@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from honeycore.logger import AttemptLogger
@@ -35,5 +37,20 @@ def test_logger_displays_empty_password(capsys: pytest.CaptureFixture[str]) -> N
     logger.log("proxmox", ("10.0.0.3", 8006), username="root@pam", password="")
     captured = capsys.readouterr()
     out = captured.out
-    assert "[CRED]" in out
+    assert "[WARN]" in out
     assert "pass=<empty>" in out
+    assert "\x1b[33m" in out
+
+
+def test_logger_writes_full_unclipped_line_to_text_file(tmp_path: Path) -> None:
+    logger = AttemptLogger()
+    output_file = tmp_path / "trigger.txt"
+    logger.set_text_output(str(output_file))
+
+    long_startup = "x" * 220
+    logger.log("postgres", ("10.0.0.4", 5432), startup={"application_name": long_startup})
+    logger.close()
+
+    saved = output_file.read_text(encoding="utf-8")
+    assert long_startup in saved
+    assert "[Postgres]" in saved

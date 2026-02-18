@@ -162,7 +162,7 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser) -> None:
         "--timeout",
         dest="timeout",
         type=_positive_float,
-        default=3.0,
+        default=1.0,
         metavar="seconds",
         help="HTTP timeout in seconds.",
     )
@@ -270,6 +270,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_output_flags(trigger_options)
     _add_scan_host_flags(trigger_options)
+    trigger_options.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        default=None,
+        metavar="file",
+        help="Optional output txt file for trigger/listener event logs.",
+    )
     trigger_options.add_argument(
         "--callback-ip",
         dest="callback_ip",

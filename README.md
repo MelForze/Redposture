@@ -72,6 +72,15 @@ redposture trigger \
   --retries 2
 ```
 
+Save full trigger/listener events to a txt file (without field truncation):
+
+```bash
+redposture trigger \
+  -t ./ips.txt \
+  --callback-ip 10.20.122.106 \
+  -o ./trigger_events.txt
+```
+
 Start listeners first, then trigger, then keep listeners running:
 
 ```bash
@@ -105,6 +114,7 @@ redposture scan -t ./ips.txt --profiles-file ./profiles.json
 - Credential events are highlighted with `CRED` and include `user=` / `pass=`.
 - `scan` and `collect` support both `txt` and `json` output via `-f/--format`.
 - `scan`, `trigger`, and `collect` support `--workers` and `--retries`.
+- default `--timeout` is `1.0` second.
 - `trigger` prints a summary with detected exporters, attempts, successes, failures, and per-callback stats.
 
 Example runtime lines:
