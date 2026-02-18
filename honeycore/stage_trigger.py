@@ -28,8 +28,9 @@ def _run_trigger_requests(
         f"trigger started: hosts={len(hosts)} callbacks={callbacks} "
         f"timeout={args.timeout}s workers={args.workers} retries={args.retries}"
     )
+    trigger_logger = logger if (args.debug or getattr(args, "output", None)) else None
     summary = scan_exporters_and_trigger(
-        logger=logger if args.debug else None,
+        logger=trigger_logger,
         hosts=hosts,
         callback_targets=callback_targets,
         timeout=args.timeout,
@@ -104,6 +105,15 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if not callback_targets:
         console.error("trigger requires --callback-ip and/or --callback-dns")
         return 2
+
+    output_path = getattr(args, "output", None)
+    if output_path:
+        try:
+            logger.set_text_output(output_path)
+        except OSError as exc:
+            console.error(f"failed to open trigger output file: {exc}")
+            return 2
+        console.info(f"trigger output file: {output_path}")
 
     if not args.with_listen:
         _run_trigger_requests(args, logger, console, hosts, callback_targets, profiles["trigger_exporters"])

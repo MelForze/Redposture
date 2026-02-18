@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,7 @@ def _base_args(**overrides: object) -> argparse.Namespace:
         "hosts": None,
         "hosts_file": None,
         "profiles_file": None,
+        "output": None,
         "callback_ip": "10.0.0.2",
         "callback_dns": None,
         "with_listen": False,
@@ -149,3 +151,38 @@ def test_trigger_rejects_hostname_in_callback_ip(monkeypatch: pytest.MonkeyPatch
         AttemptLogger(),
     )
     assert rc == 2
+
+
+def test_trigger_output_file_contains_full_unclipped_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "trigger.txt"
+    long_startup = "x" * 220
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        logger = kwargs.get("logger")
+        if isinstance(logger, AttemptLogger):
+            logger.log("postgres", ("10.0.0.4", 5432), startup={"application_name": long_startup})
+        return {
+            "detected_exporters": 1,
+            "attempted": 1,
+            "triggered": 1,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 1, "attempted": 1, "success": 1, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 1, "fail": 0}},
+        }
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {"trigger_exporters": []}
+
+    monkeypatch.setattr("honeycore.stage_trigger.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("honeycore.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(
+        _base_args(with_listen=False, output=str(output_path), debug=True),
+        AttemptLogger(),
+    )
+    assert rc == 0
+    saved = output_path.read_text(encoding="utf-8")
+    assert long_startup in saved
+    assert "[Postgres]" in saved
