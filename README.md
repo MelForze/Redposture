@@ -12,7 +12,7 @@ RedPosture is a small Python CLI for:
 ### pipx (recommended)
 
 ```bash
-pipx install "git+https://github.com/MelForze/Honey.git"
+pipx install "git+https://github.com/MelForze/Redposture.git"
 ```
 
 ### Local install
