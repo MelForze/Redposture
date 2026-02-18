@@ -81,6 +81,11 @@ def test_trigger_workers_and_retries_flags_are_parsed() -> None:
     assert args.retries == 2
 
 
+def test_trigger_output_flag_is_parsed() -> None:
+    args = parse_args(["trigger", "-t", "10.0.0.1", "--callback-ip", "10.0.0.2", "-o", "trigger.txt"])
+    assert args.output == "trigger.txt"
+
+
 def test_trigger_with_optional_callback_dns_flag() -> None:
     args = parse_args(
         [
