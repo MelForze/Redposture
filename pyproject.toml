@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "0.1.1"
+version = "1.0.2"
 description = "Multi-service honeypot and exporter interaction toolkit"
 readme = "README.md"
 requires-python = ">=3.10"
