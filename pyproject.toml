@@ -30,9 +30,9 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/MelForze/Honey"
-Repository = "https://github.com/MelForze/Honey"
-Issues = "https://github.com/MelForze/Honey/issues"
+Homepage = "https://github.com/MelForze/Redposture"
+Repository = "https://github.com/MelForze/Redposture"
+Issues = "https://github.com/MelForze/Redposture/issues"
 
 [project.scripts]
 redposture = "honeycore.cli:main"
