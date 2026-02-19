@@ -80,6 +80,7 @@ redposture trigger \
   --callback-ip 10.20.122.106 \
   -o ./trigger_events.txt
 ```
+When `-o/--output` is set, successful trigger events are written to this file.
 
 Start listeners first, then trigger, then keep listeners running:
 
