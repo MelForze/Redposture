@@ -24,11 +24,12 @@ def _run_trigger_requests(
     trigger_exporters: list[dict[str, Any]],
 ) -> dict[str, Any]:
     callbacks = ",".join(callback_targets)
+    output_enabled = bool(getattr(args, "output", None))
     console.info(
         f"trigger started: hosts={len(hosts)} callbacks={callbacks} "
         f"timeout={args.timeout}s workers={args.workers} retries={args.retries}"
     )
-    trigger_logger = logger if (args.debug or getattr(args, "output", None)) else None
+    trigger_logger = logger if output_enabled else (logger if args.debug else None)
     summary = scan_exporters_and_trigger(
         logger=trigger_logger,
         hosts=hosts,
@@ -37,15 +38,17 @@ def _run_trigger_requests(
         workers=args.workers,
         retries=args.retries,
         trigger_exporters=trigger_exporters,
+        log_success_only=output_enabled and not args.debug,
     )
     console.info(
         "trigger complete: "
         f"hosts={len(hosts)} detected={summary['detected_exporters']} "
         f"attempts={summary['attempted']} success={summary['triggered']} fail={summary['failed']}"
     )
-    for target in callback_targets:
-        stats = summary["by_callback"].get(target, {"success": 0, "fail": 0})
-        console.info(f"callback={target} success={stats['success']} fail={stats['fail']}")
+    if output_enabled or args.debug:
+        for target in callback_targets:
+            stats = summary["by_callback"].get(target, {"success": 0, "fail": 0})
+            console.info(f"callback={target} success={stats['success']} fail={stats['fail']}")
     for host, stats in sorted(summary["by_host"].items()):
         console.debug(
             f"host={host} detected={stats['detected']} "

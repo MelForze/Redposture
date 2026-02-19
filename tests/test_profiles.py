@@ -15,6 +15,8 @@ def test_load_profiles_defaults() -> None:
     assert "collect_exporters" in profiles
     assert "collect_debug_endpoints" in profiles
     assert profiles["trigger_exporters"]
+    blackbox = next(item for item in profiles["trigger_exporters"] if item["name"] == "blackbox_exporter")
+    assert blackbox["target_fmt"] == "http://{our_host}:9115"
 
 
 def test_load_profiles_override_subset(tmp_path: Path) -> None:

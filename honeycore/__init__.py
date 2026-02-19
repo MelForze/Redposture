@@ -7,6 +7,6 @@ from importlib import metadata
 try:
     __version__ = metadata.version("redposture")
 except metadata.PackageNotFoundError:
-    __version__ = "1.0.4+local"
+    __version__ = "1.0.5+local"
 
 __all__ = ["__version__"]

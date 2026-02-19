@@ -186,3 +186,32 @@ def test_trigger_output_file_contains_full_unclipped_event(
     saved = output_path.read_text(encoding="utf-8")
     assert long_startup in saved
     assert "[Postgres]" in saved
+
+
+def test_trigger_enables_success_only_logging_when_output_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured["logger_is_set"] = kwargs.get("logger") is not None
+        captured["log_success_only"] = kwargs.get("log_success_only")
+        return {
+            "detected_exporters": 1,
+            "attempted": 1,
+            "triggered": 1,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 1, "attempted": 1, "success": 1, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 1, "fail": 0}},
+        }
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {"trigger_exporters": []}
+
+    monkeypatch.setattr("honeycore.stage_trigger.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("honeycore.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(
+        _base_args(with_listen=False, output="trigger.txt", debug=False),
+        AttemptLogger(),
+    )
+    assert rc == 0
+    assert captured == {"logger_is_set": True, "log_success_only": True}
