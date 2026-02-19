@@ -257,7 +257,7 @@ def _trigger_task(
     callback_targets: list[str],
     timeout: float,
     retries: int,
-    log_success_only: bool = False,
+    log_trigger_events_only: bool = False,
 ) -> dict[str, Any]:
     exporter_name = str(exporter["name"])
     port = int(exporter["port"])
@@ -276,7 +276,7 @@ def _trigger_task(
     try:
         status, body = http_get_text(detect_url, timeout, retries=retries)
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        if logger is not None and not log_success_only:
+        if logger is not None and not log_trigger_events_only:
             logger.log(
                 "scanner",
                 (host, port),
@@ -291,7 +291,7 @@ def _trigger_task(
         return result
 
     result["detected"] = True
-    if logger is not None and not log_success_only:
+    if logger is not None and not log_trigger_events_only:
         logger.log(
             "scanner",
             (host, port),
@@ -324,7 +324,7 @@ def _trigger_task(
                 )
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             result["by_callback"][callback_target]["fail"] += 1
-            if logger is not None and not log_success_only:
+            if logger is not None:
                 logger.log(
                     "scanner",
                     (host, port),
@@ -346,7 +346,7 @@ def scan_exporters_and_trigger(
     workers: int = 10,
     retries: int = 3,
     trigger_exporters: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
-    log_success_only: bool = False,
+    log_trigger_events_only: bool = False,
 ) -> dict[str, Any]:
     exporters = list(trigger_exporters or SCAN_EXPORTERS)
     callback_list = list(dict.fromkeys(callback_targets))
@@ -375,7 +375,7 @@ def scan_exporters_and_trigger(
                 callback_list,
                 timeout,
                 retries,
-                log_success_only,
+                log_trigger_events_only,
             ): (host, exporter)
             for host in hosts
             for exporter in exporters
@@ -409,7 +409,7 @@ def scan_exporters_and_trigger(
                     by_callback[target]["success"] += int(stats.get("success", 0))
                     by_callback[target]["fail"] += int(stats.get("fail", 0))
 
-    if logger is not None and not log_success_only:
+    if logger is not None and not log_trigger_events_only:
         for host, detected in host_detected.items():
             if not detected:
                 logger.log("scanner", (host, 0), phase="not_found")
