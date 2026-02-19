@@ -188,12 +188,12 @@ def test_trigger_output_file_contains_full_unclipped_event(
     assert "[Postgres]" in saved
 
 
-def test_trigger_enables_success_only_logging_when_output_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_trigger_without_listen_enables_attempt_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
         captured["logger_is_set"] = kwargs.get("logger") is not None
-        captured["log_success_only"] = kwargs.get("log_success_only")
+        captured["log_trigger_events_only"] = kwargs.get("log_trigger_events_only")
         return {
             "detected_exporters": 1,
             "attempted": 1,
@@ -214,4 +214,45 @@ def test_trigger_enables_success_only_logging_when_output_set(monkeypatch: pytes
         AttemptLogger(),
     )
     assert rc == 0
-    assert captured == {"logger_is_set": True, "log_success_only": True}
+    assert captured == {"logger_is_set": True, "log_trigger_events_only": True}
+
+
+def test_trigger_with_listen_disables_trigger_attempt_logs(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_start_listeners(*_args: object, **_kwargs: object) -> tuple[list[object], None]:
+        return [], None
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured["logger_is_set"] = kwargs.get("logger") is not None
+        captured["log_trigger_events_only"] = kwargs.get("log_trigger_events_only")
+        return {
+            "detected_exporters": 1,
+            "attempted": 1,
+            "triggered": 1,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 1, "attempted": 1, "success": 1, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 1, "fail": 0}},
+        }
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {"trigger_exporters": []}
+
+    def fake_stop_listeners(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def fake_sleep(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("honeycore.stage_trigger.start_listeners_for_trigger", fake_start_listeners)
+    monkeypatch.setattr("honeycore.stage_trigger.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("honeycore.stage_trigger.scan_exporters_and_trigger", fake_scan)
+    monkeypatch.setattr("honeycore.stage_trigger.stop_started_listeners", fake_stop_listeners)
+    monkeypatch.setattr("honeycore.stage_trigger.time.sleep", fake_sleep)
+
+    rc = run_trigger_stage(
+        _base_args(with_listen=True, output=None, debug=False),
+        AttemptLogger(),
+    )
+    assert rc == 0
+    assert captured == {"logger_is_set": False, "log_trigger_events_only": True}

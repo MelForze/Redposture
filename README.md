@@ -91,6 +91,7 @@ redposture trigger \
   --callback-dns honeypot.example.com \
   --with-listen
 ```
+In `--with-listen` mode trigger attempt details are suppressed; only incoming listener events are shown.
 
 ### 4) Collect debug endpoints
 
@@ -116,7 +117,7 @@ redposture scan -t ./ips.txt --profiles-file ./profiles.json
 - `scan` and `collect` support both `txt` and `json` output via `-f/--format`.
 - `scan`, `trigger`, and `collect` support `--workers` and `--retries`.
 - default `--timeout` is `1.0` second.
-- `trigger` prints a summary with detected exporters, attempts, successes, failures, and per-callback stats.
+- `trigger` (without `--with-listen`) prints a summary with detected exporters, attempts, successes, failures, and per-callback stats.
 
 Example runtime lines:
 
