@@ -38,7 +38,7 @@ SCAN_EXPORTERS = (
         "detect_path": "/metrics",
         "markers": ("blackbox_exporter_build_info",),
         "trigger_path": "/probe",
-        "target_fmt": "http://{our_host}",
+        "target_fmt": "http://{our_host}:9115",
     },
 )
 
