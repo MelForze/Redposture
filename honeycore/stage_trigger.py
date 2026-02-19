@@ -22,14 +22,16 @@ def _run_trigger_requests(
     hosts: list[str],
     callback_targets: list[str],
     trigger_exporters: list[dict[str, Any]],
+    show_trigger_info: bool,
+    log_trigger_attempts: bool,
 ) -> dict[str, Any]:
     callbacks = ",".join(callback_targets)
-    output_enabled = bool(getattr(args, "output", None))
-    console.info(
-        f"trigger started: hosts={len(hosts)} callbacks={callbacks} "
-        f"timeout={args.timeout}s workers={args.workers} retries={args.retries}"
-    )
-    trigger_logger = logger if output_enabled else (logger if args.debug else None)
+    if show_trigger_info:
+        console.info(
+            f"trigger started: hosts={len(hosts)} callbacks={callbacks} "
+            f"timeout={args.timeout}s workers={args.workers} retries={args.retries}"
+        )
+    trigger_logger = logger if log_trigger_attempts else None
     summary = scan_exporters_and_trigger(
         logger=trigger_logger,
         hosts=hosts,
@@ -38,14 +40,14 @@ def _run_trigger_requests(
         workers=args.workers,
         retries=args.retries,
         trigger_exporters=trigger_exporters,
-        log_success_only=output_enabled and not args.debug,
+        log_trigger_events_only=not args.debug,
     )
-    console.info(
-        "trigger complete: "
-        f"hosts={len(hosts)} detected={summary['detected_exporters']} "
-        f"attempts={summary['attempted']} success={summary['triggered']} fail={summary['failed']}"
-    )
-    if output_enabled or args.debug:
+    if show_trigger_info:
+        console.info(
+            "trigger complete: "
+            f"hosts={len(hosts)} detected={summary['detected_exporters']} "
+            f"attempts={summary['attempted']} success={summary['triggered']} fail={summary['failed']}"
+        )
         for target in callback_targets:
             stats = summary["by_callback"].get(target, {"success": 0, "fail": 0})
             console.info(f"callback={target} success={stats['success']} fail={stats['fail']}")
@@ -54,7 +56,8 @@ def _run_trigger_requests(
             f"host={host} detected={stats['detected']} "
             f"attempts={stats['attempted']} success={stats['success']} fail={stats['fail']}"
         )
-    console.debug("debug mode enabled; detailed trigger events emitted in text logs")
+    if show_trigger_info:
+        console.debug("debug mode enabled; detailed trigger events emitted in text logs")
     return summary
 
 
@@ -116,19 +119,37 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         except OSError as exc:
             console.error(f"failed to open trigger output file: {exc}")
             return 2
-        console.info(f"trigger output file: {output_path}")
+        if not args.with_listen:
+            console.info(f"trigger output file: {output_path}")
 
     if not args.with_listen:
-        _run_trigger_requests(args, logger, console, hosts, callback_targets, profiles["trigger_exporters"])
+        _run_trigger_requests(
+            args,
+            logger,
+            console,
+            hosts,
+            callback_targets,
+            profiles["trigger_exporters"],
+            show_trigger_info=True,
+            log_trigger_attempts=True,
+        )
         return 0
 
     running: list[RunningServer] = []
     temp_cert_dir: str | None = None
     try:
         running, temp_cert_dir = start_listeners_for_trigger(args, logger, console)
-        console.info("listeners are up; sending trigger requests")
-        _run_trigger_requests(args, logger, console, hosts, callback_targets, profiles["trigger_exporters"])
-        console.info("trigger finished; listeners keep running (Ctrl+C to stop)")
+        _run_trigger_requests(
+            args,
+            logger,
+            console,
+            hosts,
+            callback_targets,
+            profiles["trigger_exporters"],
+            show_trigger_info=False,
+            log_trigger_attempts=False,
+        )
+        console.info("listeners are up; waiting for incoming events (Ctrl+C to stop)")
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
