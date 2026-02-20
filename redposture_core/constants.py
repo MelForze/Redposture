@@ -38,7 +38,15 @@ SCAN_EXPORTERS = (
         "detect_path": "/metrics",
         "markers": ("blackbox_exporter_build_info",),
         "trigger_path": "/probe",
-        "target_fmt": "http://{our_host}:9115",
+        "target_fmt": "http://{our_host}",
+    },
+    {
+        "name": "proxmox_exporter",
+        "port": 9221,
+        "detect_path": "/metrics",
+        "markers": ("proxmox_", "pve_"),
+        "trigger_path": "/pve",
+        "target_fmt": "{our_host}:8006",
     },
 )
 
@@ -55,7 +63,7 @@ DISCOVERY_EXPORTERS = (
     {"name": "frr_exporter", "port": 9342, "markers": ("frr_",)},
     {"name": "named_process_exporter", "port": 9256, "markers": ("namedprocess_",)},
     {"name": "ping_exporter", "port": 9427, "markers": ("ping_",)},
-    {"name": "proxmox_exporter", "port": 9221, "markers": ("proxmox_",)},
+    {"name": "proxmox_exporter", "port": 9221, "markers": ("proxmox_", "pve_")},
 )
 
 COLLECT_EXPORTERS = (
@@ -74,10 +82,28 @@ COLLECT_EXPORTERS = (
     {"name": "proxmox_exporter", "port": 9221},
 )
 
-COLLECT_DEBUG_ENDPOINTS = (
+COLLECT_DEFAULT_ENDPOINTS = (
     "/debug/vars",
+    "/debug/pprof/",
+    "/debug/pprof/goroutine?debug=1",
     "/debug/pprof/cmdline?debug=1",
+    "/debug/pprof/heap?debug=1",
+    "/metrics",
 )
+
+COLLECT_DEEP_ENDPOINT_TEMPLATES = (
+    "/debug/pprof/goroutine?debug=2",
+    "/debug/pprof/heap",
+    "/debug/pprof/allocs",
+    "/debug/pprof/block",
+    "/debug/pprof/mutex",
+    "/debug/pprof/threadcreate",
+    "/debug/pprof/profile?seconds={pprof_seconds}",
+    "/debug/pprof/trace?seconds={trace_seconds}",
+)
+
+# Backward compatibility alias for profile defaults.
+COLLECT_DEBUG_ENDPOINTS = COLLECT_DEFAULT_ENDPOINTS
 
 HTTP_METHOD_PREFIXES = (
     b"GET ",

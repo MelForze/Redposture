@@ -4,15 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "1.0.6"
-description = "Multi-service honeypot and exporter interaction toolkit"
+version = "2.0.0"
+description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Grafana auditing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
   { name = "RedPosture contributors" },
 ]
-keywords = ["honeypot", "security", "cli", "observability", "prometheus"]
+keywords = ["security", "cli", "redteam", "observability", "prometheus", "recon"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Information Technology",
@@ -35,7 +35,7 @@ Repository = "https://github.com/MelForze/Redposture"
 Issues = "https://github.com/MelForze/Redposture/issues"
 
 [project.scripts]
-redposture = "honeycore.cli:main"
+redposture = "redposture_core.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -45,7 +45,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["honeycore"]
+packages = ["redposture_core"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
@@ -53,7 +53,7 @@ testpaths = ["tests"]
 
 [tool.mypy]
 python_version = "3.10"
-files = ["honeycore", "redposture.py", "tests"]
+files = ["redposture_core", "redposture.py", "tests"]
 show_error_codes = true
 pretty = true
 warn_unused_ignores = true

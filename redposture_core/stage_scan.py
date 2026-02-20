@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from .console import Console
 from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import scan_exporter_presence
-from .utils import collect_scan_targets
+from .utils import collect_scan_ports, collect_scan_targets
 
 
 def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None) -> int:
@@ -16,9 +17,6 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
 
     if args.timeout <= 0:
         console.error("--timeout must be > 0")
-        return 2
-    if args.max_bytes <= 0:
-        console.error("--max-bytes must be > 0")
         return 2
     if args.retries < 0:
         console.error("--retries must be >= 0")
@@ -36,6 +34,12 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         return 2
 
     try:
+        custom_ports = collect_scan_ports(getattr(args, "ports", None))
+    except ValueError as exc:
+        console.error(f"failed to parse --ports: {exc}")
+        return 2
+
+    try:
         profiles = load_profiles(args.profiles_file)
     except (OSError, ValueError) as exc:
         console.error(f"failed to load profiles: {exc}")
@@ -47,31 +51,61 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
 
     stream_to_stdout = not bool(args.output)
 
+    def _split_tabbed_tag(left: str) -> tuple[str, str]:
+        parts = left.split("\t", 1)
+        if len(parts) != 2:
+            return left.strip(), ""
+        tag = parts[0].strip()
+        rest = "\t" + parts[1]
+        return tag, rest
+
     def emit_line(line: str) -> None:
         if args.output_format != "txt":
             print(line, flush=True)
             return
-        if line.startswith("[HIT"):
-            console.plain(line, color="green")
+        if " [*] " in line:
+            if args.debug:
+                console.plain(line, color="cyan")
             return
-        if line.startswith("[MISS]"):
+        if " [+] " in line:
+            left, right = line.split(" [+] ", 1)
+            tag, rest = _split_tabbed_tag(left)
+            if tag == "SCAN":
+                tag_text = f"{tag:<8}"
+                rest_text = rest
+            else:
+                tag_text = tag
+                rest_text = ""
+            colored = (
+                f"{console._paint(tag_text, 'blue', sys.stdout)}"
+                f"{console._paint(rest_text, 'white', sys.stdout)} "
+                f"{console._paint('[+]', 'green', sys.stdout)} "
+                f"{console._paint(right, 'white', sys.stdout)}"
+            )
+            console.plain(colored)
+            return
+        if not args.debug:
+            return
+        if " [!] " in line:
+            console.plain(line, color="red")
+            return
+        if " [-] " in line:
             console.plain(line, color="yellow")
-            return
-        if line.startswith("[SUMMARY]"):
-            console.plain(line, color="cyan")
             return
         console.plain(line)
 
     if stream_to_stdout and args.output_format == "txt":
+        ports_hint = f" ports={len(custom_ports)}(custom)" if custom_ports else ""
         console.info(
             f"scan started: hosts={len(hosts)} timeout={args.timeout}s "
-            f"workers={args.workers} retries={args.retries} format=txt"
+            f"workers={args.workers} retries={args.retries} format=txt{ports_hint}"
         )
     if not stream_to_stdout:
+        ports_hint = f" ports={len(custom_ports)}(custom)" if custom_ports else ""
         console.info(
             f"scan started: hosts={len(hosts)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} "
-            f"format={args.output_format} output={args.output}"
+            f"format={args.output_format} output={args.output}{ports_hint}"
         )
 
     try:
@@ -80,12 +114,12 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
             timeout=args.timeout,
             output_path=args.output,
             output_format=args.output_format,
-            max_bytes=args.max_bytes,
             logger=logger if args.debug else None,
             emit_line=emit_line,
             workers=args.workers,
             retries=args.retries,
             discovery_exporters=profiles["discovery_exporters"],
+            custom_ports=custom_ports or None,
         )
     except OSError as exc:
         console.error(f"failed to process scan output: {exc}")

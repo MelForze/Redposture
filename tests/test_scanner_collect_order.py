@@ -1,0 +1,137 @@
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+from redposture_core.scanner import collect_exporter_debug_data
+
+
+def test_collect_output_is_sorted_by_host_then_path_order(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        # Force out-of-order completion to ensure final output is explicitly sorted.
+        if "/debug/vars" in url:
+            time.sleep(0.03)
+        else:
+            time.sleep(0.005)
+        return {
+            "status": 200,
+            "body": "ok",
+            "content_type": "text/plain",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    lines: list[str] = []
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.2", "10.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        emit_line=lines.append,
+        workers=4,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/vars", "/debug/pprof/cmdline?debug=1"],
+        found_by_host={
+            "10.0.0.2": [{"exporter": "node_exporter", "port": 9100}],
+            "10.0.0.1": [{"exporter": "node_exporter", "port": 9100}],
+        },
+    )
+
+    assert total == 4
+    assert success == 4
+
+    payloads = [json.loads(line) for line in lines]
+    records = [item for item in payloads if item.get("type") != "summary"]
+    order = [(str(item.get("host")), str(item.get("endpoint"))) for item in records]
+    assert order == [
+        ("10.0.0.2", "/debug/vars"),
+        ("10.0.0.2", "/debug/pprof/cmdline?debug=1"),
+        ("10.0.0.1", "/debug/vars"),
+        ("10.0.0.1", "/debug/pprof/cmdline?debug=1"),
+    ]
+
+
+def test_collect_txt_line_contains_display_name_and_full_url(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        return {
+            "status": 200,
+            "body": "ok",
+            "content_type": "text/plain",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    lines: list[str] = []
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="txt",
+        emit_line=lines.append,
+        workers=1,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/vars"],
+        found_by_host={"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+    )
+
+    assert total == 1
+    assert success == 1
+    hit_lines = [line for line in lines if "[+] " in line and line.startswith("COLLECT")]
+    assert hit_lines
+    assert "Node Exporter" in hit_lines[0]
+    assert "url=http://10.0.0.1:9100/debug/vars" in hit_lines[0]
+
+
+def test_collect_can_save_raw_responses_and_index(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        return {
+            "status": 200,
+            "body": "password=redis\nuser=redis\n",
+            "content_type": "text/plain",
+            "elapsed_ms": 2,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    save_dir = tmp_path / "collect_raw"
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="txt",
+        emit_line=None,
+        workers=1,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/vars", "/debug/pprof/cmdline?debug=1"],
+        found_by_host={"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+        save_responses_dir=str(save_dir),
+    )
+
+    assert total == 2
+    assert success == 2
+    index_path = save_dir / "index.jsonl"
+    assert index_path.exists()
+
+    index_lines = [line for line in index_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(index_lines) == 2
+    payload = json.loads(index_lines[0])
+    response_file = str(payload.get("response_file") or "")
+    assert response_file.endswith(".txt")
+    saved_file = save_dir / response_file
+    assert saved_file.exists()
+    assert "password=redis" in saved_file.read_text(encoding="utf-8")

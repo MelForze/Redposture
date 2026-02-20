@@ -1,4 +1,4 @@
-"""Server runtime and honeypot protocol handlers."""
+"""Server runtime and protocol handlers for listener emulation."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import shutil
 import socket
 import socketserver
 import ssl
+import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -89,13 +90,14 @@ class ThreadingHTTPReuseServer(ThreadingHTTPServer):
     daemon_threads = True
 
 
-class PostgresHoneypotHandler(socketserver.BaseRequestHandler):
+class PostgresListenerHandler(socketserver.BaseRequestHandler):
     def handle(self) -> None:
         sock = self.request
         assert isinstance(sock, socket.socket)
 
         sock.settimeout(20)
         remote = self.client_address
+        listen_port = int(self.server.server_address[1])  # type: ignore[attr-defined]
         params: dict[str, str] = {}
         user: str | None = None
 
@@ -108,6 +110,7 @@ class PostgresHoneypotHandler(socketserver.BaseRequestHandler):
                     "postgres",
                     remote,
                     protocol="http",
+                    listen_port=listen_port,
                 )
                 return
 
@@ -158,6 +161,7 @@ class PostgresHoneypotHandler(socketserver.BaseRequestHandler):
                 username=user,
                 password=password,
                 startup=params,
+                listen_port=listen_port,
             )
 
             sock.sendall(encode_pg_error(user))
@@ -177,7 +181,7 @@ def make_postgres_server(
     postgres_tls: bool,
     ssl_context: ssl.SSLContext | None,
 ) -> ThreadingTCPReuseServer:
-    server = ThreadingTCPReuseServer((bind, port), PostgresHoneypotHandler)
+    server = ThreadingTCPReuseServer((bind, port), PostgresListenerHandler)
     server.attempt_logger = logger  # type: ignore[attr-defined]
     server.postgres_tls = postgres_tls  # type: ignore[attr-defined]
     server.ssl_context = ssl_context  # type: ignore[attr-defined]
@@ -244,10 +248,11 @@ def parse_redis_auth(command: list[str]) -> tuple[str | None, str | None]:
     return None, None
 
 
-class RedisHoneypotHandler(socketserver.StreamRequestHandler):
+class RedisListenerHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         self.connection.settimeout(20)
         remote = self.client_address
+        listen_port = int(self.server.server_address[1])  # type: ignore[attr-defined]
 
         while True:
             try:
@@ -268,6 +273,7 @@ class RedisHoneypotHandler(socketserver.StreamRequestHandler):
                     "redis",
                     remote,
                     protocol="http",
+                    listen_port=listen_port,
                 )
                 self.wfile.write(build_http_ok_response())
                 self.wfile.flush()
@@ -281,6 +287,7 @@ class RedisHoneypotHandler(socketserver.StreamRequestHandler):
                     username=username,
                     password=password,
                     command=command[0],
+                    listen_port=listen_port,
                 )
                 self.wfile.write(b"-WRONGPASS invalid username-password pair or user is disabled.\r\n")
             elif op == "PING":
@@ -295,13 +302,13 @@ class RedisHoneypotHandler(socketserver.StreamRequestHandler):
 
 
 def make_redis_server(bind: str, port: int, logger: AttemptLogger) -> ThreadingTCPReuseServer:
-    server = ThreadingTCPReuseServer((bind, port), RedisHoneypotHandler)
+    server = ThreadingTCPReuseServer((bind, port), RedisListenerHandler)
     server.attempt_logger = logger  # type: ignore[attr-defined]
     return server
 
 
 def make_proxmox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
-    class ProxmoxHoneypotHandler(BaseHTTPRequestHandler):
+    class ProxmoxListenerHandler(BaseHTTPRequestHandler):
         server_version = "pve-api-daemon/3.0"
 
         def log_message(self, format: str, *args: Any) -> None:
@@ -318,6 +325,9 @@ def make_proxmox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
         def _client_addr(self) -> tuple[str, int]:
             return self.client_address[0], self.client_address[1]
 
+        def _listen_port(self) -> int:
+            return int(self.server.server_address[1])
+
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path in {"/", "/index.html"}:
@@ -333,6 +343,17 @@ def make_proxmox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
                 return
 
             if parsed.path.startswith("/api2/"):
+                basic_user, basic_pass = parse_basic_auth(self.headers.get("Authorization"))
+                logger.log(
+                    "proxmox",
+                    self._client_addr(),
+                    username=basic_user,
+                    password=basic_pass,
+                    user_agent=self.headers.get("User-Agent"),
+                    path=parsed.path,
+                    method="GET",
+                    listen_port=self._listen_port(),
+                )
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"data": None, "message": "authentication failure"})
                 return
 
@@ -373,17 +394,18 @@ def make_proxmox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
                     password=password,
                     user_agent=self.headers.get("User-Agent"),
                     path=parsed.path,
+                    listen_port=self._listen_port(),
                 )
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"data": None, "message": "authentication failure"})
                 return
 
             self._send_json(HTTPStatus.NOT_FOUND, {"data": None, "message": "not found"})
 
-    return ProxmoxHoneypotHandler
+    return ProxmoxListenerHandler
 
 
 def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
-    class BlackboxHoneypotHandler(BaseHTTPRequestHandler):
+    class BlackboxListenerHandler(BaseHTTPRequestHandler):
         server_version = "blackbox_exporter"
 
         def log_message(self, format: str, *args: Any) -> None:
@@ -399,6 +421,7 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
                 requestline=getattr(self, "requestline", None),
                 error_message=message,
                 user_agent=self.headers.get("User-Agent") if hasattr(self, "headers") else None,
+                listen_port=self._listen_port(),
             )
             super().send_error(code, message, explain)
 
@@ -415,6 +438,9 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
 
         def _client_addr(self) -> tuple[str, int]:
             return self.client_address[0], self.client_address[1]
+
+        def _listen_port(self) -> int:
+            return int(self.server.server_address[1])
 
         def _extract_probe_params(self, parsed_path: Any) -> tuple[str | None, str]:
             query = parse_qs(parsed_path.query)
@@ -460,6 +486,7 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
                 username=username,
                 password=password,
                 user_agent=self.headers.get("User-Agent"),
+                listen_port=self._listen_port(),
             )
 
         def _log_exporter_metrics(self, parsed_path: Any, method: str, body_len: int = 0) -> None:
@@ -481,9 +508,11 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
                 username=username,
                 password=password,
                 user_agent=self.headers.get("User-Agent"),
+                listen_port=self._listen_port(),
             )
 
         def _log_non_probe(self, parsed_path: Any, method: str, body_len: int = 0) -> None:
+            username, password = parse_basic_auth(self.headers.get("Authorization"))
             logger.log(
                 "blackbox",
                 self._client_addr(),
@@ -491,7 +520,10 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
                 path=parsed_path.path,
                 query=parsed_path.query,
                 content_length=body_len if body_len > 0 else None,
+                username=username,
+                password=password,
                 user_agent=self.headers.get("User-Agent"),
+                listen_port=self._listen_port(),
             )
 
         def _probe_metrics(self, target: str | None, module: str) -> str:
@@ -527,15 +559,15 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
                 }
             )
             lines = [
-                "# HELP exporter_honeypot_up Synthetic exporter endpoint health.",
-                "# TYPE exporter_honeypot_up gauge",
-                f"exporter_honeypot_up{sample_labels} 1",
-                "# HELP exporter_honeypot_requests_total Synthetic request counter.",
-                "# TYPE exporter_honeypot_requests_total counter",
-                f"exporter_honeypot_requests_total{sample_labels} 1",
+                "# HELP exporter_redposture_up Synthetic exporter endpoint health.",
+                "# TYPE exporter_redposture_up gauge",
+                f"exporter_redposture_up{sample_labels} 1",
+                "# HELP exporter_redposture_requests_total Synthetic request counter.",
+                "# TYPE exporter_redposture_requests_total counter",
+                f"exporter_redposture_requests_total{sample_labels} 1",
                 "# HELP blackbox_exporter_build_info Build information",
                 "# TYPE blackbox_exporter_build_info gauge",
-                'blackbox_exporter_build_info{version="0.0.0-honeypot"} 1',
+                'blackbox_exporter_build_info{version="0.0.0-redposture"} 1',
             ]
             return "\n".join(lines) + "\n"
 
@@ -579,7 +611,7 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
             self._log_non_probe(parsed, method="POST", body_len=body_len)
             self._text(HTTPStatus.OK, "blackbox_exporter\n", headers={"X-RedPosture": "1"})
 
-    return BlackboxHoneypotHandler
+    return BlackboxListenerHandler
 
 
 def make_http_server(
@@ -601,7 +633,68 @@ def build_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
     return context
 
 
-def prepare_cert_files(cert_path: str | None, key_path: str | None) -> tuple[str, str, str | None]:
+def _generate_self_signed_cert(cert_path: str, key_path: str) -> None:
+    command = [
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-sha256",
+        "-days",
+        "365",
+        "-subj",
+        "/CN=redposture-local",
+        "-keyout",
+        key_path,
+        "-out",
+        cert_path,
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise ValueError(f"failed to run openssl for self-signed cert generation: {exc}") from exc
+
+    if completed.returncode != 0:
+        details = (completed.stderr or completed.stdout or "").strip()
+        if details:
+            raise ValueError(f"openssl failed to generate self-signed cert: {details}")
+        raise ValueError("openssl failed to generate self-signed cert")
+
+
+def write_self_signed_cert_files(cert_path: str, key_path: str, *, force: bool = False) -> tuple[str, str]:
+    cert_abs = os.path.abspath(cert_path)
+    key_abs = os.path.abspath(key_path)
+
+    if not cert_abs or not key_abs:
+        raise ValueError("both cert path and key path must be set")
+    if cert_abs == key_abs:
+        raise ValueError("cert path and key path must be different files")
+
+    for path, kind in ((cert_abs, "cert"), (key_abs, "key")):
+        if os.path.isdir(path):
+            raise ValueError(f"{kind} path points to a directory: {path}")
+        parent = os.path.dirname(path) or "."
+        os.makedirs(parent, exist_ok=True)
+        if os.path.exists(path) and not force:
+            raise ValueError(f"{kind} file already exists: {path} (use --force to overwrite)")
+
+    _generate_self_signed_cert(cert_abs, key_abs)
+    return cert_abs, key_abs
+
+
+def prepare_cert_files(
+    cert_path: str | None,
+    key_path: str | None,
+    generate_local_selfcert: bool = False,
+) -> tuple[str, str, str | None]:
     if bool(cert_path) != bool(key_path):
         raise ValueError("both --cert-file and --key-file must be set together")
 
@@ -611,6 +704,10 @@ def prepare_cert_files(cert_path: str | None, key_path: str | None) -> tuple[str
     tmp_dir = tempfile.mkdtemp(prefix="redposture-certs-")
     cert = os.path.join(tmp_dir, "cert.pem")
     key = os.path.join(tmp_dir, "key.pem")
+    if generate_local_selfcert:
+        _generate_self_signed_cert(cert, key)
+        return cert, key, tmp_dir
+
     with open(cert, "w", encoding="utf-8") as cert_fh:
         cert_fh.write(DEFAULT_CERT_PEM)
     with open(key, "w", encoding="utf-8") as key_fh:

@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from honeycore.cli import main
+from redposture_core.cli import main
 
 
 if __name__ == "__main__":

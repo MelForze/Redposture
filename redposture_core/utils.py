@@ -147,3 +147,50 @@ def collect_scan_targets(targets: str | None, max_network_hosts: int = 4096) -> 
         _consume_token(token)
 
     return unique
+
+
+def collect_scan_ports(ports: str | None) -> list[int]:
+    if not ports:
+        return []
+
+    unique: list[int] = []
+    seen: set[int] = set()
+
+    def _add_port(value: int) -> None:
+        if value in seen:
+            return
+        seen.add(value)
+        unique.append(value)
+
+    def _consume_token(token: str) -> None:
+        item = token.strip()
+        if not item:
+            return
+
+        if "-" in item:
+            left, right = item.split("-", 1)
+            try:
+                start = int(left.strip())
+                end = int(right.strip())
+            except ValueError as exc:
+                raise ValueError(f"invalid port range '{item}'") from exc
+            if start < 1 or start > 65535 or end < 1 or end > 65535:
+                raise ValueError(f"port range '{item}' must be within 1..65535")
+            if start > end:
+                raise ValueError(f"port range '{item}' must be ascending")
+            for port in range(start, end + 1):
+                _add_port(port)
+            return
+
+        try:
+            value = int(item)
+        except ValueError as exc:
+            raise ValueError(f"invalid port '{item}'") from exc
+        if value < 1 or value > 65535:
+            raise ValueError(f"port '{item}' must be within 1..65535")
+        _add_port(value)
+
+    for token in ports.split(","):
+        _consume_token(token)
+
+    return unique
