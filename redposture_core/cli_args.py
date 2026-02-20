@@ -17,6 +17,7 @@ COMMAND_REDIS = "redis"
 COMMAND_POSTGRES = "postgres"
 COMMAND_ETCD = "etcd"
 COMMAND_GRAFANA = "grafana"
+COMMAND_KAFKA = "kafka"
 COMMAND_SELFCERT = "selfcert"
 COMMAND_EXPORTERS = "exporters"
 
@@ -391,8 +392,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
-            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Grafana auditing. "
-            "Use one module command: exporters, grafana, postgres, redis, etcd. "
+            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Grafana/Kafka auditing. "
+            "Use one module command: exporters, grafana, kafka, postgres, redis, etcd. "
             "Listener mode is available inside trigger via --with-listen."
         ),
     )
@@ -718,6 +719,60 @@ def build_parser() -> argparse.ArgumentParser:
         help="etcd audit output format for stdout/file.",
     )
 
+    kafka_parser = subparsers.add_parser(
+        COMMAND_KAFKA,
+        help="Audit Kafka broker auth exposure and topic visibility.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    _add_output_flags(kafka_parser)
+    _add_log_flag(kafka_parser)
+    _add_scan_host_flags(kafka_parser, include_profiles=False)
+    kafka_parser.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=9092,
+        metavar="port",
+        help="Kafka broker TCP port to audit.",
+    )
+    kafka_parser.add_argument(
+        "-u",
+        "--username",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Optional Kafka username for credential check (SASL/PLAIN).",
+    )
+    kafka_parser.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Optional Kafka password for credential check (SASL/PLAIN).",
+    )
+    kafka_parser.add_argument(
+        "--show-topics",
+        action="store_true",
+        help="Show topic names after successful access/auth.",
+    )
+    kafka_parser.add_argument(
+        "--topic",
+        dest="topic",
+        default=None,
+        metavar="name",
+        help="Show one topic detail by name (partition count / not found).",
+    )
+    _add_save_flag(kafka_parser, "Optional output file path. If omitted, results are printed to stdout.")
+    kafka_parser.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="Kafka audit output format for stdout/file.",
+    )
+
     return parser
 
 
@@ -753,6 +808,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("direct 'trigger' mode removed; use 'exporters trigger ...'")
 
     if raw_argv[0].startswith("-"):
-        parser.error("module command is required: exporters, grafana, postgres, redis, etcd, or --selfcert")
+        parser.error("module command is required: exporters, grafana, kafka, postgres, redis, etcd, or --selfcert")
 
     return parser.parse_args(raw_argv)
