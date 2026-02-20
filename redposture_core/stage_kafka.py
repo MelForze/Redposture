@@ -21,10 +21,13 @@ from .utils import collect_scan_targets, utc_now_iso
 KAFKA_CLIENT_ID = "redposture"
 KAFKA_API_VERSIONS = 18
 KAFKA_METADATA = 3
+KAFKA_FETCH = 1
+KAFKA_LIST_OFFSETS = 2
 KAFKA_SASL_HANDSHAKE = 17
 KAFKA_SASL_AUTHENTICATE = 36
 KAFKA_AUTH_ERROR_CODES = {29, 31, 58}
 KAFKA_MAX_FRAME = 16 * 1024 * 1024
+KAFKA_FETCH_MAX_BYTES = 1024 * 1024
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -106,6 +109,21 @@ def _is_probable_auth_error(message: str | None, error_codes: list[int] | None =
     return any(needle in text for needle in needles)
 
 
+def _is_sasl_probe_candidate(message: str | None) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    needles = (
+        "unexpected eof",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "forcibly closed",
+        "end of file",
+    )
+    return any(needle in text for needle in needles)
+
+
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
     data = b""
     while len(data) < size:
@@ -179,6 +197,9 @@ class _KafkaReader:
 
     def read_i16(self) -> int:
         return struct.unpack(">h", self._read(2))[0]
+
+    def read_i8(self) -> int:
+        return struct.unpack(">b", self._read(1))[0]
 
     def read_i32(self) -> int:
         return struct.unpack(">i", self._read(4))[0]
@@ -346,6 +367,240 @@ def _fetch_metadata(
     return _parse_metadata_response(payload, correlation_id)
 
 
+def _build_list_offsets_request_body(topic: str, partition: int, *, time_value: int = -2) -> bytes:
+    return (
+        struct.pack(">i", -1)
+        + struct.pack(">i", 1)
+        + _encode_kafka_string(topic)
+        + struct.pack(">i", 1)
+        + struct.pack(">i", int(partition))
+        + struct.pack(">q", int(time_value))
+        + struct.pack(">i", 1)
+    )
+
+
+def _parse_list_offsets_response(payload: bytes, expected_correlation_id: int) -> tuple[int | None, str | None]:
+    try:
+        reader = _KafkaReader(payload)
+        correlation_id = reader.read_i32()
+        if correlation_id != expected_correlation_id:
+            return None, f"unexpected correlation id {correlation_id} (expected {expected_correlation_id})"
+
+        topic_count = reader.read_i32()
+        if topic_count <= 0:
+            return None, "ListOffsets returned empty topic list"
+
+        _ = reader.read_string(nullable=False) or ""
+        partition_count = reader.read_i32()
+        if partition_count <= 0:
+            return None, "ListOffsets returned empty partition list"
+
+        _ = reader.read_i32()
+        error_code = reader.read_i16()
+        if error_code != 0:
+            return None, f"ListOffsets failed: {_kafka_error_name(int(error_code))}"
+
+        offset_count = reader.read_i32()
+        if offset_count <= 0:
+            return None, "ListOffsets returned no offsets"
+
+        return int(reader.read_i64()), None
+    except (ValueError, struct.error) as exc:
+        return None, f"invalid ListOffsets response: {exc}"
+
+
+def _build_fetch_request_body(topic: str, partition: int, offset: int, *, max_bytes: int = KAFKA_FETCH_MAX_BYTES) -> bytes:
+    return (
+        struct.pack(">i", -1)
+        + struct.pack(">i", 300)
+        + struct.pack(">i", 1)
+        + struct.pack(">i", 1)
+        + _encode_kafka_string(topic)
+        + struct.pack(">i", 1)
+        + struct.pack(">i", int(partition))
+        + struct.pack(">q", int(offset))
+        + struct.pack(">i", int(max_bytes))
+    )
+
+
+def _parse_message_set_entries(message_set: bytes, max_messages: int) -> list[tuple[int, str]]:
+    items: list[tuple[int, str]] = []
+    reader = _KafkaReader(message_set)
+
+    while reader.remaining() >= 12 and len(items) < max_messages:
+        try:
+            offset = reader.read_i64()
+            message_size = reader.read_i32()
+            if message_size <= 0 or message_size > reader.remaining():
+                break
+
+            message_reader = _KafkaReader(reader._read(message_size))  # noqa: SLF001
+            if message_reader.remaining() < 6:
+                continue
+
+            _ = message_reader.read_i32()  # crc
+            magic = message_reader.read_i8()
+            _ = message_reader.read_i8()  # attributes
+            if magic >= 1 and message_reader.remaining() >= 8:
+                _ = message_reader.read_i64()  # timestamp
+
+            _ = message_reader.read_bytes(nullable=True)  # key
+            value = message_reader.read_bytes(nullable=True)
+            if value is None:
+                continue
+
+            decoded = value.decode("utf-8", errors="replace")
+            if decoded:
+                items.append((int(offset), decoded))
+        except (ValueError, struct.error):
+            break
+
+    return items
+
+
+def _parse_fetch_response(
+    payload: bytes,
+    expected_correlation_id: int,
+    *,
+    expected_partition: int,
+    max_messages: int,
+) -> tuple[list[tuple[int, str]] | None, str | None]:
+    try:
+        reader = _KafkaReader(payload)
+        correlation_id = reader.read_i32()
+        if correlation_id != expected_correlation_id:
+            return None, f"unexpected correlation id {correlation_id} (expected {expected_correlation_id})"
+
+        topic_count = reader.read_i32()
+        if topic_count <= 0:
+            return [], None
+
+        for _ in range(topic_count):
+            _ = reader.read_string(nullable=False) or ""
+            partition_count = reader.read_i32()
+            for _ in range(max(0, partition_count)):
+                partition = reader.read_i32()
+                error_code = reader.read_i16()
+                _ = reader.read_i64()  # high watermark
+                message_set_size = reader.read_i32()
+                if message_set_size < 0 or message_set_size > reader.remaining():
+                    return None, "invalid Fetch message set size"
+                message_set = reader._read(message_set_size)  # noqa: SLF001
+
+                if partition != expected_partition:
+                    continue
+                if error_code != 0:
+                    return None, f"Fetch failed: {_kafka_error_name(int(error_code))}"
+                return _parse_message_set_entries(message_set, max_messages), None
+
+        return [], None
+    except (ValueError, struct.error) as exc:
+        return None, f"invalid Fetch response: {exc}"
+
+
+def _read_topic_messages(
+    host: str,
+    port: int,
+    timeout: float,
+    topic: str,
+    max_messages: int,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+) -> tuple[list[str] | None, str | None]:
+    if max_messages <= 0:
+        return [], None
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            correlation = 1
+
+            if username and password:
+                hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
+                if not hs_ok:
+                    return None, hs_error or "SASL handshake failed"
+                auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
+                if not auth_ok:
+                    return None, auth_error or "authentication failed"
+            else:
+                is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
+                correlation += 1
+                if not is_kafka:
+                    return None, api_error or "service is not kafka"
+
+            metadata, metadata_error = _fetch_metadata(sock, correlation, topics=[topic])
+            correlation += 1
+            if metadata is None:
+                return None, metadata_error or "metadata request failed"
+
+            topic_map = dict(metadata.get("topic_map") or {})
+            if topic not in topic_map:
+                return [], None
+
+            partition_count = int(topic_map.get(topic) or 0)
+            if partition_count <= 0:
+                return [], None
+
+            out: list[str] = []
+            for partition in range(partition_count):
+                if len(out) >= max_messages:
+                    break
+
+                list_offsets_payload = _send_kafka_request(
+                    sock,
+                    api_key=KAFKA_LIST_OFFSETS,
+                    api_version=0,
+                    correlation_id=correlation,
+                    client_id=KAFKA_CLIENT_ID,
+                    body=_build_list_offsets_request_body(topic, partition, time_value=-2),
+                )
+                earliest_offset, list_offsets_error = _parse_list_offsets_response(list_offsets_payload, correlation)
+                correlation += 1
+                if list_offsets_error:
+                    if not out:
+                        return None, list_offsets_error
+                    continue
+                if earliest_offset is None:
+                    continue
+
+                fetch_payload = _send_kafka_request(
+                    sock,
+                    api_key=KAFKA_FETCH,
+                    api_version=0,
+                    correlation_id=correlation,
+                    client_id=KAFKA_CLIENT_ID,
+                    body=_build_fetch_request_body(
+                        topic,
+                        partition,
+                        earliest_offset,
+                        max_bytes=KAFKA_FETCH_MAX_BYTES,
+                    ),
+                )
+                fetch_items, fetch_error = _parse_fetch_response(
+                    fetch_payload,
+                    correlation,
+                    expected_partition=partition,
+                    max_messages=max_messages - len(out),
+                )
+                correlation += 1
+                if fetch_error:
+                    if not out:
+                        return None, fetch_error
+                    continue
+                if not fetch_items:
+                    continue
+
+                for offset, text in fetch_items:
+                    out.append(f"p{partition}@{offset} {text}")
+                    if len(out) >= max_messages:
+                        break
+
+            return out, None
+    except (ConnectionError, OSError, ValueError, socket.timeout) as exc:
+        return None, _friendly_error_from_exception(exc)
+
+
 def _sasl_handshake_plain(sock: socket.socket, correlation_id: int) -> tuple[bool, int, str | None]:
     versions = (1, 0)
     for version in versions:
@@ -477,6 +732,113 @@ def _authenticate_and_fetch_metadata(
         return False, None, _friendly_error_from_exception(exc)
 
 
+def _audit_kafka_via_sasl_fallback(
+    host: str,
+    port: int,
+    timeout: float,
+    username: str | None,
+    password: str | None,
+    show_topics: bool,
+    query_topic: str | None,
+    read_topic: bool,
+    max_messages: int,
+) -> dict[str, Any] | None:
+    provided_credentials = bool(username and password)
+    started = time.monotonic()
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+
+            correlation = 1
+            hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
+            if not hs_ok:
+                return None
+
+            auth_required = True
+            provided_credentials_ok: bool | None = None
+            topic_map: dict[str, int] | None = None
+            error_parts: list[str] = []
+
+            if provided_credentials and username and password:
+                auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
+                provided_credentials_ok = auth_ok
+                if auth_ok:
+                    metadata, metadata_error = _fetch_metadata(sock, correlation, topics=None)
+                    if metadata is not None:
+                        topic_map = dict(metadata.get("topic_map") or {})
+                    elif metadata_error:
+                        error_parts.append(metadata_error)
+                elif auth_error:
+                    error_parts.append(auth_error)
+            elif hs_error:
+                error_parts.append(hs_error)
+
+            topic_names = sorted(topic_map.keys()) if isinstance(topic_map, dict) else None
+            topic_count = len(topic_names) if isinstance(topic_names, list) else None
+
+            query_topic_name = (query_topic or "").strip()
+            query_topic_value: str | None = None
+            topic_messages: list[str] | None = None
+            topic_read_error: str | None = None
+            if query_topic_name:
+                if isinstance(topic_map, dict):
+                    if query_topic_name in topic_map:
+                        query_topic_value = f"{query_topic_name} (partitions:{int(topic_map[query_topic_name])})"
+                        if read_topic:
+                            read_items, read_error = _read_topic_messages(
+                                host=host,
+                                port=port,
+                                timeout=timeout,
+                                topic=query_topic_name,
+                                max_messages=max_messages,
+                                username=username if provided_credentials_ok else None,
+                                password=password if provided_credentials_ok else None,
+                            )
+                            topic_messages = read_items
+                            topic_read_error = read_error
+                    else:
+                        query_topic_value = f"{query_topic_name}:<not found>"
+                        if read_topic:
+                            topic_read_error = "topic not found"
+                elif provided_credentials_ok:
+                    query_topic_value = f"{query_topic_name}:<not available>"
+                    if read_topic:
+                        topic_read_error = "topic metadata unavailable"
+                else:
+                    query_topic_value = f"{query_topic_name}:<authentication required>"
+                    if read_topic:
+                        topic_read_error = "authentication required"
+
+            status = "valid_credentials" if provided_credentials_ok else "auth_required"
+            error = "; ".join(item for item in error_parts if str(item).strip()) or None
+
+            return {
+                "timestamp": utc_now_iso(),
+                "host": host,
+                "port": port,
+                "is_kafka": True,
+                "status": status,
+                "auth_required": auth_required,
+                "provided_credentials": provided_credentials,
+                "provided_username": username,
+                "provided_credentials_ok": provided_credentials_ok,
+                "show_topics": show_topics,
+                "query_topic": query_topic_name or None,
+                "topic_count": topic_count,
+                "topics": topic_names,
+                "query_topic_value": query_topic_value,
+                "read_topic": bool(read_topic and query_topic_name),
+                "max_messages": max_messages if read_topic and query_topic_name else None,
+                "topic_messages": topic_messages,
+                "topic_read_error": topic_read_error,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "error": error,
+            }
+    except (ConnectionError, OSError, ValueError, socket.timeout):
+        return None
+
+
 def _audit_kafka_host(
     host: str,
     port: int,
@@ -486,6 +848,8 @@ def _audit_kafka_host(
     password: str | None,
     show_topics: bool,
     query_topic: str | None,
+    read_topic: bool,
+    max_messages: int,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     provided_credentials = bool(username and password)
@@ -501,6 +865,20 @@ def _audit_kafka_host(
                 is_kafka, api_error_code, api_error = _probe_apiversions(sock, correlation)
                 correlation += 1
                 if not is_kafka:
+                    if _is_sasl_probe_candidate(api_error):
+                        fallback_record = _audit_kafka_via_sasl_fallback(
+                            host=host,
+                            port=port,
+                            timeout=timeout,
+                            username=username,
+                            password=password,
+                            show_topics=show_topics,
+                            query_topic=query_topic,
+                            read_topic=read_topic,
+                            max_messages=max_messages,
+                        )
+                        if fallback_record is not None:
+                            return fallback_record
                     return {
                         "timestamp": utc_now_iso(),
                         "host": host,
@@ -513,9 +891,13 @@ def _audit_kafka_host(
                         "provided_credentials_ok": None,
                         "show_topics": show_topics,
                         "query_topic": query_topic,
+                        "read_topic": bool(read_topic and str(query_topic or "").strip()),
+                        "max_messages": max_messages if read_topic and str(query_topic or "").strip() else None,
                         "topic_count": None,
                         "topics": None,
                         "query_topic_value": None,
+                        "topic_messages": None,
+                        "topic_read_error": None,
                         "elapsed_ms": int((time.monotonic() - started) * 1000),
                         "error": api_error or (f"ApiVersions failed ({_kafka_error_name(int(api_error_code))})" if api_error_code is not None else "service is not kafka"),
                     }
@@ -562,16 +944,36 @@ def _audit_kafka_host(
 
                 query_topic_name = (query_topic or "").strip()
                 query_topic_value: str | None = None
+                topic_messages: list[str] | None = None
+                topic_read_error: str | None = None
                 if query_topic_name:
                     if isinstance(topic_map, dict):
                         if query_topic_name in topic_map:
                             query_topic_value = f"{query_topic_name} (partitions:{int(topic_map[query_topic_name])})"
+                            if read_topic and (auth_required is False or bool(provided_credentials_ok)):
+                                read_items, read_error = _read_topic_messages(
+                                    host=host,
+                                    port=port,
+                                    timeout=timeout,
+                                    topic=query_topic_name,
+                                    max_messages=max_messages,
+                                    username=username if bool(provided_credentials_ok) else None,
+                                    password=password if bool(provided_credentials_ok) else None,
+                                )
+                                topic_messages = read_items
+                                topic_read_error = read_error
                         else:
                             query_topic_value = f"{query_topic_name}:<not found>"
+                            if read_topic:
+                                topic_read_error = "topic not found"
                     elif auth_required is True and not bool(provided_credentials_ok):
                         query_topic_value = f"{query_topic_name}:<authentication required>"
+                        if read_topic:
+                            topic_read_error = "authentication required"
                     else:
                         query_topic_value = f"{query_topic_name}:<not available>"
+                        if read_topic:
+                            topic_read_error = "topic metadata unavailable"
 
                 if auth_required is False:
                     status = "open_no_auth"
@@ -596,14 +998,32 @@ def _audit_kafka_host(
                     "provided_credentials_ok": provided_credentials_ok,
                     "show_topics": show_topics,
                     "query_topic": query_topic_name or None,
+                    "read_topic": bool(read_topic and query_topic_name),
+                    "max_messages": max_messages if read_topic and query_topic_name else None,
                     "topic_count": topic_count,
                     "topics": topic_names,
                     "query_topic_value": query_topic_value,
+                    "topic_messages": topic_messages,
+                    "topic_read_error": topic_read_error,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": error,
                 }
         except (ConnectionError, OSError, ValueError, socket.timeout) as exc:
             last_error = _friendly_error_from_exception(exc)
+            if _is_sasl_probe_candidate(last_error):
+                fallback_record = _audit_kafka_via_sasl_fallback(
+                    host=host,
+                    port=port,
+                    timeout=timeout,
+                    username=username,
+                    password=password,
+                    show_topics=show_topics,
+                    query_topic=query_topic,
+                    read_topic=read_topic,
+                    max_messages=max_messages,
+                )
+                if fallback_record is not None:
+                    return fallback_record
             if attempt >= attempts - 1:
                 break
             time.sleep(_retry_delay(attempt))
@@ -620,9 +1040,13 @@ def _audit_kafka_host(
         "provided_credentials_ok": None,
         "show_topics": show_topics,
         "query_topic": (query_topic or "").strip() or None,
+        "read_topic": bool(read_topic and str(query_topic or "").strip()),
+        "max_messages": max_messages if read_topic and str(query_topic or "").strip() else None,
         "topic_count": None,
         "topics": None,
         "query_topic_value": None,
+        "topic_messages": None,
+        "topic_read_error": None,
         "elapsed_ms": None,
         "error": last_error or "connection failed",
     }
@@ -679,12 +1103,12 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     if status == "valid_credentials":
         username = str(record.get("provided_username") or "user").strip() or "user"
-        return _with_optional_topics(record, f"{prefix} [+] {username}:<provided>")
+        return _with_optional_topics(record, f"{prefix} [+] {username}")
 
     if status == "auth_required":
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "user").strip() or "user"
-            base = f"{prefix} [-] {username}:<provided> invalid"
+            base = f"{prefix} [-] {username} invalid"
         else:
             base = f"{prefix} [-] authentication required"
         if err != "-":
@@ -707,12 +1131,19 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
     show_topics = bool(record.get("show_topics"))
     query_topic = str(record.get("query_topic") or "").strip()
     query_topic_value = record.get("query_topic_value")
+    read_topic = bool(record.get("read_topic"))
+    max_messages = int(record.get("max_messages") or 0)
+    topic_messages_raw = record.get("topic_messages")
+    topic_read_error = str(record.get("topic_read_error") or "").strip()
+    topic_messages: list[str] = []
+    if isinstance(topic_messages_raw, list):
+        topic_messages = [str(item) for item in topic_messages_raw if str(item)]
     topics = record.get("topics")
     topic_names: list[str] = []
     if isinstance(topics, list):
         topic_names = sorted(str(item) for item in topics)
 
-    if not show_topics and not query_topic:
+    if not show_topics and not query_topic and not read_topic:
         return []
 
     if output_format == "json":
@@ -747,6 +1178,24 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
                     ensure_ascii=False,
                 )
             )
+        if read_topic and query_topic:
+            lines.append(
+                json.dumps(
+                    {
+                        "timestamp": record.get("timestamp"),
+                        "type": "topic_read",
+                        "service": "kafka",
+                        "host": record.get("host"),
+                        "port": record.get("port"),
+                        "topic": query_topic,
+                        "max_messages": max_messages,
+                        "message_count": len(topic_messages),
+                        "messages": topic_messages,
+                        "error": topic_read_error or None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
         return lines
 
     prefix = _nxc_prefix(record)
@@ -759,6 +1208,15 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
         lines.append(f"{prefix} [*] Topic {query_topic}")
         if isinstance(query_topic_value, str):
             lines.append(f"{prefix} {query_topic_value}")
+    if read_topic and query_topic:
+        lines.append(f"{prefix} [*] Read Topic {query_topic} (max:{max_messages})")
+        if topic_messages:
+            for item in topic_messages:
+                lines.append(f"{prefix} {item}")
+        elif topic_read_error:
+            lines.append(f"{prefix} [-] {topic_read_error}")
+        else:
+            lines.append(f"{prefix} <no messages>")
     return lines
 
 
@@ -848,6 +1306,8 @@ def audit_kafka_targets(
     password: str | None,
     show_topics: bool,
     query_topic: str | None,
+    read_topic: bool,
+    max_messages: int,
     output_path: str | None,
     output_format: str,
     emit_line: Callable[[str], None] | None = None,
@@ -877,6 +1337,8 @@ def audit_kafka_targets(
                     password,
                     show_topics,
                     query_topic,
+                    read_topic,
+                    max_messages,
                 ): host
                 for host in hosts
             }
@@ -897,8 +1359,9 @@ def audit_kafka_targets(
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
 
                 _emit_line(out_fh, emit_line, _format_record(record, output_format))
-                for topics_line in _format_topics_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, topics_line)
+                if bool(record.get("is_kafka")):
+                    for topics_line in _format_topics_detail_records(record, output_format):
+                        _emit_line(out_fh, emit_line, topics_line)
 
                 if logger is not None:
                     logger.log(
@@ -910,6 +1373,8 @@ def audit_kafka_targets(
                         provided_credentials_ok=record.get("provided_credentials_ok"),
                         topic_count=record.get("topic_count"),
                         topic=record.get("query_topic"),
+                        read_topic=record.get("read_topic"),
+                        topic_read_error=record.get("topic_read_error"),
                         error=record.get("error"),
                     )
     finally:
@@ -928,8 +1393,14 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.retries < 0:
         console.error("--retries must be >= 0")
         return 2
+    if args.max_messages <= 0:
+        console.error("--max-messages must be > 0")
+        return 2
     if bool(args.username) != bool(args.password):
         console.error("--username and --password must be set together")
+        return 2
+    if args.read_topic and not str(args.topic or "").strip():
+        console.error("--read-topic requires --topic")
         return 2
 
     targets = getattr(args, "targets", None) or getattr(args, "hosts", None)
@@ -969,6 +1440,8 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append("show-topics")
         if args.topic:
             mode_parts.append(f"topic={args.topic}")
+        if args.read_topic:
+            mode_parts.append(f"read-topic,max={args.max_messages}")
         mode = ",".join(mode_parts) if mode_parts else "detect-only"
         console.info(
             f"kafka audit started: hosts={len(hosts)} port={args.port} timeout={args.timeout}s "
@@ -982,6 +1455,8 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append("show-topics")
         if args.topic:
             mode_parts.append(f"topic={args.topic}")
+        if args.read_topic:
+            mode_parts.append(f"read-topic,max={args.max_messages}")
         mode = ",".join(mode_parts) if mode_parts else "detect-only"
         console.info(
             f"kafka audit started: hosts={len(hosts)} port={args.port} timeout={args.timeout}s "
@@ -1000,6 +1475,8 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             password=args.password,
             show_topics=args.show_topics,
             query_topic=args.topic,
+            read_topic=args.read_topic,
+            max_messages=args.max_messages,
             output_path=args.output,
             output_format=args.output_format,
             emit_line=emit_line,
