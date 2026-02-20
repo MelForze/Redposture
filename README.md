@@ -10,6 +10,7 @@ RedPosture is a Python security toolkit for:
 - auditing Postgres exposure, default credentials, and risky privileges (`postgres`)
 - auditing etcd API exposure, auth requirements, and key count (`etcd`)
 - auditing Kafka broker auth exposure and topic visibility (`kafka`)
+- auditing ZooKeeper exposure, auth requirements, and znode visibility (`zookeeper`)
 - auditing Grafana auth exposure, default credentials, and datasource access (`grafana`)
 
 ## Installation
@@ -36,6 +37,8 @@ Unified lab is provided via one compose file:
   - open broker with seeded topics on `9092`
   - auth-enabled broker (SASL/PLAIN) with seeded topics on `29092` (`metrics:metricspass`)
   - topic payloads are seeded for read tests (`orders`, `audit.logs`, `secure.orders`, `secure.metrics`)
+- ZooKeeper lab is included:
+  - open ZooKeeper with seeded znodes on `2181`
 - etcd labs are included:
   - open etcd with seeded keys on `2379`
   - auth-enabled etcd on `22379`
@@ -65,6 +68,7 @@ curl -s http://127.0.0.1:9308/debug/vars | head
 curl -s "http://127.0.0.1:9308/debug/pprof/cmdline?debug=1" | head
 curl -s "http://127.0.0.1:9121/scrape?target=127.0.0.1:6379" | head
 curl -s "http://127.0.0.1:9187/probe?target=127.0.0.1:5432" | head
+echo ruok | nc 127.0.0.1 2181
 curl -s http://127.0.0.1:2379/version
 curl -s http://127.0.0.1:2379/v2/keys?recursive=true | head
 curl -s http://127.0.0.1:22379/version
@@ -81,6 +85,9 @@ redis-cli -h 127.0.0.1 -a redis HGETALL user:1001
 
 psql postgresql://postgres:postgres@127.0.0.1:5432/postgres -c "SELECT username, role FROM redposture.demo_accounts;"
 psql postgresql://postgres:postgres@127.0.0.1:5432/postgres -c "SELECT event_type, source_ip FROM redposture.audit_events;"
+
+python3 redposture.py zookeeper -t 127.0.0.1 --show-znodes
+python3 redposture.py zookeeper -t 127.0.0.1 -znode /redposture/db/password --dump
 ```
 
 For `trigger` against real exporter containers, use:
@@ -285,13 +292,13 @@ redposture redis -t ./ips.txt -key app:token
 Dump all keys with values:
 
 ```bash
-redposture redis -t ./ips.txt --dump-keys
+redposture redis -t ./ips.txt --dump
 ```
 
 Use non-default Redis port and save results:
 
 ```bash
-redposture redis -t ./ips.txt --port 6380 --username myuser --password mypass --show-keys --dump-keys -f txt -o ./redis_audit.txt
+redposture redis -t ./ips.txt --port 6380 --username myuser --password mypass --show-keys --dump -f txt -o ./redis_audit.txt
 ```
 
 ### 6) Audit Postgres exposure
@@ -395,7 +402,7 @@ redposture etcd -t ./ips.txt --show-keys
 Dump all accessible keys with values:
 
 ```bash
-redposture etcd -t ./ips.txt --dump-keys
+redposture etcd -t ./ips.txt --dump
 ```
 
 Dump one specific key:
@@ -503,6 +510,44 @@ You can also override path/query for generated checks:
 ```bash
 redposture grafana -t ./ips.txt --defcreds --ssrf-target host.docker.internal --ssrf-port 19115 --ssrf-path /debug/vars
 ```
+
+### 10) Audit ZooKeeper exposure
+
+Detect ZooKeeper and check whether auth is required:
+
+```bash
+redposture zookeeper -t ./ips.txt
+```
+
+Show znode paths:
+
+```bash
+redposture zookeeper -t ./ips.txt --show-znodes
+```
+
+Show one znode detail:
+
+```bash
+redposture zookeeper -t ./ips.txt -znode /brokers/ids/1
+```
+
+Dump one znode value:
+
+```bash
+redposture zookeeper -t ./ips.txt -znode /brokers/ids/1 --dump
+```
+
+Dump all enumerated znode values:
+
+```bash
+redposture zookeeper -t ./ips.txt --dump
+```
+
+Tune target port and enumeration cap:
+
+```bash
+redposture zookeeper -t ./ips.txt --port 22181 --max-znodes 5000 -f txt -o ./zookeeper_audit.txt
+```
 If several targets and several ports are set, checks run as all combinations (`targets × ports`).
 
 Use custom exporter profiles from JSON:
@@ -520,13 +565,13 @@ redposture exporters scan -t ./ips.txt --profiles-file ./profiles.json
 
 - Runtime events are printed as readable colorized text.
 - Credential events are highlighted with `CRED` and include `user=` / `pass=`.
-- `scan`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, and `grafana` support both `txt` and `json` output via `-f/--format`.
-- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, and `grafana` support `--save` (alias of `--output`) to write results to file.
+- `scan`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, `zookeeper`, and `grafana` support both `txt` and `json` output via `-f/--format`.
+- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, `zookeeper`, and `grafana` support `--save` (alias of `--output`) to write results to file.
 - all modules support `-log/--log <file>` to mirror console output into a log file.
-- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, and `grafana` support `--workers` and `--retries`.
+- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, `zookeeper`, and `grafana` support `--workers` and `--retries`.
 - `scan --ports/-p` probes custom port lists/ranges and maps hits to known exporters by marker signatures.
 - default `--timeout` is `1.0` second.
-- `redis` counts keys by default (`DBSIZE`); use `--show-keys` for key names only, `-key/--key` for one key+value, and `--dump-keys` for all key+value pairs.
+- `redis` counts keys by default (`DBSIZE`); use `--show-keys` for key names only, `-key/--key` for one key+value, and `--dump` for all key+value pairs.
 - `redis --defcreds` enables default credential attempts (`redis:redis`) on auth-required targets.
 - `postgres` counts readable tables by default (`tables:N`); use `--show-tables` to dump table names.
 - `postgres --defcreds` enables default credential attempts (`postgres:postgres`) on auth-required targets.
@@ -538,10 +583,15 @@ redposture exporters scan -t ./ips.txt --profiles-file ./profiles.json
 - `postgres --column <name>` filters columns used by `--show-columns` and `--dump` (repeatable; `--columns` is kept as alias).
 - `postgres -x/--execute` tries command execution via `COPY FROM PROGRAM` and prints output lines.
 - `postgres --os-shell` opens interactive command mode via `COPY FROM PROGRAM` (single target, text output only).
-- `etcd` checks API support (`api:v2`, `api:v3`), auth requirement, and key count when no auth is required; use `--show-keys` for names and `--dump-keys` for `key:value`.
+- `etcd` checks API support (`api:v2`, `api:v3`), auth requirement, and key count when no auth is required; use `--show-keys` for names and `--dump` for `key:value`.
 - `kafka` checks broker detection, auth requirement, optional provided credentials (`-u/-p`, SASL/PLAIN), and topic visibility.
 - `kafka --show-topics` prints topic names after successful access/auth.
 - `kafka --topic <name>` prints one topic detail line with partition count or `<not found>`.
+- `zookeeper` checks service detection, auth requirement, and znode visibility.
+- `zookeeper --show-znodes` prints znode path names.
+- `zookeeper -znode/--znode <path>` prints one znode detail line.
+- `zookeeper --dump` dumps znode data: with `--znode` dumps only that znode, without `--znode` dumps all enumerated `znode:value` lines.
+- `zookeeper --max-znodes <count>` limits recursive znode enumeration per target.
 - `grafana` checks service detection, auth requirement, optional default creds (`--defcreds`), and datasource exposure via `/api/datasources`.
 - `grafana --show-datasources` (alias `--show-datasource`) prints datasource detail lines.
 - `grafana --ssrf-target` + optional `--ssrf-port`/`--ssrf-path` runs temporary Prometheus egress-check (create -> request exact URL path -> cleanup).
@@ -575,6 +625,7 @@ redposture exporters collect --help
 redposture exporters trigger --help
 redposture grafana --help
 redposture kafka --help
+redposture zookeeper --help
 redposture postgres --help
 redposture redis --help
 redposture etcd --help
