@@ -816,9 +816,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         source = str(record.get("credentials_source") or "")
         if source == "default":
             password_text = str(record.get("effective_password") or "")
-        else:
-            password_text = "<provided>"
-        return _with_optional_datasources(record, f"{prefix} [+] {user}:{password_text}")
+            return _with_optional_datasources(record, f"{prefix} [+] {user}:{password_text}")
+        return _with_optional_datasources(record, f"{prefix} [+] {user}")
     if status == "auth_required":
         if int(record.get("attempted_credentials") or 0) > 0:
             return f"{prefix} [-] authentication required (credentials invalid)"

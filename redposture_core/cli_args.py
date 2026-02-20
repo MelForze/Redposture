@@ -763,6 +763,19 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="name",
         help="Show one topic detail by name (partition count / not found).",
     )
+    kafka_parser.add_argument(
+        "--read-topic",
+        action="store_true",
+        help="Read topic messages for --topic.",
+    )
+    kafka_parser.add_argument(
+        "--max-messages",
+        dest="max_messages",
+        type=int,
+        default=1000,
+        metavar="count",
+        help="Maximum number of topic messages to read with --read-topic.",
+    )
     _add_save_flag(kafka_parser, "Optional output file path. If omitted, results are printed to stdout.")
     kafka_parser.add_argument(
         "-f",

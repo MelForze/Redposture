@@ -32,6 +32,10 @@ Unified lab is provided via one compose file:
 - `docker-compose.lab.yml`: real exporters + seeded Redis/Postgres + synthetic exporter shim.
 - Default ports (`3000/9100/9115/9121/9187/9221/9308`) are backed by real services/exporters.
 - Additional exporters are exposed on default ports (`9116/9127/9216/9256/9342/9349/9427`) via synthetic shim.
+- Kafka labs are included:
+  - open broker with seeded topics on `9092`
+  - auth-enabled broker (SASL/PLAIN) with seeded topics on `29092` (`metrics:metricspass`)
+  - topic payloads are seeded for read tests (`orders`, `audit.logs`, `secure.orders`, `secure.metrics`)
 - etcd labs are included:
   - open etcd with seeded keys on `2379`
   - auth-enabled etcd on `22379`
@@ -64,6 +68,13 @@ curl -s "http://127.0.0.1:9187/probe?target=127.0.0.1:5432" | head
 curl -s http://127.0.0.1:2379/version
 curl -s http://127.0.0.1:2379/v2/keys?recursive=true | head
 curl -s http://127.0.0.1:22379/version
+docker compose -f docker-compose.lab.yml exec kafka-open kafka-topics --bootstrap-server kafka-open:9092 --list
+docker compose -f docker-compose.lab.yml exec kafka-auth bash -ec 'cat >/tmp/client.properties <<EOF
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=PLAIN
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="metrics" password="metricspass";
+EOF
+kafka-topics --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --list'
 
 redis-cli -h 127.0.0.1 -a redis DBSIZE
 redis-cli -h 127.0.0.1 -a redis HGETALL user:1001
@@ -407,10 +418,10 @@ Detect Kafka broker, check whether authentication is required, and show topics w
 redposture kafka -t ./ips.txt
 ```
 
-Check broker with credentials (SASL/PLAIN):
+Check auth-enabled broker with credentials (SASL/PLAIN):
 
 ```bash
-redposture kafka -t ./ips.txt -u metrics -p 'StrongPass!'
+redposture kafka -t ./ips.txt --port 29092 -u metrics -p metricspass
 ```
 
 Show topic names:
@@ -425,10 +436,24 @@ Query one topic:
 redposture kafka -t ./ips.txt --topic orders
 ```
 
+Read topic messages:
+
+```bash
+redposture kafka -t ./ips.txt --topic orders --read-topic
+```
+
+`--read-topic` requires `--topic` and reads up to `--max-messages` (default: `1000`).
+
+Read more messages:
+
+```bash
+redposture kafka -t ./ips.txt --topic orders --read-topic --max-messages 5000
+```
+
 Use non-default Kafka port and save output:
 
 ```bash
-redposture kafka -t ./ips.txt --port 19092 --show-topics -f txt -o ./kafka_audit.txt
+redposture kafka -t ./ips.txt --port 29092 --show-topics -f txt -o ./kafka_audit.txt
 ```
 
 ### 9) Audit Grafana exposure
