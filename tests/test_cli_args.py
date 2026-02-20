@@ -275,6 +275,53 @@ def test_etcd_show_keys_flag_is_parsed() -> None:
     assert args.dump_keys is False
 
 
+def test_kafka_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "kafka",
+            "-t",
+            "10.0.0.21,10.0.0.22",
+            "--timeout",
+            "0.8",
+            "-w",
+            "8",
+            "-r",
+            "1",
+            "--port",
+            "19092",
+            "-u",
+            "metrics",
+            "-p",
+            "secret",
+            "--show-topics",
+            "--topic",
+            "orders",
+            "-f",
+            "json",
+            "-o",
+            "kafka_audit.jsonl",
+        ]
+    )
+    assert args.command == "kafka"
+    assert args.targets == "10.0.0.21,10.0.0.22"
+    assert args.timeout == 0.8
+    assert args.workers == 8
+    assert args.retries == 1
+    assert args.port == 19092
+    assert args.username == "metrics"
+    assert args.password == "secret"
+    assert args.show_topics is True
+    assert args.topic == "orders"
+    assert args.output_format == "json"
+    assert args.output == "kafka_audit.jsonl"
+
+
+def test_kafka_rejects_profiles_file_flag() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["kafka", "-t", "10.0.0.9", "--profiles-file", "profiles.json"])
+    assert exc.value.code == 2
+
+
 def test_grafana_flags_are_parsed() -> None:
     args = parse_args(
         [

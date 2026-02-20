@@ -13,6 +13,7 @@ from .cli_args import (
     COMMAND_ETCD,
     COMMAND_EXPORTERS,
     COMMAND_GRAFANA,
+    COMMAND_KAFKA,
     COMMAND_POSTGRES,
     COMMAND_REDIS,
     COMMAND_SCAN,
@@ -24,6 +25,7 @@ from .logger import AttemptLogger
 from .stage_collect import run_collect_stage
 from .stage_etcd import run_etcd_stage
 from .stage_grafana import run_grafana_stage
+from .stage_kafka import run_kafka_stage
 from .stage_postgres import run_postgres_stage
 from .stage_redis import run_redis_stage
 from .stage_scan import run_scan_stage
@@ -112,6 +114,9 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
 
     if args.command == COMMAND_GRAFANA:
         return run_grafana_stage(args, logger)
+
+    if args.command == COMMAND_KAFKA:
+        return run_kafka_stage(args, logger)
 
     if args.command == COMMAND_POSTGRES:
         return run_postgres_stage(args, logger)
