@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from honeycore.profiles import load_profiles
+from redposture_core.profiles import load_profiles
 
 
 def test_load_profiles_defaults() -> None:
@@ -16,7 +16,7 @@ def test_load_profiles_defaults() -> None:
     assert "collect_debug_endpoints" in profiles
     assert profiles["trigger_exporters"]
     blackbox = next(item for item in profiles["trigger_exporters"] if item["name"] == "blackbox_exporter")
-    assert blackbox["target_fmt"] == "http://{our_host}:9115"
+    assert blackbox["target_fmt"] == "http://{our_host}"
 
 
 def test_load_profiles_override_subset(tmp_path: Path) -> None:

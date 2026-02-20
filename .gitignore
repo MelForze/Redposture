@@ -29,3 +29,9 @@ dist/
 *.jsonl
 collect_results*.txt
 scan_results*.txt
+cert.pem
+key.pem
+server.crt
+server.key
+tls.crt
+tls.key

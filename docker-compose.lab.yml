@@ -1,0 +1,284 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: redposture-lab-redis
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a redis ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  redis-seed:
+    image: redis:7-alpine
+    container_name: redposture-lab-redis-seed
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - sh
+      - -ceu
+      - |
+        redis-cli -h redis -a redis < /seed/seed.redis >/dev/null
+        echo "[redis-seed] done"
+    volumes:
+      - ./docker/redis/seed.redis:/seed/seed.redis:ro
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: redposture-lab-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.14
+    container_name: redposture-lab-etcd
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-open
+      - --data-dir=/etcd-data
+      - --enable-v2=true
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd:2380
+      - --initial-cluster=etcd-open=http://etcd:2380
+      - --initial-cluster-state=new
+    ports:
+      - "2379:2379"
+    volumes:
+      - etcd-open-data:/etcd-data
+    healthcheck:
+      test: ["CMD", "etcdctl", "--endpoints=http://127.0.0.1:2379", "endpoint", "health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 6s
+    restart: unless-stopped
+
+  etcd-seed:
+    image: curlimages/curl:8.12.1
+    container_name: redposture-lab-etcd-seed
+    depends_on:
+      etcd:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - sh
+      - -ceu
+      - |
+        curl -sS -X PUT "http://etcd:2379/v2/keys/redposture/env" -d "value=lab" >/dev/null
+        curl -sS -X PUT "http://etcd:2379/v2/keys/redposture/app/api_key" -d "value=rp-demo-key-2026" >/dev/null
+        curl -sS -X PUT "http://etcd:2379/v2/keys/redposture/db/password" -d "value=postgres" >/dev/null
+        curl -sS -X POST "http://etcd:2379/v3/kv/put" \
+          -H "Content-Type: application/json" \
+          -d '{"key":"L3JlZHBvc3R1cmUvdjMvZW52","value":"bGFi"}' >/dev/null
+        curl -sS -X POST "http://etcd:2379/v3/kv/put" \
+          -H "Content-Type: application/json" \
+          -d '{"key":"L3JlZHBvc3R1cmUvdjMvdG9rZW4=","value":"cnAtdjMtdG9rZW4tMjAyNg=="}' >/dev/null
+        echo "[etcd-seed] done"
+
+  etcd-auth:
+    image: quay.io/coreos/etcd:v3.5.14
+    container_name: redposture-lab-etcd-auth
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd-auth
+      - --data-dir=/etcd-data
+      - --enable-v2=true
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd-auth:2379
+      - --listen-peer-urls=http://0.0.0.0:2380
+      - --initial-advertise-peer-urls=http://etcd-auth:2380
+      - --initial-cluster=etcd-auth=http://etcd-auth:2380
+      - --initial-cluster-state=new
+    ports:
+      - "22379:2379"
+    volumes:
+      - etcd-auth-data:/etcd-data
+    restart: unless-stopped
+
+  etcd-auth-seed:
+    image: curlimages/curl:8.12.1
+    container_name: redposture-lab-etcd-auth-seed
+    depends_on:
+      - etcd-auth
+    restart: "no"
+    command:
+      - sh
+      - -ceu
+      - |
+        until curl -fsS "http://etcd-auth:2379/health" | grep -q '"health":"true"'; do
+          sleep 1
+        done
+        if curl -sS -X POST "http://etcd-auth:2379/v3/auth/status" -H "Content-Type: application/json" -d '{}' | grep -q '"enabled":true'; then
+          echo "[etcd-auth-seed] auth already configured"
+          exit 0
+        fi
+        curl -sS -X PUT "http://etcd-auth:2379/v2/keys/secure/bootstrap" -d "value=1" >/dev/null || true
+        curl -sS -X POST "http://etcd-auth:2379/v3/kv/put" \
+          -H "Content-Type: application/json" \
+          -d '{"key":"L3NlY3VyZS92My9ib290c3RyYXA=","value":"MQ=="}' >/dev/null || true
+        curl -sS -X POST "http://etcd-auth:2379/v3/auth/role/add" \
+          -H "Content-Type: application/json" \
+          -d '{"name":"root"}' >/dev/null || true
+        curl -sS -X POST "http://etcd-auth:2379/v3/auth/user/add" \
+          -H "Content-Type: application/json" \
+          -d '{"name":"root","password":"rootpass"}' >/dev/null || true
+        curl -sS -X POST "http://etcd-auth:2379/v3/auth/user/grant" \
+          -H "Content-Type: application/json" \
+          -d '{"user":"root","role":"root"}' >/dev/null || true
+        curl -sS -X POST "http://etcd-auth:2379/v3/auth/enable" \
+          -H "Content-Type: application/json" \
+          -d '{}' >/dev/null || true
+        echo "[etcd-auth-seed] done"
+
+  blackbox-exporter:
+    image: prom/blackbox-exporter:v0.27.0
+    container_name: redposture-lab-blackbox-exporter
+    command:
+      - "--config.file=/etc/blackbox_exporter/config.yml"
+    volumes:
+      - ./docker/real_lab/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "9115:9115"
+    restart: unless-stopped
+
+  kafka-exporter:
+    image: python:3.12-alpine
+    container_name: redposture-lab-kafka-exporter
+    command: ["python", "/app/legacy_kafka_exporter.py"]
+    volumes:
+      - ./docker/real_lab/legacy_kafka_exporter.py:/app/legacy_kafka_exporter.py:ro
+    ports:
+      - "9308:9308"
+    restart: unless-stopped
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    container_name: redposture-lab-redis-exporter
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+      REDIS_PASSWORD: "redis"
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "9121:9121"
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: redposture-lab-postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+    command:
+      - "--config.file=/etc/postgres_exporter/postgres_exporter.yml"
+    volumes:
+      - ./docker/real_lab/postgres_exporter.yml:/etc/postgres_exporter/postgres_exporter.yml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "9187:9187"
+    restart: unless-stopped
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: redposture-lab-node-exporter
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "9100:9100"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: redposture-lab-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+  proxmox-exporter:
+    image: prompve/prometheus-pve-exporter:latest
+    container_name: redposture-lab-proxmox-exporter
+    command:
+      - "--config.file=/etc/prometheus/pve.yml"
+      - "--web.listen-address=:9221"
+    volumes:
+      - ./docker/real_lab/pve.yml:/etc/prometheus/pve.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "9221:9221"
+    restart: unless-stopped
+
+  exporter-lab:
+    build:
+      context: .
+      dockerfile: docker/exporter_lab/Dockerfile
+    container_name: redposture-lab-exporter-lab
+    environment:
+      CALLBACK_TIMEOUT: "2.0"
+      BLACKBOX_CALLBACK_USER: "blackbox"
+      BLACKBOX_CALLBACK_PASSWORD: "blackbox"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      # Additional exporters on their standard ports.
+      - "9116:9116"
+      - "9127:9127"
+      - "9216:9216"
+      - "9256:9256"
+      - "9342:9342"
+      - "9349:9349"
+      - "9427:9427"
+      # Synthetic callback-friendly mirrors on high ports to avoid conflicts
+      # with real exporter containers above.
+      - "19100:9100"
+      - "19115:9115"
+      - "19121:9121"
+      - "19187:9187"
+      - "19221:9221"
+      - "19308:9308"
+    restart: unless-stopped
+
+volumes:
+  etcd-open-data:
+  etcd-auth-data:
