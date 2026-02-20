@@ -19,6 +19,7 @@ from .cli_args import (
     COMMAND_SCAN,
     COMMAND_SELFCERT,
     COMMAND_TRIGGER,
+    COMMAND_ZOOKEEPER,
     parse_args,
 )
 from .logger import AttemptLogger
@@ -31,6 +32,7 @@ from .stage_redis import run_redis_stage
 from .stage_scan import run_scan_stage
 from .stage_selfcert import run_selfcert_stage
 from .stage_trigger import run_trigger_stage
+from .stage_zookeeper import run_zookeeper_stage
 
 
 class _TeeStream:
@@ -123,6 +125,9 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
 
     if args.command == COMMAND_ETCD:
         return run_etcd_stage(args, logger)
+
+    if args.command == COMMAND_ZOOKEEPER:
+        return run_zookeeper_stage(args, logger)
 
     if args.command == COMMAND_SELFCERT:
         return run_selfcert_stage(args)
