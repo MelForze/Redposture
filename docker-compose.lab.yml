@@ -48,6 +48,94 @@ services:
       retries: 20
       start_period: 5s
 
+  zookeeper:
+    image: zookeeper:3.9
+    container_name: redposture-lab-zookeeper
+    environment:
+      ZOO_4LW_COMMANDS_WHITELIST: "ruok,stat,mntr,conf"
+      ZOO_AUTOPURGE_PURGEINTERVAL: "1"
+    ports:
+      - "2181:2181"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec '</dev/tcp/127.0.0.1/2181'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+
+  zookeeper-seed:
+    image: zookeeper:3.9
+    container_name: redposture-lab-zookeeper-seed
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - bash
+      - -ceu
+      - |
+        if command -v zkCli.sh >/dev/null 2>&1; then
+          ZKCLI="zkCli.sh"
+        else
+          ZKCLI="$(echo /apache-zookeeper-*/bin/zkCli.sh)"
+        fi
+
+        cat >/tmp/seed_create.zk <<'EOF'
+        create /redposture "env=lab,owner=platform"
+        create /redposture/env "lab"
+        create /redposture/app "service=redposture-api,namespace=observability"
+        create /redposture/app/api_key "rp-zk-key-2026"
+        create /redposture/app/jwt_secret "rp-jwt-lab-2026"
+        create /redposture/app/oidc_client_secret "oidc-client-secret-lab"
+        create /redposture/db "engine=postgres,host=postgres,port=5432"
+        create /redposture/db/password "postgres"
+        create /redposture/cache "backend=redis,host=redis,port=6379"
+        create /redposture/cache/redis_uri "redis://default:redis@redis:6379/0"
+        create /brokers "cluster=kafka-open"
+        create /brokers/ids "source=seed"
+        create /brokers/ids/1 "host=kafka-open,port=9092"
+        create /config "profile=lab,reload_interval=30s"
+        create /config/services "count=4"
+        create /config/services/redposture "mode=lab,metrics=true"
+        create /config/services/grafana "url=http://grafana:3000,admin_user=admin,admin_password=admin"
+        create /config/services/postgres "dsn=postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+        create /config/services/kafka "open=kafka-open:9092,auth=kafka-auth:9092,sasl_user=metrics,sasl_password=metricspass"
+        create /observability "stack=prometheus-grafana,team=sre"
+        create /observability/scrape_interval "15s"
+        create /observability/remote_write_url "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
+        quit
+        EOF
+        "$${ZKCLI}" -server zookeeper:2181 < /tmp/seed_create.zk >/tmp/seed_create.log 2>&1 || true
+
+        cat >/tmp/seed_update.zk <<'EOF'
+        set /redposture "env=lab,owner=platform"
+        set /redposture/env "lab"
+        set /redposture/app "service=redposture-api,namespace=observability"
+        set /redposture/app/api_key "rp-zk-key-2026"
+        set /redposture/app/jwt_secret "rp-jwt-lab-2026"
+        set /redposture/app/oidc_client_secret "oidc-client-secret-lab"
+        set /redposture/db "engine=postgres,host=postgres,port=5432"
+        set /redposture/db/password "postgres"
+        set /redposture/cache "backend=redis,host=redis,port=6379"
+        set /redposture/cache/redis_uri "redis://default:redis@redis:6379/0"
+        set /brokers "cluster=kafka-open"
+        set /brokers/ids "source=seed"
+        set /brokers/ids/1 "host=kafka-open,port=9092"
+        set /config "profile=lab,reload_interval=30s"
+        set /config/services "count=4"
+        set /config/services/redposture "mode=lab,metrics=true"
+        set /config/services/grafana "url=http://grafana:3000,admin_user=admin,admin_password=admin"
+        set /config/services/postgres "dsn=postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+        set /config/services/kafka "open=kafka-open:9092,auth=kafka-auth:9092,sasl_user=metrics,sasl_password=metricspass"
+        set /observability "stack=prometheus-grafana,team=sre"
+        set /observability/scrape_interval "15s"
+        set /observability/remote_write_url "https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write"
+        quit
+        EOF
+        "$${ZKCLI}" -server zookeeper:2181 < /tmp/seed_update.zk >/tmp/seed_update.log 2>&1 || true
+        echo "[zookeeper-seed] done"
+
   etcd:
     image: quay.io/coreos/etcd:v3.5.14
     container_name: redposture-lab-etcd
@@ -85,15 +173,41 @@ services:
       - sh
       - -ceu
       - |
-        curl -sS -X PUT "http://etcd:2379/v2/keys/redposture/env" -d "value=lab" >/dev/null
-        curl -sS -X PUT "http://etcd:2379/v2/keys/redposture/app/api_key" -d "value=rp-demo-key-2026" >/dev/null
-        curl -sS -X PUT "http://etcd:2379/v2/keys/redposture/db/password" -d "value=postgres" >/dev/null
-        curl -sS -X POST "http://etcd:2379/v3/kv/put" \
-          -H "Content-Type: application/json" \
-          -d '{"key":"L3JlZHBvc3R1cmUvdjMvZW52","value":"bGFi"}' >/dev/null
-        curl -sS -X POST "http://etcd:2379/v3/kv/put" \
-          -H "Content-Type: application/json" \
-          -d '{"key":"L3JlZHBvc3R1cmUvdjMvdG9rZW4=","value":"cnAtdjMtdG9rZW4tMjAyNg=="}' >/dev/null
+        put_v2() {
+          path="$1"
+          value="$2"
+          curl -sS -X PUT "http://etcd:2379/v2/keys$${path}" -d "value=$${value}" >/dev/null
+        }
+        put_v3() {
+          path="$1"
+          value="$2"
+          key_b64=$(printf '%s' "$${path}" | base64 | tr -d '\n')
+          value_b64=$(printf '%s' "$${value}" | base64 | tr -d '\n')
+          curl -sS -X POST "http://etcd:2379/v3/kv/put" \
+            -H "Content-Type: application/json" \
+            -d "{\"key\":\"$${key_b64}\",\"value\":\"$${value_b64}\"}" >/dev/null
+        }
+
+        put_v2 /redposture/env lab
+        put_v2 /redposture/app/api_key rp-demo-key-2026
+        put_v2 /redposture/db/password postgres
+        put_v2 /redposture/db/readonly_password readonly
+        put_v2 /redposture/cache/redis_uri redis://default:redis@redis:6379/0
+        put_v2 /redposture/integrations/slack/webhook https://hooks.slack.com/services/T000/B000/REDACTED
+        put_v2 /redposture/integrations/pagerduty/routing_key pd_demo_routing_key_2026
+        put_v2 /redposture/feature_flags/new_ui true
+        put_v2 /inventory/services/grafana/url http://grafana:3000
+        put_v2 /inventory/services/prometheus/url http://prometheus:9090
+        put_v2 /inventory/services/kafka/bootstrap kafka-open:9092
+
+        put_v3 /redposture/v3/env lab
+        put_v3 /redposture/v3/token rp-v3-token-2026
+        put_v3 /redposture/v3/datasource/admin_user admin
+        put_v3 /redposture/v3/datasource/admin_password admin
+        put_v3 /redposture/v3/datasource/postgres_dsn postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable
+        put_v3 /redposture/v3/kafka/sasl_username metrics_collector
+        put_v3 /redposture/v3/kafka/sasl_password Kfka-M0nitor-2026
+        put_v3 /redposture/v3/observability/remote_write https://prom_rw:PromRW-2026@prometheus.internal/api/v1/write
         echo "[etcd-seed] done"
 
   etcd-auth:
@@ -134,9 +248,13 @@ services:
           exit 0
         fi
         curl -sS -X PUT "http://etcd-auth:2379/v2/keys/secure/bootstrap" -d "value=1" >/dev/null || true
+        curl -sS -X PUT "http://etcd-auth:2379/v2/keys/secure/proxmox/token" -d "value=pve-redposture-token-2026" >/dev/null || true
         curl -sS -X POST "http://etcd-auth:2379/v3/kv/put" \
           -H "Content-Type: application/json" \
           -d '{"key":"L3NlY3VyZS92My9ib290c3RyYXA=","value":"MQ=="}' >/dev/null || true
+        curl -sS -X POST "http://etcd-auth:2379/v3/kv/put" \
+          -H "Content-Type: application/json" \
+          -d '{"key":"L3NlY3VyZS92My9rYWZrYS9zYXNsX3Bhc3N3b3Jk","value":"bWV0cmljc3Bhc3M="}' >/dev/null || true
         curl -sS -X POST "http://etcd-auth:2379/v3/auth/role/add" \
           -H "Content-Type: application/json" \
           -d '{"name":"root"}' >/dev/null || true
@@ -199,6 +317,16 @@ services:
           cat <<'EOF' | kafka-console-producer --bootstrap-server kafka-open:9092 --topic orders >/dev/null
         {"order_id":"ord-1001","status":"created","amount":99.50}
         {"order_id":"ord-1002","status":"paid","amount":149.00}
+        {"order_id":"ord-1003","status":"refunded","amount":49.00}
+        EOF
+        fi
+        open_payments_count=$(kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server kafka-open:9092 --topic payments.events 2>/dev/null | awk -F: '{sum += $$3} END {print sum+0}')
+        [ -n "$${open_payments_count}" ] || open_payments_count=0
+        if [ "$${open_payments_count}" -eq 0 ]; then
+          cat <<'EOF' | kafka-console-producer --bootstrap-server kafka-open:9092 --topic payments.events >/dev/null
+        {"payment_id":"pay-3001","provider":"stripe","status":"authorized","amount":149.00}
+        {"payment_id":"pay-3002","provider":"adyen","status":"captured","amount":99.50}
+        {"payment_id":"pay-3003","provider":"stripe","status":"failed","reason":"insufficient_funds"}
         EOF
         fi
         open_audit_count=$(kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server kafka-open:9092 --topic audit.logs 2>/dev/null | awk -F: '{sum += $$3} END {print sum+0}')
@@ -207,6 +335,7 @@ services:
           cat <<'EOF' | kafka-console-producer --bootstrap-server kafka-open:9092 --topic audit.logs >/dev/null
         {"event":"login","user":"admin","source_ip":"10.0.1.11"}
         {"event":"token_created","service":"grafana","token_hint":"gfa_demo_token_123"}
+        {"event":"config_changed","user":"automation","path":"/etc/redposture/app.yml"}
         EOF
         fi
         echo "[kafka-open-seed] done"
@@ -286,12 +415,14 @@ services:
         done
         kafka-topics --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --create --if-not-exists --topic secure.orders --partitions 2 --replication-factor 1
         kafka-topics --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --create --if-not-exists --topic secure.metrics --partitions 1 --replication-factor 1
+        kafka-topics --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --create --if-not-exists --topic secure.audit --partitions 1 --replication-factor 1
         auth_orders_count=$(kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --topic secure.orders 2>/dev/null | awk -F: '{sum += $$3} END {print sum+0}')
         [ -n "$${auth_orders_count}" ] || auth_orders_count=0
         if [ "$${auth_orders_count}" -eq 0 ]; then
           cat <<'EOF' | kafka-console-producer --bootstrap-server kafka-auth:9092 --producer.config /tmp/client.properties --topic secure.orders >/dev/null
         {"order_id":"sec-2001","status":"queued","tenant":"internal"}
         {"order_id":"sec-2002","status":"processed","tenant":"internal"}
+        {"order_id":"sec-2003","status":"failed","tenant":"internal","reason":"card_declined"}
         EOF
         fi
         auth_metrics_count=$(kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --topic secure.metrics 2>/dev/null | awk -F: '{sum += $$3} END {print sum+0}')
@@ -299,6 +430,15 @@ services:
         if [ "$${auth_metrics_count}" -eq 0 ]; then
           cat <<'EOF' | kafka-console-producer --bootstrap-server kafka-auth:9092 --producer.config /tmp/client.properties --topic secure.metrics >/dev/null
         {"metric":"lag","group":"metrics_collector","value":12}
+        {"metric":"consumer_errors","group":"metrics_collector","value":1}
+        EOF
+        fi
+        auth_audit_count=$(kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --topic secure.audit 2>/dev/null | awk -F: '{sum += $$3} END {print sum+0}')
+        [ -n "$${auth_audit_count}" ] || auth_audit_count=0
+        if [ "$${auth_audit_count}" -eq 0 ]; then
+          cat <<'EOF' | kafka-console-producer --bootstrap-server kafka-auth:9092 --producer.config /tmp/client.properties --topic secure.audit >/dev/null
+        {"event":"sasl_login","user":"metrics","source":"prometheus"}
+        {"event":"topic_acl_update","actor":"broker","topic":"secure.orders"}
         EOF
         fi
         echo "[kafka-auth-seed] done"

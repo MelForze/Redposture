@@ -18,6 +18,7 @@ COMMAND_POSTGRES = "postgres"
 COMMAND_ETCD = "etcd"
 COMMAND_GRAFANA = "grafana"
 COMMAND_KAFKA = "kafka"
+COMMAND_ZOOKEEPER = "zookeeper"
 COMMAND_SELFCERT = "selfcert"
 COMMAND_EXPORTERS = "exporters"
 
@@ -392,8 +393,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
-            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Grafana/Kafka auditing. "
-            "Use one module command: exporters, grafana, kafka, postgres, redis, etcd. "
+            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Grafana/Kafka/ZooKeeper auditing. "
+            "Use one module command: exporters, grafana, kafka, postgres, redis, etcd, zookeeper. "
             "Listener mode is available inside trigger via --with-listen."
         ),
     )
@@ -653,9 +654,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show Redis key names only (SCAN).",
     )
     redis_parser.add_argument(
-        "--dump-keys",
+        "--dump",
+        dest="dump",
         action="store_true",
-        help="Dump all Redis keys with values.",
+        help="Dump Redis key values. With -key/--key dumps one key; without -key dumps all keys.",
     )
     redis_parser.add_argument(
         "-key",
@@ -697,9 +699,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show etcd key names only when auth is not required.",
     )
     etcd_parser.add_argument(
-        "--dump-keys",
+        "--dump",
+        dest="dump",
         action="store_true",
-        help="Dump all etcd keys with values when auth is not required.",
+        help="Dump etcd key values. With -key/--key dumps one key; without -key dumps all keys.",
     )
     etcd_parser.add_argument(
         "-key",
@@ -786,6 +789,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="Kafka audit output format for stdout/file.",
     )
 
+    zookeeper_parser = subparsers.add_parser(
+        COMMAND_ZOOKEEPER,
+        help="Audit ZooKeeper exposure, auth requirements, and znode visibility.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    _add_output_flags(zookeeper_parser)
+    _add_log_flag(zookeeper_parser)
+    _add_scan_host_flags(zookeeper_parser, include_profiles=False)
+    zookeeper_parser.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=2181,
+        metavar="port",
+        help="ZooKeeper TCP port to audit.",
+    )
+    zookeeper_parser.add_argument(
+        "--show-znodes",
+        action="store_true",
+        help="Show znode paths after successful access/auth.",
+    )
+    zookeeper_parser.add_argument(
+        "--dump",
+        dest="dump",
+        action="store_true",
+        help="Dump znode values. With --znode dumps only that znode; without --znode dumps all enumerated znodes.",
+    )
+    zookeeper_parser.add_argument(
+        "-znode",
+        "--znode",
+        dest="znode",
+        default=None,
+        metavar="path",
+        help="Show one znode detail by path (example: /brokers/ids).",
+    )
+    zookeeper_parser.add_argument(
+        "--max-znodes",
+        dest="max_znodes",
+        type=_positive_int,
+        default=2000,
+        metavar="count",
+        help="Maximum znodes to enumerate per target.",
+    )
+    _add_save_flag(zookeeper_parser, "Optional output file path. If omitted, results are printed to stdout.")
+    zookeeper_parser.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="ZooKeeper audit output format for stdout/file.",
+    )
+
     return parser
 
 
@@ -821,6 +877,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("direct 'trigger' mode removed; use 'exporters trigger ...'")
 
     if raw_argv[0].startswith("-"):
-        parser.error("module command is required: exporters, grafana, kafka, postgres, redis, etcd, or --selfcert")
+        parser.error("module command is required: exporters, grafana, kafka, postgres, redis, etcd, zookeeper, or --selfcert")
 
     return parser.parse_args(raw_argv)

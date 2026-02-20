@@ -786,6 +786,7 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
 
     stream_to_stdout = not bool(args.output)
+    dump_keys_flag = bool(getattr(args, "dump", False))
 
     def emit_line(line: str) -> None:
         if args.output_format != "txt":
@@ -805,8 +806,8 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append("defcreds")
         if args.show_keys:
             mode_parts.append("show-keys")
-        if args.dump_keys:
-            mode_parts.append("dump-keys")
+        if dump_keys_flag:
+            mode_parts.append("dump")
         if args.key:
             mode_parts.append(f"key={args.key}")
         mode = "+".join(mode_parts)
@@ -820,8 +821,8 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append("defcreds")
         if args.show_keys:
             mode_parts.append("show-keys")
-        if args.dump_keys:
-            mode_parts.append("dump-keys")
+        if dump_keys_flag:
+            mode_parts.append("dump")
         if args.key:
             mode_parts.append(f"key={args.key}")
         mode = "+".join(mode_parts)
@@ -842,7 +843,7 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             password=args.password,
             defcreds=args.defcreds,
             show_keys=args.show_keys,
-            dump_keys=args.dump_keys,
+            dump_keys=dump_keys_flag,
             query_key=args.key,
             output_path=args.output,
             output_format=args.output_format,

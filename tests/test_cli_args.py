@@ -175,7 +175,7 @@ def test_redis_flags_are_parsed() -> None:
         "redis",
         "--defcreds",
         "--show-keys",
-        "--dump-keys",
+        "--dump",
         "-key",
         "session:admin",
         "-f",
@@ -193,7 +193,7 @@ def test_redis_flags_are_parsed() -> None:
     assert args.password == "redis"
     assert args.defcreds is True
     assert args.show_keys is True
-    assert args.dump_keys is True
+    assert args.dump is True
     assert args.key == "session:admin"
     assert args.output_format == "json"
     assert args.output == "redis_audit.jsonl"
@@ -214,9 +214,15 @@ def test_redis_key_flag_is_parsed() -> None:
 
 
 def test_redis_dump_keys_flag_is_parsed() -> None:
-    args = parse_args(["redis", "-t", "10.0.0.7", "--dump-keys"])
+    args = parse_args(["redis", "-t", "10.0.0.7", "--dump"])
     assert args.command == "redis"
-    assert args.dump_keys is True
+    assert args.dump is True
+
+
+def test_redis_dump_keys_legacy_alias_is_parsed() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["redis", "-t", "10.0.0.7", "--dump-keys"])
+    assert exc.value.code == 2
 
 
 def test_redis_defcreds_flag_is_parsed() -> None:
@@ -240,7 +246,7 @@ def test_etcd_flags_are_parsed() -> None:
             "--port",
             "22379",
             "--show-keys",
-            "--dump-keys",
+            "--dump",
             "-key",
             "/redposture/env",
             "-f",
@@ -256,23 +262,29 @@ def test_etcd_flags_are_parsed() -> None:
     assert args.retries == 1
     assert args.port == 22379
     assert args.show_keys is True
-    assert args.dump_keys is True
+    assert args.dump is True
     assert args.key == "/redposture/env"
     assert args.output_format == "json"
     assert args.output == "etcd_audit.jsonl"
 
 
 def test_etcd_dump_keys_flag_is_parsed() -> None:
-    args = parse_args(["etcd", "-t", "10.0.0.9", "--dump-keys"])
+    args = parse_args(["etcd", "-t", "10.0.0.9", "--dump"])
     assert args.command == "etcd"
-    assert args.dump_keys is True
+    assert args.dump is True
+
+
+def test_etcd_dump_keys_legacy_alias_is_parsed() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["etcd", "-t", "10.0.0.9", "--dump-keys"])
+    assert exc.value.code == 2
 
 
 def test_etcd_show_keys_flag_is_parsed() -> None:
     args = parse_args(["etcd", "-t", "10.0.0.9", "--show-keys"])
     assert args.command == "etcd"
     assert args.show_keys is True
-    assert args.dump_keys is False
+    assert args.dump is False
 
 
 def test_kafka_flags_are_parsed() -> None:
@@ -324,6 +336,58 @@ def test_kafka_flags_are_parsed() -> None:
 def test_kafka_rejects_profiles_file_flag() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args(["kafka", "-t", "10.0.0.9", "--profiles-file", "profiles.json"])
+    assert exc.value.code == 2
+
+
+def test_zookeeper_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "zookeeper",
+            "-t",
+            "10.0.0.31,10.0.0.32",
+            "--timeout",
+            "0.9",
+            "-w",
+            "6",
+            "-r",
+            "2",
+            "--port",
+            "22181",
+            "--show-znodes",
+            "--dump",
+            "-znode",
+            "/brokers/ids/1",
+            "--max-znodes",
+            "500",
+            "-f",
+            "json",
+            "-o",
+            "zookeeper_audit.jsonl",
+        ]
+    )
+    assert args.command == "zookeeper"
+    assert args.targets == "10.0.0.31,10.0.0.32"
+    assert args.timeout == 0.9
+    assert args.workers == 6
+    assert args.retries == 2
+    assert args.port == 22181
+    assert args.show_znodes is True
+    assert args.dump is True
+    assert args.znode == "/brokers/ids/1"
+    assert args.max_znodes == 500
+    assert args.output_format == "json"
+    assert args.output == "zookeeper_audit.jsonl"
+
+
+def test_zookeeper_rejects_profiles_file_flag() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["zookeeper", "-t", "10.0.0.9", "--profiles-file", "profiles.json"])
+    assert exc.value.code == 2
+
+
+def test_zookeeper_dump_legacy_alias_is_parsed() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["zookeeper", "-t", "10.0.0.9", "--dump-znodes"])
     assert exc.value.code == 2
 
 

@@ -860,7 +860,7 @@ def run_etcd_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     stream_to_stdout = not bool(args.output)
     query_key = _normalize_etcd_key(getattr(args, "key", None))
     show_keys = bool(args.show_keys)
-    dump_keys = bool(getattr(args, "dump_keys", False))
+    dump_keys = bool(getattr(args, "dump", False))
 
     def emit_line(line: str) -> None:
         if args.output_format != "txt":
