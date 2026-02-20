@@ -1,8 +1,9 @@
-"""Honeypot listener runtime."""
+"""Listener runtime for RedPosture service emulation mode."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import time
 
@@ -21,6 +22,23 @@ from .servers import (
     start_server,
 )
 
+_ADDRESS_IN_USE_ERRNOS = {48, 98, 10048}
+_AUTO_CERT_KEY_PAIRS: tuple[tuple[str, str], ...] = (
+    ("cert.pem", "key.pem"),
+    ("server.crt", "server.key"),
+    ("tls.crt", "tls.key"),
+    ("fullchain.pem", "privkey.pem"),
+)
+
+
+def _autodetect_cert_key_files(search_dir: str) -> tuple[str | None, str | None]:
+    for cert_name, key_name in _AUTO_CERT_KEY_PAIRS:
+        cert_path = os.path.join(search_dir, cert_name)
+        key_path = os.path.join(search_dir, key_name)
+        if os.path.isfile(cert_path) and os.path.isfile(key_path):
+            return cert_path, key_path
+    return None, None
+
 
 def parse_services(raw: str) -> set[str]:
     selected = {part.strip().lower() for part in raw.split(",") if part.strip()}
@@ -30,6 +48,13 @@ def parse_services(raw: str) -> set[str]:
     if not selected:
         raise ValueError("at least one service must be selected")
     return selected
+
+
+def _build_bind_error(service: str, bind: str, port: int, exc: OSError) -> str:
+    detail = str(exc)
+    if getattr(exc, "errno", None) in _ADDRESS_IN_USE_ERRNOS or "address already in use" in detail.lower():
+        return f"{service} listener {bind}:{port} is already in use"
+    return f"{service} listener {bind}:{port} failed to start: {detail}"
 
 
 def _start_servers(
@@ -46,36 +71,65 @@ def _start_servers(
     key_path: str | None = None
 
     if need_tls:
-        if not (args.cert_file and args.key_file):
+        selected_cert = args.cert_file
+        selected_key = args.key_file
+        has_custom_cert = bool(selected_cert and selected_key)
+        auto_detected = False
+        if not has_custom_cert:
+            detected_cert, detected_key = _autodetect_cert_key_files(os.getcwd())
+            if detected_cert and detected_key:
+                selected_cert = detected_cert
+                selected_key = detected_key
+                has_custom_cert = True
+                auto_detected = True
+        if not has_custom_cert:
             console.warn("TLS enabled without custom cert/key; using bundled self-signed certificate")
-        cert_path, key_path, temp_cert_dir = prepare_cert_files(args.cert_file, args.key_file)
+        elif auto_detected:
+            console.info(f"TLS enabled; auto-detected cert/key: {selected_cert} + {selected_key}")
+        cert_path, key_path, temp_cert_dir = prepare_cert_files(
+            selected_cert,
+            selected_key,
+            generate_local_selfcert=False,
+        )
 
     postgres_ssl_context = build_ssl_context(cert_path, key_path) if ("postgres" in services and args.postgres_tls) else None
     proxmox_ssl_context = build_ssl_context(cert_path, key_path) if ("proxmox" in services and args.proxmox_tls) else None
 
     if "postgres" in services:
-        pg_server = make_postgres_server(
-            args.bind,
-            args.postgres_port,
-            logger,
-            postgres_tls=args.postgres_tls,
-            ssl_context=postgres_ssl_context,
-        )
-        running.append(start_server("postgres", args.bind, args.postgres_port, pg_server, tls=args.postgres_tls))
+        try:
+            pg_server = make_postgres_server(
+                args.bind,
+                args.postgres_port,
+                logger,
+                postgres_tls=args.postgres_tls,
+                ssl_context=postgres_ssl_context,
+            )
+            running.append(start_server("postgres", args.bind, args.postgres_port, pg_server, tls=args.postgres_tls))
+        except OSError as exc:
+            raise OSError(_build_bind_error("postgres", args.bind, args.postgres_port, exc)) from exc
 
     if "redis" in services:
-        redis_server = make_redis_server(args.bind, args.redis_port, logger)
-        running.append(start_server("redis", args.bind, args.redis_port, redis_server, tls=False))
+        try:
+            redis_server = make_redis_server(args.bind, args.redis_port, logger)
+            running.append(start_server("redis", args.bind, args.redis_port, redis_server, tls=False))
+        except OSError as exc:
+            raise OSError(_build_bind_error("redis", args.bind, args.redis_port, exc)) from exc
 
     if "proxmox" in services:
-        proxmox_handler = make_proxmox_handler(logger)
-        proxmox_server = make_http_server(args.bind, args.proxmox_port, proxmox_handler, ssl_context=proxmox_ssl_context)
-        running.append(start_server("proxmox", args.bind, args.proxmox_port, proxmox_server, tls=args.proxmox_tls))
+        try:
+            proxmox_handler = make_proxmox_handler(logger)
+            proxmox_server = make_http_server(args.bind, args.proxmox_port, proxmox_handler, ssl_context=proxmox_ssl_context)
+            running.append(start_server("proxmox", args.bind, args.proxmox_port, proxmox_server, tls=args.proxmox_tls))
+        except OSError as exc:
+            raise OSError(_build_bind_error("proxmox", args.bind, args.proxmox_port, exc)) from exc
 
     if "blackbox" in services:
-        blackbox_handler = make_blackbox_handler(logger)
-        blackbox_server = make_http_server(args.bind, args.blackbox_port, blackbox_handler, ssl_context=None)
-        running.append(start_server("blackbox", args.bind, args.blackbox_port, blackbox_server, tls=False))
+        try:
+            blackbox_handler = make_blackbox_handler(logger)
+            blackbox_server = make_http_server(args.bind, args.blackbox_port, blackbox_handler, ssl_context=None)
+            running.append(start_server("blackbox", args.bind, args.blackbox_port, blackbox_server, tls=False))
+        except OSError as exc:
+            raise OSError(_build_bind_error("blackbox", args.bind, args.blackbox_port, exc)) from exc
 
     console.success("listeners started")
     for item in running:

@@ -7,12 +7,15 @@ from typing import TextIO
 
 
 _COLORS = {
-    "blue": "34",
-    "green": "32",
-    "yellow": "33",
-    "red": "31",
-    "magenta": "35",
-    "cyan": "36",
+    "blue": "1;94",
+    "green": "1;92",
+    "bright_green": "1;92",
+    "orange": "1;38;5;208",
+    "yellow": "1;93",
+    "red": "1;91",
+    "magenta": "1;95",
+    "cyan": "1;96",
+    "white": "1;97",
 }
 
 
