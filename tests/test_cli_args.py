@@ -296,6 +296,9 @@ def test_kafka_flags_are_parsed() -> None:
             "--show-topics",
             "--topic",
             "orders",
+            "--read-topic",
+            "--max-messages",
+            "5000",
             "-f",
             "json",
             "-o",
@@ -312,6 +315,8 @@ def test_kafka_flags_are_parsed() -> None:
     assert args.password == "secret"
     assert args.show_topics is True
     assert args.topic == "orders"
+    assert args.read_topic is True
+    assert args.max_messages == 5000
     assert args.output_format == "json"
     assert args.output == "kafka_audit.jsonl"
 

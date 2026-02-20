@@ -151,6 +151,158 @@ services:
           -d '{}' >/dev/null || true
         echo "[etcd-auth-seed] done"
 
+  kafka-open:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: redposture-lab-kafka-open
+    environment:
+      CLUSTER_ID: "LxzRBSyNT_-nGe7wyn5kSw"
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka-open:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-open:9093"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports:
+      - "9092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  kafka-open-seed:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: redposture-lab-kafka-open-seed
+    depends_on:
+      kafka-open:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - bash
+      - -ceu
+      - |
+        kafka-topics --bootstrap-server kafka-open:9092 --create --if-not-exists --topic orders --partitions 3 --replication-factor 1
+        kafka-topics --bootstrap-server kafka-open:9092 --create --if-not-exists --topic payments.events --partitions 6 --replication-factor 1
+        kafka-topics --bootstrap-server kafka-open:9092 --create --if-not-exists --topic audit.logs --partitions 1 --replication-factor 1
+        open_orders_count=$(kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server kafka-open:9092 --topic orders 2>/dev/null | awk -F: '{sum += $$3} END {print sum+0}')
+        [ -n "$${open_orders_count}" ] || open_orders_count=0
+        if [ "$${open_orders_count}" -eq 0 ]; then
+          cat <<'EOF' | kafka-console-producer --bootstrap-server kafka-open:9092 --topic orders >/dev/null
+        {"order_id":"ord-1001","status":"created","amount":99.50}
+        {"order_id":"ord-1002","status":"paid","amount":149.00}
+        EOF
+        fi
+        open_audit_count=$(kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server kafka-open:9092 --topic audit.logs 2>/dev/null | awk -F: '{sum += $$3} END {print sum+0}')
+        [ -n "$${open_audit_count}" ] || open_audit_count=0
+        if [ "$${open_audit_count}" -eq 0 ]; then
+          cat <<'EOF' | kafka-console-producer --bootstrap-server kafka-open:9092 --topic audit.logs >/dev/null
+        {"event":"login","user":"admin","source_ip":"10.0.1.11"}
+        {"event":"token_created","service":"grafana","token_hint":"gfa_demo_token_123"}
+        EOF
+        fi
+        echo "[kafka-open-seed] done"
+
+  kafka-auth:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: redposture-lab-kafka-auth
+    entrypoint:
+      - /bin/bash
+      - -ceu
+      - |
+        cat >/tmp/kafka_server_jaas.conf <<'EOF'
+        KafkaServer {
+          org.apache.kafka.common.security.plain.PlainLoginModule required
+          username="broker"
+          password="brokerpass"
+          user_broker="brokerpass"
+          user_metrics="metricspass";
+        };
+        sasl_plaintext.KafkaServer {
+          org.apache.kafka.common.security.plain.PlainLoginModule required
+          username="broker"
+          password="brokerpass"
+          user_broker="brokerpass"
+          user_metrics="metricspass";
+        };
+        EOF
+        export KAFKA_OPTS="-Djava.security.auth.login.config=/tmp/kafka_server_jaas.conf"
+        exec /etc/confluent/docker/run
+    environment:
+      CLUSTER_ID: "apWLAYJORsehwZoyfyaUtQ"
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENERS: "SASL_PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+      KAFKA_ADVERTISED_LISTENERS: "SASL_PLAINTEXT://kafka-auth:9092"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "SASL_PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-auth:9093"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_SASL_ENABLED_MECHANISMS: "PLAIN"
+      KAFKA_SASL_MECHANISM_INTER_BROKER_PROTOCOL: "PLAIN"
+      KAFKA_LISTENER_NAME_SASL_PLAINTEXT_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required username="broker" password="brokerpass" user_broker="brokerpass" user_metrics="metricspass";'
+    ports:
+      - "29092:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec '</dev/tcp/127.0.0.1/9092'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  kafka-auth-seed:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: redposture-lab-kafka-auth-seed
+    depends_on:
+      kafka-auth:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - bash
+      - -ceu
+      - |
+        cat >/tmp/client.properties <<'EOF'
+        security.protocol=SASL_PLAINTEXT
+        sasl.mechanism=PLAIN
+        sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="metrics" password="metricspass";
+        EOF
+        for i in $(seq 1 30); do
+          kafka-topics --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --list >/dev/null 2>&1 && break
+          sleep 1
+        done
+        kafka-topics --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --create --if-not-exists --topic secure.orders --partitions 2 --replication-factor 1
+        kafka-topics --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --create --if-not-exists --topic secure.metrics --partitions 1 --replication-factor 1
+        auth_orders_count=$(kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --topic secure.orders 2>/dev/null | awk -F: '{sum += $$3} END {print sum+0}')
+        [ -n "$${auth_orders_count}" ] || auth_orders_count=0
+        if [ "$${auth_orders_count}" -eq 0 ]; then
+          cat <<'EOF' | kafka-console-producer --bootstrap-server kafka-auth:9092 --producer.config /tmp/client.properties --topic secure.orders >/dev/null
+        {"order_id":"sec-2001","status":"queued","tenant":"internal"}
+        {"order_id":"sec-2002","status":"processed","tenant":"internal"}
+        EOF
+        fi
+        auth_metrics_count=$(kafka-run-class kafka.tools.GetOffsetShell --bootstrap-server kafka-auth:9092 --command-config /tmp/client.properties --topic secure.metrics 2>/dev/null | awk -F: '{sum += $$3} END {print sum+0}')
+        [ -n "$${auth_metrics_count}" ] || auth_metrics_count=0
+        if [ "$${auth_metrics_count}" -eq 0 ]; then
+          cat <<'EOF' | kafka-console-producer --bootstrap-server kafka-auth:9092 --producer.config /tmp/client.properties --topic secure.metrics >/dev/null
+        {"metric":"lag","group":"metrics_collector","value":12}
+        EOF
+        fi
+        echo "[kafka-auth-seed] done"
+
   blackbox-exporter:
     image: prom/blackbox-exporter:v0.27.0
     container_name: redposture-lab-blackbox-exporter

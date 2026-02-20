@@ -551,12 +551,12 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     if status == "valid_credentials":
         username = str(record.get("provided_username") or "default").strip() or "default"
-        return _with_optional_keys(record, f"{prefix} [+] {username}:<provided>")
+        return _with_optional_keys(record, f"{prefix} [+] {username}")
 
     if status == "auth_required":
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "default").strip() or "default"
-            base = f"{prefix} [-] {username}:<provided> invalid"
+            base = f"{prefix} [-] {username} invalid"
         elif record.get("default_credentials_attempted"):
             base = f"{prefix} [-] redis:redis invalid"
         else:
