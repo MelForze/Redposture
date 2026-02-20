@@ -9,6 +9,7 @@ RedPosture is a Python security toolkit for:
 - auditing Redis exposure and weak/default credentials (`redis`)
 - auditing Postgres exposure, default credentials, and risky privileges (`postgres`)
 - auditing etcd API exposure, auth requirements, and key count (`etcd`)
+- auditing Kafka broker auth exposure and topic visibility (`kafka`)
 - auditing Grafana auth exposure, default credentials, and datasource access (`grafana`)
 
 ## Installation
@@ -398,7 +399,39 @@ Use non-default etcd port and save output:
 redposture etcd -t ./ips.txt --port 22379 -f txt -o ./etcd_audit.txt
 ```
 
-### 8) Audit Grafana exposure
+### 8) Audit Kafka broker exposure
+
+Detect Kafka broker, check whether authentication is required, and show topics when access is available:
+
+```bash
+redposture kafka -t ./ips.txt
+```
+
+Check broker with credentials (SASL/PLAIN):
+
+```bash
+redposture kafka -t ./ips.txt -u metrics -p 'StrongPass!'
+```
+
+Show topic names:
+
+```bash
+redposture kafka -t ./ips.txt --show-topics
+```
+
+Query one topic:
+
+```bash
+redposture kafka -t ./ips.txt --topic orders
+```
+
+Use non-default Kafka port and save output:
+
+```bash
+redposture kafka -t ./ips.txt --port 19092 --show-topics -f txt -o ./kafka_audit.txt
+```
+
+### 9) Audit Grafana exposure
 
 Detect Grafana, check whether auth is required, and fetch datasource list when accessible:
 
@@ -462,10 +495,10 @@ redposture exporters scan -t ./ips.txt --profiles-file ./profiles.json
 
 - Runtime events are printed as readable colorized text.
 - Credential events are highlighted with `CRED` and include `user=` / `pass=`.
-- `scan`, `collect`, `redis`, `postgres`, `etcd`, and `grafana` support both `txt` and `json` output via `-f/--format`.
-- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, and `grafana` support `--save` (alias of `--output`) to write results to file.
+- `scan`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, and `grafana` support both `txt` and `json` output via `-f/--format`.
+- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, and `grafana` support `--save` (alias of `--output`) to write results to file.
 - all modules support `-log/--log <file>` to mirror console output into a log file.
-- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, and `grafana` support `--workers` and `--retries`.
+- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, and `grafana` support `--workers` and `--retries`.
 - `scan --ports/-p` probes custom port lists/ranges and maps hits to known exporters by marker signatures.
 - default `--timeout` is `1.0` second.
 - `redis` counts keys by default (`DBSIZE`); use `--show-keys` for key names only, `-key/--key` for one key+value, and `--dump-keys` for all key+value pairs.
@@ -481,6 +514,9 @@ redposture exporters scan -t ./ips.txt --profiles-file ./profiles.json
 - `postgres -x/--execute` tries command execution via `COPY FROM PROGRAM` and prints output lines.
 - `postgres --os-shell` opens interactive command mode via `COPY FROM PROGRAM` (single target, text output only).
 - `etcd` checks API support (`api:v2`, `api:v3`), auth requirement, and key count when no auth is required; use `--show-keys` for names and `--dump-keys` for `key:value`.
+- `kafka` checks broker detection, auth requirement, optional provided credentials (`-u/-p`, SASL/PLAIN), and topic visibility.
+- `kafka --show-topics` prints topic names after successful access/auth.
+- `kafka --topic <name>` prints one topic detail line with partition count or `<not found>`.
 - `grafana` checks service detection, auth requirement, optional default creds (`--defcreds`), and datasource exposure via `/api/datasources`.
 - `grafana --show-datasources` (alias `--show-datasource`) prints datasource detail lines.
 - `grafana --ssrf-target` + optional `--ssrf-port`/`--ssrf-path` runs temporary Prometheus egress-check (create -> request exact URL path -> cleanup).
@@ -513,6 +549,7 @@ redposture exporters scan --help
 redposture exporters collect --help
 redposture exporters trigger --help
 redposture grafana --help
+redposture kafka --help
 redposture postgres --help
 redposture redis --help
 redposture etcd --help
