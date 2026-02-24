@@ -271,7 +271,8 @@ def _callback_event_remote_host(event: dict[str, Any]) -> str:
 
 
 def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogger, console: Console) -> None:
-    from .stage_postgres import _audit_postgres_host, _caps_suffix as _postgres_caps_suffix
+    from .stage_postgres import _audit_postgres_host
+    from .stage_postgres import _caps_suffix as _postgres_caps_suffix
     from .stage_redis import _audit_redis_host
 
     raw_events = logger.get_trigger_callback_events()
