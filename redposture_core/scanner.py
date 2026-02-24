@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -79,6 +82,32 @@ def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
 
 
+def _unwrap_network_error(exc: BaseException) -> BaseException:
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, BaseException):
+            return reason
+    return exc
+
+
+def _should_retry_http_exception(exc: BaseException) -> bool:
+    root = _unwrap_network_error(exc)
+    if isinstance(root, (TimeoutError, socket.timeout)):
+        return True
+    if isinstance(root, socket.gaierror):
+        # Retry only temporary DNS resolution failures.
+        eai_again = getattr(socket, "EAI_AGAIN", None)
+        return eai_again is not None and getattr(root, "errno", None) == eai_again
+    if isinstance(root, OSError):
+        return getattr(root, "errno", None) in {
+            errno.ETIMEDOUT,
+            errno.EAGAIN,
+            errno.EWOULDBLOCK,
+            errno.EINTR,
+        }
+    return False
+
+
 def _safe_fs_part(value: str, fallback: str) -> str:
     clean = re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip())
     clean = clean.strip("._-")
@@ -130,8 +159,8 @@ def http_get_text(url: str, timeout: float, retries: int = 1) -> tuple[int, str]
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             return exc.code, body
-        except (urllib.error.URLError, OSError, TimeoutError):
-            if attempt >= attempts - 1:
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            if attempt >= attempts - 1 or not _should_retry_http_exception(exc):
                 raise
             time.sleep(_retry_delay(attempt))
     raise RuntimeError("unreachable")
@@ -169,7 +198,7 @@ def http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, An
             }
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
             elapsed_ms = int((time.monotonic() - started) * 1000)
-            if attempt < attempts - 1:
+            if attempt < attempts - 1 and _should_retry_http_exception(exc):
                 time.sleep(_retry_delay(attempt))
                 continue
             return {
@@ -825,7 +854,6 @@ def collect_exporter_debug_data(
     try:
         enabled_exporters = {str(item.get("name") or "") for item in exporters}
         host_rank = {host: idx for idx, host in enumerate(hosts)}
-        endpoint_rank = {endpoint: idx for idx, endpoint in enumerate(endpoints)}
         if found_by_host is None:
             collect_targets: list[tuple[str, str, int]] = [
                 (host, str(exporter["name"]), int(exporter["port"])) for host in hosts for exporter in exporters
@@ -853,39 +881,45 @@ def collect_exporter_debug_data(
             unique_targets.append(item)
         collect_targets = unique_targets
 
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            future_map = {
-                executor.submit(_collect_task, host, exporter_name, port, endpoint, timeout, retries): (
-                    host,
-                    exporter_name,
-                    port,
-                    endpoint,
-                )
-                for host, exporter_name, port in collect_targets
-                for endpoint in endpoints
-            }
+        collect_targets.sort(
+            key=lambda item: (
+                host_rank.get(str(item[0]), 10**9),
+                str(item[0]),
+                int(item[2]),
+                str(item[1]),
+            )
+        )
 
-            records: list[tuple[dict[str, Any], bool]] = []
-            for future in as_completed(future_map):
+        jobs = [
+            (host, exporter_name, port, endpoint)
+            for host, exporter_name, port in collect_targets
+            for endpoint in endpoints
+        ]
+        max_workers = max(1, workers)
+        max_inflight = max(max_workers * 4, max_workers)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            job_iter = iter(jobs)
+            pending: deque[Any] = deque()
+
+            def _submit_next() -> bool:
+                try:
+                    host, exporter_name, port, endpoint = next(job_iter)
+                except StopIteration:
+                    return False
+                pending.append(executor.submit(_collect_task, host, exporter_name, port, endpoint, timeout, retries))
+                return True
+
+            while len(pending) < max_inflight and _submit_next():
+                pass
+
+            while pending:
+                future = pending.popleft()
                 record, ok = future.result()
+                response_file, response_size = (None, 0)
                 total += 1
                 if ok:
                     success += 1
-                records.append((record, ok))
-
-            records.sort(
-                key=lambda item: (
-                    host_rank.get(str(item[0].get("host") or ""), 10**9),
-                    str(item[0].get("host") or ""),
-                    int(item[0].get("port") or 0),
-                    str(item[0].get("exporter") or ""),
-                    endpoint_rank.get(str(item[0].get("endpoint") or ""), 10**9),
-                    str(item[0].get("endpoint") or ""),
-                )
-            )
-
-            for record, ok in records:
-                response_file, response_size = (None, 0)
                 if save_responses_dir:
                     response_file, response_size = _save_collect_body(save_responses_dir, record)
                     if response_file is not None:
@@ -933,6 +967,7 @@ def collect_exporter_debug_data(
                         error=record["error"],
                         output=output_path,
                     )
+                _submit_next()
 
         if emit_summary:
             summary = {

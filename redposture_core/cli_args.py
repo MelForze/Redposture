@@ -404,6 +404,24 @@ def _configure_trigger_parser(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Start listeners first, then run trigger stage, then keep listeners running.",
     )
+    trigger_options.add_argument(
+        "--exporters",
+        dest="trigger_exporters_filter",
+        default=None,
+        metavar="names",
+        help=(
+            "Comma-separated exporter filter for trigger "
+            "(aliases: redis,postgres,blackbox,proxmox or full names like redis_exporter)."
+        ),
+    )
+    trigger_options.add_argument(
+        "--check-credentials",
+        action="store_true",
+        help=(
+            "With --with-listen, validate captured Redis/Postgres credentials against source exporter IPs "
+            "(Redis:6379, Postgres:5432)."
+        ),
+    )
     _add_listener_flags(listen_options)
 
 
