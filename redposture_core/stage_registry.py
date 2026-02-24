@@ -13,13 +13,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable
+from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
-
 
 _REGISTRY_MANIFEST_ACCEPT = ",".join(
     (
@@ -138,7 +138,7 @@ def _auth_headers(username: str | None, password: str | None, token: str | None)
     if token:
         return {"Authorization": f"Bearer {token}"}
     if username and password:
-        encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        encoded = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
         return {"Authorization": f"Basic {encoded}"}
     return {}
 
@@ -526,7 +526,9 @@ def _inspect_image(
     *,
     headers: dict[str, str],
 ) -> dict[str, Any]:
-    manifest_payload, manifest_error = _fetch_manifest_payload(host, port, repository, reference, timeout, headers=headers)
+    manifest_payload, manifest_error = _fetch_manifest_payload(
+        host, port, repository, reference, timeout, headers=headers
+    )
     if manifest_error:
         return {
             "image": _display_image(repository, reference),
@@ -605,7 +607,9 @@ def _should_download_large(total_size: int, image_name: str, console: Console) -
     limit_text = _human_bytes(_REGISTRY_DOWNLOAD_LIMIT_BYTES)
     prompt = f"image {image_name} size={size_text} exceeds {limit_text}. Continue download? [y/N]: "
     if not sys.stdin.isatty():
-        console.warn(f"download skipped for {image_name}: size={size_text} exceeds {limit_text} (non-interactive shell)")
+        console.warn(
+            f"download skipped for {image_name}: size={size_text} exceeds {limit_text} (non-interactive shell)"
+        )
         return False
 
     try:
@@ -716,7 +720,9 @@ def _fetch_harbor_info(
     *,
     headers: dict[str, str],
 ) -> tuple[dict[str, Any] | None, str | None]:
-    status, body, _resp_headers, error = _http_request(host, port, "GET", "/api/v2.0/systeminfo", timeout, headers=headers)
+    status, body, _resp_headers, error = _http_request(
+        host, port, "GET", "/api/v2.0/systeminfo", timeout, headers=headers
+    )
     if error:
         return None, error
     if status in (401, 403):
@@ -884,11 +890,7 @@ def _fetch_gitlab_info(
     scope = str(params.get("scope") or "").strip()
 
     marker_raw = " ".join([scheme, realm, service, scope]).lower()
-    header_is_gitlab = (
-        service == "container_registry"
-        or "/jwt/auth" in realm.lower()
-        or "gitlab" in marker_raw
-    )
+    header_is_gitlab = service == "container_registry" or "/jwt/auth" in realm.lower() or "gitlab" in marker_raw
     if not header_is_gitlab:
         # Fallback for flows where /v2/ returns 200 and omits WWW-Authenticate.
         probe_path = "/jwt/auth?service=container_registry&scope=registry:catalog:*"
@@ -1011,7 +1013,9 @@ def _fetch_nexus_info(
     *,
     headers: dict[str, str],
 ) -> tuple[dict[str, Any] | None, str | None]:
-    status, body, _resp_headers, error = _http_request(host, port, "GET", "/service/rest/v1/status", timeout, headers=headers)
+    status, body, _resp_headers, error = _http_request(
+        host, port, "GET", "/service/rest/v1/status", timeout, headers=headers
+    )
     if error:
         return None, error
     if status in (401, 403):
@@ -1258,7 +1262,9 @@ def _audit_registry_host(
             docker_header = str(resp_headers.get("docker-distribution-api-version") or "").lower()
             body_text = body.decode("utf-8", errors="replace").strip().lower()
             unauthorized_body = "unauthorized" in body_text or "authentication required" in body_text
-            is_registry = status in {200, 401} or "registry/2.0" in docker_header or (status == 403 and "v2/" in body_text)
+            is_registry = (
+                status in {200, 401} or "registry/2.0" in docker_header or (status == 403 and "v2/" in body_text)
+            )
             www_authenticate = str(resp_headers.get("www-authenticate") or "")
 
             gitlab_info, gitlab_error = _fetch_gitlab_info(
@@ -1438,7 +1444,9 @@ def _audit_registry_host(
                             latest_tag = _pick_latest_tag(repo_tags_map.get(repo_name) or [])
                             if not latest_tag:
                                 continue
-                            inspected_latest = _inspect_image(host, port, repo_name, latest_tag, timeout, headers=auth_headers)
+                            inspected_latest = _inspect_image(
+                                host, port, repo_name, latest_tag, timeout, headers=auth_headers
+                            )
                             created_raw = str(inspected_latest.get("created") or "").strip()
                             if created_raw:
                                 last_pushed_by_repo[repo_name] = created_raw
@@ -1452,7 +1460,9 @@ def _audit_registry_host(
                     if repository_raw in repo_tags_map:
                         selected_repository_tags = sorted(set(repo_tags_map.get(repository_raw) or []))
                     else:
-                        tags_list, tag_error = _fetch_repository_tags(host, port, repository_raw, timeout, headers=auth_headers)
+                        tags_list, tag_error = _fetch_repository_tags(
+                            host, port, repository_raw, timeout, headers=auth_headers
+                        )
                         if tags_list is None:
                             if images_error is None and tag_error:
                                 images_error = f"{repository_raw}: {tag_error}"
@@ -1473,7 +1483,9 @@ def _audit_registry_host(
 
             # Deep Harbor parsing is enabled only with --harbor.
             if harbor and is_harbor is True:
-                harbor_projects, harbor_error_projects = _fetch_harbor_projects(host, port, timeout, headers=auth_headers)
+                harbor_projects, harbor_error_projects = _fetch_harbor_projects(
+                    host, port, timeout, headers=auth_headers
+                )
                 if harbor_error_projects and harbor_error is None:
                     harbor_error = harbor_error_projects
                 harbor_projects = harbor_projects or []
@@ -1611,9 +1623,9 @@ def _audit_registry_host(
                 "provided_username": username,
                 "token_provided": token_provided,
                 "debug": debug,
-                        "show_images": show_images,
-                        "docker": docker,
-                        "show_tags": show_tags,
+                "show_images": show_images,
+                "docker": docker,
+                "show_tags": show_tags,
                 "repository": repository_raw,
                 "tag": tag_raw,
                 "metadata": metadata,
@@ -1649,7 +1661,9 @@ def _audit_registry_host(
                 "download_result": download_result,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "probe_status": status,
-                "error": None if state in {"open_no_auth", "valid_credentials"} else ("authentication required" if state == "auth_required" else None),
+                "error": None
+                if state in {"open_no_auth", "valid_credentials"}
+                else ("authentication required" if state == "auth_required" else None),
             }
         except (OSError, TimeoutError, ValueError) as exc:
             last_error = _friendly_error_from_exception(exc)
@@ -1728,11 +1742,7 @@ def _with_optional_images(record: dict[str, Any], message: str) -> str:
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required_value = record.get("auth_required")
     auth_required_text = (
-        "True"
-        if auth_required_value is True
-        else "False"
-        if auth_required_value is False
-        else "unknown"
+        "True" if auth_required_value is True else "False" if auth_required_value is False else "unknown"
     )
 
     if output_format == "json":
@@ -1831,32 +1841,52 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     harbor_repositories_raw = record.get("harbor_repositories")
     harbor_artifacts_raw = record.get("harbor_artifacts")
     harbor_projects = [str(item) for item in harbor_projects_raw] if isinstance(harbor_projects_raw, list) else []
-    harbor_repositories = [str(item) for item in harbor_repositories_raw] if isinstance(harbor_repositories_raw, list) else []
+    harbor_repositories = (
+        [str(item) for item in harbor_repositories_raw] if isinstance(harbor_repositories_raw, list) else []
+    )
     harbor_artifacts = [str(item) for item in harbor_artifacts_raw] if isinstance(harbor_artifacts_raw, list) else []
     harbor_error = str(record.get("harbor_error") or "").strip()
     is_harbor = record.get("is_harbor")
     gitlab_info = record.get("gitlab_info")
     gitlab_error = str(record.get("gitlab_error") or "").strip()
     gitlab_repositories_raw = record.get("gitlab_repositories")
-    gitlab_repositories = [str(item) for item in gitlab_repositories_raw] if isinstance(gitlab_repositories_raw, list) else []
+    gitlab_repositories = (
+        [str(item) for item in gitlab_repositories_raw] if isinstance(gitlab_repositories_raw, list) else []
+    )
     gitlab_repository_details_raw = record.get("gitlab_repository_details")
-    gitlab_repository_details = [item for item in gitlab_repository_details_raw if isinstance(item, dict)] if isinstance(gitlab_repository_details_raw, list) else []
+    gitlab_repository_details = (
+        [item for item in gitlab_repository_details_raw if isinstance(item, dict)]
+        if isinstance(gitlab_repository_details_raw, list)
+        else []
+    )
     selected_repository_tags_raw = record.get("selected_repository_tags")
-    selected_repository_tags = [str(item) for item in selected_repository_tags_raw] if isinstance(selected_repository_tags_raw, list) else []
+    selected_repository_tags = (
+        [str(item) for item in selected_repository_tags_raw] if isinstance(selected_repository_tags_raw, list) else []
+    )
     metadata_result = record.get("metadata_result") if isinstance(record.get("metadata_result"), dict) else None
     is_gitlab = record.get("is_gitlab")
     nexus_info = record.get("nexus_info")
     nexus_repositories_raw = record.get("nexus_repositories")
-    nexus_repositories = [str(item) for item in nexus_repositories_raw] if isinstance(nexus_repositories_raw, list) else []
+    nexus_repositories = (
+        [str(item) for item in nexus_repositories_raw] if isinstance(nexus_repositories_raw, list) else []
+    )
     nexus_repository_details_raw = record.get("nexus_repository_details")
-    nexus_repository_details = [item for item in nexus_repository_details_raw if isinstance(item, dict)] if isinstance(nexus_repository_details_raw, list) else []
+    nexus_repository_details = (
+        [item for item in nexus_repository_details_raw if isinstance(item, dict)]
+        if isinstance(nexus_repository_details_raw, list)
+        else []
+    )
     nexus_assets_raw = record.get("nexus_assets")
-    nexus_assets = [item for item in nexus_assets_raw if isinstance(item, dict)] if isinstance(nexus_assets_raw, list) else []
+    nexus_assets = (
+        [item for item in nexus_assets_raw if isinstance(item, dict)] if isinstance(nexus_assets_raw, list) else []
+    )
     nexus_error = str(record.get("nexus_error") or "").strip()
     is_nexus = record.get("is_nexus")
 
     inspections_raw = record.get("inspections")
-    inspections = [item for item in inspections_raw if isinstance(item, dict)] if isinstance(inspections_raw, list) else []
+    inspections = (
+        [item for item in inspections_raw if isinstance(item, dict)] if isinstance(inspections_raw, list) else []
+    )
     inspection_error = str(record.get("inspection_error") or "").strip()
 
     download_result = record.get("download_result") if isinstance(record.get("download_result"), dict) else None
@@ -2104,10 +2134,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         nexus_version = ""
         if isinstance(nexus_info, dict):
             nexus_version = str(
-                nexus_info.get("version")
-                or nexus_info.get("release")
-                or nexus_info.get("editionLong")
-                or ""
+                nexus_info.get("version") or nexus_info.get("release") or nexus_info.get("editionLong") or ""
             ).strip()
         if nexus_version:
             lines.append(f"{prefix} [*] Nexus Repository detected version={nexus_version}")
@@ -2120,9 +2147,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     repo_name = str(item.get("name") or "").strip() or "-"
                     repo_type = str(item.get("type") or "").strip() or "-"
                     online_raw = item.get("online")
-                    online_text = (
-                        "True" if online_raw is True else "False" if online_raw is False else "unknown"
-                    )
+                    online_text = "True" if online_raw is True else "False" if online_raw is False else "unknown"
                     components_raw = item.get("components")
                     components_text = str(components_raw) if isinstance(components_raw, int) else "-"
                     lines.append(
@@ -2511,7 +2536,15 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
     if not ports:
         ports = [int(args.port)]
-    if not args.docker and not args.images and not args.harbor and not args.gitlab and not args.nexus and not args.inspect and not args.download:
+    if (
+        not args.docker
+        and not args.images
+        and not args.harbor
+        and not args.gitlab
+        and not args.nexus
+        and not args.inspect
+        and not args.download
+    ):
         # Detection-only mode is valid; keep behavior explicit.
         pass
 
@@ -2679,7 +2712,9 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if stream_to_stdout and total > 0 and open_no_auth == 0 and valid == 0 and auth_required == 0 and failed == total:
         if args.output_format == "txt":
-            console.warn("all registry targets are unreachable; check host/port, network reachability, and service status")
+            console.warn(
+                "all registry targets are unreachable; check host/port, network reachability, and service status"
+            )
 
     if args.debug:
         console.info(

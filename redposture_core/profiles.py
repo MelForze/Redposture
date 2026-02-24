@@ -131,7 +131,7 @@ def load_profiles(path: str | None) -> dict[str, Any]:
     if not path:
         return profiles
 
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         raw = json.load(fh)
 
     if not isinstance(raw, dict):

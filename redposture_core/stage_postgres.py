@@ -13,14 +13,14 @@ import secrets
 import socket
 import sys
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
-
 
 _PG_PROTOCOL_VERSION = 196608
 _PG_MAX_MESSAGE_SIZE = 16 * 1024 * 1024
@@ -300,7 +300,7 @@ def _scram_client_final(state: _ScramState, password: str, server_first: str) ->
     auth_message = f"{state.client_first_bare},{server_first},{client_final_without_proof}"
 
     client_signature = hmac.new(stored_key, auth_message.encode("utf-8", errors="replace"), hashlib.sha256).digest()
-    proof_bytes = bytes(left ^ right for left, right in zip(client_key, client_signature))
+    proof_bytes = bytes(left ^ right for left, right in zip(client_key, client_signature, strict=True))
     proof = base64.b64encode(proof_bytes).decode("ascii")
 
     server_key = hmac.new(salted_password, b"Server Key", hashlib.sha256).digest()
@@ -505,7 +505,9 @@ def _pg_startup_and_auth(sock: socket.socket, username: str, password: str | Non
         raise _PgAuditError(f"unexpected handshake message: {message_type!r}", detected=detected)
 
 
-def _collect_postgres_privileges(sock: socket.socket) -> tuple[bool | None, bool | None, bool | None, int | None, str | None]:
+def _collect_postgres_privileges(
+    sock: socket.socket,
+) -> tuple[bool | None, bool | None, bool | None, int | None, str | None]:
     superuser, superuser_error = _pg_query_scalar_bool(
         sock,
         "SELECT COALESCE((SELECT rolsuper FROM pg_roles WHERE rolname = current_user), false)",
@@ -586,13 +588,7 @@ def _pg_query_readable_tables(sock: socket.socket) -> tuple[list[str] | None, st
 def _pg_query_databases(sock: socket.socket) -> tuple[list[str] | None, str | None]:
     rows, error = _pg_query_rows(
         sock,
-        (
-            "SELECT datname "
-            "FROM pg_database "
-            "WHERE datallowconn = true "
-            "AND datistemplate = false "
-            "ORDER BY datname"
-        ),
+        ("SELECT datname FROM pg_database WHERE datallowconn = true AND datistemplate = false ORDER BY datname"),
     )
     if error:
         return None, error
@@ -655,7 +651,9 @@ def _pg_text(value: Any) -> str:
     return str(value if value is not None else "").replace("\n", "\\n")
 
 
-def _pg_try_execute_command(sock: socket.socket, command: str, *, max_lines: int = 100) -> tuple[list[str] | None, str | None]:
+def _pg_try_execute_command(
+    sock: socket.socket, command: str, *, max_lines: int = 100
+) -> tuple[list[str] | None, str | None]:
     temp_name = f"redposture_exec_{secrets.token_hex(6)}"
     temp_ident = f'"{temp_name}"'
 
@@ -737,7 +735,9 @@ def _pg_query_table_rows(
         select_list = ", ".join(_pg_quote_ident(column) for column in columns)
     else:
         select_list = "*"
-    rows, error = _pg_query_rows(sock, f"SELECT row_to_json(t)::text FROM (SELECT {select_list} FROM {sql_ident} LIMIT {limit}) AS t")
+    rows, error = _pg_query_rows(
+        sock, f"SELECT row_to_json(t)::text FROM (SELECT {select_list} FROM {sql_ident} LIMIT {limit}) AS t"
+    )
     if error:
         return display_name, None, error
 
@@ -836,7 +836,9 @@ def _audit_postgres_host(
                     database=database,
                 )
 
-                superuser, can_execute_commands, can_read_tables, readable_tables, query_error = _collect_postgres_privileges(sock)
+                superuser, can_execute_commands, can_read_tables, readable_tables, query_error = (
+                    _collect_postgres_privileges(sock)
+                )
                 database_names: list[str] | None = None
                 if show_databases:
                     database_names, databases_error = _pg_query_databases(sock)
@@ -1050,12 +1052,7 @@ def _caps_suffix(record: dict[str, Any]) -> str:
     read_tables_text = "True" if can_read_tables is True else "False" if can_read_tables is False else "unknown"
     tables_text = str(readable_tables) if isinstance(readable_tables, int) else "-"
 
-    return (
-        f"(superuser:{superuser_text})"
-        f"(execute:{execute_text})"
-        f"(read:{read_tables_text})"
-        f"(tables:{tables_text})"
-    )
+    return f"(superuser:{superuser_text})(execute:{execute_text})(read:{read_tables_text})(tables:{tables_text})"
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
@@ -1199,7 +1196,9 @@ def _format_table_dump_detail_records(record: dict[str, Any], output_format: str
     if not isinstance(table_dumps, list) or not table_dumps:
         return []
     table_columns = record.get("table_columns")
-    selected_columns = [str(item) for item in table_columns] if isinstance(table_columns, list) and table_columns else []
+    selected_columns = (
+        [str(item) for item in table_columns] if isinstance(table_columns, list) and table_columns else []
+    )
     columns_label = ",".join(selected_columns)
 
     if output_format == "json":

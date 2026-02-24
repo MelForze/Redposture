@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 from typing import TextIO
 
-
 _COLORS = {
     "blue": "1;94",
     "green": "1;92",

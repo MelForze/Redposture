@@ -29,8 +29,14 @@ dist/
 
 # Local outputs
 *.jsonl
+*.log
+result
 collect_results*.txt
 scan_results*.txt
+trigger_events*.txt
+*_audit.txt
+collect_raw/
+registry_downloads/
 cert.pem
 key.pem
 server.crt

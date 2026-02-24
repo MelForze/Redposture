@@ -92,8 +92,12 @@ def _start_servers(
             generate_local_selfcert=False,
         )
 
-    postgres_ssl_context = build_ssl_context(cert_path, key_path) if ("postgres" in services and args.postgres_tls) else None
-    proxmox_ssl_context = build_ssl_context(cert_path, key_path) if ("proxmox" in services and args.proxmox_tls) else None
+    postgres_ssl_context = (
+        build_ssl_context(cert_path, key_path) if ("postgres" in services and args.postgres_tls) else None
+    )
+    proxmox_ssl_context = (
+        build_ssl_context(cert_path, key_path) if ("proxmox" in services and args.proxmox_tls) else None
+    )
 
     if "postgres" in services:
         try:
@@ -118,7 +122,9 @@ def _start_servers(
     if "proxmox" in services:
         try:
             proxmox_handler = make_proxmox_handler(logger)
-            proxmox_server = make_http_server(args.bind, args.proxmox_port, proxmox_handler, ssl_context=proxmox_ssl_context)
+            proxmox_server = make_http_server(
+                args.bind, args.proxmox_port, proxmox_handler, ssl_context=proxmox_ssl_context
+            )
             running.append(start_server("proxmox", args.bind, args.proxmox_port, proxmox_server, tls=args.proxmox_tls))
         except OSError as exc:
             raise OSError(_build_bind_error("proxmox", args.bind, args.proxmox_port, exc)) from exc

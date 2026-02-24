@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from redposture_core.stage_postgres import _PgSession, _audit_postgres_host
+from redposture_core.stage_postgres import _audit_postgres_host, _PgSession
 
 
 class _DummySocket:
-    def __enter__(self) -> "_DummySocket":
+    def __enter__(self) -> _DummySocket:
         return self
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
@@ -20,7 +20,9 @@ class _DummySocket:
 def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     dumped_tables: list[str] = []
 
-    monkeypatch.setattr("redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket())
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_startup_and_auth",
         lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
@@ -76,7 +78,9 @@ def test_dump_with_table_and_columns_uses_only_selected(monkeypatch) -> None:  #
     dumped: list[tuple[str, list[str] | None]] = []
     column_targets: list[str] = []
 
-    monkeypatch.setattr("redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket())
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_startup_and_auth",
         lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
@@ -85,7 +89,10 @@ def test_dump_with_table_and_columns_uses_only_selected(monkeypatch) -> None:  #
         "redposture_core.stage_postgres._collect_postgres_privileges",
         lambda *_args, **_kwargs: (False, False, True, 1, None),
     )
-    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_readable_tables", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")))
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_readable_tables",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
+    )
     monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
 
     def fake_query_table_columns(
@@ -139,7 +146,9 @@ def test_show_columns_with_dump_prints_columns_and_dump(monkeypatch) -> None:  #
     dumped: list[tuple[str, list[str] | None]] = []
     column_targets: list[str] = []
 
-    monkeypatch.setattr("redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket())
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_startup_and_auth",
         lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
@@ -148,7 +157,10 @@ def test_show_columns_with_dump_prints_columns_and_dump(monkeypatch) -> None:  #
         "redposture_core.stage_postgres._collect_postgres_privileges",
         lambda *_args, **_kwargs: (False, False, True, 1, None),
     )
-    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_readable_tables", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")))
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_readable_tables",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
+    )
     monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
 
     def fake_query_table_columns(

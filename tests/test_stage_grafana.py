@@ -55,7 +55,7 @@ def test_format_check_detail_records_includes_proxy_request_line() -> None:
                 "probe_ok": True,
                 "probe_status": 200,
                 "probe_elapsed_ms": 5,
-                "probe_sample": "{\"ok\":1}",
+                "probe_sample": '{"ok":1}',
                 "cleanup_ok": True,
             }
         ],

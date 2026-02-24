@@ -34,4 +34,3 @@ def test_autodetect_cert_key_requires_complete_pair(tmp_path) -> None:
     cert_path, key_path = _autodetect_cert_key_files(str(tmp_path))
     assert cert_path is None
     assert key_path is None
-

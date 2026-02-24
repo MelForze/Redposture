@@ -153,9 +153,7 @@ def test_trigger_rejects_hostname_in_callback_ip(monkeypatch: pytest.MonkeyPatch
     assert rc == 2
 
 
-def test_trigger_output_file_contains_full_unclipped_event(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_trigger_output_file_contains_full_unclipped_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     output_path = tmp_path / "trigger.txt"
     long_startup = "x" * 220
 
