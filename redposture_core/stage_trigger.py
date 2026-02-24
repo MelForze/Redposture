@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import threading
 import time
@@ -93,11 +94,48 @@ def _render_trigger_check_row(console: Console, target: str, port: str, marker: 
     clipped_port = _clip_text(port, 16)
     target_segment = "\t" + clipped_target + "\t" + clipped_port + "\t"
     stage_segment = f"{'CHECK':<8}"
+    spans: list[tuple[int, int, str]] = []
+    for fragment, color in (
+        ("(auth required:True)", "bright_green"),
+        ("(auth required:False)", "red"),
+        ("(auth required:unknown)", "yellow"),
+        ("(superuser:True)", "red"),
+        ("(execute:True)", "red"),
+        ("(read:True)", "red"),
+    ):
+        idx = body.find(fragment)
+        if idx >= 0:
+            spans.append((idx, idx + len(fragment), color))
+
+    table_match = re.search(r"\(tables:(\d+)\)", body)
+    if table_match and int(table_match.group(1)) > 0:
+        spans.append((table_match.start(), table_match.end(), "orange"))
+
+    key_match = re.search(r"\(keys:(\d+)(?: [^)]*)?\)", body)
+    if key_match and key_match.group(1).isdigit() and int(key_match.group(1)) > 0:
+        spans.append((key_match.start(), key_match.end(), "red"))
+
+    if not spans:
+        body_colored = console._paint(body, "white", sys.stdout)
+    else:
+        chunks: list[str] = []
+        cursor = 0
+        for start, end, color in sorted(spans, key=lambda item: item[0]):
+            if start < cursor:
+                continue
+            if start > cursor:
+                chunks.append(console._paint(body[cursor:start], "white", sys.stdout))
+            chunks.append(console._paint(body[start:end], color, sys.stdout))
+            cursor = end
+        if cursor < len(body):
+            chunks.append(console._paint(body[cursor:], "white", sys.stdout))
+        body_colored = "".join(chunks)
+
     line = (
         f"{console._paint(stage_segment, 'blue', sys.stdout)}"
         f"{console._paint(target_segment, 'white', sys.stdout)}"
         f" {console._paint(marker, marker_color, sys.stdout)} "
-        f"{console._paint(body, 'white', sys.stdout)}"
+        f"{body_colored}"
     )
     console.plain(line)
 
@@ -233,7 +271,7 @@ def _callback_event_remote_host(event: dict[str, Any]) -> str:
 
 
 def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogger, console: Console) -> None:
-    from .stage_postgres import _audit_postgres_host
+    from .stage_postgres import _audit_postgres_host, _caps_suffix as _postgres_caps_suffix
     from .stage_redis import _audit_redis_host
 
     raw_events = logger.get_trigger_callback_events()
@@ -322,7 +360,13 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
         status = str(record.get("status") or "fail")
         err = str(record.get("error") or "").strip()
         if status in {"valid_credentials", "open_no_auth", "weak_default_creds"}:
-            _render_trigger_check_row(console, host, str(port), "[+]", "Postgres credentials valid")
+            if status == "valid_credentials":
+                body = f"{cred_display} {_postgres_caps_suffix(record)}"
+            elif status == "weak_default_creds":
+                body = f"postgres:postgres {_postgres_caps_suffix(record)}"
+            else:
+                body = f"no-auth access {_postgres_caps_suffix(record)}"
+            _render_trigger_check_row(console, host, str(port), "[+]", body)
         elif status == "auth_required":
             body = f"Postgres credentials invalid ({cred_display})"
             if err:
