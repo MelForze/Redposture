@@ -22,6 +22,7 @@ _SERVICE_TAGS = {
     "postgres": "Postgres",
     "redis": "REDIS",
     "etcd": "ETCD",
+    "registry": "REGISTRY",
     "proxmox": "PVE",
     "blackbox": "BLACKBOX",
     "scanner": "TRIGGER",
@@ -256,9 +257,10 @@ class AttemptLogger:
             marker_color = "green"
             suffix = " " + _paint("(SSRF!)", "orange")
 
+        target_segment = "\t" + _clip(display_target, 64) + "\t" + _clip(listen_port, 16) + "\t"
         line = (
             f"{_paint('TRIGGER ', 'blue')}"
-            f"{_paint(f'\t{_clip(display_target, 64)}\t{_clip(listen_port, 16)}\t', 'white')}"
+            f"{_paint(target_segment, 'white')}"
             f" {_paint('[+]', marker_color)} "
             f"{_paint(exporter_name, 'white')}{suffix}"
         )

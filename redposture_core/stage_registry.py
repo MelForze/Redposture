@@ -1,0 +1,2669 @@
+"""Docker Registry v2 and Harbor audit stage."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import re
+import socket
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Callable
+
+from .console import Console
+from .logger import AttemptLogger
+from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+
+
+_REGISTRY_MANIFEST_ACCEPT = ",".join(
+    (
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.index.v1+json",
+    )
+)
+_REGISTRY_DOWNLOAD_LIMIT_BYTES = 100 * 1024 * 1024
+_REGISTRY_MAX_INSPECT_IMAGES = 100
+_REGISTRY_MAX_HISTORY_LINES = 20
+_SUSPICIOUS_TEXT_RE = re.compile(
+    r"(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?key|aws[_-]?secret|private[_-]?key)"
+)
+
+
+def _clip(text: str, width: int = 72) -> str:
+    if len(text) <= width:
+        return text
+    if width <= 3:
+        return text[:width]
+    return text[: width - 3] + "..."
+
+
+def _retry_delay(attempt_index: int) -> float:
+    return min(1.50, 0.20 * (2**attempt_index))
+
+
+def _friendly_error_text(value: str) -> str:
+    text = (value or "").strip()
+    if not text:
+        return "connection failed"
+    lower = text.lower()
+    if "connection refused" in lower:
+        return "connection refused (service is not listening on target port)"
+    if "timed out" in lower or "timeout" in lower:
+        return "connection timeout"
+    if "name or service not known" in lower or "nodename nor servname provided" in lower:
+        return "dns lookup failed"
+    if "temporary failure in name resolution" in lower:
+        return "dns lookup temporary failure"
+    if "no route to host" in lower or "network is unreachable" in lower:
+        return "network unreachable"
+    if "operation not permitted" in lower:
+        return "operation not permitted by local environment"
+    match = re.search(r"\[errno\s+(-?\d+)\]\s*(.*)", text, flags=re.IGNORECASE)
+    if match:
+        errno_num = match.group(1)
+        detail = (match.group(2) or "").strip()
+        if errno_num in {"61", "111"}:
+            return "connection refused (service is not listening on target port)"
+        if errno_num in {"60", "110"}:
+            return "connection timeout"
+        if errno_num in {"8", "-2"}:
+            return "dns lookup failed"
+        if errno_num in {"65", "101", "113"}:
+            return "network unreachable"
+        if detail:
+            return detail
+    return text
+
+
+def _friendly_error_from_exception(exc: BaseException) -> str:
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, BaseException):
+            return _friendly_error_text(str(reason))
+        return _friendly_error_text(str(reason or exc))
+    if isinstance(exc, (socket.timeout, TimeoutError)):
+        return "connection timeout"
+    return _friendly_error_text(str(exc))
+
+
+def _human_bytes(value: int | float | None) -> str:
+    if value is None:
+        return "-"
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)}B"
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{int(size)}B"
+
+
+def _normalize_path(path: str) -> str:
+    clean = str(path or "").strip()
+    if not clean:
+        return "/"
+    if not clean.startswith("/"):
+        clean = "/" + clean
+    return clean
+
+
+def _safe_slug(value: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value))
+    slug = slug.strip("._-")
+    return slug or "item"
+
+
+def _quote_repo(repo: str) -> str:
+    return urllib.parse.quote(repo, safe="/._-")
+
+
+def _quote_ref(reference: str) -> str:
+    return urllib.parse.quote(reference, safe=":@._-")
+
+
+def _json_loads_bytes(raw: bytes) -> Any:
+    return json.loads(raw.decode("utf-8", errors="replace"))
+
+
+def _auth_headers(username: str | None, password: str | None, token: str | None) -> dict[str, str]:
+    if token:
+        return {"Authorization": f"Bearer {token}"}
+    if username and password:
+        encoded = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+        return {"Authorization": f"Basic {encoded}"}
+    return {}
+
+
+def _http_request(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+) -> tuple[int, bytes, dict[str, str], str | None]:
+    url = f"http://{host}:{port}{_normalize_path(path)}"
+    req_headers = {"User-Agent": "RedPosture/1.0"}
+    if headers:
+        req_headers.update(headers)
+    request = urllib.request.Request(url, data=body, method=method, headers=req_headers)
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = int(response.status)
+            payload = response.read()
+            response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+            return status, payload, response_headers, None
+    except urllib.error.HTTPError as exc:
+        payload = exc.read()
+        response_headers = {str(k).lower(): str(v) for k, v in exc.headers.items()}
+        return int(exc.code), payload, response_headers, None
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+        return 0, b"", {}, _friendly_error_from_exception(exc)
+
+
+def _http_request_url(
+    url: str,
+    method: str,
+    timeout: float,
+    *,
+    headers: dict[str, str] | None = None,
+    body: bytes | None = None,
+) -> tuple[int, bytes, dict[str, str], str | None]:
+    req_headers = {"User-Agent": "RedPosture/1.0"}
+    if headers:
+        req_headers.update(headers)
+    request = urllib.request.Request(url, data=body, method=method, headers=req_headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = int(response.status)
+            payload = response.read()
+            response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+            return status, payload, response_headers, None
+    except urllib.error.HTTPError as exc:
+        payload = exc.read()
+        response_headers = {str(k).lower(): str(v) for k, v in exc.headers.items()}
+        return int(exc.code), payload, response_headers, None
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+        return 0, b"", {}, _friendly_error_from_exception(exc)
+
+
+def _http_download(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    out_path: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, int, str | None]:
+    url = f"http://{host}:{port}{_normalize_path(path)}"
+    req_headers = {"User-Agent": "RedPosture/1.0"}
+    if headers:
+        req_headers.update(headers)
+    request = urllib.request.Request(url, method="GET", headers=req_headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = int(response.status)
+            size = 0
+            with open(out_path, "wb") as fh:
+                while True:
+                    chunk = response.read(1024 * 64)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+                    size += len(chunk)
+            return status, size, None
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), 0, None
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+        return 0, 0, _friendly_error_from_exception(exc)
+
+
+def _parse_link_next(link_header: str | None) -> str | None:
+    raw = (link_header or "").strip()
+    if not raw:
+        return None
+    match = re.search(r"<([^>]+)>;\s*rel=\"?next\"?", raw, flags=re.IGNORECASE)
+    if not match:
+        return None
+    target = match.group(1).strip()
+    parsed = urllib.parse.urlsplit(target)
+    if parsed.scheme or parsed.netloc:
+        return urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
+    return target
+
+
+def _fetch_registry_catalog(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[list[str] | None, str | None]:
+    repositories: list[str] = []
+    seen: set[str] = set()
+    next_path = "/v2/_catalog?n=1000"
+    pages = 0
+
+    while next_path:
+        pages += 1
+        if pages > 30:
+            break
+        status, body, resp_headers, error = _http_request(host, port, "GET", next_path, timeout, headers=headers)
+        if error:
+            return None, error
+        if status in (401, 403):
+            return None, "authentication required"
+        if status != 200:
+            return None, f"{next_path} returned status {status}"
+
+        try:
+            payload = _json_loads_bytes(body)
+        except json.JSONDecodeError:
+            return None, f"{next_path} returned invalid JSON"
+        items = payload.get("repositories") if isinstance(payload, dict) else None
+        if isinstance(items, list):
+            for item in items:
+                repo = str(item or "").strip()
+                if not repo or repo in seen:
+                    continue
+                seen.add(repo)
+                repositories.append(repo)
+        next_path = _parse_link_next(resp_headers.get("link"))
+
+    repositories.sort()
+    return repositories, None
+
+
+def _fetch_repository_tags(
+    host: str,
+    port: int,
+    repository: str,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[list[str] | None, str | None]:
+    path = f"/v2/{_quote_repo(repository)}/tags/list?n=1000"
+    status, body, _resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=headers)
+    if error:
+        return None, error
+    if status in (401, 403):
+        return None, "authentication required"
+    if status == 404:
+        return [], None
+    if status != 200:
+        return None, f"{path} returned status {status}"
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return None, f"{path} returned invalid JSON"
+
+    tags_raw = payload.get("tags") if isinstance(payload, dict) else None
+    if not isinstance(tags_raw, list):
+        return [], None
+    tags = sorted({str(item or "").strip() for item in tags_raw if str(item or "").strip()})
+    return tags, None
+
+
+def _split_image_reference(value: str) -> tuple[str, str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return "", ""
+    if "@" in raw:
+        repo, digest = raw.rsplit("@", 1)
+        return repo.strip(), digest.strip()
+
+    slash_pos = raw.rfind("/")
+    colon_pos = raw.rfind(":")
+    if colon_pos > slash_pos:
+        return raw[:colon_pos].strip(), raw[colon_pos + 1 :].strip()
+    return raw, "latest"
+
+
+def _display_image(repository: str, reference: str) -> str:
+    if reference.startswith("sha256:"):
+        return f"{repository}@{reference}"
+    return f"{repository}:{reference}"
+
+
+def _pick_latest_tag(tags: list[str]) -> str | None:
+    clean = [str(item).strip() for item in tags if str(item).strip()]
+    if not clean:
+        return None
+    if "latest" in clean:
+        return "latest"
+    return sorted(set(clean))[-1]
+
+
+def _build_gitlab_repository_summaries(
+    repositories: list[str],
+    repo_tags: dict[str, list[str]],
+    last_pushed_by_repo: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    last_pushed_map = last_pushed_by_repo or {}
+    summaries: list[dict[str, Any]] = []
+    for repo in sorted(set(repositories)):
+        tags = sorted(set(repo_tags.get(repo) or []))
+        summaries.append(
+            {
+                "repository": repo,
+                "tags": tags,
+                "tags_count": len(tags),
+                "latest_tag": _pick_latest_tag(tags),
+                # Best-effort from image config.created when available.
+                "last_pushed": last_pushed_map.get(repo),
+            }
+        )
+    return summaries
+
+
+def _fetch_manifest_payload(
+    host: str,
+    port: int,
+    repository: str,
+    reference: str,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+    depth: int = 0,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if depth > 4:
+        return None, "manifest recursion depth exceeded"
+
+    req_headers = dict(headers)
+    req_headers["Accept"] = _REGISTRY_MANIFEST_ACCEPT
+    path = f"/v2/{_quote_repo(repository)}/manifests/{_quote_ref(reference)}"
+    status, body, resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=req_headers)
+    if error:
+        return None, error
+    if status in (401, 403):
+        return None, "authentication required"
+    if status == 404:
+        return None, "image/tag not found"
+    if status != 200:
+        return None, f"{path} returned status {status}"
+
+    try:
+        manifest_payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return None, "manifest is not valid JSON"
+    if not isinstance(manifest_payload, dict):
+        return None, "manifest payload is invalid"
+
+    manifests_raw = manifest_payload.get("manifests")
+    if isinstance(manifests_raw, list) and manifests_raw:
+        chosen_digest: str | None = None
+        for item in manifests_raw:
+            if not isinstance(item, dict):
+                continue
+            digest = str(item.get("digest") or "").strip()
+            if not digest:
+                continue
+            platform = item.get("platform")
+            if isinstance(platform, dict):
+                os_name = str(platform.get("os") or "").lower()
+                arch = str(platform.get("architecture") or "").lower()
+                if os_name == "linux" and arch in {"amd64", "x86_64"}:
+                    chosen_digest = digest
+                    break
+            if chosen_digest is None:
+                chosen_digest = digest
+        if chosen_digest:
+            return _fetch_manifest_payload(
+                host,
+                port,
+                repository,
+                chosen_digest,
+                timeout,
+                headers=headers,
+                depth=depth + 1,
+            )
+
+    return (
+        {
+            "manifest": manifest_payload,
+            "manifest_raw": body.decode("utf-8", errors="replace"),
+            "content_type": resp_headers.get("content-type"),
+            "resolved_reference": reference,
+        },
+        None,
+    )
+
+
+def _fetch_blob_json(
+    host: str,
+    port: int,
+    repository: str,
+    digest: str,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[dict[str, Any] | None, str | None]:
+    path = f"/v2/{_quote_repo(repository)}/blobs/{_quote_ref(digest)}"
+    status, body, _resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=headers)
+    if error:
+        return None, error
+    if status in (401, 403):
+        return None, "authentication required"
+    if status != 200:
+        return None, f"{path} returned status {status}"
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return None, "blob JSON payload is invalid"
+    if not isinstance(payload, dict):
+        return None, "blob payload is invalid"
+    return payload, None
+
+
+def _extract_image_metadata(repository: str, reference: str, manifest_data: dict[str, Any]) -> dict[str, Any]:
+    manifest = manifest_data.get("manifest")
+    if not isinstance(manifest, dict):
+        return {
+            "image": _display_image(repository, reference),
+            "error": "manifest payload is invalid",
+        }
+
+    config_descriptor = manifest.get("config")
+    layers_raw = manifest.get("layers")
+    config_digest: str | None = None
+    config_size = 0
+    if isinstance(config_descriptor, dict):
+        digest = str(config_descriptor.get("digest") or "").strip()
+        if digest:
+            config_digest = digest
+        size_raw = config_descriptor.get("size")
+        if isinstance(size_raw, int) and size_raw >= 0:
+            config_size = size_raw
+
+    layers: list[dict[str, Any]] = []
+    total_layer_size = 0
+    if isinstance(layers_raw, list):
+        for item in layers_raw:
+            if not isinstance(item, dict):
+                continue
+            digest = str(item.get("digest") or "").strip()
+            media_type = str(item.get("mediaType") or "").strip()
+            size_raw = item.get("size")
+            size = int(size_raw) if isinstance(size_raw, int) and size_raw >= 0 else 0
+            if digest:
+                layers.append({"digest": digest, "media_type": media_type, "size": size})
+                total_layer_size += size
+
+    return {
+        "image": _display_image(repository, reference),
+        "repository": repository,
+        "reference": reference,
+        "resolved_reference": str(manifest_data.get("resolved_reference") or reference),
+        "manifest_raw": str(manifest_data.get("manifest_raw") or ""),
+        "content_type": str(manifest_data.get("content_type") or ""),
+        "config_digest": config_digest,
+        "config_size": config_size,
+        "layers": layers,
+        "layer_count": len(layers),
+        "total_size": total_layer_size + config_size,
+    }
+
+
+def _inspect_image(
+    host: str,
+    port: int,
+    repository: str,
+    reference: str,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    manifest_payload, manifest_error = _fetch_manifest_payload(host, port, repository, reference, timeout, headers=headers)
+    if manifest_error:
+        return {
+            "image": _display_image(repository, reference),
+            "repository": repository,
+            "reference": reference,
+            "error": manifest_error,
+        }
+
+    metadata = _extract_image_metadata(repository, reference, manifest_payload or {})
+    config_digest = metadata.get("config_digest")
+    env_values: list[str] = []
+    exposed_ports: list[str] = []
+    label_items: list[str] = []
+    cmd_items: list[str] = []
+    history_items: list[str] = []
+    config_blob: dict[str, Any] | None = None
+    config_error: str | None = None
+    suspicious: list[str] = []
+    config_created: str | None = None
+
+    if isinstance(config_digest, str) and config_digest:
+        config_blob, config_error = _fetch_blob_json(host, port, repository, config_digest, timeout, headers=headers)
+        if config_blob is not None:
+            config_created_raw = config_blob.get("created")
+            if isinstance(config_created_raw, str) and config_created_raw.strip():
+                config_created = config_created_raw.strip()
+            config_section = config_blob.get("config")
+            if isinstance(config_section, dict):
+                env_raw = config_section.get("Env")
+                if isinstance(env_raw, list):
+                    env_values = [str(item) for item in env_raw if str(item).strip()]
+                cmd_raw = config_section.get("Cmd")
+                if isinstance(cmd_raw, list):
+                    cmd_items = [str(item) for item in cmd_raw if str(item).strip()]
+                labels_raw = config_section.get("Labels")
+                if isinstance(labels_raw, dict):
+                    label_items = [f"{key}={value}" for key, value in labels_raw.items()]
+                exposed_raw = config_section.get("ExposedPorts")
+                if isinstance(exposed_raw, dict):
+                    exposed_ports = sorted(str(key) for key in exposed_raw.keys())
+
+            history_raw = config_blob.get("history")
+            if isinstance(history_raw, list):
+                for item in history_raw[:_REGISTRY_MAX_HISTORY_LINES]:
+                    if not isinstance(item, dict):
+                        continue
+                    created_by = str(item.get("created_by") or "").strip()
+                    comment = str(item.get("comment") or "").strip()
+                    line = created_by
+                    if comment:
+                        line = f"{line} | comment={comment}" if line else f"comment={comment}"
+                    if line:
+                        history_items.append(line)
+
+            for item in env_values + label_items + cmd_items + history_items:
+                if _SUSPICIOUS_TEXT_RE.search(item):
+                    suspicious.append(item)
+
+    metadata["config_fetch_error"] = config_error
+    metadata["created"] = config_created
+    metadata["env"] = env_values
+    metadata["cmd"] = cmd_items
+    metadata["exposed_ports"] = exposed_ports
+    metadata["labels"] = sorted(label_items)
+    metadata["history"] = history_items
+    metadata["suspicious"] = suspicious
+    metadata["config_blob"] = config_blob
+    return metadata
+
+
+def _should_download_large(total_size: int, image_name: str, console: Console) -> bool:
+    if total_size <= _REGISTRY_DOWNLOAD_LIMIT_BYTES:
+        return True
+
+    size_text = _human_bytes(total_size)
+    limit_text = _human_bytes(_REGISTRY_DOWNLOAD_LIMIT_BYTES)
+    prompt = f"image {image_name} size={size_text} exceeds {limit_text}. Continue download? [y/N]: "
+    if not sys.stdin.isatty():
+        console.warn(f"download skipped for {image_name}: size={size_text} exceeds {limit_text} (non-interactive shell)")
+        return False
+
+    try:
+        answer = input(prompt).strip().lower()
+    except EOFError:
+        return False
+    return answer in {"y", "yes"}
+
+
+def _download_image(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+    inspect_data: dict[str, Any],
+    download_dir: str,
+    console: Console,
+) -> dict[str, Any]:
+    image_name = str(inspect_data.get("image") or "-")
+    repository = str(inspect_data.get("repository") or "").strip()
+    if not repository:
+        return {"status": "fail", "error": "missing repository for download"}
+
+    total_size = int(inspect_data.get("total_size") or 0)
+    if not _should_download_large(total_size, image_name, console):
+        return {"status": "skipped", "size": total_size, "error": "download not confirmed"}
+
+    target_dir = os.path.join(
+        download_dir,
+        _safe_slug(host),
+        _safe_slug(image_name),
+    )
+    os.makedirs(target_dir, exist_ok=True)
+
+    manifest_raw = str(inspect_data.get("manifest_raw") or "")
+    if manifest_raw:
+        with open(os.path.join(target_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+            fh.write(manifest_raw)
+
+    config_blob = inspect_data.get("config_blob")
+    if isinstance(config_blob, dict):
+        with open(os.path.join(target_dir, "config.json"), "w", encoding="utf-8") as fh:
+            json.dump(config_blob, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+
+    downloaded_bytes = 0
+    config_digest = str(inspect_data.get("config_digest") or "").strip()
+    if config_digest:
+        config_name = _safe_slug(config_digest) + ".blob"
+        config_path = os.path.join(target_dir, config_name)
+        status, size, error = _http_download(
+            host,
+            port,
+            f"/v2/{_quote_repo(repository)}/blobs/{_quote_ref(config_digest)}",
+            timeout,
+            config_path,
+            headers=headers,
+        )
+        if error:
+            return {"status": "fail", "size": downloaded_bytes, "error": error}
+        if status != 200:
+            return {"status": "fail", "size": downloaded_bytes, "error": f"config blob returned status {status}"}
+        downloaded_bytes += size
+
+    layers = inspect_data.get("layers")
+    if isinstance(layers, list):
+        for layer in layers:
+            if not isinstance(layer, dict):
+                continue
+            digest = str(layer.get("digest") or "").strip()
+            if not digest:
+                continue
+            layer_name = _safe_slug(digest) + ".layer"
+            layer_path = os.path.join(target_dir, layer_name)
+            status, size, error = _http_download(
+                host,
+                port,
+                f"/v2/{_quote_repo(repository)}/blobs/{_quote_ref(digest)}",
+                timeout,
+                layer_path,
+                headers=headers,
+            )
+            if error:
+                return {"status": "fail", "path": target_dir, "size": downloaded_bytes, "error": error}
+            if status != 200:
+                return {
+                    "status": "fail",
+                    "path": target_dir,
+                    "size": downloaded_bytes,
+                    "error": f"layer {digest} returned status {status}",
+                }
+            downloaded_bytes += size
+
+    return {
+        "status": "ok",
+        "path": target_dir,
+        "size": downloaded_bytes,
+        "declared_size": total_size,
+        "files": len(os.listdir(target_dir)),
+    }
+
+
+def _fetch_harbor_info(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[dict[str, Any] | None, str | None]:
+    status, body, _resp_headers, error = _http_request(host, port, "GET", "/api/v2.0/systeminfo", timeout, headers=headers)
+    if error:
+        return None, error
+    if status in (401, 403):
+        return None, "authentication required"
+    if status == 404:
+        return None, "not harbor"
+    if status != 200:
+        return None, f"/api/v2.0/systeminfo returned status {status}"
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return None, "harbor systeminfo payload is invalid JSON"
+    if not isinstance(payload, dict):
+        return None, "harbor systeminfo payload is invalid"
+    return payload, None
+
+
+def _fetch_harbor_projects(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[list[str] | None, str | None]:
+    status, body, _resp_headers, error = _http_request(
+        host,
+        port,
+        "GET",
+        "/api/v2.0/projects?page=1&page_size=200",
+        timeout,
+        headers=headers,
+    )
+    if error:
+        return None, error
+    if status in (401, 403):
+        return None, "authentication required"
+    if status != 200:
+        return None, f"/api/v2.0/projects returned status {status}"
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return None, "harbor projects payload is invalid JSON"
+    if not isinstance(payload, list):
+        return None, "harbor projects payload is invalid"
+    projects: list[str] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name:
+            projects.append(name)
+    return sorted(set(projects)), None
+
+
+def _fetch_harbor_repositories(
+    host: str,
+    port: int,
+    project: str,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[list[str] | None, str | None]:
+    quoted_project = urllib.parse.quote(project, safe="")
+    path = f"/api/v2.0/projects/{quoted_project}/repositories?page=1&page_size=200"
+    status, body, _resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=headers)
+    if error:
+        return None, error
+    if status in (401, 403):
+        return None, "authentication required"
+    if status != 200:
+        return None, f"{path} returned status {status}"
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return None, f"{path} returned invalid JSON"
+    if not isinstance(payload, list):
+        return None, f"{path} payload is invalid"
+    repositories: list[str] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name:
+            repositories.append(name)
+    return sorted(set(repositories)), None
+
+
+def _fetch_harbor_artifacts(
+    host: str,
+    port: int,
+    project: str,
+    repository: str,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[list[str] | None, str | None]:
+    quoted_project = urllib.parse.quote(project, safe="")
+    quoted_repo = urllib.parse.quote(repository, safe="")
+    path = f"/api/v2.0/projects/{quoted_project}/repositories/{quoted_repo}/artifacts?page=1&page_size=20&with_tag=true"
+    status, body, _resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=headers)
+    if error:
+        return None, error
+    if status in (401, 403):
+        return None, "authentication required"
+    if status != 200:
+        return None, f"{path} returned status {status}"
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return None, f"{path} returned invalid JSON"
+    if not isinstance(payload, list):
+        return None, f"{path} payload is invalid"
+
+    artifacts: list[str] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        digest = str(item.get("digest") or "").strip()
+        tags_raw = item.get("tags")
+        tags: list[str] = []
+        if isinstance(tags_raw, list):
+            for tag_item in tags_raw:
+                if isinstance(tag_item, dict):
+                    tag_name = str(tag_item.get("name") or "").strip()
+                    if tag_name:
+                        tags.append(tag_name)
+        if tags:
+            for tag in tags:
+                artifacts.append(f"{repository}:{tag}@{digest}")
+        elif digest:
+            artifacts.append(f"{repository}@{digest}")
+    return sorted(set(artifacts)), None
+
+
+def _parse_www_authenticate(header_value: str) -> tuple[str, dict[str, str]]:
+    raw = str(header_value or "").strip()
+    if not raw:
+        return "", {}
+
+    if " " not in raw:
+        return raw.lower(), {}
+
+    scheme, params_raw = raw.split(" ", 1)
+    params: dict[str, str] = {}
+    for match in re.finditer(r'([A-Za-z][A-Za-z0-9_-]*)="([^"]*)"', params_raw):
+        key = match.group(1).strip().lower()
+        value = match.group(2).strip()
+        if key:
+            params[key] = value
+    return scheme.strip().lower(), params
+
+
+def _fetch_gitlab_info(
+    host: str,
+    port: int,
+    www_authenticate: str,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+    deep: bool,
+) -> tuple[dict[str, Any] | None, str | None]:
+    scheme, params = _parse_www_authenticate(www_authenticate)
+    realm = str(params.get("realm") or "").strip()
+    service = str(params.get("service") or "").strip()
+    scope = str(params.get("scope") or "").strip()
+
+    marker_raw = " ".join([scheme, realm, service, scope]).lower()
+    header_is_gitlab = (
+        service == "container_registry"
+        or "/jwt/auth" in realm.lower()
+        or "gitlab" in marker_raw
+    )
+    if not header_is_gitlab:
+        # Fallback for valid-token flows where /v2/ returns 200 and omits WWW-Authenticate.
+        if not deep:
+            return None, "not gitlab"
+        probe_path = "/jwt/auth?service=container_registry&scope=registry:catalog:*"
+        status, body, _probe_headers, error = _http_request(host, port, "GET", probe_path, timeout, headers=headers)
+        if error:
+            return None, error
+        if status == 404:
+            return None, "not gitlab"
+        if status not in {200, 401, 403}:
+            return None, "not gitlab"
+
+        fallback_info: dict[str, Any] = {
+            "scheme": "bearer",
+            "realm": f"http://{host}:{port}/jwt/auth",
+            "service": "container_registry",
+            "scope": "registry:catalog:*",
+            "detected_by": "jwt_auth_probe",
+            "token_probe_http_status": status,
+        }
+        if status in {401, 403}:
+            fallback_info["token_probe_status"] = "authentication required"
+            return fallback_info, None
+
+        try:
+            payload = _json_loads_bytes(body)
+        except json.JSONDecodeError:
+            fallback_info["token_probe_status"] = "failed"
+            fallback_info["token_probe_error"] = "realm returned invalid JSON"
+            return fallback_info, None
+
+        if isinstance(payload, dict):
+            fallback_info["token_probe_status"] = "ok"
+            token = str(payload.get("token") or payload.get("access_token") or "").strip()
+            fallback_info["token_received"] = bool(token)
+            if "expires_in" in payload:
+                fallback_info["token_expires_in"] = payload.get("expires_in")
+            if "issued_at" in payload:
+                fallback_info["token_issued_at"] = payload.get("issued_at")
+            if "scope" in payload and payload.get("scope"):
+                fallback_info["token_scope"] = payload.get("scope")
+            return fallback_info, None
+
+        fallback_info["token_probe_status"] = "failed"
+        fallback_info["token_probe_error"] = "realm JSON payload is invalid"
+        return fallback_info, None
+
+    info: dict[str, Any] = {
+        "scheme": scheme,
+        "realm": realm or None,
+        "service": service or None,
+        "scope": scope or None,
+        "detected_by": "www_authenticate",
+    }
+
+    if not deep or not realm:
+        return info, None
+
+    parsed = urllib.parse.urlsplit(realm)
+    if parsed.scheme not in {"http", "https"}:
+        info["token_probe_status"] = "skipped"
+        info["token_probe_error"] = "unsupported realm URL scheme"
+        return info, None
+
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if service and "service" not in query:
+        query["service"] = [service]
+    if scope and "scope" not in query:
+        query["scope"] = [scope]
+    if "scope" not in query:
+        query["scope"] = ["registry:catalog:*"]
+    token_url = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, urllib.parse.urlencode(query, doseq=True), parsed.fragment)
+    )
+    status, body, _headers, error = _http_request_url(token_url, "GET", timeout, headers=headers)
+    if error:
+        info["token_probe_status"] = "failed"
+        info["token_probe_error"] = error
+        return info, None
+
+    info["token_probe_http_status"] = status
+    if status in {401, 403}:
+        info["token_probe_status"] = "authentication required"
+        return info, None
+    if status != 200:
+        info["token_probe_status"] = "failed"
+        info["token_probe_error"] = f"realm returned status {status}"
+        return info, None
+
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        info["token_probe_status"] = "failed"
+        info["token_probe_error"] = "realm returned invalid JSON"
+        return info, None
+
+    if isinstance(payload, dict):
+        info["token_probe_status"] = "ok"
+        token = str(payload.get("token") or payload.get("access_token") or "").strip()
+        info["token_received"] = bool(token)
+        if "expires_in" in payload:
+            info["token_expires_in"] = payload.get("expires_in")
+        if "issued_at" in payload:
+            info["token_issued_at"] = payload.get("issued_at")
+        if "scope" in payload and payload.get("scope"):
+            info["token_scope"] = payload.get("scope")
+        return info, None
+
+    info["token_probe_status"] = "failed"
+    info["token_probe_error"] = "realm JSON payload is invalid"
+    return info, None
+
+
+def _fetch_nexus_info(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[dict[str, Any] | None, str | None]:
+    status, body, _resp_headers, error = _http_request(host, port, "GET", "/service/rest/v1/status", timeout, headers=headers)
+    if error:
+        return None, error
+    if status in (401, 403):
+        return None, "authentication required"
+    if status == 404:
+        return None, "not nexus"
+    if status != 200:
+        return None, f"/service/rest/v1/status returned status {status}"
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return None, "nexus status payload is invalid JSON"
+    if not isinstance(payload, dict):
+        return None, "nexus status payload is invalid"
+    return payload, None
+
+
+def _fetch_nexus_repositories(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[list[str] | None, str | None]:
+    status, body, _resp_headers, error = _http_request(
+        host,
+        port,
+        "GET",
+        "/service/rest/v1/repositories",
+        timeout,
+        headers=headers,
+    )
+    if error:
+        return None, error
+    if status in (401, 403):
+        return None, "authentication required"
+    if status == 404:
+        return None, "not nexus"
+    if status != 200:
+        return None, f"/service/rest/v1/repositories returned status {status}"
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return None, "nexus repositories payload is invalid JSON"
+    if not isinstance(payload, list):
+        return None, "nexus repositories payload is invalid"
+
+    repositories: list[str] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        fmt = str(item.get("format") or "").strip()
+        repo_type = str(item.get("type") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not name:
+            continue
+        extra: list[str] = []
+        if fmt:
+            extra.append(f"format={fmt}")
+        if repo_type:
+            extra.append(f"type={repo_type}")
+        if url:
+            extra.append(f"url={url}")
+        if extra:
+            repositories.append(f"{name} ({', '.join(extra)})")
+        else:
+            repositories.append(name)
+    return sorted(set(repositories)), None
+
+
+def _fetch_nexus_repository_records(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    status, body, _resp_headers, error = _http_request(
+        host,
+        port,
+        "GET",
+        "/service/rest/v1/repositories",
+        timeout,
+        headers=headers,
+    )
+    if error:
+        return None, error
+    if status in (401, 403):
+        return None, "authentication required"
+    if status == 404:
+        return None, "not nexus"
+    if status != 200:
+        return None, f"/service/rest/v1/repositories returned status {status}"
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return None, "nexus repositories payload is invalid JSON"
+    if not isinstance(payload, list):
+        return None, "nexus repositories payload is invalid"
+
+    records: list[dict[str, Any]] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        record: dict[str, Any] = {
+            "name": name,
+            "format": str(item.get("format") or "").strip() or None,
+            "type": str(item.get("type") or "").strip() or None,
+            "url": str(item.get("url") or "").strip() or None,
+            "online": item.get("online") if isinstance(item.get("online"), bool) else None,
+        }
+        records.append(record)
+    records.sort(key=lambda item: str(item.get("name") or ""))
+    return records, None
+
+
+def _fetch_nexus_components(
+    host: str,
+    port: int,
+    repository: str,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    components: list[dict[str, Any]] = []
+    continuation: str | None = None
+    pages = 0
+
+    while True:
+        pages += 1
+        if pages > 30:
+            break
+        query = {"repository": repository}
+        if continuation:
+            query["continuationToken"] = continuation
+        path = "/service/rest/v1/components?" + urllib.parse.urlencode(query)
+        status, body, _resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=headers)
+        if error:
+            return None, error
+        if status in (401, 403):
+            return None, "authentication required"
+        if status == 404:
+            return None, "nexus components API unavailable"
+        if status != 200:
+            return None, f"{path} returned status {status}"
+        try:
+            payload = _json_loads_bytes(body)
+        except json.JSONDecodeError:
+            return None, f"{path} returned invalid JSON"
+        if not isinstance(payload, dict):
+            return None, f"{path} payload is invalid"
+
+        items = payload.get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict):
+                    components.append(item)
+
+        token_raw = payload.get("continuationToken")
+        continuation = str(token_raw).strip() if token_raw not in (None, "") else None
+        if not continuation:
+            break
+
+    return components, None
+
+
+def _extract_nexus_assets(components: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    assets: list[dict[str, Any]] = []
+    for component in components:
+        comp_name = str(component.get("name") or "").strip() or None
+        comp_version = str(component.get("version") or "").strip() or None
+        assets_raw = component.get("assets")
+        if not isinstance(assets_raw, list):
+            continue
+        for asset in assets_raw:
+            if not isinstance(asset, dict):
+                continue
+            checksum_raw = asset.get("checksum")
+            checksums: dict[str, str] = {}
+            if isinstance(checksum_raw, dict):
+                for key, value in checksum_raw.items():
+                    key_s = str(key).strip().lower()
+                    val_s = str(value).strip()
+                    if key_s and val_s:
+                        checksums[key_s] = val_s
+            assets.append(
+                {
+                    "component_name": comp_name,
+                    "component_version": comp_version,
+                    "path": str(asset.get("path") or "").strip() or None,
+                    "download_url": str(asset.get("downloadUrl") or "").strip() or None,
+                    "checksums": checksums,
+                }
+            )
+    return assets
+
+
+def _audit_registry_host(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    username: str | None,
+    password: str | None,
+    token: str | None,
+    show_images: bool,
+    show_tags: bool,
+    repository: str | None,
+    tag: str | None,
+    metadata: bool,
+    harbor: bool,
+    gitlab: bool,
+    nexus: bool,
+    assets: bool,
+    inspect: bool,
+    image: str | None,
+    download: bool,
+    download_dir: str,
+    console: Console,
+    debug: bool,
+) -> dict[str, Any]:
+    attempts = max(1, retries + 1)
+    last_error: str | None = None
+    auth_headers = _auth_headers(username, password, token)
+    provided_credentials = bool(username and password)
+    token_provided = bool(token)
+    image_raw = str(image or "").strip() or None
+    repository_raw = str(repository or "").strip() or None
+    tag_raw = str(tag or "").strip() or None
+
+    for attempt in range(attempts):
+        started = time.monotonic()
+        try:
+            status, body, resp_headers, error = _http_request(host, port, "GET", "/v2/", timeout, headers=auth_headers)
+            if error:
+                raise OSError(error)
+
+            docker_header = str(resp_headers.get("docker-distribution-api-version") or "").lower()
+            body_text = body.decode("utf-8", errors="replace").strip().lower()
+            unauthorized_body = "unauthorized" in body_text or "authentication required" in body_text
+            is_registry = status in {200, 401} or "registry/2.0" in docker_header or (status == 403 and "v2/" in body_text)
+            www_authenticate = str(resp_headers.get("www-authenticate") or "")
+
+            gitlab_info, gitlab_error = _fetch_gitlab_info(
+                host,
+                port,
+                www_authenticate,
+                timeout,
+                headers=auth_headers,
+                deep=gitlab,
+            )
+            if gitlab_info is not None:
+                is_gitlab: bool | None = True
+            elif gitlab_error == "not gitlab":
+                is_gitlab = False
+                gitlab_error = None
+            else:
+                is_gitlab = None
+            gitlab_repositories: list[str] | None = None
+
+            harbor_info, harbor_error = _fetch_harbor_info(host, port, timeout, headers=auth_headers)
+            if harbor_info is not None:
+                is_harbor: bool | None = True
+            elif harbor_error == "not harbor":
+                is_harbor = False
+                harbor_error = None
+            else:
+                is_harbor = None
+            harbor_projects: list[str] | None = None
+            harbor_repositories: list[str] | None = None
+            harbor_artifacts: list[str] | None = None
+
+            nexus_info, nexus_error = _fetch_nexus_info(host, port, timeout, headers=auth_headers)
+            if nexus_info is not None:
+                is_nexus: bool | None = True
+            elif nexus_error == "not nexus":
+                is_nexus = False
+                nexus_error = None
+            else:
+                is_nexus = None
+            nexus_repositories: list[str] | None = None
+            nexus_repository_details: list[dict[str, Any]] | None = None
+            nexus_assets_list: list[dict[str, Any]] | None = None
+            if nexus and is_nexus is True:
+                nexus_repository_details, nexus_error_repositories = _fetch_nexus_repository_records(
+                    host,
+                    port,
+                    timeout,
+                    headers=auth_headers,
+                )
+                if nexus_error_repositories and nexus_error is None:
+                    nexus_error = nexus_error_repositories
+                nexus_repository_details = nexus_repository_details or []
+                nexus_repositories = []
+                for item in nexus_repository_details:
+                    name = str(item.get("name") or "").strip()
+                    if not name:
+                        continue
+                    extra: list[str] = []
+                    fmt = str(item.get("format") or "").strip()
+                    repo_type = str(item.get("type") or "").strip()
+                    url = str(item.get("url") or "").strip()
+                    if fmt:
+                        extra.append(f"format={fmt}")
+                    if repo_type:
+                        extra.append(f"type={repo_type}")
+                    if url:
+                        extra.append(f"url={url}")
+                    nexus_repositories.append(f"{name} ({', '.join(extra)})" if extra else name)
+
+            gitlab_repository_details: list[dict[str, Any]] | None = None
+            selected_repository_tags: list[str] | None = None
+            metadata_result: dict[str, Any] | None = None
+
+            if not is_registry:
+                return {
+                    "timestamp": utc_now_iso(),
+                    "host": host,
+                    "port": port,
+                    "is_registry": False,
+                    "is_harbor": is_harbor,
+                    "is_gitlab": is_gitlab,
+                    "is_nexus": is_nexus,
+                    "status": "not_registry",
+                    "auth_required": None,
+                    "provided_credentials": provided_credentials,
+                    "provided_username": username,
+                    "token_provided": token_provided,
+                    "debug": debug,
+                    "show_images": show_images,
+                    "show_tags": show_tags,
+                    "repository": repository_raw,
+                    "tag": tag_raw,
+                    "metadata": metadata,
+                    "harbor": harbor,
+                    "gitlab": gitlab,
+                    "nexus": nexus,
+                    "assets": assets,
+                    "inspect": inspect,
+                    "image": image_raw,
+                    "download": download,
+                    "image_count": None,
+                    "images": None,
+                    "images_error": None,
+                    "harbor_info": harbor_info,
+                    "harbor_projects": harbor_projects,
+                    "harbor_repositories": harbor_repositories,
+                    "harbor_artifacts": harbor_artifacts,
+                    "harbor_error": harbor_error,
+                    "gitlab_info": gitlab_info,
+                    "gitlab_error": gitlab_error,
+                    "gitlab_repositories": gitlab_repositories,
+                    "gitlab_repository_details": gitlab_repository_details,
+                    "selected_repository_tags": selected_repository_tags,
+                    "metadata_result": metadata_result,
+                    "nexus_info": nexus_info,
+                    "nexus_repositories": nexus_repositories,
+                    "nexus_repository_details": nexus_repository_details,
+                    "nexus_assets": nexus_assets_list,
+                    "nexus_error": nexus_error,
+                    "inspections": None,
+                    "inspection_error": None,
+                    "download_result": None,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "probe_status": status,
+                    "error": None,
+                }
+
+            auth_required = status == 401 or (status == 403 and unauthorized_body)
+            if status == 200 and not (provided_credentials or token_provided):
+                state = "open_no_auth"
+            elif status == 200:
+                state = "valid_credentials"
+            elif auth_required:
+                state = "auth_required"
+            else:
+                state = "unknown_auth"
+
+            repos: list[str] | None = None
+            repo_tags_map: dict[str, list[str]] = {}
+            image_refs: list[str] | None = None
+            images_error: str | None = None
+            can_access_registry_data = status == 200
+
+            if show_images and not can_access_registry_data:
+                images_error = "authentication required"
+
+            # Always enumerate catalog/tags when registry is accessible so image_count
+            # is consistent even without --images.
+            need_catalog = can_access_registry_data
+            if need_catalog:
+                repos, images_error = _fetch_registry_catalog(host, port, timeout, headers=auth_headers)
+                if repos is None:
+                    repos = []
+
+            if can_access_registry_data:
+                image_refs = []
+                if repos:
+                    for repo in repos:
+                        tags_list, tag_error = _fetch_repository_tags(host, port, repo, timeout, headers=auth_headers)
+                        if tags_list is None:
+                            if images_error is None and tag_error:
+                                images_error = f"{repo}: {tag_error}"
+                            continue
+                        repo_tags_map[repo] = list(tags_list)
+                        if not tags_list:
+                            image_refs.append(f"{repo}:<untagged>")
+                            continue
+                        for repo_tag in tags_list:
+                            image_refs.append(_display_image(repo, repo_tag))
+                image_refs = sorted(set(image_refs or []))
+                if is_gitlab is True:
+                    gitlab_repositories = sorted(set(repos or []))
+                    last_pushed_by_repo: dict[str, str] = {}
+                    if gitlab:
+                        for repo_name in gitlab_repositories:
+                            latest_tag = _pick_latest_tag(repo_tags_map.get(repo_name) or [])
+                            if not latest_tag:
+                                continue
+                            inspected_latest = _inspect_image(host, port, repo_name, latest_tag, timeout, headers=auth_headers)
+                            created_raw = str(inspected_latest.get("created") or "").strip()
+                            if created_raw:
+                                last_pushed_by_repo[repo_name] = created_raw
+                    gitlab_repository_details = _build_gitlab_repository_summaries(
+                        gitlab_repositories,
+                        repo_tags_map,
+                        last_pushed_by_repo,
+                    )
+
+                if repository_raw:
+                    if repository_raw in repo_tags_map:
+                        selected_repository_tags = sorted(set(repo_tags_map.get(repository_raw) or []))
+                    else:
+                        tags_list, tag_error = _fetch_repository_tags(host, port, repository_raw, timeout, headers=auth_headers)
+                        if tags_list is None:
+                            if images_error is None and tag_error:
+                                images_error = f"{repository_raw}: {tag_error}"
+                        else:
+                            selected_repository_tags = sorted(set(tags_list))
+
+                if metadata and repository_raw and tag_raw:
+                    metadata_result = _inspect_image(host, port, repository_raw, tag_raw, timeout, headers=auth_headers)
+            elif show_tags and repository_raw:
+                selected_repository_tags = None
+            if metadata and repository_raw and tag_raw and not can_access_registry_data:
+                metadata_result = {
+                    "image": _display_image(repository_raw, tag_raw),
+                    "repository": repository_raw,
+                    "reference": tag_raw,
+                    "error": "cannot fetch metadata without registry access",
+                }
+
+            # Deep Harbor parsing is enabled only with --harbor.
+            if harbor and is_harbor is True:
+                harbor_projects, harbor_error_projects = _fetch_harbor_projects(host, port, timeout, headers=auth_headers)
+                if harbor_error_projects and harbor_error is None:
+                    harbor_error = harbor_error_projects
+                harbor_projects = harbor_projects or []
+
+                repos_accum: list[str] = []
+                artifacts_accum: list[str] = []
+                for project_name in harbor_projects:
+                    project_repos, project_error = _fetch_harbor_repositories(
+                        host,
+                        port,
+                        project_name,
+                        timeout,
+                        headers=auth_headers,
+                    )
+                    if project_error and harbor_error is None:
+                        harbor_error = project_error
+                    for repo_name in project_repos or []:
+                        repos_accum.append(repo_name)
+                        artifacts, artifacts_error = _fetch_harbor_artifacts(
+                            host,
+                            port,
+                            project_name,
+                            repo_name,
+                            timeout,
+                            headers=auth_headers,
+                        )
+                        if artifacts_error and harbor_error is None:
+                            harbor_error = artifacts_error
+                        artifacts_accum.extend(artifacts or [])
+                harbor_repositories = sorted(set(repos_accum))
+                harbor_artifacts = sorted(set(artifacts_accum))
+
+            if nexus and is_nexus is True and nexus_repository_details:
+                component_counts: dict[str, int] = {}
+                assets_accum: list[dict[str, Any]] = []
+                repo_names = [str(item.get("name") or "").strip() for item in nexus_repository_details]
+                repo_names = [name for name in repo_names if name]
+                if repository_raw:
+                    repo_names = [repository_raw]
+                for repo_name in repo_names:
+                    components, components_error = _fetch_nexus_components(
+                        host,
+                        port,
+                        repo_name,
+                        timeout,
+                        headers=auth_headers,
+                    )
+                    if components_error and nexus_error is None:
+                        nexus_error = components_error
+                    if components is None:
+                        continue
+                    component_counts[repo_name] = len(components)
+                    if assets:
+                        assets_accum.extend(_extract_nexus_assets(components))
+                for repo_item in nexus_repository_details:
+                    repo_name = str(repo_item.get("name") or "").strip()
+                    if repo_name:
+                        repo_item["components"] = component_counts.get(repo_name)
+                if assets:
+                    nexus_assets_list = assets_accum
+
+            inspections: list[dict[str, Any]] | None = None
+            inspection_error: str | None = None
+            inspect_needed = inspect or bool(download)
+            if inspect_needed:
+                if not can_access_registry_data:
+                    inspection_error = "cannot inspect images without registry access"
+                else:
+                    inspect_targets: list[tuple[str, str]] = []
+                    if image_raw:
+                        repo, ref = _split_image_reference(image_raw)
+                        if not repo or not ref:
+                            inspection_error = f"invalid --image value: {image_raw}"
+                        else:
+                            inspect_targets.append((repo, ref))
+                    else:
+                        if not image_refs:
+                            inspection_error = "no images discovered for inspection"
+                        else:
+                            for image_ref in image_refs[:_REGISTRY_MAX_INSPECT_IMAGES]:
+                                repo, ref = _split_image_reference(image_ref)
+                                if repo and ref:
+                                    inspect_targets.append((repo, ref))
+                            if len(image_refs) > _REGISTRY_MAX_INSPECT_IMAGES and inspection_error is None:
+                                inspection_error = (
+                                    f"inspect list truncated to first {_REGISTRY_MAX_INSPECT_IMAGES} images "
+                                    f"(found {len(image_refs)})"
+                                )
+
+                    inspections = []
+                    for repo, ref in inspect_targets:
+                        inspected = _inspect_image(host, port, repo, ref, timeout, headers=auth_headers)
+                        inspections.append(inspected)
+
+            download_result: dict[str, Any] | None = None
+            if download:
+                if not image_raw:
+                    download_result = {"status": "fail", "error": "--download requires --image"}
+                elif not can_access_registry_data:
+                    download_result = {"status": "fail", "error": "registry access denied"}
+                else:
+                    selected_inspect: dict[str, Any] | None = None
+                    if inspections:
+                        selected_inspect = inspections[0]
+                    elif image_raw:
+                        repo, ref = _split_image_reference(image_raw)
+                        if repo and ref:
+                            selected_inspect = _inspect_image(host, port, repo, ref, timeout, headers=auth_headers)
+                    if selected_inspect is None:
+                        download_result = {"status": "fail", "error": "failed to prepare image metadata"}
+                    elif selected_inspect.get("error"):
+                        download_result = {"status": "fail", "error": str(selected_inspect.get("error"))}
+                    else:
+                        download_result = _download_image(
+                            host,
+                            port,
+                            timeout,
+                            headers=auth_headers,
+                            inspect_data=selected_inspect,
+                            download_dir=download_dir,
+                            console=console,
+                        )
+
+            return {
+                "timestamp": utc_now_iso(),
+                "host": host,
+                "port": port,
+                "is_registry": True,
+                "is_harbor": is_harbor,
+                "is_gitlab": is_gitlab,
+                "is_nexus": is_nexus,
+                "status": state,
+                "auth_required": auth_required if state != "unknown_auth" else None,
+                "provided_credentials": provided_credentials,
+                "provided_username": username,
+                "token_provided": token_provided,
+                "debug": debug,
+                "show_images": show_images,
+                "show_tags": show_tags,
+                "repository": repository_raw,
+                "tag": tag_raw,
+                "metadata": metadata,
+                "harbor": harbor,
+                "gitlab": gitlab,
+                "nexus": nexus,
+                "assets": assets,
+                "inspect": inspect,
+                "image": image_raw,
+                "download": download,
+                "image_count": len(image_refs or []),
+                # Keep full list only when it may be rendered/used directly.
+                "images": image_refs if (show_images or inspect or (download and image_raw is None)) else None,
+                "images_error": images_error,
+                "harbor_info": harbor_info,
+                "harbor_projects": harbor_projects,
+                "harbor_repositories": harbor_repositories,
+                "harbor_artifacts": harbor_artifacts,
+                "harbor_error": harbor_error,
+                "gitlab_info": gitlab_info,
+                "gitlab_error": gitlab_error,
+                "gitlab_repositories": gitlab_repositories,
+                "gitlab_repository_details": gitlab_repository_details,
+                "selected_repository_tags": selected_repository_tags,
+                "metadata_result": metadata_result,
+                "nexus_info": nexus_info,
+                "nexus_repositories": nexus_repositories,
+                "nexus_repository_details": nexus_repository_details,
+                "nexus_assets": nexus_assets_list,
+                "nexus_error": nexus_error,
+                "inspections": inspections,
+                "inspection_error": inspection_error,
+                "download_result": download_result,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "probe_status": status,
+                "error": None if state in {"open_no_auth", "valid_credentials"} else ("authentication required" if state == "auth_required" else None),
+            }
+        except (OSError, TimeoutError, ValueError) as exc:
+            last_error = _friendly_error_from_exception(exc)
+            if attempt >= attempts - 1:
+                break
+            time.sleep(_retry_delay(attempt))
+
+    return {
+        "timestamp": utc_now_iso(),
+        "host": host,
+        "port": port,
+        "is_registry": False,
+        "is_harbor": None,
+        "is_gitlab": None,
+        "is_nexus": None,
+        "status": "fail",
+        "auth_required": None,
+        "provided_credentials": provided_credentials,
+        "provided_username": username,
+        "token_provided": token_provided,
+        "debug": debug,
+        "show_images": show_images,
+        "show_tags": show_tags,
+        "repository": repository_raw,
+        "tag": tag_raw,
+        "metadata": metadata,
+        "harbor": harbor,
+        "gitlab": gitlab,
+        "nexus": nexus,
+        "assets": assets,
+        "inspect": inspect,
+        "image": image_raw,
+        "download": download,
+        "image_count": None,
+        "images": None,
+        "images_error": None,
+        "harbor_info": None,
+        "harbor_projects": None,
+        "harbor_repositories": None,
+        "harbor_artifacts": None,
+        "harbor_error": None,
+        "gitlab_info": None,
+        "gitlab_error": None,
+        "gitlab_repositories": None,
+        "gitlab_repository_details": None,
+        "selected_repository_tags": None,
+        "metadata_result": None,
+        "nexus_info": None,
+        "nexus_repositories": None,
+        "nexus_repository_details": None,
+        "nexus_assets": None,
+        "nexus_error": None,
+        "inspections": None,
+        "inspection_error": None,
+        "download_result": None,
+        "elapsed_ms": None,
+        "probe_status": None,
+        "error": last_error or "connection failed",
+    }
+
+
+def _nxc_prefix(record: dict[str, Any]) -> str:
+    host = _clip(str(record.get("host") or "-"), 64)
+    port = str(record.get("port") or "-")
+    return f"{'REGISTRY':<12}\t{host}\t{port}\t"
+
+
+def _with_optional_images(record: dict[str, Any], message: str) -> str:
+    image_count = record.get("image_count")
+    if isinstance(image_count, int):
+        return f"{message} (images:{image_count})"
+    return f"{message} (images:-)"
+
+
+def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
+    auth_required_value = record.get("auth_required")
+    auth_required_text = (
+        "True"
+        if auth_required_value is True
+        else "False"
+        if auth_required_value is False
+        else "unknown"
+    )
+
+    if output_format == "json":
+        return json.dumps(
+            {
+                "timestamp": record.get("timestamp"),
+                "type": "detect",
+                "host": record.get("host"),
+                "port": record.get("port"),
+                "service": "registry",
+                "detected": bool(record.get("is_registry")),
+                "auth_required": auth_required_value,
+            },
+            ensure_ascii=False,
+        )
+    service_label = "Docker Registry Service"
+    if record.get("is_gitlab") is True:
+        service_label = "GitLab Container Registry (Docker Registry v2)"
+    elif record.get("is_harbor") is True:
+        service_label = "Harbor Registry (Docker Registry v2)"
+    elif record.get("is_nexus") is True:
+        service_label = "Nexus Docker Registry (Docker Registry v2)"
+    return f"{_nxc_prefix(record)} [*] {service_label} (auth required:{auth_required_text})"
+
+
+def _format_record(record: dict[str, Any], output_format: str) -> str:
+    if output_format == "json":
+        return json.dumps(record, ensure_ascii=False)
+
+    prefix = _nxc_prefix(record)
+    status = str(record.get("status") or "fail")
+    err = _clip(str(record.get("error") or "-"), 96)
+
+    if status == "open_no_auth":
+        return _with_optional_images(record, f"{prefix} [+] no-auth access")
+
+    if status == "valid_credentials":
+        if record.get("token_provided"):
+            return _with_optional_images(record, f"{prefix} [+] token auth")
+        username = str(record.get("provided_username") or "user").strip() or "user"
+        return _with_optional_images(record, f"{prefix} [+] {username}")
+
+    if status == "auth_required":
+        if record.get("provided_credentials") or record.get("token_provided"):
+            line = f"{prefix} [-] authentication required (credentials invalid)"
+        else:
+            line = f"{prefix} [-] authentication required"
+        if err != "-":
+            return f"{line} err={err}"
+        return line
+
+    if status == "not_registry":
+        line = f"{prefix} [-] not a Docker Registry v2 endpoint"
+        probe_status = record.get("probe_status")
+        if isinstance(probe_status, int) and probe_status > 0:
+            return f"{line} (status:{probe_status})"
+        return line
+
+    if status == "unknown_auth":
+        line = f"{prefix} [!] auth status unknown"
+        if err != "-":
+            return f"{line} err={err}"
+        return line
+
+    line = f"{prefix} [!] connection failed"
+    if err != "-":
+        return f"{line} err={err}"
+    return line
+
+
+def _format_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    debug = bool(record.get("debug"))
+    is_registry = bool(record.get("is_registry"))
+    show_images = bool(record.get("show_images")) and is_registry
+    show_tags = bool(record.get("show_tags")) and is_registry
+    repository_raw = str(record.get("repository") or "").strip()
+    tag_raw = str(record.get("tag") or "").strip()
+    metadata_enabled = bool(record.get("metadata")) and is_registry
+    harbor = bool(record.get("harbor"))
+    gitlab = bool(record.get("gitlab"))
+    nexus = bool(record.get("nexus"))
+    assets_enabled = bool(record.get("assets")) and bool(record.get("nexus"))
+    inspect = bool(record.get("inspect"))
+    download = bool(record.get("download"))
+    image_raw = str(record.get("image") or "").strip()
+
+    images_raw = record.get("images")
+    images = [str(item) for item in images_raw] if isinstance(images_raw, list) else []
+    images_error = str(record.get("images_error") or "").strip()
+
+    harbor_info = record.get("harbor_info")
+    harbor_projects_raw = record.get("harbor_projects")
+    harbor_repositories_raw = record.get("harbor_repositories")
+    harbor_artifacts_raw = record.get("harbor_artifacts")
+    harbor_projects = [str(item) for item in harbor_projects_raw] if isinstance(harbor_projects_raw, list) else []
+    harbor_repositories = [str(item) for item in harbor_repositories_raw] if isinstance(harbor_repositories_raw, list) else []
+    harbor_artifacts = [str(item) for item in harbor_artifacts_raw] if isinstance(harbor_artifacts_raw, list) else []
+    harbor_error = str(record.get("harbor_error") or "").strip()
+    is_harbor = record.get("is_harbor")
+    gitlab_info = record.get("gitlab_info")
+    gitlab_error = str(record.get("gitlab_error") or "").strip()
+    gitlab_repositories_raw = record.get("gitlab_repositories")
+    gitlab_repositories = [str(item) for item in gitlab_repositories_raw] if isinstance(gitlab_repositories_raw, list) else []
+    gitlab_repository_details_raw = record.get("gitlab_repository_details")
+    gitlab_repository_details = [item for item in gitlab_repository_details_raw if isinstance(item, dict)] if isinstance(gitlab_repository_details_raw, list) else []
+    selected_repository_tags_raw = record.get("selected_repository_tags")
+    selected_repository_tags = [str(item) for item in selected_repository_tags_raw] if isinstance(selected_repository_tags_raw, list) else []
+    metadata_result = record.get("metadata_result") if isinstance(record.get("metadata_result"), dict) else None
+    is_gitlab = record.get("is_gitlab")
+    nexus_info = record.get("nexus_info")
+    nexus_repositories_raw = record.get("nexus_repositories")
+    nexus_repositories = [str(item) for item in nexus_repositories_raw] if isinstance(nexus_repositories_raw, list) else []
+    nexus_repository_details_raw = record.get("nexus_repository_details")
+    nexus_repository_details = [item for item in nexus_repository_details_raw if isinstance(item, dict)] if isinstance(nexus_repository_details_raw, list) else []
+    nexus_assets_raw = record.get("nexus_assets")
+    nexus_assets = [item for item in nexus_assets_raw if isinstance(item, dict)] if isinstance(nexus_assets_raw, list) else []
+    nexus_error = str(record.get("nexus_error") or "").strip()
+    is_nexus = record.get("is_nexus")
+
+    inspections_raw = record.get("inspections")
+    inspections = [item for item in inspections_raw if isinstance(item, dict)] if isinstance(inspections_raw, list) else []
+    inspection_error = str(record.get("inspection_error") or "").strip()
+
+    download_result = record.get("download_result") if isinstance(record.get("download_result"), dict) else None
+
+    if output_format == "json":
+        payloads: list[str] = []
+        if show_images:
+            payloads.append(
+                json.dumps(
+                    {
+                        "timestamp": record.get("timestamp"),
+                        "type": "images",
+                        "host": record.get("host"),
+                        "port": record.get("port"),
+                        "images": images,
+                        "error": images_error or None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        payloads.append(
+            json.dumps(
+                {
+                    "timestamp": record.get("timestamp"),
+                    "type": "harbor",
+                    "host": record.get("host"),
+                    "port": record.get("port"),
+                    "is_harbor": is_harbor,
+                    "deep": harbor,
+                    "info": harbor_info,
+                    "projects": harbor_projects,
+                    "repositories": harbor_repositories,
+                    "artifacts": harbor_artifacts,
+                    "error": harbor_error or None,
+                },
+                ensure_ascii=False,
+            )
+        )
+        payloads.append(
+            json.dumps(
+                {
+                    "timestamp": record.get("timestamp"),
+                    "type": "gitlab",
+                    "host": record.get("host"),
+                    "port": record.get("port"),
+                    "is_gitlab": is_gitlab,
+                    "deep": gitlab,
+                    "info": gitlab_info,
+                    "repositories": gitlab_repositories,
+                    "repository_details": gitlab_repository_details,
+                    "selected_repository_tags": selected_repository_tags if show_tags else None,
+                    "metadata": metadata_result if metadata_enabled else None,
+                    "error": gitlab_error or None,
+                },
+                ensure_ascii=False,
+            )
+        )
+        payloads.append(
+            json.dumps(
+                {
+                    "timestamp": record.get("timestamp"),
+                    "type": "nexus",
+                    "host": record.get("host"),
+                    "port": record.get("port"),
+                    "is_nexus": is_nexus,
+                    "deep": nexus,
+                    "info": nexus_info,
+                    "repositories": nexus_repositories,
+                    "repository_details": nexus_repository_details,
+                    "assets": nexus_assets if assets_enabled else None,
+                    "error": nexus_error or None,
+                },
+                ensure_ascii=False,
+            )
+        )
+        if inspect:
+            payloads.append(
+                json.dumps(
+                    {
+                        "timestamp": record.get("timestamp"),
+                        "type": "inspect",
+                        "host": record.get("host"),
+                        "port": record.get("port"),
+                        "image": image_raw or None,
+                        "inspections": inspections,
+                        "error": inspection_error or None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        if download and download_result is not None:
+            payloads.append(
+                json.dumps(
+                    {
+                        "timestamp": record.get("timestamp"),
+                        "type": "download",
+                        "host": record.get("host"),
+                        "port": record.get("port"),
+                        "result": download_result,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return payloads
+
+    prefix = _nxc_prefix(record)
+    lines: list[str] = []
+
+    if show_images:
+        lines.append(f"{prefix} [*] Show Images")
+        if images:
+            for item in images:
+                lines.append(f"{prefix} {item}")
+        elif images_error:
+            lines.append(f"{prefix} [-] {images_error}")
+        else:
+            lines.append(f"{prefix} <no images>")
+
+    show_harbor_presence = bool(is_registry or harbor or is_harbor is True or harbor_error)
+    if show_harbor_presence and is_harbor is True:
+        version = ""
+        if isinstance(harbor_info, dict):
+            version = str(harbor_info.get("harbor_version") or harbor_info.get("version") or "").strip()
+        if version:
+            lines.append(f"{prefix} [*] Harbor detected version={version}")
+        else:
+            lines.append(f"{prefix} [*] Harbor detected")
+        if harbor:
+            if harbor_projects:
+                lines.append(f"{prefix} [*] Harbor Projects")
+                for item in harbor_projects:
+                    lines.append(f"{prefix} {item}")
+            if harbor_repositories:
+                lines.append(f"{prefix} [*] Harbor Repositories")
+                for item in harbor_repositories:
+                    lines.append(f"{prefix} {item}")
+            if harbor_artifacts:
+                lines.append(f"{prefix} [*] Harbor Artifacts")
+                for item in harbor_artifacts:
+                    lines.append(f"{prefix} {item}")
+            if harbor_error:
+                lines.append(f"{prefix} [-] {harbor_error}")
+    elif show_harbor_presence and is_harbor is False:
+        if debug:
+            lines.append(f"{prefix} [*] Harbor API not detected")
+    elif show_harbor_presence and harbor_error:
+        lines.append(f"{prefix} [!] Harbor presence unknown: {harbor_error}")
+
+    show_gitlab_presence = bool(is_registry or gitlab or is_gitlab is True or gitlab_error)
+    if show_gitlab_presence and is_gitlab is True:
+        challenge_parts: list[str] = []
+        if isinstance(gitlab_info, dict):
+            service = str(gitlab_info.get("service") or "").strip()
+            realm = str(gitlab_info.get("realm") or "").strip()
+            if service:
+                challenge_parts.append(f"service={service}")
+            if realm:
+                challenge_parts.append(f"realm={realm}")
+        if challenge_parts:
+            lines.append(f"{prefix} [*] GitLab Container Registry detected ({', '.join(challenge_parts)})")
+        else:
+            lines.append(f"{prefix} [*] GitLab Container Registry detected")
+        if gitlab and isinstance(gitlab_info, dict):
+            probe_status = str(gitlab_info.get("token_probe_status") or "").strip()
+            if probe_status:
+                extra = ""
+                probe_http_status = gitlab_info.get("token_probe_http_status")
+                if isinstance(probe_http_status, int):
+                    extra = f" http={probe_http_status}"
+                lines.append(f"{prefix} [*] GitLab token probe status={probe_status}{extra}")
+            probe_error = str(gitlab_info.get("token_probe_error") or "").strip()
+            if probe_error:
+                lines.append(f"{prefix} [-] {probe_error}")
+            if gitlab_repository_details:
+                lines.append(f"{prefix} [*] GitLab Repositories")
+                for item in gitlab_repository_details:
+                    repo_name = str(item.get("repository") or "").strip() or "-"
+                    tags_count = item.get("tags_count")
+                    latest_tag = str(item.get("latest_tag") or "").strip() or "-"
+                    last_pushed = str(item.get("last_pushed") or "").strip() or "-"
+                    tags_count_text = str(tags_count) if isinstance(tags_count, int) else "-"
+                    lines.append(
+                        f"{prefix} {repo_name} (tags:{tags_count_text})(latest:{latest_tag})(last pushed:{last_pushed})"
+                    )
+            elif gitlab_repositories:
+                lines.append(f"{prefix} [*] GitLab Repositories")
+                for item in gitlab_repositories:
+                    lines.append(f"{prefix} {item}")
+            elif images_error:
+                lines.append(f"{prefix} [-] GitLab repositories unavailable: {images_error}")
+            else:
+                lines.append(f"{prefix} [*] GitLab Repositories")
+                lines.append(f"{prefix} <no repositories>")
+    elif show_gitlab_presence and is_gitlab is False:
+        if debug:
+            lines.append(f"{prefix} [*] GitLab Container Registry not detected")
+    elif show_gitlab_presence and gitlab_error:
+        lines.append(f"{prefix} [!] GitLab presence unknown: {gitlab_error}")
+
+    if show_tags and repository_raw:
+        lines.append(f"{prefix} [*] Show Tags {repository_raw}")
+        if selected_repository_tags:
+            for item in selected_repository_tags:
+                lines.append(f"{prefix} {item}")
+        elif images_error:
+            lines.append(f"{prefix} [-] {repository_raw}: {images_error}")
+        else:
+            lines.append(f"{prefix} <no tags>")
+
+    if metadata_enabled and repository_raw and tag_raw:
+        image_display = _display_image(repository_raw, tag_raw)
+        if metadata_result is None:
+            lines.append(f"{prefix} [-] Metadata unavailable for {image_display}")
+        else:
+            metadata_error = str(metadata_result.get("error") or "").strip()
+            if metadata_error:
+                lines.append(f"{prefix} [-] Metadata {image_display} err={metadata_error}")
+            else:
+                lines.append(f"{prefix} [*] Metadata {image_display}")
+                env_values = metadata_result.get("env")
+                if isinstance(env_values, list):
+                    lines.append(f"{prefix} [*] ENV")
+                    for env_item in env_values:
+                        lines.append(f"{prefix} {env_item}")
+                labels = metadata_result.get("labels")
+                if isinstance(labels, list):
+                    lines.append(f"{prefix} [*] Labels")
+                    for label_item in labels:
+                        lines.append(f"{prefix} {label_item}")
+                cmd_items = metadata_result.get("cmd")
+                if isinstance(cmd_items, list):
+                    lines.append(f"{prefix} [*] CMD")
+                    if cmd_items:
+                        lines.append(f"{prefix} {' '.join(str(item) for item in cmd_items)}")
+                    else:
+                        lines.append(f"{prefix} <empty>")
+                suspicious = metadata_result.get("suspicious")
+                if isinstance(suspicious, list) and suspicious:
+                    lines.append(f"{prefix} [!] Possible Secret Indicators")
+                    for suspicious_item in suspicious:
+                        lines.append(f"{prefix} {suspicious_item}")
+
+    show_nexus_presence = bool(is_registry or nexus or is_nexus is True or nexus_error)
+    if show_nexus_presence and is_nexus is True:
+        nexus_version = ""
+        if isinstance(nexus_info, dict):
+            nexus_version = str(
+                nexus_info.get("version")
+                or nexus_info.get("release")
+                or nexus_info.get("editionLong")
+                or ""
+            ).strip()
+        if nexus_version:
+            lines.append(f"{prefix} [*] Nexus Repository detected version={nexus_version}")
+        else:
+            lines.append(f"{prefix} [*] Nexus Repository detected")
+        if nexus:
+            if nexus_repository_details:
+                lines.append(f"{prefix} [*] Nexus Repositories")
+                for item in nexus_repository_details:
+                    repo_name = str(item.get("name") or "").strip() or "-"
+                    repo_type = str(item.get("type") or "").strip() or "-"
+                    online_raw = item.get("online")
+                    online_text = (
+                        "True" if online_raw is True else "False" if online_raw is False else "unknown"
+                    )
+                    components_raw = item.get("components")
+                    components_text = str(components_raw) if isinstance(components_raw, int) else "-"
+                    lines.append(
+                        f"{prefix} {repo_name} (type:{repo_type})(online:{online_text})(components:{components_text})"
+                    )
+            elif nexus_repositories:
+                lines.append(f"{prefix} [*] Nexus Repositories")
+                for item in nexus_repositories:
+                    lines.append(f"{prefix} {item}")
+            if assets_enabled:
+                lines.append(f"{prefix} [*] Nexus Assets")
+                if nexus_assets:
+                    for asset in nexus_assets:
+                        url = str(asset.get("download_url") or "").strip() or "-"
+                        checksums = asset.get("checksums")
+                        checksum_text = "-"
+                        if isinstance(checksums, dict) and checksums:
+                            for algo in ("sha256", "sha1", "md5"):
+                                value = str(checksums.get(algo) or "").strip()
+                                if value:
+                                    checksum_text = f"{algo}:{value}"
+                                    break
+                            if checksum_text == "-":
+                                first_key = sorted(checksums.keys())[0]
+                                checksum_text = f"{first_key}:{checksums[first_key]}"
+                        lines.append(f"{prefix} downloadUrl={url} checksum={checksum_text}")
+                else:
+                    lines.append(f"{prefix} <no assets>")
+            if nexus_error:
+                lines.append(f"{prefix} [-] {nexus_error}")
+    elif show_nexus_presence and is_nexus is False:
+        if debug:
+            lines.append(f"{prefix} [*] Nexus Repository not detected")
+    elif show_nexus_presence and nexus_error:
+        lines.append(f"{prefix} [!] Nexus presence unknown: {nexus_error}")
+
+    if inspect and is_registry:
+        if inspection_error:
+            lines.append(f"{prefix} [-] {inspection_error}")
+        if inspections:
+            for item in inspections:
+                image_name = str(item.get("image") or image_raw or "-")
+                error = str(item.get("error") or "").strip()
+                if error:
+                    lines.append(f"{prefix} [-] Inspect {image_name} err={error}")
+                    continue
+
+                layer_count = int(item.get("layer_count") or 0)
+                total_size = _human_bytes(int(item.get("total_size") or 0))
+                lines.append(f"{prefix} [*] Inspect {image_name} (layers:{layer_count})(size:{total_size})")
+
+                env_values = item.get("env")
+                if isinstance(env_values, list):
+                    lines.append(f"{prefix} [*] ENV")
+                    for env_item in env_values:
+                        lines.append(f"{prefix} {env_item}")
+
+                exposed_ports = item.get("exposed_ports")
+                if isinstance(exposed_ports, list):
+                    lines.append(f"{prefix} [*] Exposed Ports")
+                    for port_item in exposed_ports:
+                        lines.append(f"{prefix} {port_item}")
+
+                labels = item.get("labels")
+                if isinstance(labels, list):
+                    lines.append(f"{prefix} [*] Labels")
+                    for label_item in labels:
+                        lines.append(f"{prefix} {label_item}")
+
+                cmd_items = item.get("cmd")
+                if isinstance(cmd_items, list):
+                    lines.append(f"{prefix} [*] CMD")
+                    if cmd_items:
+                        lines.append(f"{prefix} {' '.join(str(part) for part in cmd_items)}")
+                    else:
+                        lines.append(f"{prefix} <empty>")
+
+                history = item.get("history")
+                if isinstance(history, list):
+                    lines.append(f"{prefix} [*] History")
+                    for history_item in history:
+                        lines.append(f"{prefix} {history_item}")
+
+                suspicious = item.get("suspicious")
+                if isinstance(suspicious, list) and suspicious:
+                    lines.append(f"{prefix} [!] Possible Secret Indicators")
+                    for suspicious_item in suspicious:
+                        lines.append(f"{prefix} {suspicious_item}")
+
+    if download and is_registry and download_result is not None:
+        status = str(download_result.get("status") or "").strip()
+        if status == "ok":
+            path = str(download_result.get("path") or "-")
+            size = _human_bytes(int(download_result.get("size") or 0))
+            lines.append(f"{prefix} [+] Download complete path={path} size={size}")
+        elif status == "skipped":
+            err = str(download_result.get("error") or "download skipped")
+            size = _human_bytes(int(download_result.get("size") or 0))
+            lines.append(f"{prefix} [-] Download skipped size={size} reason={err}")
+        else:
+            err = str(download_result.get("error") or "download failed")
+            lines.append(f"{prefix} [!] Download failed err={err}")
+
+    return lines
+
+
+def _render_colored_registry_line(console: Console, line: str) -> bool:
+    if not line.startswith("REGISTRY"):
+        return False
+
+    marker_default_color = {
+        "[*]": "cyan",
+        "[+]": "bright_green",
+        "[-]": "yellow",
+        "[!]": "red",
+    }
+
+    for marker in ("[!]", "[-]", "[+]", "[*]"):
+        token = f" {marker} "
+        if token not in line:
+            continue
+
+        left, right = line.split(token, 1)
+        tag = "REGISTRY"
+        rest = left[len(tag) :] if left.startswith(tag) else left
+
+        marker_color = marker_default_color[marker]
+
+        spans: list[tuple[int, int, str]] = []
+        auth_true = "(auth required:True)"
+        auth_false = "(auth required:False)"
+        auth_unknown = "(auth required:unknown)"
+
+        idx_true = right.find(auth_true)
+        if idx_true >= 0:
+            spans.append((idx_true, idx_true + len(auth_true), "bright_green"))
+        idx_false = right.find(auth_false)
+        if idx_false >= 0:
+            spans.append((idx_false, idx_false + len(auth_false), "red"))
+        idx_unknown = right.find(auth_unknown)
+        if idx_unknown >= 0:
+            spans.append((idx_unknown, idx_unknown + len(auth_unknown), "yellow"))
+
+        image_match = re.search(r"\(images:(\d+)\)", right)
+        if image_match:
+            image_value = image_match.group(1).strip()
+            if image_value.isdigit() and int(image_value) > 0:
+                spans.append((image_match.start(), image_match.end(), "red"))
+
+        if not spans:
+            right_colored = console._paint(right, "white", sys.stdout)
+        else:
+            chunks: list[str] = []
+            cursor = 0
+            for start, end, color in sorted(spans, key=lambda item: item[0]):
+                if start < cursor:
+                    continue
+                if start > cursor:
+                    chunks.append(console._paint(right[cursor:start], "white", sys.stdout))
+                chunks.append(console._paint(right[start:end], color, sys.stdout))
+                cursor = end
+            if cursor < len(right):
+                chunks.append(console._paint(right[cursor:], "white", sys.stdout))
+            right_colored = "".join(chunks)
+
+        tag_colored = console._paint(tag, "blue", sys.stdout)
+        rest_colored = console._paint(rest, "white", sys.stdout)
+        marker_colored = console._paint(marker, marker_color, sys.stdout)
+        console.plain(f"{tag_colored}{rest_colored} {marker_colored} {right_colored}")
+        return True
+
+    return False
+
+
+def _render_plain_registry_line(console: Console, line: str, *, suspicious: bool = False) -> bool:
+    color = "orange" if suspicious else "white"
+    return console.render_tagged_payload_line(line, "REGISTRY", payload_color=color)
+
+
+def _looks_like_registry_image_ref(line: str) -> bool:
+    parts = line.split("\t", 3)
+    if len(parts) < 4:
+        return False
+    value = parts[3].strip()
+    if not value or " " in value or "/" not in value:
+        return False
+    if value.endswith(":<untagged>"):
+        return True
+    if "@sha256:" in value:
+        return True
+    return ":" in value
+
+
+def _looks_like_registry_data_row(line: str) -> bool:
+    parts = line.split("\t", 3)
+    if len(parts) < 4:
+        return False
+    value = parts[3].strip()
+    if not value or value.startswith("<"):
+        return False
+    if value.startswith(("downloadUrl=", "checksum=")):
+        return True
+    if "(tags:" in value and "(latest:" in value:
+        return True
+    if "(type:" in value and "(online:" in value:
+        return True
+    # Plain repository names (e.g. gitlab/project-api) should also be highlighted.
+    if "/" in value and " " not in value and "(" not in value and not value.startswith("["):
+        return True
+    # Plain tags (e.g. 1.0.0, latest, v16.11.0) are data rows too.
+    if " " not in value and not value.startswith("[") and re.fullmatch(r"[A-Za-z0-9._:@+-]+", value):
+        return True
+    return False
+
+
+def audit_registry_targets(
+    *,
+    hosts: list[str],
+    port: int,
+    timeout: float,
+    retries: int,
+    workers: int,
+    username: str | None,
+    password: str | None,
+    token: str | None,
+    show_images: bool,
+    show_tags: bool,
+    repository: str | None,
+    tag: str | None,
+    metadata: bool,
+    harbor: bool,
+    gitlab: bool,
+    nexus: bool,
+    assets: bool,
+    inspect: bool,
+    image: str | None,
+    download: bool,
+    download_dir: str,
+    output_path: str | None,
+    output_format: str,
+    emit_line: Callable[[str], None],
+    logger: AttemptLogger | None,
+    console: Console,
+    debug: bool,
+    append_output: bool = False,
+) -> tuple[int, int, int, int, int, int]:
+    total = 0
+    open_no_auth = 0
+    valid = 0
+    auth_required = 0
+    not_registry = 0
+    failed = 0
+
+    out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8") if output_path else None
+    write_lock = None
+    if out_fh is not None:
+        import threading
+
+        write_lock = threading.Lock()
+
+    def write_output(line: str) -> None:
+        if out_fh is None:
+            return
+        assert write_lock is not None
+        with write_lock:
+            out_fh.write(line + "\n")
+            out_fh.flush()
+
+    try:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = {
+                pool.submit(
+                    _audit_registry_host,
+                    host,
+                    port,
+                    timeout,
+                    retries,
+                    username=username,
+                    password=password,
+                    token=token,
+                    show_images=show_images,
+                    show_tags=show_tags,
+                    repository=repository,
+                    tag=tag,
+                    metadata=metadata,
+                    harbor=harbor,
+                    gitlab=gitlab,
+                    nexus=nexus,
+                    assets=assets,
+                    inspect=inspect,
+                    image=image,
+                    download=download,
+                    download_dir=download_dir,
+                    console=console,
+                    debug=debug,
+                ): host
+                for host in hosts
+            }
+
+            for future in as_completed(futures):
+                record = future.result()
+                total += 1
+                state = str(record.get("status") or "")
+                if state == "open_no_auth":
+                    open_no_auth += 1
+                elif state == "valid_credentials":
+                    valid += 1
+                elif state == "auth_required":
+                    auth_required += 1
+                elif state == "not_registry":
+                    not_registry += 1
+                else:
+                    failed += 1
+
+                output_lines: list[str] = []
+                if bool(record.get("is_registry")):
+                    output_lines.append(_format_detect_record(record, output_format))
+                output_lines.append(_format_record(record, output_format))
+                output_lines.extend(_format_detail_records(record, output_format))
+
+                for line in output_lines:
+                    emit_line(line)
+                    write_output(line)
+
+                if logger is not None:
+                    logger.log(
+                        "registry",
+                        (str(record.get("host") or "-"), int(record.get("port") or 0)),
+                        status=record.get("status"),
+                        auth_required=record.get("auth_required"),
+                        image_count=record.get("image_count"),
+                        is_harbor=record.get("is_harbor"),
+                        is_gitlab=record.get("is_gitlab"),
+                        is_nexus=record.get("is_nexus"),
+                        error=record.get("error"),
+                    )
+    finally:
+        if out_fh is not None:
+            out_fh.close()
+
+    return total, open_no_auth, valid, auth_required, not_registry, failed
+
+
+def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
+    console = Console(debug=args.debug)
+
+    if args.timeout <= 0:
+        console.error("--timeout must be > 0")
+        return 2
+    if args.retries < 0:
+        console.error("--retries must be >= 0")
+        return 2
+    if bool(args.username) != bool(args.password):
+        console.error("--username and --password must be set together")
+        return 2
+    if args.token and (args.username or args.password):
+        console.error("use either --token or --username/--password, not both")
+        return 2
+    if args.show_tags and not str(args.repository or "").strip():
+        console.error("--show-tags requires --repository")
+        return 2
+    if str(args.tag or "").strip() and not str(args.repository or "").strip():
+        console.error("--tag requires --repository")
+        return 2
+    if args.metadata and (not str(args.repository or "").strip() or not str(args.tag or "").strip()):
+        console.error("--metadata requires --repository and --tag")
+        return 2
+    if args.assets and not args.nexus:
+        console.error("--assets requires --nexus")
+        return 2
+    if args.download and not str(args.image or "").strip():
+        console.error("--download requires --image")
+        return 2
+    try:
+        ports = collect_scan_ports(getattr(args, "ports", None))
+    except ValueError as exc:
+        console.error(f"failed to parse --port: {exc}")
+        return 2
+    if not ports:
+        ports = [int(args.port)]
+    if not args.images and not args.harbor and not args.gitlab and not args.nexus and not args.inspect and not args.download:
+        # Detection-only mode is valid; keep behavior explicit.
+        pass
+
+    targets = getattr(args, "targets", None) or getattr(args, "hosts", None)
+    hosts_file = getattr(args, "hosts_file", None)
+    if hosts_file:
+        targets = f"{targets},{hosts_file}" if targets else hosts_file
+
+    try:
+        hosts = collect_scan_targets(targets)
+    except (OSError, ValueError) as exc:
+        console.error(f"failed to parse targets: {exc}")
+        return 2
+
+    if not hosts:
+        console.error("registry requires -t/--targets")
+        return 2
+
+    stream_to_stdout = not bool(args.output)
+
+    def emit_line(line: str) -> None:
+        if args.output_format != "txt":
+            print(line, flush=True)
+            return
+        if line.startswith("REGISTRY") and all(token not in line for token in (" [*] ", " [+] ", " [-] ", " [!] ")):
+            suspicious = (
+                _SUSPICIOUS_TEXT_RE.search(line) is not None
+                or _looks_like_registry_image_ref(line)
+                or _looks_like_registry_data_row(line)
+            )
+            if _render_plain_registry_line(console, line, suspicious=suspicious):
+                return
+            console.plain(line, color="white")
+            return
+        if _render_colored_registry_line(console, line):
+            return
+        if args.debug:
+            console.plain(line)
+
+    if args.debug and stream_to_stdout and args.output_format == "txt":
+        mode_parts: list[str] = []
+        if args.username and args.password:
+            mode_parts.append("basic-auth")
+        if args.token:
+            mode_parts.append("bearer-token")
+        if args.images:
+            mode_parts.append("images")
+        if args.repository:
+            mode_parts.append(f"repository={args.repository}")
+        if args.show_tags:
+            mode_parts.append("show-tags")
+        if args.tag:
+            mode_parts.append(f"tag={args.tag}")
+        if args.metadata:
+            mode_parts.append("metadata")
+        if args.harbor:
+            mode_parts.append("harbor")
+        if args.gitlab:
+            mode_parts.append("gitlab")
+        if args.nexus:
+            mode_parts.append("nexus")
+        if args.assets:
+            mode_parts.append("assets")
+        if args.inspect:
+            mode_parts.append("inspect")
+        if args.image:
+            mode_parts.append(f"image={args.image}")
+        if args.download:
+            mode_parts.append("download")
+        mode = ",".join(mode_parts) if mode_parts else "detect-only"
+        console.info(
+            f"registry audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
+            f"workers={args.workers} retries={args.retries} mode={mode} format=txt"
+        )
+
+    if args.debug and not stream_to_stdout:
+        mode_parts = []
+        if args.username and args.password:
+            mode_parts.append("basic-auth")
+        if args.token:
+            mode_parts.append("bearer-token")
+        if args.images:
+            mode_parts.append("images")
+        if args.repository:
+            mode_parts.append(f"repository={args.repository}")
+        if args.show_tags:
+            mode_parts.append("show-tags")
+        if args.tag:
+            mode_parts.append(f"tag={args.tag}")
+        if args.metadata:
+            mode_parts.append("metadata")
+        if args.harbor:
+            mode_parts.append("harbor")
+        if args.gitlab:
+            mode_parts.append("gitlab")
+        if args.nexus:
+            mode_parts.append("nexus")
+        if args.assets:
+            mode_parts.append("assets")
+        if args.inspect:
+            mode_parts.append("inspect")
+        if args.image:
+            mode_parts.append(f"image={args.image}")
+        if args.download:
+            mode_parts.append("download")
+        mode = ",".join(mode_parts) if mode_parts else "detect-only"
+        console.info(
+            f"registry audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
+            f"workers={args.workers} retries={args.retries} mode={mode} "
+            f"format={args.output_format} output={args.output}"
+        )
+
+    total = 0
+    open_no_auth = 0
+    valid = 0
+    auth_required = 0
+    not_registry = 0
+    failed = 0
+    try:
+        for idx, audit_port in enumerate(ports):
+            part_total, part_open, part_valid, part_auth, part_not_registry, part_failed = audit_registry_targets(
+                hosts=hosts,
+                port=audit_port,
+                timeout=args.timeout,
+                retries=args.retries,
+                workers=args.workers,
+                username=args.username,
+                password=args.password,
+                token=args.token,
+                show_images=args.images,
+                show_tags=args.show_tags,
+                repository=args.repository,
+                tag=args.tag,
+                metadata=args.metadata,
+                harbor=args.harbor,
+                gitlab=args.gitlab,
+                nexus=args.nexus,
+                assets=args.assets,
+                inspect=args.inspect,
+                image=args.image,
+                download=args.download,
+                download_dir=args.download_dir,
+                output_path=args.output,
+                output_format=args.output_format,
+                emit_line=emit_line,
+                logger=logger if args.debug else None,
+                console=console,
+                debug=args.debug,
+                append_output=idx > 0,
+            )
+            total += part_total
+            open_no_auth += part_open
+            valid += part_valid
+            auth_required += part_auth
+            not_registry += part_not_registry
+            failed += part_failed
+    except OSError as exc:
+        console.error(f"failed to process registry output: {exc}")
+        return 2
+
+    if stream_to_stdout and total > 0 and open_no_auth == 0 and valid == 0 and auth_required == 0 and failed == total:
+        if args.output_format == "txt":
+            console.warn("all registry targets are unreachable; check host/port, network reachability, and service status")
+
+    if args.debug:
+        console.info(
+            f"registry audit complete: total={total} open={open_no_auth} valid={valid} "
+            f"auth_required={auth_required} not_registry={not_registry} fail={failed}"
+        )
+
+    return 0

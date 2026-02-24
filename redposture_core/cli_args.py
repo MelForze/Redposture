@@ -14,6 +14,7 @@ COMMAND_SCAN = "scan"
 COMMAND_TRIGGER = "trigger"
 COMMAND_COLLECT = "collect"
 COMMAND_REDIS = "redis"
+COMMAND_REGISTRY = "registry"
 COMMAND_POSTGRES = "postgres"
 COMMAND_ETCD = "etcd"
 COMMAND_GRAFANA = "grafana"
@@ -187,6 +188,16 @@ def _add_save_flag(parser: argparse.ArgumentParser | argparse._ArgumentGroup, he
     )
 
 
+def _add_multi_ports_flag(parser: argparse.ArgumentParser | argparse._ArgumentGroup) -> None:
+    parser.add_argument(
+        "--ports",
+        dest="ports",
+        default=None,
+        metavar="ports",
+        help=argparse.SUPPRESS,
+    )
+
+
 def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: bool = True) -> None:
     parser.add_argument(
         "-t",
@@ -245,6 +256,50 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         metavar="file",
         help=argparse.SUPPRESS,
     )
+
+
+def _normalize_multi_port_port_flag(raw_argv: list[str]) -> list[str]:
+    """Accept list/range/file syntax in --port by normalizing into hidden --ports."""
+    argv = list(raw_argv)
+    idx = 0
+    while idx < len(argv):
+        token = argv[idx]
+
+        if token == "--port" and idx + 1 < len(argv):
+            value = str(argv[idx + 1]).strip()
+            if value and not value.isdigit():
+                if "," in value or "-" in value:
+                    first = value.split(",", 1)[0].strip()
+                    if "-" in first:
+                        first = first.split("-", 1)[0].strip()
+                    if first.isdigit():
+                        argv[idx + 1] = first
+                        argv.insert(idx + 2, "--ports")
+                        argv.insert(idx + 3, value)
+                        idx += 4
+                        continue
+                argv[idx] = "--ports"
+                idx += 2
+                continue
+
+        if token.startswith("--port="):
+            value = token.split("=", 1)[1].strip()
+            if value and not value.isdigit():
+                first = value.split(",", 1)[0].strip()
+                if "-" in first:
+                    first = first.split("-", 1)[0].strip()
+                if ("," in value or "-" in value) and first.isdigit():
+                    argv[idx] = f"--port={first}"
+                    argv.insert(idx + 1, "--ports")
+                    argv.insert(idx + 2, value)
+                    idx += 3
+                    continue
+                argv[idx] = f"--ports={value}"
+                idx += 1
+                continue
+
+        idx += 1
+    return argv
 
 
 def _build_selfcert_option_parser() -> argparse.ArgumentParser:
@@ -393,8 +448,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
-            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Grafana/Kafka/ZooKeeper auditing. "
-            "Use one module command: exporters, grafana, kafka, postgres, redis, etcd, zookeeper. "
+            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Registry/Grafana/Kafka/ZooKeeper auditing. "
+            "Use one module command: exporters, registry, grafana, kafka, postgres, redis, etcd, zookeeper. "
             "Listener mode is available inside trigger via --with-listen."
         ),
     )
@@ -429,6 +484,132 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _configure_trigger_parser(exporters_trigger_parser)
 
+    registry_parser = subparsers.add_parser(
+        COMMAND_REGISTRY,
+        help="Audit Docker Registry v2 / Harbor / GitLab / Nexus exposure and image metadata.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    _add_output_flags(registry_parser)
+    _add_log_flag(registry_parser)
+    _add_scan_host_flags(registry_parser, include_profiles=False)
+    registry_parser.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=5000,
+        metavar="port",
+        help="Docker Registry port spec: single port, list/range, or file (examples: 5000, 5000,15000-15002, ./ports.txt).",
+    )
+    _add_multi_ports_flag(registry_parser)
+    registry_parser.add_argument(
+        "-u",
+        "--username",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Optional Registry/Harbor/GitLab/Nexus username for Basic auth.",
+    )
+    registry_parser.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Optional Registry/Harbor/GitLab/Nexus password for Basic auth.",
+    )
+    registry_parser.add_argument(
+        "--token",
+        dest="token",
+        default=None,
+        metavar="value",
+        help="Optional Bearer token for Registry/Harbor/GitLab API auth.",
+    )
+    registry_parser.add_argument(
+        "--images",
+        action="store_true",
+        help="List repositories/images from /v2/_catalog and tags (when accessible).",
+    )
+    registry_parser.add_argument(
+        "--repository",
+        dest="repository",
+        default=None,
+        metavar="name",
+        help="Repository name for targeted tag listing/metadata (example: gitlab/project-api).",
+    )
+    registry_parser.add_argument(
+        "--show-tags",
+        dest="show_tags",
+        action="store_true",
+        help="Show tags for --repository.",
+    )
+    registry_parser.add_argument(
+        "--tag",
+        dest="tag",
+        default=None,
+        metavar="name",
+        help="Tag name used with --repository for --metadata.",
+    )
+    registry_parser.add_argument(
+        "--metadata",
+        dest="metadata",
+        action="store_true",
+        help="Show config metadata (ENV/LABELS/CMD) for --repository + --tag.",
+    )
+    registry_parser.add_argument(
+        "--harbor",
+        action="store_true",
+        help="Enable Harbor API deep parsing (projects/repositories/artifacts).",
+    )
+    registry_parser.add_argument(
+        "--gitlab",
+        action="store_true",
+        help="Enable GitLab Container Registry deep parsing (Bearer challenge/token endpoint metadata).",
+    )
+    registry_parser.add_argument(
+        "--nexus",
+        action="store_true",
+        help="Enable Nexus Repository deep parsing (status/repositories via REST API).",
+    )
+    registry_parser.add_argument(
+        "--assets",
+        dest="assets",
+        action="store_true",
+        help="With --nexus, show asset downloadUrl and checksums for repository components.",
+    )
+    registry_parser.add_argument(
+        "--inspect",
+        action="store_true",
+        help="Inspect image metadata (ENV, exposed ports, labels, history).",
+    )
+    registry_parser.add_argument(
+        "--image",
+        dest="image",
+        default=None,
+        metavar="name",
+        help="Image reference for --inspect/--download (example: library/nginx:latest).",
+    )
+    registry_parser.add_argument(
+        "--download",
+        action="store_true",
+        help="Download image blobs for --image (asks confirmation when image size exceeds 100MB).",
+    )
+    registry_parser.add_argument(
+        "--download-dir",
+        dest="download_dir",
+        default="./registry_downloads",
+        metavar="dir",
+        help="Output directory for --download files.",
+    )
+    _add_save_flag(registry_parser, "Optional output file path. If omitted, results are printed to stdout.")
+    registry_parser.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="Registry audit output format for stdout/file.",
+    )
+
     grafana_parser = subparsers.add_parser(
         COMMAND_GRAFANA,
         help="Audit Grafana auth exposure and datasource access.",
@@ -443,8 +624,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=_port,
         default=3000,
         metavar="port",
-        help="Grafana HTTP port to audit.",
+        help="Grafana port spec: single port, list/range, or file (examples: 3000, 3000,3001, ./ports.txt).",
     )
+    _add_multi_ports_flag(grafana_parser)
     grafana_parser.add_argument(
         "-u",
         "--username",
@@ -520,8 +702,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=_port,
         default=5432,
         metavar="port",
-        help="Postgres TCP port to audit.",
+        help="Postgres port spec: single port, list/range, or file (examples: 5432, 5432,15432, ./ports.txt).",
     )
+    _add_multi_ports_flag(postgres_parser)
     postgres_parser.add_argument(
         "-d",
         "--database",
@@ -625,8 +808,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=_port,
         default=6379,
         metavar="port",
-        help="Redis TCP port to audit.",
+        help="Redis port spec: single port, list/range, or file (examples: 6379, 6379,16379, ./ports.txt).",
     )
+    _add_multi_ports_flag(redis_parser)
     redis_parser.add_argument(
         "-u",
         "--username",
@@ -691,8 +875,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=_port,
         default=2379,
         metavar="port",
-        help="etcd HTTP port to audit.",
+        help="etcd port spec: single port, list/range, or file (examples: 2379, 2379,22379, ./ports.txt).",
     )
+    _add_multi_ports_flag(etcd_parser)
     etcd_parser.add_argument(
         "--show-keys",
         action="store_true",
@@ -736,8 +921,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=_port,
         default=9092,
         metavar="port",
-        help="Kafka broker TCP port to audit.",
+        help="Kafka port spec: single port, list/range, or file (examples: 9092, 9092,29092, ./ports.txt).",
     )
+    _add_multi_ports_flag(kafka_parser)
     kafka_parser.add_argument(
         "-u",
         "--username",
@@ -767,9 +953,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show one topic detail by name (partition count / not found).",
     )
     kafka_parser.add_argument(
-        "--read-topic",
+        "--dump",
         action="store_true",
-        help="Read topic messages for --topic.",
+        help="Dump topic messages: with --topic dumps only that topic, otherwise dumps all topics.",
     )
     kafka_parser.add_argument(
         "--max-messages",
@@ -777,7 +963,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1000,
         metavar="count",
-        help="Maximum number of topic messages to read with --read-topic.",
+        help="Maximum number of topic messages to read per topic with --dump.",
     )
     _add_save_flag(kafka_parser, "Optional output file path. If omitted, results are printed to stdout.")
     kafka_parser.add_argument(
@@ -803,8 +989,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=_port,
         default=2181,
         metavar="port",
-        help="ZooKeeper TCP port to audit.",
+        help="ZooKeeper port spec: single port, list/range, or file (examples: 2181, 2181,22181, ./ports.txt).",
     )
+    _add_multi_ports_flag(zookeeper_parser)
     zookeeper_parser.add_argument(
         "--show-znodes",
         action="store_true",
@@ -847,6 +1034,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    raw_argv = _normalize_multi_port_port_flag(raw_argv)
     parser = build_parser()
 
     if not raw_argv:
@@ -877,6 +1065,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error("direct 'trigger' mode removed; use 'exporters trigger ...'")
 
     if raw_argv[0].startswith("-"):
-        parser.error("module command is required: exporters, grafana, kafka, postgres, redis, etcd, zookeeper, or --selfcert")
+        parser.error(
+            "module command is required: exporters, registry, grafana, kafka, postgres, redis, etcd, zookeeper, or --selfcert"
+        )
 
     return parser.parse_args(raw_argv)
