@@ -40,10 +40,10 @@ def test_exporters_scan_flags_are_parsed() -> None:
     assert args.ports == "9100,9115"
 
 
-def test_trigger_listener_defaults_have_tls_disabled() -> None:
+def test_trigger_listener_defaults_have_tls_enabled() -> None:
     args = parse_args(["exporters", "trigger", "-t", "10.0.0.1", "--callback-ip", "10.0.0.2"])
-    assert args.postgres_tls is False
-    assert args.proxmox_tls is False
+    assert args.postgres_tls is True
+    assert args.proxmox_tls is True
 
 
 def test_scan_flags_are_parsed() -> None:
@@ -134,8 +134,8 @@ def test_trigger_with_listen_flag_and_listener_defaults() -> None:
     assert args.redis_port == 6379
     assert args.proxmox_port == 8006
     assert args.blackbox_port == 9115
-    assert args.postgres_tls is False
-    assert args.proxmox_tls is False
+    assert args.postgres_tls is True
+    assert args.proxmox_tls is True
 
 
 def test_trigger_workers_and_retries_flags_are_parsed() -> None:
