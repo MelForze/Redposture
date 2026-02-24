@@ -398,6 +398,7 @@ def _audit_redis_host(
                     "default_credentials": default_credentials,
                     "provided_credentials": provided_credentials,
                     "provided_username": username,
+                    "provided_password": password if provided_credentials else None,
                     "provided_credentials_ok": provided_credentials_ok,
                     "defcreds_enabled": defcreds,
                     "default_credentials_attempted": default_credentials_attempted,
@@ -427,6 +428,7 @@ def _audit_redis_host(
         "default_credentials": None,
         "provided_credentials": provided_credentials,
         "provided_username": username,
+        "provided_password": password if provided_credentials else None,
         "provided_credentials_ok": None,
         "defcreds_enabled": defcreds,
         "default_credentials_attempted": False,
@@ -554,12 +556,16 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     if status == "valid_credentials":
         username = str(record.get("provided_username") or "default").strip() or "default"
-        return _with_optional_keys(record, f"{prefix} [+] {username}")
+        provided_password = record.get("provided_password")
+        password_text = "<empty>" if provided_password == "" else str(provided_password or "")
+        return _with_optional_keys(record, f"{prefix} [+] {username}:{password_text}")
 
     if status == "auth_required":
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "default").strip() or "default"
-            base = f"{prefix} [-] {username} invalid"
+            provided_password = record.get("provided_password")
+            password_text = "<empty>" if provided_password == "" else str(provided_password or "")
+            base = f"{prefix} [-] {username}:{password_text} invalid"
         elif record.get("default_credentials_attempted"):
             base = f"{prefix} [-] redis:redis invalid"
         else:

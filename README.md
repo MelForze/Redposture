@@ -8,6 +8,30 @@ RedPosture is a Python security CLI for:
 
 Use only on systems you own or are explicitly authorized to assess.
 
+## Modules by System Type
+
+Use this as a quick map before reading examples below:
+
+- Exporter workflows (discovery / trigger / collect):
+  - `exporters scan`
+  - `exporters trigger`
+  - `exporters collect`
+  - `--selfcert` (TLS listener helper for trigger/listen flows)
+- Databases / KV stores:
+  - `redis`
+  - `postgres`
+  - `etcd`
+- Messaging / coordination:
+  - `kafka`
+  - `zookeeper`
+- Observability platform:
+  - `grafana`
+- Container registries / artifact platforms:
+  - `registry --docker` (Docker Registry v2 / OCI)
+  - `registry --harbor`
+  - `registry --gitlab`
+  - `registry --nexus`
+
 ## Install
 
 `pipx` (recommended):
