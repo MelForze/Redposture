@@ -155,6 +155,7 @@ def collect_scan_ports(ports: str | None) -> list[int]:
 
     unique: list[int] = []
     seen: set[int] = set()
+    processed_files: set[str] = set()
 
     def _add_port(value: int) -> None:
         if value in seen:
@@ -165,6 +166,20 @@ def collect_scan_ports(ports: str | None) -> list[int]:
     def _consume_token(token: str) -> None:
         item = token.strip()
         if not item:
+            return
+
+        if os.path.isfile(item):
+            real = os.path.realpath(item)
+            if real in processed_files:
+                return
+            processed_files.add(real)
+            with open(real, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    clean = raw.split("#", 1)[0].strip()
+                    if not clean:
+                        continue
+                    for part in clean.split(","):
+                        _consume_token(part)
             return
 
         if "-" in item:

@@ -9,6 +9,7 @@ RedPosture is a Python security toolkit for:
 - auditing Redis exposure and weak/default credentials (`redis`)
 - auditing Postgres exposure, default credentials, and risky privileges (`postgres`)
 - auditing etcd API exposure, auth requirements, and key count (`etcd`)
+- auditing Docker Registry v2 / Harbor / GitLab Container Registry / Nexus Repository exposure, image listing, and metadata inspection (`registry`)
 - auditing Kafka broker auth exposure and topic visibility (`kafka`)
 - auditing ZooKeeper exposure, auth requirements, and znode visibility (`zookeeper`)
 - auditing Grafana auth exposure, default credentials, and datasource access (`grafana`)
@@ -42,6 +43,12 @@ Unified lab is provided via one compose file:
 - etcd labs are included:
   - open etcd with seeded keys on `2379`
   - auth-enabled etcd on `22379`
+- Registry labs are included:
+  - open Docker Registry v2 with seeded images on `15000`
+  - Basic-auth protected Registry proxy on `15001` (`registry:redposture`)
+  - Harbor-like API mock for `--harbor` parsing on `15002`
+  - GitLab Container Registry-like mock for `--gitlab` parsing on `15003`
+  - Nexus Repository-like mock for `--nexus` parsing on `15004`
 - Callback-friendly synthetic mirrors for core exporters are also exposed on high ports:
   `19100/19115/19121/19187/19221/19308`.
 
@@ -50,6 +57,8 @@ Start lab:
 ```bash
 docker compose -f docker-compose.lab.yml up -d --build
 ```
+
+The command above is enough: seed services run automatically and retry on failure until data is populated.
 
 Stop lab:
 
@@ -68,6 +77,14 @@ curl -s http://127.0.0.1:9308/debug/vars | head
 curl -s "http://127.0.0.1:9308/debug/pprof/cmdline?debug=1" | head
 curl -s "http://127.0.0.1:9121/scrape?target=127.0.0.1:6379" | head
 curl -s "http://127.0.0.1:9187/probe?target=127.0.0.1:5432" | head
+curl -s http://127.0.0.1:15000/v2/ | head
+curl -s http://127.0.0.1:15000/v2/_catalog | head
+curl -s -u registry:redposture http://127.0.0.1:15001/v2/_catalog | head
+curl -s http://127.0.0.1:15002/api/v2.0/systeminfo | head
+curl -s -i http://127.0.0.1:15003/v2/ | head
+curl -s http://127.0.0.1:15003/jwt/auth?service=container_registry\&scope=registry:catalog:* | head
+curl -s http://127.0.0.1:15004/service/rest/v1/status | head
+curl -s http://127.0.0.1:15004/service/rest/v1/repositories | head
 echo ruok | nc 127.0.0.1 2181
 curl -s http://127.0.0.1:2379/version
 curl -s http://127.0.0.1:2379/v2/keys?recursive=true | head
@@ -88,6 +105,13 @@ psql postgresql://postgres:postgres@127.0.0.1:5432/postgres -c "SELECT event_typ
 
 python3 redposture.py zookeeper -t 127.0.0.1 --show-znodes
 python3 redposture.py zookeeper -t 127.0.0.1 -znode /redposture/db/password --dump
+python3 redposture.py registry -t 127.0.0.1 --port 15000 --images
+python3 redposture.py registry -t 127.0.0.1 --port 15001 -u registry -p redposture --images
+python3 redposture.py registry -t 127.0.0.1 --port 15000 --inspect --image redposture/demo-api:latest
+python3 redposture.py registry -t 127.0.0.1 --port 15002 --harbor
+python3 redposture.py registry -t 127.0.0.1 --port 15003 --gitlab
+python3 redposture.py registry -t 127.0.0.1 --port 15004 --nexus
+python3 redposture.py registry -t 127.0.0.1 --port 15000,15002,15003,15004 --harbor --gitlab --nexus
 ```
 
 For `trigger` against real exporter containers, use:
@@ -443,18 +467,24 @@ Query one topic:
 redposture kafka -t ./ips.txt --topic orders
 ```
 
-Read topic messages:
+Dump one topic messages:
 
 ```bash
-redposture kafka -t ./ips.txt --topic orders --read-topic
+redposture kafka -t ./ips.txt --topic orders --dump
 ```
 
-`--read-topic` requires `--topic` and reads up to `--max-messages` (default: `1000`).
+Dump all topics messages:
+
+```bash
+redposture kafka -t ./ips.txt --dump
+```
+
+`--dump` reads up to `--max-messages` messages per topic (default: `1000`).
 
 Read more messages:
 
 ```bash
-redposture kafka -t ./ips.txt --topic orders --read-topic --max-messages 5000
+redposture kafka -t ./ips.txt --topic orders --dump --max-messages 5000
 ```
 
 Use non-default Kafka port and save output:
@@ -463,7 +493,53 @@ Use non-default Kafka port and save output:
 redposture kafka -t ./ips.txt --port 29092 --show-topics -f txt -o ./kafka_audit.txt
 ```
 
-### 9) Audit Grafana exposure
+### 9) Audit Docker Registry/Harbor exposure
+
+Detect open Docker Registry v2 API endpoint:
+
+```bash
+redposture registry -t ./ips.txt
+```
+
+Harbor presence check is always performed by default.
+
+List repositories/images (when registry is accessible):
+
+```bash
+redposture registry -t ./ips.txt --images
+```
+
+Authenticate with Basic auth:
+
+```bash
+redposture registry -t ./ips.txt -u registry -p 'redposture'
+```
+
+Authenticate with Bearer token:
+
+```bash
+redposture registry -t ./ips.txt --token 'eyJhbGciOi...'
+```
+
+Enable Harbor deep parsing (projects/repositories/artifacts):
+
+```bash
+redposture registry -t ./ips.txt --harbor
+```
+
+Inspect image metadata (`ENV`, exposed ports, labels, history):
+
+```bash
+redposture registry -t ./ips.txt --inspect --image redposture/demo-api:latest
+```
+
+Download image blobs (asks confirmation if image is bigger than 100MB):
+
+```bash
+redposture registry -t ./ips.txt --image redposture/demo-api:latest --download --download-dir ./registry_downloads
+```
+
+### 10) Audit Grafana exposure
 
 Detect Grafana, check whether auth is required, and fetch datasource list when accessible:
 
@@ -511,7 +587,7 @@ You can also override path/query for generated checks:
 redposture grafana -t ./ips.txt --defcreds --ssrf-target host.docker.internal --ssrf-port 19115 --ssrf-path /debug/vars
 ```
 
-### 10) Audit ZooKeeper exposure
+### 11) Audit ZooKeeper exposure
 
 Detect ZooKeeper and check whether auth is required:
 
@@ -565,10 +641,10 @@ redposture exporters scan -t ./ips.txt --profiles-file ./profiles.json
 
 - Runtime events are printed as readable colorized text.
 - Credential events are highlighted with `CRED` and include `user=` / `pass=`.
-- `scan`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, `zookeeper`, and `grafana` support both `txt` and `json` output via `-f/--format`.
-- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, `zookeeper`, and `grafana` support `--save` (alias of `--output`) to write results to file.
+- `scan`, `collect`, `redis`, `postgres`, `etcd`, `registry`, `kafka`, `zookeeper`, and `grafana` support both `txt` and `json` output via `-f/--format`.
+- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, `registry`, `kafka`, `zookeeper`, and `grafana` support `--save` (alias of `--output`) to write results to file.
 - all modules support `-log/--log <file>` to mirror console output into a log file.
-- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, `kafka`, `zookeeper`, and `grafana` support `--workers` and `--retries`.
+- `scan`, `trigger`, `collect`, `redis`, `postgres`, `etcd`, `registry`, `kafka`, `zookeeper`, and `grafana` support `--workers` and `--retries`.
 - `scan --ports/-p` probes custom port lists/ranges and maps hits to known exporters by marker signatures.
 - default `--timeout` is `1.0` second.
 - `redis` counts keys by default (`DBSIZE`); use `--show-keys` for key names only, `-key/--key` for one key+value, and `--dump` for all key+value pairs.
@@ -584,9 +660,18 @@ redposture exporters scan -t ./ips.txt --profiles-file ./profiles.json
 - `postgres -x/--execute` tries command execution via `COPY FROM PROGRAM` and prints output lines.
 - `postgres --os-shell` opens interactive command mode via `COPY FROM PROGRAM` (single target, text output only).
 - `etcd` checks API support (`api:v2`, `api:v3`), auth requirement, and key count when no auth is required; use `--show-keys` for names and `--dump` for `key:value`.
+- `registry` checks Docker Registry v2 detection, auth requirement, and highlights open registries in blue.
+- `registry --images` lists repositories/images from `/v2/_catalog` and tags.
+- `registry` always checks Harbor, GitLab Container Registry, and Nexus presence (`detected / not detected / unknown`).
+- `registry --harbor` enables deeper Harbor API parsing (projects/repositories/artifacts).
+- `registry --gitlab` enables deeper GitLab Container Registry parsing (Bearer challenge/token endpoint metadata) and prints accessible repositories.
+- `registry --nexus` enables deeper Nexus Repository parsing (`/service/rest/v1/status`, `/service/rest/v1/repositories`).
+- `registry --inspect` shows image metadata (`ENV`, exposed ports, labels, history), optionally limited by `--image`.
+- `registry --download --image <name>` downloads image blobs to local directory and asks confirmation for images larger than 100MB.
 - `kafka` checks broker detection, auth requirement, optional provided credentials (`-u/-p`, SASL/PLAIN), and topic visibility.
 - `kafka --show-topics` prints topic names after successful access/auth.
 - `kafka --topic <name>` prints one topic detail line with partition count or `<not found>`.
+- `kafka --dump` dumps messages: with `--topic` dumps one topic, without `--topic` dumps all discovered topics.
 - `zookeeper` checks service detection, auth requirement, and znode visibility.
 - `zookeeper --show-znodes` prints znode path names.
 - `zookeeper -znode/--znode <path>` prints one znode detail line.
@@ -624,6 +709,7 @@ redposture exporters scan --help
 redposture exporters collect --help
 redposture exporters trigger --help
 redposture grafana --help
+redposture registry --help
 redposture kafka --help
 redposture zookeeper --help
 redposture postgres --help

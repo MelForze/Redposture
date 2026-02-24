@@ -20,7 +20,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    restart: "no"
+    restart: on-failure
     command:
       - sh
       - -ceu
@@ -70,7 +70,7 @@ services:
     depends_on:
       zookeeper:
         condition: service_healthy
-    restart: "no"
+    restart: on-failure
     command:
       - bash
       - -ceu
@@ -168,7 +168,7 @@ services:
     depends_on:
       etcd:
         condition: service_healthy
-    restart: "no"
+    restart: on-failure
     command:
       - sh
       - -ceu
@@ -235,7 +235,7 @@ services:
     container_name: redposture-lab-etcd-auth-seed
     depends_on:
       - etcd-auth
-    restart: "no"
+    restart: on-failure
     command:
       - sh
       - -ceu
@@ -303,7 +303,7 @@ services:
     depends_on:
       kafka-open:
         condition: service_healthy
-    restart: "no"
+    restart: on-failure
     command:
       - bash
       - -ceu
@@ -399,7 +399,7 @@ services:
     depends_on:
       kafka-auth:
         condition: service_healthy
-    restart: "no"
+    restart: on-failure
     command:
       - bash
       - -ceu
@@ -442,6 +442,71 @@ services:
         EOF
         fi
         echo "[kafka-auth-seed] done"
+
+  registry-open:
+    image: registry:2
+    container_name: redposture-lab-registry-open
+    environment:
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+    volumes:
+      - registry-open-data:/var/lib/registry
+    ports:
+      - "15000:5000"
+    restart: unless-stopped
+
+  registry-seed:
+    image: python:3.12-alpine
+    container_name: redposture-lab-registry-seed
+    depends_on:
+      registry-open:
+        condition: service_started
+    restart: on-failure
+    command: ["python", "/seed/seed_registry.py"]
+    volumes:
+      - ./docker/registry/seed_registry.py:/seed/seed_registry.py:ro
+
+  registry-auth:
+    image: nginx:1.27-alpine
+    container_name: redposture-lab-registry-auth
+    depends_on:
+      registry-open:
+        condition: service_started
+    ports:
+      - "15001:5000"
+    volumes:
+      - ./docker/registry/nginx.registry-auth.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./docker/registry/registry.htpasswd:/etc/nginx/conf.d/registry.htpasswd:ro
+    restart: unless-stopped
+
+  harbor-mock:
+    image: python:3.12-alpine
+    container_name: redposture-lab-harbor-mock
+    command: ["python", "/app/harbor_mock.py"]
+    volumes:
+      - ./docker/registry/harbor_mock.py:/app/harbor_mock.py:ro
+    ports:
+      - "15002:8080"
+    restart: unless-stopped
+
+  gitlab-registry-mock:
+    image: python:3.12-alpine
+    container_name: redposture-lab-gitlab-registry-mock
+    command: ["python", "/app/gitlab_registry_mock.py"]
+    volumes:
+      - ./docker/registry/gitlab_registry_mock.py:/app/gitlab_registry_mock.py:ro
+    ports:
+      - "15003:5000"
+    restart: unless-stopped
+
+  nexus-mock:
+    image: python:3.12-alpine
+    container_name: redposture-lab-nexus-mock
+    command: ["python", "/app/nexus_mock.py"]
+    volumes:
+      - ./docker/registry/nexus_mock.py:/app/nexus_mock.py:ro
+    ports:
+      - "15004:8081"
+    restart: unless-stopped
 
   blackbox-exporter:
     image: prom/blackbox-exporter:v0.27.0
@@ -574,3 +639,4 @@ services:
 volumes:
   etcd-open-data:
   etcd-auth-data:
+  registry-open-data:

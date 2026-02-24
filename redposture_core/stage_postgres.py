@@ -19,7 +19,7 @@ from typing import Any, Callable
 
 from .console import Console
 from .logger import AttemptLogger
-from .utils import collect_scan_targets, utc_now_iso
+from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 
 _PG_PROTOCOL_VERSION = 196608
@@ -1449,6 +1449,7 @@ def audit_postgres_targets(
     output_format: str,
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
+    append_output: bool = False,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -1460,7 +1461,7 @@ def audit_postgres_targets(
     out_fh: Any = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        out_fh = open(output_path, "w", encoding="utf-8")
+        out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
@@ -1554,6 +1555,13 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.username and args.password is None:
         console.error("--password is required when --username is set")
         return 2
+    try:
+        ports = collect_scan_ports(getattr(args, "ports", None))
+    except ValueError as exc:
+        console.error(f"failed to parse --port: {exc}")
+        return 2
+    if not ports:
+        ports = [int(args.port)]
 
     targets = getattr(args, "targets", None) or getattr(args, "hosts", None)
     hosts_file = getattr(args, "hosts_file", None)
@@ -1581,7 +1589,9 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             print(line, flush=True)
             return
         if line.startswith("POSTGRES") and all(token not in line for token in (" [*] ", " [+] ", " [-] ", " [!] ")):
-            console.plain(line, color="orange")
+            if console.render_tagged_payload_line(line, "POSTGRES", payload_color="orange"):
+                return
+            console.plain(line, color="white")
             return
         if _render_colored_postgres_line(console, line):
             return
@@ -1630,11 +1640,15 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if len(hosts) != 1:
             console.error("--os-shell requires exactly one target host")
             return 2
+        if len(ports) != 1:
+            console.error("--os-shell requires exactly one port (use --port with a single value)")
+            return 2
 
         host = hosts[0]
+        shell_port = int(ports[0])
         record = _audit_postgres_host(
             host=host,
-            port=args.port,
+            port=shell_port,
             timeout=args.timeout,
             retries=args.retries,
             username=effective_username,
@@ -1696,7 +1710,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
             command_output, command_error = _pg_execute_remote_command(
                 host=host,
-                port=args.port,
+                port=shell_port,
                 timeout=args.timeout,
                 retries=args.retries,
                 username=shell_username,
@@ -1716,7 +1730,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             if args.debug:
                 logger.log(
                     "postgres",
-                    (host, int(args.port)),
+                    (host, shell_port),
                     phase="os_shell",
                     command=command,
                     execute_ok=command_error is None,
@@ -1732,7 +1746,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         else:
             mode = "detect-only"
         console.info(
-            f"postgres audit started: hosts={len(hosts)} port={args.port} timeout={args.timeout}s "
+            f"postgres audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} mode={mode} database={args.database} format=txt"
         )
     if args.debug and not stream_to_stdout:
@@ -1743,34 +1757,48 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         else:
             mode = "detect-only"
         console.info(
-            f"postgres audit started: hosts={len(hosts)} port={args.port} timeout={args.timeout}s "
+            f"postgres audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} mode={mode} database={args.database} "
             f"format={args.output_format} output={args.output}"
         )
 
+    total = 0
+    open_no_auth = 0
+    weak = 0
+    valid = 0
+    auth_required = 0
+    failed = 0
     try:
-        total, open_no_auth, weak, valid, auth_required, failed = audit_postgres_targets(
-            hosts=hosts,
-            port=args.port,
-            timeout=args.timeout,
-            retries=args.retries,
-            workers=args.workers,
-            username=effective_username,
-            password=args.password,
-            defcreds=args.defcreds,
-            database=args.database,
-            show_databases=args.show_databases,
-            show_tables=args.show_tables,
-            show_columns=show_columns,
-            table_targets=table_targets,
-            table_columns=table_columns,
-            dump_table_rows=dump_table_rows,
-            execute_command=execute_command,
-            output_path=args.output,
-            output_format=args.output_format,
-            emit_line=emit_line,
-            logger=logger if args.debug else None,
-        )
+        for idx, audit_port in enumerate(ports):
+            part_total, part_open, part_weak, part_valid, part_auth, part_failed = audit_postgres_targets(
+                hosts=hosts,
+                port=audit_port,
+                timeout=args.timeout,
+                retries=args.retries,
+                workers=args.workers,
+                username=effective_username,
+                password=args.password,
+                defcreds=args.defcreds,
+                database=args.database,
+                show_databases=args.show_databases,
+                show_tables=args.show_tables,
+                show_columns=show_columns,
+                table_targets=table_targets,
+                table_columns=table_columns,
+                dump_table_rows=dump_table_rows,
+                execute_command=execute_command,
+                output_path=args.output,
+                output_format=args.output_format,
+                emit_line=emit_line,
+                logger=logger if args.debug else None,
+                append_output=idx > 0,
+            )
+            total += part_total
+            open_no_auth += part_open
+            weak += part_weak
+            valid += part_valid
+            auth_required += part_auth
+            failed += part_failed
     except OSError as exc:
         console.error(f"failed to process postgres output: {exc}")
         return 2
