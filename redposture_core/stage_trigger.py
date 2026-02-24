@@ -83,10 +83,15 @@ def _with_listen_target_fmt(exporter: dict[str, Any], args: argparse.Namespace) 
     name = str(exporter.get("name") or "")
     trigger_path = str(exporter.get("trigger_path") or "").strip()
     exporter_name = name.strip().lower()
+    redis_port = int(getattr(args, "redis_port", 16379))
+    postgres_port = int(getattr(args, "postgres_port", 15432))
+    blackbox_port = int(getattr(args, "blackbox_port", 19115))
+    proxmox_port = int(getattr(args, "proxmox_port", 18006))
+    proxmox_tls = bool(getattr(args, "proxmox_tls", False))
     if exporter_name == "redis_exporter":
-        return f"{{our_host}}:{args.redis_port}"
+        return f"{{our_host}}:{redis_port}"
     if exporter_name == "postgres_exporter":
-        return f"postgresql://postgres:postgres@{{our_host}}:{args.postgres_port}/postgres?sslmode=disable"
+        return f"postgresql://postgres:postgres@{{our_host}}:{postgres_port}/postgres?sslmode=disable"
     if exporter_name == "blackbox_exporter":
         raw_target_fmt = str(exporter.get("target_fmt") or "").strip()
         parsed = urlparse(raw_target_fmt if "://" in raw_target_fmt else f"http://{raw_target_fmt}", scheme="http")
@@ -101,12 +106,12 @@ def _with_listen_target_fmt(exporter: dict[str, Any], args: argparse.Namespace) 
 
         path = parsed.path or ""
         query = f"?{parsed.query}" if parsed.query else ""
-        return f"{scheme}://{auth_prefix}{{our_host}}:{args.blackbox_port}{path}{query}"
+        return f"{scheme}://{auth_prefix}{{our_host}}:{blackbox_port}{path}{query}"
     if exporter_name == "proxmox_exporter":
         if trigger_path == "/pve":
-            return f"{{our_host}}:{args.proxmox_port}"
-        scheme = "https" if args.proxmox_tls else "http"
-        return f"{scheme}://{{our_host}}:{args.proxmox_port}/api2/json/access/ticket"
+            return f"{{our_host}}:{proxmox_port}"
+        scheme = "https" if proxmox_tls else "http"
+        return f"{scheme}://{{our_host}}:{proxmox_port}/api2/json/access/ticket"
     return None
 
 

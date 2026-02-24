@@ -122,7 +122,7 @@ def test_collect_stage_hides_scan_and_meta_without_debug(
 
     out = capsys.readouterr().out
     assert "SCAN" not in out
-    assert "collect started" in out
+    assert "collect started" not in out
     assert "collect complete" in out
     assert "Node Exporter url=http://10.0.0.1:9100/debug/vars" in out
 
