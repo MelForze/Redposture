@@ -96,6 +96,16 @@ def _non_negative_int(value: str) -> int:
     return number
 
 
+def _mirror_group_actions(group: object, *actions: argparse.Action) -> None:
+    # Help-only duplication: show shared actions under multiple sections without re-registering flags.
+    group_actions = getattr(group, "_group_actions", None)
+    if not isinstance(group_actions, list):
+        return
+    for action in actions:
+        if action not in group_actions:
+            group_actions.append(action)
+
+
 def _add_listener_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "-s",
@@ -488,11 +498,20 @@ def build_parser() -> argparse.ArgumentParser:
         COMMAND_REGISTRY,
         help="Audit Docker Registry v2 / Harbor / GitLab / Nexus exposure and image metadata.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Registry audit supports four modes: generic Docker Registry v2/OCI, Harbor, "
+            "GitLab Container Registry, and Nexus Repository. By default it performs minimal "
+            "detection and prints only the detected type + basic access status. "
+            "Use --harbor/--gitlab/--nexus for vendor API parsing, and use shared Docker/OCI "
+            "flags (--repository/--show-tags/--tag/--metadata/--inspect/--download) to inspect "
+            "image tags and config metadata on any compatible v2 registry endpoint."
+        ),
     )
-    _add_output_flags(registry_parser)
-    _add_log_flag(registry_parser)
-    _add_scan_host_flags(registry_parser, include_profiles=False)
-    registry_parser.add_argument(
+    registry_common = registry_parser.add_argument_group("Common")
+    _add_output_flags(registry_common)  # type: ignore[arg-type]
+    _add_log_flag(registry_common)
+    _add_scan_host_flags(registry_common, include_profiles=False)  # type: ignore[arg-type]
+    registry_common.add_argument(
         "--port",
         dest="port",
         type=_port,
@@ -500,108 +519,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="port",
         help="Docker Registry port spec: single port, list/range, or file (examples: 5000, 5000,15000-15002, ./ports.txt).",
     )
-    _add_multi_ports_flag(registry_parser)
-    registry_parser.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Optional Registry/Harbor/GitLab/Nexus username for Basic auth.",
-    )
-    registry_parser.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Optional Registry/Harbor/GitLab/Nexus password for Basic auth.",
-    )
-    registry_parser.add_argument(
-        "--token",
-        dest="token",
-        default=None,
-        metavar="value",
-        help="Optional Bearer token for Registry/Harbor/GitLab API auth.",
-    )
-    registry_parser.add_argument(
-        "--images",
-        action="store_true",
-        help="List repositories/images from /v2/_catalog and tags (when accessible).",
-    )
-    registry_parser.add_argument(
-        "--repository",
-        dest="repository",
-        default=None,
-        metavar="name",
-        help="Repository name for targeted tag listing/metadata (example: gitlab/project-api).",
-    )
-    registry_parser.add_argument(
-        "--show-tags",
-        dest="show_tags",
-        action="store_true",
-        help="Show tags for --repository.",
-    )
-    registry_parser.add_argument(
-        "--tag",
-        dest="tag",
-        default=None,
-        metavar="name",
-        help="Tag name used with --repository for --metadata.",
-    )
-    registry_parser.add_argument(
-        "--metadata",
-        dest="metadata",
-        action="store_true",
-        help="Show config metadata (ENV/LABELS/CMD) for --repository + --tag.",
-    )
-    registry_parser.add_argument(
-        "--harbor",
-        action="store_true",
-        help="Enable Harbor API deep parsing (projects/repositories/artifacts).",
-    )
-    registry_parser.add_argument(
-        "--gitlab",
-        action="store_true",
-        help="Enable GitLab Container Registry deep parsing (Bearer challenge/token endpoint metadata).",
-    )
-    registry_parser.add_argument(
-        "--nexus",
-        action="store_true",
-        help="Enable Nexus Repository deep parsing (status/repositories via REST API).",
-    )
-    registry_parser.add_argument(
-        "--assets",
-        dest="assets",
-        action="store_true",
-        help="With --nexus, show asset downloadUrl and checksums for repository components.",
-    )
-    registry_parser.add_argument(
-        "--inspect",
-        action="store_true",
-        help="Inspect image metadata (ENV, exposed ports, labels, history).",
-    )
-    registry_parser.add_argument(
-        "--image",
-        dest="image",
-        default=None,
-        metavar="name",
-        help="Image reference for --inspect/--download (example: library/nginx:latest).",
-    )
-    registry_parser.add_argument(
-        "--download",
-        action="store_true",
-        help="Download image blobs for --image (asks confirmation when image size exceeds 100MB).",
-    )
-    registry_parser.add_argument(
-        "--download-dir",
-        dest="download_dir",
-        default="./registry_downloads",
-        metavar="dir",
-        help="Output directory for --download files.",
-    )
-    _add_save_flag(registry_parser, "Optional output file path. If omitted, results are printed to stdout.")
-    registry_parser.add_argument(
+    _add_multi_ports_flag(registry_common)
+    _add_save_flag(registry_common, "Optional output file path. If omitted, results are printed to stdout.")
+    registry_common.add_argument(
         "-f",
         "--format",
         dest="output_format",
@@ -609,6 +529,159 @@ def build_parser() -> argparse.ArgumentParser:
         default="txt",
         help="Registry audit output format for stdout/file.",
     )
+
+    registry_common.add_argument(
+        "-u",
+        "--username",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Optional Registry/Harbor/GitLab/Nexus username for Basic auth.",
+    )
+    registry_common.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Optional Registry/Harbor/GitLab/Nexus password for Basic auth.",
+    )
+    registry_common.add_argument(
+        "--token",
+        dest="token",
+        default=None,
+        metavar="value",
+        help="Optional Bearer token for Registry/Harbor/GitLab API auth.",
+    )
+
+    registry_docker = registry_parser.add_argument_group(
+        "Docker / OCI (Registry v2)",
+        (
+            "Shared OCI content operations. These flags work with plain Docker Registry v2 and "
+            "also with vendor-backed Docker registry endpoints (Harbor/GitLab/Nexus Docker)."
+        ),
+    )
+    registry_docker.add_argument(
+        "--docker",
+        action="store_true",
+        help="Enable explicit Docker Registry v2/OCI mode (for clarity with vendor-specific flags).",
+    )
+    registry_images_action = registry_docker.add_argument(
+        "--images",
+        action="store_true",
+        help="List repositories/images from /v2/_catalog and tags (when accessible).",
+    )
+    registry_repository_action = registry_docker.add_argument(
+        "--repository",
+        dest="repository",
+        default=None,
+        metavar="name",
+        help="Repository name for targeted tag listing/metadata (example: gitlab/project-api).",
+    )
+    registry_show_tags_action = registry_docker.add_argument(
+        "--show-tags",
+        dest="show_tags",
+        action="store_true",
+        help="Show tags for --repository.",
+    )
+    registry_tag_action = registry_docker.add_argument(
+        "--tag",
+        dest="tag",
+        default=None,
+        metavar="name",
+        help="Tag name used with --repository for --metadata.",
+    )
+    registry_metadata_action = registry_docker.add_argument(
+        "--metadata",
+        dest="metadata",
+        action="store_true",
+        help="Show config metadata (ENV/LABELS/CMD) for --repository + --tag.",
+    )
+    registry_inspect_action = registry_docker.add_argument(
+        "--inspect",
+        action="store_true",
+        help="Inspect image metadata (ENV, exposed ports, labels, history).",
+    )
+    registry_image_action = registry_docker.add_argument(
+        "--image",
+        dest="image",
+        default=None,
+        metavar="name",
+        help="Image reference for --inspect/--download (example: library/nginx:latest).",
+    )
+    registry_download_action = registry_docker.add_argument(
+        "--download",
+        action="store_true",
+        help="Download image blobs for --image (asks confirmation when image size exceeds 100MB).",
+    )
+    registry_download_dir_action = registry_docker.add_argument(
+        "--download-dir",
+        dest="download_dir",
+        default="./registry_downloads",
+        metavar="dir",
+        help="Output directory for --download files.",
+    )
+
+    registry_harbor = registry_parser.add_argument_group(
+        "Harbor",
+        (
+            "Harbor API deep parsing for projects/repositories/artifacts. Combine with shared "
+            "Docker/OCI flags above (--repository/--show-tags/--tag/--metadata) to inspect "
+            "specific image tags."
+        ),
+    )
+    registry_harbor.add_argument(
+        "--harbor",
+        action="store_true",
+        help="Enable Harbor API deep parsing (projects/repositories/artifacts).",
+    )
+
+    registry_gitlab = registry_parser.add_argument_group(
+        "GitLab Container Registry",
+        (
+            "GitLab registry challenge/token endpoint probing and repository enumeration. "
+            "Combine with shared Docker/OCI flags above for tags/metadata on a selected repo "
+            "(typically with --token for API access)."
+        ),
+    )
+    registry_gitlab.add_argument(
+        "--gitlab",
+        action="store_true",
+        help="Enable GitLab Container Registry deep parsing (Bearer challenge/token endpoint metadata).",
+    )
+
+    registry_nexus = registry_parser.add_argument_group(
+        "Nexus Repository",
+        (
+            "Nexus REST API deep parsing for repositories/components. Use --assets to print "
+            "downloadUrl + checksums. Shared Docker/OCI flags above work against Nexus Docker "
+            "registry endpoints for tags and metadata."
+        ),
+    )
+    registry_nexus.add_argument(
+        "--nexus",
+        action="store_true",
+        help="Enable Nexus Repository deep parsing (status/repositories via REST API).",
+    )
+    registry_nexus.add_argument(
+        "--assets",
+        dest="assets",
+        action="store_true",
+        help="With --nexus, show asset downloadUrl and checksums for repository components.",
+    )
+    for vendor_group in (registry_harbor, registry_gitlab, registry_nexus):
+        _mirror_group_actions(
+            vendor_group,
+            registry_images_action,
+            registry_repository_action,
+            registry_show_tags_action,
+            registry_tag_action,
+            registry_metadata_action,
+            registry_inspect_action,
+            registry_image_action,
+            registry_download_action,
+            registry_download_dir_action,
+        )
 
     grafana_parser = subparsers.add_parser(
         COMMAND_GRAFANA,

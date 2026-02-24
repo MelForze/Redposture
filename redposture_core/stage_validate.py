@@ -590,11 +590,21 @@ def _render_validate_source_row(
 def _resolve_validate_summary_target(matches: list[dict[str, str | int]]) -> tuple[str, str]:
     if not matches:
         return "-", "-"
-    first = matches[0]
-    host = str(first.get("host") or "-")
-    port = str(first.get("port") or "-")
-    if host == "-":
-        return "-", "-"
+    hosts = {str(item.get("host") or "-") for item in matches if str(item.get("host") or "-") != "-"}
+    ports = {str(item.get("port") or "-") for item in matches if str(item.get("port") or "-") != "-"}
+    exporters = {str(item.get("exporter") or "-") for item in matches if str(item.get("exporter") or "-") != "-"}
+
+    if len(hosts) == 1:
+        host = next(iter(hosts))
+    else:
+        host = "-"
+
+    # Avoid misleading summaries like "VALIDATE ... 9116" when hits came from multiple exporters/ports.
+    if len(ports) == 1 and len(exporters) <= 1 and host != "-":
+        port = next(iter(ports))
+    else:
+        port = "-"
+
     return host, port
 
 
