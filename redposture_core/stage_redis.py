@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 from .console import Console
 from .logger import AttemptLogger
-from .utils import collect_scan_targets, utc_now_iso
+from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -684,6 +684,7 @@ def audit_redis_targets(
     output_format: str,
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
+    append_output: bool = False,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -695,7 +696,7 @@ def audit_redis_targets(
     out_fh: Any = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        out_fh = open(output_path, "w", encoding="utf-8")
+        out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
@@ -769,6 +770,13 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.username and args.password is None:
         console.error("--password is required when --username is set")
         return 2
+    try:
+        ports = collect_scan_ports(getattr(args, "ports", None))
+    except ValueError as exc:
+        console.error(f"failed to parse --port: {exc}")
+        return 2
+    if not ports:
+        ports = [int(args.port)]
 
     targets = getattr(args, "targets", None) or getattr(args, "hosts", None)
     hosts_file = getattr(args, "hosts_file", None)
@@ -793,7 +801,9 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             print(line, flush=True)
             return
         if line.startswith("REDIS") and all(token not in line for token in (" [*] ", " [+] ", " [-] ", " [!] ")):
-            console.plain(line, color="orange")
+            if console.render_tagged_payload_line(line, "REDIS", payload_color="orange"):
+                return
+            console.plain(line, color="white")
             return
         if _render_colored_redis_line(console, line):
             return
@@ -812,7 +822,7 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append(f"key={args.key}")
         mode = "+".join(mode_parts)
         console.info(
-            f"redis audit started: hosts={len(hosts)} port={args.port} timeout={args.timeout}s "
+            f"redis audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} mode={mode} format=txt"
         )
     if args.debug and not stream_to_stdout:
@@ -827,29 +837,43 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append(f"key={args.key}")
         mode = "+".join(mode_parts)
         console.info(
-            f"redis audit started: hosts={len(hosts)} port={args.port} timeout={args.timeout}s "
+            f"redis audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} mode={mode} "
             f"format={args.output_format} output={args.output}"
         )
 
+    total = 0
+    open_no_auth = 0
+    weak = 0
+    valid = 0
+    auth_required = 0
+    failed = 0
     try:
-        total, open_no_auth, weak, valid, auth_required, failed = audit_redis_targets(
-            hosts=hosts,
-            port=args.port,
-            timeout=args.timeout,
-            retries=args.retries,
-            workers=args.workers,
-            username=args.username,
-            password=args.password,
-            defcreds=args.defcreds,
-            show_keys=args.show_keys,
-            dump_keys=dump_keys_flag,
-            query_key=args.key,
-            output_path=args.output,
-            output_format=args.output_format,
-            emit_line=emit_line,
-            logger=logger if args.debug else None,
-        )
+        for idx, audit_port in enumerate(ports):
+            part_total, part_open, part_weak, part_valid, part_auth, part_failed = audit_redis_targets(
+                hosts=hosts,
+                port=audit_port,
+                timeout=args.timeout,
+                retries=args.retries,
+                workers=args.workers,
+                username=args.username,
+                password=args.password,
+                defcreds=args.defcreds,
+                show_keys=args.show_keys,
+                dump_keys=dump_keys_flag,
+                query_key=args.key,
+                output_path=args.output,
+                output_format=args.output_format,
+                emit_line=emit_line,
+                logger=logger if args.debug else None,
+                append_output=idx > 0,
+            )
+            total += part_total
+            open_no_auth += part_open
+            weak += part_weak
+            valid += part_valid
+            auth_required += part_auth
+            failed += part_failed
     except OSError as exc:
         console.error(f"failed to process redis output: {exc}")
         return 2

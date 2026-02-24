@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from .console import Console
 from .logger import AttemptLogger
-from .utils import collect_scan_targets, utc_now_iso
+from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 
 _ZK_PROTOCOL_VERSION = 0
@@ -820,6 +820,7 @@ def audit_zookeeper_targets(
     output_format: str,
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
+    append_output: bool = False,
 ) -> tuple[int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -829,7 +830,7 @@ def audit_zookeeper_targets(
     out_fh: Any = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        out_fh = open(output_path, "w", encoding="utf-8")
+        out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
@@ -904,6 +905,13 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.max_znodes <= 0:
         console.error("--max-znodes must be > 0")
         return 2
+    try:
+        ports = collect_scan_ports(getattr(args, "ports", None))
+    except ValueError as exc:
+        console.error(f"failed to parse --port: {exc}")
+        return 2
+    if not ports:
+        ports = [int(args.port)]
 
     targets = getattr(args, "targets", None) or getattr(args, "hosts", None)
     hosts_file = getattr(args, "hosts_file", None)
@@ -930,7 +938,9 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             print(line, flush=True)
             return
         if line.startswith("ZOOKEEPER") and all(token not in line for token in (" [*] ", " [+] ", " [-] ", " [!] ")):
-            console.plain(line, color="orange")
+            if console.render_tagged_payload_line(line, "ZOOKEEPER", payload_color="orange"):
+                return
+            console.plain(line, color="white")
             return
         if _render_colored_zookeeper_line(console, line):
             return
@@ -947,7 +957,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append(f"znode={query_znode}")
         mode = "+".join(mode_parts)
         console.info(
-            f"zookeeper audit started: hosts={len(hosts)} port={args.port} timeout={args.timeout}s "
+            f"zookeeper audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} max_znodes={args.max_znodes} "
             f"mode={mode} format=txt"
         )
@@ -961,27 +971,37 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append(f"znode={query_znode}")
         mode = "+".join(mode_parts)
         console.info(
-            f"zookeeper audit started: hosts={len(hosts)} port={args.port} timeout={args.timeout}s "
+            f"zookeeper audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} max_znodes={args.max_znodes} "
             f"mode={mode} format={args.output_format} output={args.output}"
         )
 
+    total = 0
+    open_no_auth = 0
+    auth_required = 0
+    failed = 0
     try:
-        total, open_no_auth, auth_required, failed = audit_zookeeper_targets(
-            hosts=hosts,
-            port=args.port,
-            timeout=args.timeout,
-            retries=args.retries,
-            workers=args.workers,
-            show_znodes=show_znodes,
-            dump=dump,
-            query_znode=query_znode,
-            max_znodes=args.max_znodes,
-            output_path=args.output,
-            output_format=args.output_format,
-            emit_line=emit_line,
-            logger=logger if args.debug else None,
-        )
+        for idx, audit_port in enumerate(ports):
+            part_total, part_open, part_auth, part_failed = audit_zookeeper_targets(
+                hosts=hosts,
+                port=audit_port,
+                timeout=args.timeout,
+                retries=args.retries,
+                workers=args.workers,
+                show_znodes=show_znodes,
+                dump=dump,
+                query_znode=query_znode,
+                max_znodes=args.max_znodes,
+                output_path=args.output,
+                output_format=args.output_format,
+                emit_line=emit_line,
+                logger=logger if args.debug else None,
+                append_output=idx > 0,
+            )
+            total += part_total
+            open_no_auth += part_open
+            auth_required += part_auth
+            failed += part_failed
     except OSError as exc:
         console.error(f"failed to process zookeeper output: {exc}")
         return 2

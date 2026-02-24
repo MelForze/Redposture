@@ -169,6 +169,8 @@ def test_redis_flags_are_parsed() -> None:
         "1",
         "--port",
         "6380",
+        "--ports",
+        "6379,6380,16379",
         "--username",
         "redis",
         "--password",
@@ -189,6 +191,7 @@ def test_redis_flags_are_parsed() -> None:
     assert args.workers == 8
     assert args.retries == 1
     assert args.port == 6380
+    assert args.ports == "6379,6380,16379"
     assert args.username == "redis"
     assert args.password == "redis"
     assert args.defcreds is True
@@ -245,6 +248,8 @@ def test_etcd_flags_are_parsed() -> None:
             "1",
             "--port",
             "22379",
+            "--ports",
+            "2379,22379",
             "--show-keys",
             "--dump",
             "-key",
@@ -261,6 +266,7 @@ def test_etcd_flags_are_parsed() -> None:
     assert args.workers == 8
     assert args.retries == 1
     assert args.port == 22379
+    assert args.ports == "2379,22379"
     assert args.show_keys is True
     assert args.dump is True
     assert args.key == "/redposture/env"
@@ -287,6 +293,109 @@ def test_etcd_show_keys_flag_is_parsed() -> None:
     assert args.dump is False
 
 
+def test_registry_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "registry",
+            "-t",
+            "10.0.0.41,10.0.0.42",
+            "--timeout",
+            "0.9",
+            "-w",
+            "6",
+            "-r",
+            "2",
+            "--port",
+            "5001",
+            "--ports",
+            "5000,5001,15000-15001",
+            "-u",
+            "robot$ci",
+            "-p",
+            "secret",
+            "--images",
+            "--repository",
+            "gitlab/project-api",
+            "--show-tags",
+            "--tag",
+            "latest",
+            "--metadata",
+            "--harbor",
+            "--gitlab",
+            "--nexus",
+            "--assets",
+            "--inspect",
+            "--image",
+            "library/nginx:latest",
+            "--download",
+            "--download-dir",
+            "./dl",
+            "-f",
+            "json",
+            "-o",
+            "registry_audit.jsonl",
+        ]
+    )
+    assert args.command == "registry"
+    assert args.targets == "10.0.0.41,10.0.0.42"
+    assert args.timeout == 0.9
+    assert args.workers == 6
+    assert args.retries == 2
+    assert args.port == 5001
+    assert args.ports == "5000,5001,15000-15001"
+    assert args.username == "robot$ci"
+    assert args.password == "secret"
+    assert args.images is True
+    assert args.repository == "gitlab/project-api"
+    assert args.show_tags is True
+    assert args.tag == "latest"
+    assert args.metadata is True
+    assert args.harbor is True
+    assert args.gitlab is True
+    assert args.nexus is True
+    assert args.assets is True
+    assert args.inspect is True
+    assert args.image == "library/nginx:latest"
+    assert args.download is True
+    assert args.download_dir == "./dl"
+    assert args.token is None
+    assert args.output_format == "json"
+    assert args.output == "registry_audit.jsonl"
+
+
+def test_registry_rejects_profiles_file_flag() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["registry", "-t", "10.0.0.9", "--profiles-file", "profiles.json"])
+    assert exc.value.code == 2
+
+
+def test_registry_token_flag_is_parsed() -> None:
+    args = parse_args(["registry", "-t", "10.0.0.9", "--token", "token-value"])
+    assert args.command == "registry"
+    assert args.token == "token-value"
+    assert args.gitlab is False
+    assert args.nexus is False
+    assert args.show_tags is False
+    assert args.metadata is False
+    assert args.assets is False
+
+
+def test_registry_port_list_in_port_flag_is_normalized() -> None:
+    args = parse_args(["registry", "-t", "10.0.0.9", "--port", "15000,15002"])
+    assert args.command == "registry"
+    assert args.port == 15000
+    assert args.ports == "15000,15002"
+
+
+def test_registry_port_file_in_port_flag_is_normalized(tmp_path) -> None:
+    ports_file = tmp_path / "ports.txt"
+    ports_file.write_text("15000\n15002\n", encoding="utf-8")
+    args = parse_args(["registry", "-t", "10.0.0.9", "--port", str(ports_file)])
+    assert args.command == "registry"
+    assert args.port == 5000
+    assert args.ports == str(ports_file)
+
+
 def test_kafka_flags_are_parsed() -> None:
     args = parse_args(
         [
@@ -301,6 +410,8 @@ def test_kafka_flags_are_parsed() -> None:
             "1",
             "--port",
             "19092",
+            "--ports",
+            "9092,19092,29092",
             "-u",
             "metrics",
             "-p",
@@ -308,7 +419,7 @@ def test_kafka_flags_are_parsed() -> None:
             "--show-topics",
             "--topic",
             "orders",
-            "--read-topic",
+            "--dump",
             "--max-messages",
             "5000",
             "-f",
@@ -323,11 +434,12 @@ def test_kafka_flags_are_parsed() -> None:
     assert args.workers == 8
     assert args.retries == 1
     assert args.port == 19092
+    assert args.ports == "9092,19092,29092"
     assert args.username == "metrics"
     assert args.password == "secret"
     assert args.show_topics is True
     assert args.topic == "orders"
-    assert args.read_topic is True
+    assert args.dump is True
     assert args.max_messages == 5000
     assert args.output_format == "json"
     assert args.output == "kafka_audit.jsonl"
@@ -337,6 +449,13 @@ def test_kafka_rejects_profiles_file_flag() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args(["kafka", "-t", "10.0.0.9", "--profiles-file", "profiles.json"])
     assert exc.value.code == 2
+
+
+def test_kafka_dump_without_topic_is_parsed() -> None:
+    args = parse_args(["kafka", "-t", "10.0.0.9", "--dump"])
+    assert args.command == "kafka"
+    assert args.dump is True
+    assert args.topic is None
 
 
 def test_zookeeper_flags_are_parsed() -> None:
@@ -353,6 +472,8 @@ def test_zookeeper_flags_are_parsed() -> None:
             "2",
             "--port",
             "22181",
+            "--ports",
+            "2181,22181",
             "--show-znodes",
             "--dump",
             "-znode",
@@ -371,6 +492,7 @@ def test_zookeeper_flags_are_parsed() -> None:
     assert args.workers == 6
     assert args.retries == 2
     assert args.port == 22181
+    assert args.ports == "2181,22181"
     assert args.show_znodes is True
     assert args.dump is True
     assert args.znode == "/brokers/ids/1"
@@ -405,6 +527,8 @@ def test_grafana_flags_are_parsed() -> None:
             "2",
             "--port",
             "3001",
+            "--ports",
+            "3000,3001",
             "-u",
             "admin",
             "-p",
@@ -429,6 +553,7 @@ def test_grafana_flags_are_parsed() -> None:
     assert args.workers == 6
     assert args.retries == 2
     assert args.port == 3001
+    assert args.ports == "3000,3001"
     assert args.username == "admin"
     assert args.password == "secret"
     assert args.defcreds is True
@@ -499,6 +624,8 @@ def test_postgres_flags_are_parsed() -> None:
             "1",
             "--port",
             "5433",
+            "--ports",
+            "5432,5433,15432",
             "--database",
             "appdb",
             "--username",
@@ -533,6 +660,7 @@ def test_postgres_flags_are_parsed() -> None:
     assert args.workers == 8
     assert args.retries == 1
     assert args.port == 5433
+    assert args.ports == "5432,5433,15432"
     assert args.database == "appdb"
     assert args.username == "postgres"
     assert args.password == "postgres"

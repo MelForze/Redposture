@@ -45,6 +45,36 @@ class Console:
             return
         print(message, file=out, flush=True)
 
+    def render_tagged_payload_line(
+        self,
+        line: str,
+        tag: str,
+        *,
+        payload_color: str = "white",
+        stream: TextIO | None = None,
+    ) -> bool:
+        out = stream or sys.stdout
+        if not line.startswith(tag):
+            return False
+        parts = line.split("\t", 3)
+        if len(parts) < 4:
+            return False
+
+        left = parts[0]
+        left_tail = left[len(tag) :] if left.startswith(tag) else left
+        host = parts[1]
+        port = parts[2]
+        payload = parts[3]
+
+        rendered = (
+            self._paint(tag, "blue", out)
+            + self._paint(left_tail, "white", out)
+            + self._paint(f"\t{host}\t{port}\t", "white", out)
+            + self._paint(payload, payload_color, out)
+        )
+        print(rendered, file=out, flush=True)
+        return True
+
     def info(self, message: str) -> None:
         self._line("[*]", message, "blue", sys.stdout)
 

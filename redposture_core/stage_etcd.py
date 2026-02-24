@@ -17,7 +17,7 @@ from typing import Any, Callable
 
 from .console import Console
 from .logger import AttemptLogger
-from .utils import collect_scan_targets, utc_now_iso
+from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -771,6 +771,7 @@ def audit_etcd_targets(
     output_format: str,
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
+    append_output: bool = False,
 ) -> tuple[int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -780,7 +781,7 @@ def audit_etcd_targets(
     out_fh: Any = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        out_fh = open(output_path, "w", encoding="utf-8")
+        out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
@@ -841,6 +842,13 @@ def run_etcd_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.retries < 0:
         console.error("--retries must be >= 0")
         return 2
+    try:
+        ports = collect_scan_ports(getattr(args, "ports", None))
+    except ValueError as exc:
+        console.error(f"failed to parse --port: {exc}")
+        return 2
+    if not ports:
+        ports = [int(args.port)]
 
     targets = getattr(args, "targets", None) or getattr(args, "hosts", None)
     hosts_file = getattr(args, "hosts_file", None)
@@ -867,7 +875,9 @@ def run_etcd_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             print(line, flush=True)
             return
         if line.startswith("ETCD") and all(token not in line for token in (" [*] ", " [+] ", " [-] ", " [!] ")):
-            console.plain(line, color="orange")
+            if console.render_tagged_payload_line(line, "ETCD", payload_color="orange"):
+                return
+            console.plain(line, color="white")
             return
         if _render_colored_etcd_line(console, line):
             return
@@ -876,30 +886,40 @@ def run_etcd_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug and stream_to_stdout and args.output_format == "txt":
         console.info(
-            f"etcd audit started: hosts={len(hosts)} port={args.port} timeout={args.timeout}s "
+            f"etcd audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} format=txt"
         )
     if args.debug and not stream_to_stdout:
         console.info(
-            f"etcd audit started: hosts={len(hosts)} port={args.port} timeout={args.timeout}s "
+            f"etcd audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} format={args.output_format} output={args.output}"
         )
 
+    total = 0
+    open_no_auth = 0
+    auth_required = 0
+    failed = 0
     try:
-        total, open_no_auth, auth_required, failed = audit_etcd_targets(
-            hosts=hosts,
-            port=args.port,
-            timeout=args.timeout,
-            retries=args.retries,
-            workers=args.workers,
-            show_keys=show_keys,
-            dump_keys=dump_keys,
-            query_key=query_key,
-            output_path=args.output,
-            output_format=args.output_format,
-            emit_line=emit_line,
-            logger=logger if args.debug else None,
-        )
+        for idx, audit_port in enumerate(ports):
+            part_total, part_open, part_auth, part_failed = audit_etcd_targets(
+                hosts=hosts,
+                port=audit_port,
+                timeout=args.timeout,
+                retries=args.retries,
+                workers=args.workers,
+                show_keys=show_keys,
+                dump_keys=dump_keys,
+                query_key=query_key,
+                output_path=args.output,
+                output_format=args.output_format,
+                emit_line=emit_line,
+                logger=logger if args.debug else None,
+                append_output=idx > 0,
+            )
+            total += part_total
+            open_no_auth += part_open
+            auth_required += part_auth
+            failed += part_failed
     except OSError as exc:
         console.error(f"failed to process etcd output: {exc}")
         return 2
