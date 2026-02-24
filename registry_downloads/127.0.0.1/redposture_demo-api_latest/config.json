@@ -1,0 +1,56 @@
+{
+  "created": "2026-02-20T00:00:00Z",
+  "architecture": "amd64",
+  "os": "linux",
+  "config": {
+    "Env": [
+      "APP_ENV=lab",
+      "APP_NAME=redposture-api",
+      "GIT_COMMIT=8f2c2a7",
+      "BUILD_TIME=2026-02-20T09:12:00Z",
+      "DB_PASSWORD=postgres",
+      "API_KEY=rp-api-key-2026"
+    ],
+    "Labels": {
+      "org.opencontainers.image.title": "redposture-demo-api",
+      "org.opencontainers.image.version": "2.0.1",
+      "org.opencontainers.image.revision": "8f2c2a7",
+      "org.opencontainers.image.source": "https://github.com/redposture/platform",
+      "ci.run_id": "843211",
+      "build.time": "2026-02-20T09:12:00Z"
+    },
+    "ExposedPorts": {
+      "8080/tcp": {},
+      "8443/tcp": {}
+    },
+    "WorkingDir": "/app",
+    "Cmd": [
+      "/app/redposture-api",
+      "--http=:8080"
+    ]
+  },
+  "rootfs": {
+    "type": "layers",
+    "diff_ids": [
+      "sha256:06b50829d05c7ac0183094d5755028f349dee3ecd91261672c94d09a85a72895"
+    ]
+  },
+  "history": [
+    {
+      "created": "2026-02-20T00:00:00Z",
+      "created_by": "ADD app/config/runtime.env /app/config/runtime.env"
+    },
+    {
+      "created": "2026-02-20T00:00:00Z",
+      "created_by": "ADD app/config/feature_flags.json /app/config/feature_flags.json"
+    },
+    {
+      "created": "2026-02-20T00:00:00Z",
+      "created_by": "RUN ./migrate && ./warmup-cache"
+    },
+    {
+      "created": "2026-02-20T00:00:00Z",
+      "created_by": "CMD [\"/app/redposture-api\",\"--http=:8080\"]"
+    }
+  ]
+}

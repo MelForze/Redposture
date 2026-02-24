@@ -241,12 +241,12 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             index_path = os.path.join(save_responses_dir, "index.jsonl")
             with open(index_path, "w", encoding="utf-8"):
                 pass
-        if args.debug and stream_to_stdout and args.output_format == "txt":
+        if stream_to_stdout and args.output_format == "txt":
             save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
             console.info(
                 f"collect complete: hosts={len(hosts)} checks={scan_checks} detected=0 requests=0 success=0{save_suffix}"
             )
-        if args.debug and not stream_to_stdout:
+        if not stream_to_stdout:
             save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
             console.info(
                 f"collect complete: hosts={len(hosts)} checks={scan_checks} detected=0 requests=0 success=0 "
@@ -270,20 +270,20 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 0
 
     if stream_to_stdout:
-        if args.debug and args.output_format == "txt":
+        if args.output_format == "txt":
             save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
             console.info(
                 f"collect complete: hosts={len(hosts)} checks={scan_checks} "
                 f"detected={scan_found} requests={requests} success={success}{save_suffix}"
             )
     else:
+        save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
+        console.info(
+            f"collect complete: hosts={len(hosts)} checks={scan_checks} detected={scan_found} "
+            f"requests={requests} success={success} "
+            f"format={args.output_format} output={args.output}{save_suffix}"
+        )
         if args.debug:
-            save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
-            console.info(
-                f"collect complete: hosts={len(hosts)} checks={scan_checks} detected={scan_found} "
-                f"requests={requests} success={success} "
-                f"format={args.output_format} output={args.output}{save_suffix}"
-            )
             console.debug("debug mode enabled; detailed collect events emitted in text logs")
     validate_rc = run_validation_records(
         collected_records,

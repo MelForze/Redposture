@@ -890,9 +890,7 @@ def _fetch_gitlab_info(
         or "gitlab" in marker_raw
     )
     if not header_is_gitlab:
-        # Fallback for valid-token flows where /v2/ returns 200 and omits WWW-Authenticate.
-        if not deep:
-            return None, "not gitlab"
+        # Fallback for flows where /v2/ returns 200 and omits WWW-Authenticate.
         probe_path = "/jwt/auth?service=container_registry&scope=registry:catalog:*"
         status, body, _probe_headers, error = _http_request(host, port, "GET", probe_path, timeout, headers=headers)
         if error:
@@ -908,8 +906,11 @@ def _fetch_gitlab_info(
             "service": "container_registry",
             "scope": "registry:catalog:*",
             "detected_by": "jwt_auth_probe",
-            "token_probe_http_status": status,
         }
+        if not deep:
+            return fallback_info, None
+
+        fallback_info["token_probe_http_status"] = status
         if status in {401, 403}:
             fallback_info["token_probe_status"] = "authentication required"
             return fallback_info, None
@@ -1221,6 +1222,7 @@ def _audit_registry_host(
     username: str | None,
     password: str | None,
     token: str | None,
+    docker: bool,
     show_images: bool,
     show_tags: bool,
     repository: str | None,
@@ -1346,6 +1348,7 @@ def _audit_registry_host(
                     "token_provided": token_provided,
                     "debug": debug,
                     "show_images": show_images,
+                    "docker": docker,
                     "show_tags": show_tags,
                     "repository": repository_raw,
                     "tag": tag_raw,
@@ -1608,8 +1611,9 @@ def _audit_registry_host(
                 "provided_username": username,
                 "token_provided": token_provided,
                 "debug": debug,
-                "show_images": show_images,
-                "show_tags": show_tags,
+                        "show_images": show_images,
+                        "docker": docker,
+                        "show_tags": show_tags,
                 "repository": repository_raw,
                 "tag": tag_raw,
                 "metadata": metadata,
@@ -1668,6 +1672,7 @@ def _audit_registry_host(
         "token_provided": token_provided,
         "debug": debug,
         "show_images": show_images,
+        "docker": docker,
         "show_tags": show_tags,
         "repository": repository_raw,
         "tag": tag_raw,
@@ -1813,6 +1818,9 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     inspect = bool(record.get("inspect"))
     download = bool(record.get("download"))
     image_raw = str(record.get("image") or "").strip()
+    targeted_repo_lookup = bool(repository_raw and (show_tags or metadata_enabled))
+    targeted_image_lookup = bool(image_raw and (inspect or download))
+    suppress_vendor_inventory = targeted_repo_lookup or targeted_image_lookup
 
     images_raw = record.get("images")
     images = [str(item) for item in images_raw] if isinstance(images_raw, list) else []
@@ -1967,7 +1975,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         else:
             lines.append(f"{prefix} <no images>")
 
-    show_harbor_presence = bool(is_registry or harbor or is_harbor is True or harbor_error)
+    show_harbor_presence = bool(harbor or (debug and (is_registry or is_harbor is True or harbor_error)))
     if show_harbor_presence and is_harbor is True:
         version = ""
         if isinstance(harbor_info, dict):
@@ -1976,7 +1984,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             lines.append(f"{prefix} [*] Harbor detected version={version}")
         else:
             lines.append(f"{prefix} [*] Harbor detected")
-        if harbor:
+        if harbor and not suppress_vendor_inventory:
             if harbor_projects:
                 lines.append(f"{prefix} [*] Harbor Projects")
                 for item in harbor_projects:
@@ -1989,15 +1997,15 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                 lines.append(f"{prefix} [*] Harbor Artifacts")
                 for item in harbor_artifacts:
                     lines.append(f"{prefix} {item}")
-            if harbor_error:
-                lines.append(f"{prefix} [-] {harbor_error}")
+        if harbor and harbor_error:
+            lines.append(f"{prefix} [-] {harbor_error}")
     elif show_harbor_presence and is_harbor is False:
         if debug:
             lines.append(f"{prefix} [*] Harbor API not detected")
     elif show_harbor_presence and harbor_error:
         lines.append(f"{prefix} [!] Harbor presence unknown: {harbor_error}")
 
-    show_gitlab_presence = bool(is_registry or gitlab or is_gitlab is True or gitlab_error)
+    show_gitlab_presence = bool(gitlab or (debug and (is_registry or is_gitlab is True or gitlab_error)))
     if show_gitlab_presence and is_gitlab is True:
         challenge_parts: list[str] = []
         if isinstance(gitlab_info, dict):
@@ -2022,7 +2030,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             probe_error = str(gitlab_info.get("token_probe_error") or "").strip()
             if probe_error:
                 lines.append(f"{prefix} [-] {probe_error}")
-            if gitlab_repository_details:
+            if not suppress_vendor_inventory and gitlab_repository_details:
                 lines.append(f"{prefix} [*] GitLab Repositories")
                 for item in gitlab_repository_details:
                     repo_name = str(item.get("repository") or "").strip() or "-"
@@ -2033,13 +2041,13 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     lines.append(
                         f"{prefix} {repo_name} (tags:{tags_count_text})(latest:{latest_tag})(last pushed:{last_pushed})"
                     )
-            elif gitlab_repositories:
+            elif not suppress_vendor_inventory and gitlab_repositories:
                 lines.append(f"{prefix} [*] GitLab Repositories")
                 for item in gitlab_repositories:
                     lines.append(f"{prefix} {item}")
-            elif images_error:
+            elif not suppress_vendor_inventory and images_error:
                 lines.append(f"{prefix} [-] GitLab repositories unavailable: {images_error}")
-            else:
+            elif not suppress_vendor_inventory:
                 lines.append(f"{prefix} [*] GitLab Repositories")
                 lines.append(f"{prefix} <no repositories>")
     elif show_gitlab_presence and is_gitlab is False:
@@ -2091,7 +2099,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     for suspicious_item in suspicious:
                         lines.append(f"{prefix} {suspicious_item}")
 
-    show_nexus_presence = bool(is_registry or nexus or is_nexus is True or nexus_error)
+    show_nexus_presence = bool(nexus or (debug and (is_registry or is_nexus is True or nexus_error)))
     if show_nexus_presence and is_nexus is True:
         nexus_version = ""
         if isinstance(nexus_info, dict):
@@ -2106,7 +2114,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         else:
             lines.append(f"{prefix} [*] Nexus Repository detected")
         if nexus:
-            if nexus_repository_details:
+            if not suppress_vendor_inventory and nexus_repository_details:
                 lines.append(f"{prefix} [*] Nexus Repositories")
                 for item in nexus_repository_details:
                     repo_name = str(item.get("name") or "").strip() or "-"
@@ -2120,7 +2128,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     lines.append(
                         f"{prefix} {repo_name} (type:{repo_type})(online:{online_text})(components:{components_text})"
                     )
-            elif nexus_repositories:
+            elif not suppress_vendor_inventory and nexus_repositories:
                 lines.append(f"{prefix} [*] Nexus Repositories")
                 for item in nexus_repositories:
                     lines.append(f"{prefix} {item}")
@@ -2317,6 +2325,12 @@ def _looks_like_registry_data_row(line: str) -> bool:
         return False
     if value.startswith(("downloadUrl=", "checksum=")):
         return True
+    if value.startswith(("COPY ", "RUN ", "CMD ", "ENTRYPOINT ", "WORKDIR ", "EXPOSE ")):
+        return True
+    if value.startswith("/") and " " in value:
+        return True
+    if "=" in value and not value.startswith("["):
+        return True
     if "(tags:" in value and "(latest:" in value:
         return True
     if "(type:" in value and "(online:" in value:
@@ -2340,6 +2354,7 @@ def audit_registry_targets(
     username: str | None,
     password: str | None,
     token: str | None,
+    docker: bool,
     show_images: bool,
     show_tags: bool,
     repository: str | None,
@@ -2395,6 +2410,7 @@ def audit_registry_targets(
                     username=username,
                     password=password,
                     token=token,
+                    docker=docker,
                     show_images=show_images,
                     show_tags=show_tags,
                     repository=repository,
@@ -2495,7 +2511,7 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
     if not ports:
         ports = [int(args.port)]
-    if not args.images and not args.harbor and not args.gitlab and not args.nexus and not args.inspect and not args.download:
+    if not args.docker and not args.images and not args.harbor and not args.gitlab and not args.nexus and not args.inspect and not args.download:
         # Detection-only mode is valid; keep behavior explicit.
         pass
 
@@ -2543,6 +2559,8 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append("bearer-token")
         if args.images:
             mode_parts.append("images")
+        if args.docker:
+            mode_parts.append("docker")
         if args.repository:
             mode_parts.append(f"repository={args.repository}")
         if args.show_tags:
@@ -2579,6 +2597,8 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append("bearer-token")
         if args.images:
             mode_parts.append("images")
+        if args.docker:
+            mode_parts.append("docker")
         if args.repository:
             mode_parts.append(f"repository={args.repository}")
         if args.show_tags:
@@ -2625,6 +2645,7 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 username=args.username,
                 password=args.password,
                 token=args.token,
+                docker=args.docker,
                 show_images=args.images,
                 show_tags=args.show_tags,
                 repository=args.repository,
