@@ -6,7 +6,8 @@ import contextlib
 import os
 import sys
 import threading
-from typing import Any, Iterator, TextIO
+from collections.abc import Iterator
+from typing import Any, TextIO
 
 from .cli_args import (
     COMMAND_COLLECT,
@@ -15,8 +16,8 @@ from .cli_args import (
     COMMAND_GRAFANA,
     COMMAND_KAFKA,
     COMMAND_POSTGRES,
-    COMMAND_REGISTRY,
     COMMAND_REDIS,
+    COMMAND_REGISTRY,
     COMMAND_SCAN,
     COMMAND_SELFCERT,
     COMMAND_TRIGGER,
@@ -29,8 +30,8 @@ from .stage_etcd import run_etcd_stage
 from .stage_grafana import run_grafana_stage
 from .stage_kafka import run_kafka_stage
 from .stage_postgres import run_postgres_stage
-from .stage_registry import run_registry_stage
 from .stage_redis import run_redis_stage
+from .stage_registry import run_registry_stage
 from .stage_scan import run_scan_stage
 from .stage_selfcert import run_selfcert_stage
 from .stage_trigger import run_trigger_stage

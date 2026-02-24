@@ -1,5 +1,7 @@
 """Grafana audit stage."""
+
 from __future__ import annotations
+
 import argparse
 import base64
 import ipaddress
@@ -12,8 +14,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, List
+from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
@@ -164,7 +167,7 @@ def _looks_like_grafana_health(status: int, body: str) -> tuple[bool, str | None
 
 
 def _auth_header(username: str, password: str) -> str:
-    raw = f"{username}:{password}".encode("utf-8")
+    raw = f"{username}:{password}".encode()
     token = base64.b64encode(raw).decode("ascii")
     return f"Basic {token}"
 
@@ -264,7 +267,7 @@ def _expand_ssrf_cidr_targets(token: str, max_hosts: int = 4096) -> list[str] | 
     return hosts
 
 
-def _normalize_check_urls(targets_str: str | None, ports_str: str | None, path_str: str | None = None) -> List[str]:
+def _normalize_check_urls(targets_str: str | None, ports_str: str | None, path_str: str | None = None) -> list[str]:
     if not targets_str:
         return []
 
@@ -567,7 +570,7 @@ def _audit_grafana_host(
     username: str | None,
     password: str | None,
     defcreds: bool,
-    check_urls: List[str] | None,
+    check_urls: list[str] | None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -628,12 +631,15 @@ def _audit_grafana_host(
             provided_credentials_ok: bool | None = None
             auth_header: str | None = None
 
-            def _try_candidates() -> None:
+            def _try_candidates(
+                candidates_local: list[tuple[str, str, str]] = candidates,
+                errors_local: list[str] = errors,
+            ) -> None:
                 nonlocal attempted_credentials, credentials_source, effective_username, effective_password
                 nonlocal default_credentials, provided_credentials_ok, auth_header
                 if effective_username is not None:
                     return
-                for cand_user, cand_pass, source in candidates:
+                for cand_user, cand_pass, source in candidates_local:
                     attempted_credentials += 1
                     ok, cred_error = _verify_credentials(host, port, timeout, cand_user, cand_pass)
                     if ok:
@@ -647,7 +653,7 @@ def _audit_grafana_host(
                             provided_credentials_ok = True
                         return
                     if cred_error:
-                        errors.append(cred_error)
+                        errors_local.append(cred_error)
 
             if provided_credentials:
                 provided_credentials_ok = False
@@ -660,7 +666,9 @@ def _audit_grafana_host(
             datasource_error: str | None = None
 
             if auth_required is False:
-                datasources, datasource_error, datasource_status = _fetch_datasources(host, port, timeout, auth_header=None)
+                datasources, datasource_error, datasource_status = _fetch_datasources(
+                    host, port, timeout, auth_header=None
+                )
                 if datasource_error and datasource_status in {401, 403}:
                     auth_required = True
                     _try_candidates()
@@ -871,9 +879,7 @@ def _format_datasources_detail_records(record: dict[str, Any], output_format: st
     prefix = _nxc_prefix(record)
     lines = [f"{prefix} [*] Dump Datasources"]
     for item in items:
-        lines.append(
-            f"{prefix} name={item['name']} type={item['type']} url={item['url']} access={item['access']}"
-        )
+        lines.append(f"{prefix} name={item['name']} type={item['type']} url={item['url']} access={item['access']}")
     return lines
 
 
@@ -1032,7 +1038,7 @@ def audit_grafana_targets(
     username: str | None,
     password: str | None,
     defcreds: bool,
-    check_urls: List[str] | None,
+    check_urls: list[str] | None,
     show_datasources: bool,
     output_path: str | None,
     output_format: str,
@@ -1230,8 +1236,17 @@ def run_grafana_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
 
     if stream_to_stdout:
-        if total > 0 and open_no_auth == 0 and valid == 0 and auth_required == 0 and failed == total and args.output_format == "txt":
-            console.warn("all grafana targets are unreachable; check host/port, network reachability, and service status")
+        if (
+            total > 0
+            and open_no_auth == 0
+            and valid == 0
+            and auth_required == 0
+            and failed == total
+            and args.output_format == "txt"
+        ):
+            console.warn(
+                "all grafana targets are unreachable; check host/port, network reachability, and service status"
+            )
 
     if args.debug:
         console.info(

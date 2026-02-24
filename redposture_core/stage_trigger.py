@@ -43,9 +43,10 @@ def _clip_text(value: str, width: int) -> str:
 def _render_trigger_row(console: Console, target: str, marker: str, body: str) -> None:
     marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "yellow", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(target, 64)
+    target_segment = "\t" + clipped_target + "\t-\t"
     line = (
         f"{console._paint('TRIGGER ', 'blue', sys.stdout)}"
-        f"{console._paint(f'\t{clipped_target}\t-\t', 'white', sys.stdout)}"
+        f"{console._paint(target_segment, 'white', sys.stdout)}"
         f" {console._paint(marker, marker_color, sys.stdout)} "
         f"{console._paint(body, 'white', sys.stdout)}"
     )
@@ -63,9 +64,10 @@ def _render_trigger_callback_row(
     marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "yellow", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(callback_target, 64)
     clipped_port = _clip_text(callback_port, 16)
+    target_segment = "\t" + clipped_target + "\t" + clipped_port + "\t"
     line = (
         f"{console._paint(f'{stage_tag:<8}', 'blue', sys.stdout)}"
-        f"{console._paint(f'\t{clipped_target}\t{clipped_port}\t', 'white', sys.stdout)}"
+        f"{console._paint(target_segment, 'white', sys.stdout)}"
         f" {console._paint(marker, marker_color, sys.stdout)} "
         f"{console._paint(exporter_name, 'white', sys.stdout)}"
     )
@@ -326,9 +328,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             )
         if args.debug:
             for item in trigger_exporters:
-                console.debug(
-                    f"trigger exporter={item.get('name')} target_fmt={item.get('target_fmt')}"
-                )
+                console.debug(f"trigger exporter={item.get('name')} target_fmt={item.get('target_fmt')}")
 
     if not args.with_listen:
         _run_trigger_requests(

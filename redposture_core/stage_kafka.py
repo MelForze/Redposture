@@ -10,13 +10,13 @@ import socket
 import struct
 import sys
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable
+from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
-
 
 KAFKA_CLIENT_ID = "redposture"
 KAFKA_API_VERSIONS = 18
@@ -160,7 +160,11 @@ def _encode_kafka_bytes(value: bytes) -> bytes:
 
 
 def _build_request_header(api_key: int, api_version: int, correlation_id: int, client_id: str) -> bytes:
-    return struct.pack(">hh", int(api_key), int(api_version)) + struct.pack(">i", int(correlation_id)) + _encode_kafka_string(client_id)
+    return (
+        struct.pack(">hh", int(api_key), int(api_version))
+        + struct.pack(">i", int(correlation_id))
+        + _encode_kafka_string(client_id)
+    )
 
 
 def _send_kafka_request(
@@ -191,7 +195,7 @@ class _KafkaReader:
         end = self._pos + size
         if end > len(self._data):
             raise ValueError("unexpected EOF while parsing Kafka response")
-        chunk = self._data[self._pos:end]
+        chunk = self._data[self._pos : end]
         self._pos = end
         return chunk
 
@@ -409,7 +413,9 @@ def _parse_list_offsets_response(payload: bytes, expected_correlation_id: int) -
         return None, f"invalid ListOffsets response: {exc}"
 
 
-def _build_fetch_request_body(topic: str, partition: int, offset: int, *, max_bytes: int = KAFKA_FETCH_MAX_BYTES) -> bytes:
+def _build_fetch_request_body(
+    topic: str, partition: int, offset: int, *, max_bytes: int = KAFKA_FETCH_MAX_BYTES
+) -> bytes:
     return (
         struct.pack(">i", -1)
         + struct.pack(">i", 300)
@@ -597,7 +603,7 @@ def _read_topic_messages(
                         break
 
             return out, None
-    except (ConnectionError, OSError, ValueError, socket.timeout) as exc:
+    except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
         return None, _friendly_error_from_exception(exc)
 
 
@@ -616,7 +622,11 @@ def _sasl_handshake_plain(sock: socket.socket, correlation_id: int) -> tuple[boo
             reader = _KafkaReader(payload)
             response_corr = reader.read_i32()
             if response_corr != correlation_id:
-                return False, correlation_id + 1, f"unexpected correlation id {response_corr} (expected {correlation_id})"
+                return (
+                    False,
+                    correlation_id + 1,
+                    f"unexpected correlation id {response_corr} (expected {correlation_id})",
+                )
             error_code = reader.read_i16()
             if error_code == 35:
                 continue
@@ -629,7 +639,9 @@ def _sasl_handshake_plain(sock: socket.socket, correlation_id: int) -> tuple[boo
     return False, correlation_id + 1, "SASL handshake failed: UNSUPPORTED_VERSION"
 
 
-def _sasl_authenticate_plain(sock: socket.socket, correlation_id: int, username: str, password: str) -> tuple[bool, int, str | None]:
+def _sasl_authenticate_plain(
+    sock: socket.socket, correlation_id: int, username: str, password: str
+) -> tuple[bool, int, str | None]:
     auth_bytes = b"\x00" + username.encode("utf-8") + b"\x00" + password.encode("utf-8")
 
     # Preferred modern flow: SASL_AUTHENTICATE request.
@@ -654,9 +666,13 @@ def _sasl_authenticate_plain(sock: socket.socket, correlation_id: int, username:
         if error_code == 0:
             return True, correlation_id + 1, None
         if error_code != 35:
-            detail = error_message.strip() if isinstance(error_message, str) and error_message.strip() else _kafka_error_name(int(error_code))
+            detail = (
+                error_message.strip()
+                if isinstance(error_message, str) and error_message.strip()
+                else _kafka_error_name(int(error_code))
+            )
             return False, correlation_id + 1, f"SASL auth failed: {detail}"
-    except (ValueError, struct.error, ConnectionError, OSError, socket.timeout):
+    except (TimeoutError, ValueError, struct.error, ConnectionError, OSError):
         pass
 
     # Legacy fallback: raw SASL bytes over size-prefixed frame.
@@ -683,7 +699,7 @@ def _sasl_authenticate_plain(sock: socket.socket, correlation_id: int, username:
                     text = body.decode("utf-8", errors="replace")
                     if _is_probable_auth_error(text):
                         return False, correlation_id, _clip(text, 96)
-    except socket.timeout:
+    except TimeoutError:
         pass
     except (ConnectionError, OSError, ValueError):
         # Some brokers may close the socket on auth failure; metadata verification below will fail.
@@ -728,7 +744,7 @@ def _authenticate_and_fetch_metadata(
             if bool(metadata.get("auth_required")):
                 return False, None, "authentication failed"
             return True, metadata, None
-    except (ConnectionError, OSError, ValueError, socket.timeout) as exc:
+    except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
         return False, None, _friendly_error_from_exception(exc)
 
 
@@ -882,7 +898,7 @@ def _audit_kafka_via_sasl_fallback(
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "error": error,
             }
-    except (ConnectionError, OSError, ValueError, socket.timeout):
+    except (TimeoutError, ConnectionError, OSError, ValueError):
         return None
 
 
@@ -950,7 +966,12 @@ def _audit_kafka_host(
                         "topic_messages": None,
                         "topic_read_error": None,
                         "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        "error": api_error or (f"ApiVersions failed ({_kafka_error_name(int(api_error_code))})" if api_error_code is not None else "service is not kafka"),
+                        "error": api_error
+                        or (
+                            f"ApiVersions failed ({_kafka_error_name(int(api_error_code))})"
+                            if api_error_code is not None
+                            else "service is not kafka"
+                        ),
                     }
 
                 metadata, metadata_error = _fetch_metadata(sock, correlation, topics=None)
@@ -966,7 +987,13 @@ def _audit_kafka_host(
                     else:
                         error_codes = metadata.get("error_codes")
                         if isinstance(error_codes, list) and error_codes:
-                            names = sorted({_kafka_error_name(int(code)) for code in error_codes if int(code) in KAFKA_AUTH_ERROR_CODES})
+                            names = sorted(
+                                {
+                                    _kafka_error_name(int(code))
+                                    for code in error_codes
+                                    if int(code) in KAFKA_AUTH_ERROR_CODES
+                                }
+                            )
                             if names:
                                 error_parts.append(f"auth errors: {','.join(names)}")
                 else:
@@ -979,7 +1006,9 @@ def _audit_kafka_host(
 
                 provided_credentials_ok: bool | None = None
                 if (auth_required is True or auth_required is None) and provided_credentials and username and password:
-                    auth_ok, auth_metadata, auth_error = _authenticate_and_fetch_metadata(host, port, timeout, username, password)
+                    auth_ok, auth_metadata, auth_error = _authenticate_and_fetch_metadata(
+                        host, port, timeout, username, password
+                    )
                     provided_credentials_ok = auth_ok
                     if auth_ok and auth_metadata is not None:
                         auth_required = True
@@ -1078,7 +1107,7 @@ def _audit_kafka_host(
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": error,
                 }
-        except (ConnectionError, OSError, ValueError, socket.timeout) as exc:
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             last_error = _friendly_error_from_exception(exc)
             if _is_sasl_probe_candidate(last_error):
                 fallback_record = _audit_kafka_via_sasl_fallback(
@@ -1142,11 +1171,7 @@ def _with_optional_topics(record: dict[str, Any], message: str) -> str:
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required_value = record.get("auth_required")
     auth_required_text = (
-        "True"
-        if auth_required_value is True
-        else "False"
-        if auth_required_value is False
-        else "unknown"
+        "True" if auth_required_value is True else "False" if auth_required_value is False else "unknown"
     )
     if output_format == "json":
         return json.dumps(
@@ -1208,7 +1233,9 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
     dump = bool(record.get("dump"))
     max_messages = int(record.get("max_messages") or 0)
     topic_messages_raw = record.get("topic_messages")
-    topic_messages: list[str] = [str(item) for item in topic_messages_raw] if isinstance(topic_messages_raw, list) else []
+    topic_messages: list[str] = (
+        [str(item) for item in topic_messages_raw] if isinstance(topic_messages_raw, list) else []
+    )
     topic_read_error = str(record.get("topic_read_error") or "").strip()
 
     topics = record.get("topics")
@@ -1661,7 +1688,14 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
 
     if stream_to_stdout:
-        if total > 0 and open_no_auth == 0 and valid == 0 and auth_required == 0 and failed == total and args.output_format == "txt":
+        if (
+            total > 0
+            and open_no_auth == 0
+            and valid == 0
+            and auth_required == 0
+            and failed == total
+            and args.output_format == "txt"
+        ):
             console.warn("all kafka targets are unreachable; check host/port, network reachability, and service status")
 
     if args.debug:

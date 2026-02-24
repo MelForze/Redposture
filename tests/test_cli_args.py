@@ -12,7 +12,20 @@ def test_parse_args_without_args_shows_help_and_exits_cleanly() -> None:
 
 
 def test_trigger_with_listen_flag_parses_listener_options() -> None:
-    args = parse_args(["exporters", "trigger", "-t", "10.0.0.1", "--callback-ip", "10.0.0.2", "--redis-port", "16379", "--postgres-tls", "--with-listen"])
+    args = parse_args(
+        [
+            "exporters",
+            "trigger",
+            "-t",
+            "10.0.0.1",
+            "--callback-ip",
+            "10.0.0.2",
+            "--redis-port",
+            "16379",
+            "--postgres-tls",
+            "--with-listen",
+        ]
+    )
     assert args.command == COMMAND_EXPORTERS
     assert args.exporters_action == "trigger"
     assert args.redis_port == 16379
@@ -34,26 +47,28 @@ def test_trigger_listener_defaults_have_tls_disabled() -> None:
 
 
 def test_scan_flags_are_parsed() -> None:
-    args = parse_args([
-        "exporters",
-        "scan",
-        "-t",
-        "10.0.0.1,10.0.0.2",
-        "--timeout",
-        "1.5",
-        "-w",
-        "12",
-        "-r",
-        "3",
-        "--profiles-file",
-        "profiles.json",
-        "-f",
-        "json",
-        "-o",
-        "scan.jsonl",
-        "-p",
-        "9100,9115,9200-9202",
-    ])
+    args = parse_args(
+        [
+            "exporters",
+            "scan",
+            "-t",
+            "10.0.0.1,10.0.0.2",
+            "--timeout",
+            "1.5",
+            "-w",
+            "12",
+            "-r",
+            "3",
+            "--profiles-file",
+            "profiles.json",
+            "-f",
+            "json",
+            "-o",
+            "scan.jsonl",
+            "-p",
+            "9100,9115,9200-9202",
+        ]
+    )
     assert args.command == COMMAND_EXPORTERS
     assert args.exporters_action == "scan"
     assert args.targets == "10.0.0.1,10.0.0.2"
@@ -157,34 +172,36 @@ def test_trigger_with_optional_callback_dns_flag() -> None:
 
 
 def test_redis_flags_are_parsed() -> None:
-    args = parse_args([
-        "redis",
-        "-t",
-        "10.0.0.7,10.0.0.8",
-        "--timeout",
-        "0.8",
-        "-w",
-        "8",
-        "-r",
-        "1",
-        "--port",
-        "6380",
-        "--ports",
-        "6379,6380,16379",
-        "--username",
-        "redis",
-        "--password",
-        "redis",
-        "--defcreds",
-        "--show-keys",
-        "--dump",
-        "-key",
-        "session:admin",
-        "-f",
-        "json",
-        "-o",
-        "redis_audit.jsonl",
-    ])
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "10.0.0.7,10.0.0.8",
+            "--timeout",
+            "0.8",
+            "-w",
+            "8",
+            "-r",
+            "1",
+            "--port",
+            "6380",
+            "--ports",
+            "6379,6380,16379",
+            "--username",
+            "redis",
+            "--password",
+            "redis",
+            "--defcreds",
+            "--show-keys",
+            "--dump",
+            "-key",
+            "session:admin",
+            "-f",
+            "json",
+            "-o",
+            "redis_audit.jsonl",
+        ]
+    )
     assert args.command == "redis"
     assert args.targets == "10.0.0.7,10.0.0.8"
     assert args.timeout == 0.8
@@ -679,7 +696,21 @@ def test_postgres_flags_are_parsed() -> None:
 
 def test_postgres_short_user_password_flags_are_parsed() -> None:
     args = parse_args(
-        ["postgres", "-t", "10.0.0.7", "-u", "postgres", "-p", "postgres", "-d", "appdb", "--table", "public.users", "-x", "whoami"]
+        [
+            "postgres",
+            "-t",
+            "10.0.0.7",
+            "-u",
+            "postgres",
+            "-p",
+            "postgres",
+            "-d",
+            "appdb",
+            "--table",
+            "public.users",
+            "-x",
+            "whoami",
+        ]
     )
     assert args.command == "postgres"
     assert args.username == "postgres"
@@ -765,7 +796,9 @@ def test_selfcert_subcommand_is_not_supported() -> None:
 
 
 def test_collect_deep_flags_are_parsed() -> None:
-    args = parse_args(["exporters", "collect", "-t", "10.0.0.1", "--deep", "--pprof-seconds", "9", "--trace-seconds", "3"])
+    args = parse_args(
+        ["exporters", "collect", "-t", "10.0.0.1", "--deep", "--pprof-seconds", "9", "--trace-seconds", "3"]
+    )
     assert args.deep is True
     assert args.pprof_seconds == 9
     assert args.trace_seconds == 3

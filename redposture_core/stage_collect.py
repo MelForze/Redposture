@@ -7,8 +7,8 @@ import os
 import sys
 from typing import Any
 
-from .constants import COLLECT_DEEP_ENDPOINT_TEMPLATES
 from .console import Console
+from .constants import COLLECT_DEEP_ENDPOINT_TEMPLATES
 from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import collect_exporter_debug_data, scan_exporter_presence
