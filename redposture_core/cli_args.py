@@ -417,6 +417,7 @@ def _configure_trigger_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
     trigger_options.add_argument(
+        "-check",
         "--check-credentials",
         action="store_true",
         help=(
