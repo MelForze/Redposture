@@ -169,7 +169,11 @@ class AttemptLogger:
         color = self._event_color(event)
         with self._lock:
             self._record_trigger_callback_event(event)
-            if self._trigger_callback_mode and self._trigger_deduplicate and self._is_duplicate_trigger_callback_event(event):
+            if (
+                self._trigger_callback_mode
+                and self._trigger_deduplicate
+                and self._is_duplicate_trigger_callback_event(event)
+            ):
                 return
             if self._trigger_callback_mode:
                 self._emit_trigger_callback_line(event)
@@ -315,7 +319,6 @@ class AttemptLogger:
         return parts
 
     def _format_event(self, event: dict[str, Any], clip_width: int | None = 92) -> str:
-        service = str(event.get("service") or "event")
         remote = str(event.get("remote_addr") or "-")
         timestamp = str(event.get("timestamp") or "")
         short_time = timestamp[11:19] if len(timestamp) >= 19 else timestamp

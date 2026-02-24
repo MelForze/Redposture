@@ -11,13 +11,13 @@ import socket
 import struct
 import sys
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable
+from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
-
 
 _ZK_PROTOCOL_VERSION = 0
 _ZK_PASSWD_DEFAULT = b"\x00" * 16
@@ -522,7 +522,7 @@ def _audit_zookeeper_host(
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "error": last_error,
             }
-        except (ConnectionError, OSError, ValueError, socket.timeout) as exc:
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             last_error = _friendly_error_from_exception(exc)
             if attempt >= attempts - 1:
                 break
@@ -572,11 +572,7 @@ def _with_optional_znodes(record: dict[str, Any], message: str) -> str:
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required_value = record.get("auth_required")
     auth_required_text = (
-        "True"
-        if auth_required_value is True
-        else "False"
-        if auth_required_value is False
-        else "unknown"
+        "True" if auth_required_value is True else "False" if auth_required_value is False else "unknown"
     )
 
     if output_format == "json":
@@ -865,9 +861,7 @@ def audit_zookeeper_targets(
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
 
                 suppress_auth_required_status_line = (
-                    output_format == "txt"
-                    and bool(record.get("is_zookeeper"))
-                    and status == "auth_required"
+                    output_format == "txt" and bool(record.get("is_zookeeper")) and status == "auth_required"
                 )
                 if not suppress_auth_required_status_line:
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))
@@ -1008,7 +1002,9 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if stream_to_stdout:
         if total > 0 and open_no_auth == 0 and auth_required == 0 and failed == total and args.output_format == "txt":
-            console.warn("all zookeeper targets are unreachable; check host/port, network reachability, and service status")
+            console.warn(
+                "all zookeeper targets are unreachable; check host/port, network reachability, and service status"
+            )
         if args.debug and args.output_format == "txt":
             console.info(
                 f"zookeeper audit complete: total={total} no_auth={open_no_auth} auth_required={auth_required} fail={failed}"

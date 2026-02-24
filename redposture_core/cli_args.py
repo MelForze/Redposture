@@ -8,7 +8,6 @@ import sys
 from importlib import metadata
 from pathlib import Path
 
-
 COMMAND_LISTEN = "listen"
 COMMAND_SCAN = "scan"
 COMMAND_TRIGGER = "trigger"
@@ -426,10 +425,7 @@ def _configure_collect_parser(parser: argparse.ArgumentParser) -> None:
         dest="save_responses_dir",
         default=None,
         metavar="dir",
-        help=(
-            "Save raw response bodies from collect endpoints to directory tree and "
-            "write metadata index.jsonl."
-        ),
+        help=("Save raw response bodies from collect endpoints to directory tree and write metadata index.jsonl."),
     )
     parser.add_argument(
         "--deep",
@@ -1124,7 +1120,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         args = selfcert_parser.parse_args(raw_argv)
         if not getattr(args, "selfcert", False):
             selfcert_parser.error("missing --selfcert")
-        setattr(args, "command", COMMAND_SELFCERT)
+        args.command = COMMAND_SELFCERT
         return args
 
     if raw_argv[0] == COMMAND_LISTEN:

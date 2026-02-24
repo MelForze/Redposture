@@ -143,9 +143,6 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
                 f"status={hit['status']} method={hit['method']} url={hit['url']}"
             )
 
-    console.info(
-        f"scan complete: checks={checks} detected={found} "
-        f"format={args.output_format} output={args.output}"
-    )
+    console.info(f"scan complete: checks={checks} detected={found} format={args.output_format} output={args.output}")
     console.debug("debug mode enabled; detailed scan events emitted in text logs")
     return 0

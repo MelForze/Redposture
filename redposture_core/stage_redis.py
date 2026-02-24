@@ -9,8 +9,9 @@ import re
 import socket
 import sys
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable
+from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
@@ -130,7 +131,9 @@ def _check_default_credentials(sock: socket.socket) -> tuple[bool, str | None]:
     return False, err
 
 
-def _check_provided_credentials(sock: socket.socket, username: str | None, password: str | None) -> tuple[bool | None, str | None]:
+def _check_provided_credentials(
+    sock: socket.socket, username: str | None, password: str | None
+) -> tuple[bool | None, str | None]:
     if password is None:
         return None, None
     if username:
@@ -574,11 +577,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required_value = record.get("auth_required")
     auth_required_text = (
-        "True"
-        if auth_required_value is True
-        else "False"
-        if auth_required_value is False
-        else "unknown"
+        "True" if auth_required_value is True else "False" if auth_required_value is False else "unknown"
     )
 
     if output_format == "json":

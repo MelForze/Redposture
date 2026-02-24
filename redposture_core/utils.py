@@ -119,7 +119,7 @@ def collect_scan_targets(targets: str | None, max_network_hosts: int = 4096) -> 
             if real in processed_files:
                 return
             processed_files.add(real)
-            with open(real, "r", encoding="utf-8") as fh:
+            with open(real, encoding="utf-8") as fh:
                 for raw in fh:
                     clean = raw.split("#", 1)[0].strip()
                     if not clean:
@@ -173,7 +173,7 @@ def collect_scan_ports(ports: str | None) -> list[int]:
             if real in processed_files:
                 return
             processed_files.add(real)
-            with open(real, "r", encoding="utf-8") as fh:
+            with open(real, encoding="utf-8") as fh:
                 for raw in fh:
                     clean = raw.split("#", 1)[0].strip()
                     if not clean:

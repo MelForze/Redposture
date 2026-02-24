@@ -7,13 +7,14 @@ import base64
 import json
 import os
 import re
+import socket
 import sys
 import time
-import socket
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable
+from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
@@ -451,7 +452,9 @@ def _audit_etcd_host(
                         key_line, one_key_error = None, "no supported API for key dump"
 
                     if one_key_error:
-                        key_dump_error = one_key_error if key_dump_error is None else f"{key_dump_error}; {one_key_error}"
+                        key_dump_error = (
+                            one_key_error if key_dump_error is None else f"{key_dump_error}; {one_key_error}"
+                        )
                     elif key_line:
                         query_key_value = str(key_line)
 
@@ -545,11 +548,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     api_versions = str(record.get("api_versions") or "-")
     auth_required_value = record.get("auth_required")
     auth_required_text = (
-        "True"
-        if auth_required_value is True
-        else "False"
-        if auth_required_value is False
-        else "unknown"
+        "True" if auth_required_value is True else "False" if auth_required_value is False else "unknown"
     )
 
     if output_format == "json":
@@ -805,9 +804,7 @@ def audit_etcd_targets(
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
 
                 suppress_auth_required_status_line = (
-                    output_format == "txt"
-                    and bool(record.get("is_etcd"))
-                    and status == "auth_required"
+                    output_format == "txt" and bool(record.get("is_etcd")) and status == "auth_required"
                 )
                 if not suppress_auth_required_status_line:
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))

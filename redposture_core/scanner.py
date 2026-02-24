@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
 import re
@@ -10,13 +9,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Callable
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
 from urllib.parse import urlparse
 
 from .constants import COLLECT_DEBUG_ENDPOINTS, COLLECT_EXPORTERS, DISCOVERY_EXPORTERS, SCAN_EXPORTERS
 from .logger import AttemptLogger
 from .utils import utc_now_iso
-
 
 _EXPORTER_DISPLAY_NAMES = {
     "blackbox_exporter": "Blackbox Exporter",
@@ -208,10 +208,7 @@ def _format_scan_record(record: dict[str, Any], output_format: str) -> str:
     if error != "-":
         return f"{prefix} [!] exporter={exporter} request failed err={error}"
 
-    return (
-        f"{prefix} [-] exporter={exporter} not detected via={method} "
-        f"marker={marker}"
-    )
+    return f"{prefix} [-] exporter={exporter} not detected via={method} marker={marker}"
 
 
 def _format_collect_record(record: dict[str, Any], output_format: str) -> str:
@@ -241,10 +238,7 @@ def _format_collect_record(record: dict[str, Any], output_format: str) -> str:
     if error != "-":
         return f"{prefix} [!] {exporter_name} url={url} err={error}"
 
-    return (
-        f"{prefix} [-] {exporter_name} "
-        f"url={url} endpoint={endpoint}"
-    )
+    return f"{prefix} [-] {exporter_name} url={url} endpoint={endpoint}"
 
 
 def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) -> None:
@@ -613,12 +607,10 @@ def scan_exporters_and_trigger(
 
     host_detected: dict[str, bool] = {host: False for host in hosts}
     by_host: dict[str, dict[str, int]] = {
-        host: {"detected": 0, "attempted": 0, "success": 0, "fail": 0}
-        for host in hosts
+        host: {"detected": 0, "attempted": 0, "success": 0, "fail": 0} for host in hosts
     }
     by_callback: dict[str, dict[str, int]] = {
-        target: {"attempted": 0, "success": 0, "fail": 0}
-        for target in callback_list
+        target: {"attempted": 0, "success": 0, "fail": 0} for target in callback_list
     }
     by_exporter: dict[str, dict[str, int]] = {
         str(exporter.get("name") or ""): {"detected": 0, "attempted": 0, "success": 0, "fail": 0}
@@ -836,9 +828,7 @@ def collect_exporter_debug_data(
         endpoint_rank = {endpoint: idx for idx, endpoint in enumerate(endpoints)}
         if found_by_host is None:
             collect_targets: list[tuple[str, str, int]] = [
-                (host, str(exporter["name"]), int(exporter["port"]))
-                for host in hosts
-                for exporter in exporters
+                (host, str(exporter["name"]), int(exporter["port"])) for host in hosts for exporter in exporters
             ]
         else:
             collect_targets = []

@@ -64,7 +64,7 @@ def test_validate_records_reports_sasl_username_when_paired_with_password(capsys
             "exporter": "kafka_exporter",
             "endpoint": "/debug/vars",
             "body": (
-                '{\n'
+                "{\n"
                 '  "kafka": {\n'
                 '    "sasl_username": "metrics_collector",\n'
                 '    "sasl_password": "Kfka-M0nitor-2026"\n'

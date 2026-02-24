@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import socket
 import socketserver
 import ssl
@@ -41,8 +40,7 @@ def build_http_ok_response(body: bytes = b"ok\n") -> bytes:
         b"Content-Type: text/plain; charset=utf-8\r\n"
         + f"Content-Length: {len(body)}\r\n".encode("ascii")
         + b"Connection: close\r\n"
-        b"\r\n"
-        + body
+        b"\r\n" + body
     )
 
 
@@ -71,12 +69,7 @@ def parse_postgres_startup_params(payload: bytes) -> dict[str, str]:
 
 def encode_pg_error(user: str | None) -> bytes:
     msg_user = user if user else "unknown"
-    payload = (
-        b"SERROR\x00"
-        b"C28P01\x00"
-        + f'Mpassword authentication failed for user "{msg_user}"\x00'.encode("utf-8")
-        + b"\x00"
-    )
+    payload = b"SERROR\x00C28P01\x00" + f'Mpassword authentication failed for user "{msg_user}"\x00'.encode() + b"\x00"
     return b"E" + (len(payload) + 4).to_bytes(4, "big") + payload
 
 
@@ -165,7 +158,7 @@ class PostgresListenerHandler(socketserver.BaseRequestHandler):
             )
 
             sock.sendall(encode_pg_error(user))
-        except (ConnectionError, socket.timeout, ssl.SSLError):
+        except (TimeoutError, ConnectionError, ssl.SSLError):
             return
         finally:
             try:
@@ -257,7 +250,7 @@ class RedisListenerHandler(socketserver.StreamRequestHandler):
         while True:
             try:
                 command = read_redis_cmd(self.rfile)
-            except socket.timeout:
+            except TimeoutError:
                 break
 
             if command is None:
@@ -332,9 +325,9 @@ def make_proxmox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
             parsed = urlparse(self.path)
             if parsed.path in {"/", "/index.html"}:
                 html = (
-                    "<html><head><title>Proxmox VE Login</title></head>"
-                    "<body><h1>Proxmox VE</h1><p>API endpoint available.</p></body></html>"
-                ).encode("utf-8")
+                    b"<html><head><title>Proxmox VE Login</title></head>"
+                    b"<body><h1>Proxmox VE</h1><p>API endpoint available.</p></body></html>"
+                )
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(html)))
@@ -655,8 +648,7 @@ def _generate_self_signed_cert(cert_path: str, key_path: str) -> None:
         completed = subprocess.run(
             command,
             check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
         )
     except OSError as exc:

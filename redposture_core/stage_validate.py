@@ -13,7 +13,6 @@ from urllib.parse import parse_qsl, urlsplit
 
 from .console import Console
 
-
 # key=value / key: value for secret-looking keys (quoted/unquoted keys/values)
 _TEXT_KV_RE = re.compile(
     r"(?i)[\"']?([A-Za-z_][A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|session[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token))[\"']?\s*[:=]\s*([^\s,;]+)"
@@ -109,9 +108,7 @@ _USERNAME_KEY_TOKENS = (
     "dbuser",
 )
 
-_USERNAME_EXCLUDE_TOKENS = (
-    "useragent",
-)
+_USERNAME_EXCLUDE_TOKENS = ("useragent",)
 
 _NON_SECRET_LITERALS = {
     "-",
@@ -152,7 +149,9 @@ def _clean_value_text(value: Any) -> str:
     text = str(value if value is not None else "").strip()
     if text.endswith(",") or text.endswith(";"):
         text = text[:-1].strip()
-    if len(text) >= 2 and ((text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'"))):
+    if len(text) >= 2 and (
+        (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'"))
+    ):
         text = text[1:-1].strip()
     return text
 
@@ -658,10 +657,7 @@ def run_validation(
         return 2
 
     if debug:
-        out.info(
-            f"validate started: input={path_obj} files={len(files)} "
-            f"format={input_format}"
-        )
+        out.info(f"validate started: input={path_obj} files={len(files)} format={input_format}")
 
     index_map: dict[str, dict[str, Any]] = {}
     if path_obj.is_dir():

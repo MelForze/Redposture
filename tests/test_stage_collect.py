@@ -108,8 +108,7 @@ def test_collect_stage_hides_scan_and_meta_without_debug(
         emit_line = kwargs.get("emit_line")
         if callable(emit_line):
             emit_line(
-                "COLLECT  10.0.0.1                         9100   [+] Node Exporter "
-                "url=http://10.0.0.1:9100/debug/vars"
+                "COLLECT  10.0.0.1                         9100   [+] Node Exporter url=http://10.0.0.1:9100/debug/vars"
             )
             emit_line("COLLECT  summary                          -      [*] hosts=1 requests=1 success=1")
         return 1, 1
