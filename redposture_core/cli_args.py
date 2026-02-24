@@ -123,9 +123,9 @@ def _add_listener_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--postgres-tls",
-        action="store_true",
-        default=False,
-        help="Enable STARTTLS for postgres SSLRequest (default: off).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable STARTTLS for postgres SSLRequest listener.",
     )
     parser.add_argument(
         "--redis-port",
@@ -143,9 +143,9 @@ def _add_listener_flags(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--proxmox-tls",
-        action="store_true",
-        default=False,
-        help="Serve proxmox listener via HTTPS (default: off).",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Serve proxmox listener via HTTPS.",
     )
     parser.add_argument(
         "--blackbox-port",
@@ -401,10 +401,12 @@ def _configure_trigger_parser(parser: argparse.ArgumentParser) -> None:
     )
     trigger_options.add_argument(
         "--with-listen",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Start listeners first, then run trigger stage, then keep listeners running.",
     )
     trigger_options.add_argument(
+        "-e",
         "--exporters",
         dest="trigger_exporters_filter",
         default=None,
@@ -423,6 +425,11 @@ def _configure_trigger_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
     _add_listener_flags(listen_options)
+    parser.set_defaults(workers=50)
+    for action in parser._actions:
+        if getattr(action, "dest", None) == "workers":
+            action.default = 50
+            break
 
 
 def _configure_collect_parser(parser: argparse.ArgumentParser) -> None:
