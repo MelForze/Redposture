@@ -109,6 +109,7 @@ class AttemptLogger:
         self._trigger_callback_stats_total = 0
         self._trigger_callback_stats_by_service: dict[str, int] = {}
         self._trigger_callback_stats_signatures: set[tuple[str, ...]] = set()
+        self._trigger_callback_events: list[dict[str, Any]] = []
 
     def set_trigger_callback_mode(
         self,
@@ -124,6 +125,7 @@ class AttemptLogger:
             self._trigger_callback_stats_total = 0
             self._trigger_callback_stats_by_service = {}
             self._trigger_callback_stats_signatures.clear()
+            self._trigger_callback_events = []
             if callback_targets is None:
                 self._trigger_callback_targets = ()
                 return
@@ -136,6 +138,10 @@ class AttemptLogger:
                 "total": int(self._trigger_callback_stats_total),
                 "by_service": dict(self._trigger_callback_stats_by_service),
             }
+
+    def get_trigger_callback_events(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(item) for item in self._trigger_callback_events]
 
     def close(self) -> None:
         with self._lock:
@@ -164,8 +170,8 @@ class AttemptLogger:
             if value is not None:
                 event[key] = value
 
-        line = self._format_event(event, clip_width=92)
-        line_full = self._format_event(event, clip_width=None)
+        line = self._format_event(event, clip_width=None)
+        line_full = line
         color = self._event_color(event)
         with self._lock:
             self._record_trigger_callback_event(event)
@@ -230,6 +236,7 @@ class AttemptLogger:
         service = signature[0]
         self._trigger_callback_stats_total += 1
         self._trigger_callback_stats_by_service[service] = self._trigger_callback_stats_by_service.get(service, 0) + 1
+        self._trigger_callback_events.append(dict(event))
 
     def _is_duplicate_trigger_callback_event(self, event: dict[str, Any]) -> bool:
         signature = self._trigger_callback_signature(event)
@@ -251,8 +258,7 @@ class AttemptLogger:
         display_target = remote_host
         listen_port = str(event.get("listen_port") or "-")
 
-        password = event.get("password")
-        has_creds = password not in (None, "")
+        has_creds = self._is_trigger_cred_event(event)
         marker_color = "green"
         suffix = ""
         if has_creds:
@@ -270,7 +276,7 @@ class AttemptLogger:
         )
         print(line, flush=True)
 
-    def _is_trigger_ssrf_event(self, event: dict[str, Any]) -> bool:
+    def _is_trigger_callback_event(self, event: dict[str, Any]) -> bool:
         if not self._trigger_callback_mode:
             return False
         service = str(event.get("service") or "").strip().lower()
@@ -278,13 +284,25 @@ class AttemptLogger:
             return False
         if event.get("error") or event.get("error_message"):
             return False
-        return event.get("password") in (None, "")
+        return str(event.get("method") or "").strip().upper() != "PARSE_ERROR"
+
+    def _is_trigger_cred_event(self, event: dict[str, Any]) -> bool:
+        if not self._is_trigger_callback_event(event):
+            return False
+        username = event.get("username")
+        password = event.get("password")
+        return username not in (None, "") and password not in (None, "")
+
+    def _is_trigger_ssrf_event(self, event: dict[str, Any]) -> bool:
+        return self._is_trigger_callback_event(event) and not self._is_trigger_cred_event(event)
 
     def _event_color(self, event: dict[str, Any]) -> str:
-        password = event.get("password")
-        if password not in (None, ""):
+        if self._is_trigger_cred_event(event):
             return "orange"
         if self._is_trigger_ssrf_event(event):
+            return "orange"
+        password = event.get("password")
+        if password not in (None, ""):
             return "orange"
         if "password" in event:
             return "yellow"
@@ -323,17 +341,20 @@ class AttemptLogger:
         timestamp = str(event.get("timestamp") or "")
         short_time = timestamp[11:19] if len(timestamp) >= 19 else timestamp
         tag = self._event_tag(event)
-        password = event.get("password")
-        if password not in (None, ""):
+        if self._is_trigger_cred_event(event):
             level = "CRED"
         elif self._is_trigger_ssrf_event(event):
             level = "SSRF"
-        elif "password" in event:
-            level = "WARN"
-        elif event.get("error") or event.get("error_message"):
-            level = "WARN"
         else:
-            level = "INFO"
+            password = event.get("password")
+            if password not in (None, ""):
+                level = "CRED"
+            elif "password" in event:
+                level = "WARN"
+            elif event.get("error") or event.get("error_message"):
+                level = "WARN"
+            else:
+                level = "INFO"
         parts = self._field_parts(event, clip_width=clip_width)
         body = " ".join(parts)
         if body:
