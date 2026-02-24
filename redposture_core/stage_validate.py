@@ -15,10 +15,10 @@ from .console import Console
 
 # key=value / key: value for secret-looking keys (quoted/unquoted keys/values)
 _TEXT_KV_RE = re.compile(
-    r"(?i)[\"']?([A-Za-z_][A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|session[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token))[\"']?\s*[:=]\s*([^\s,;]+)"
+    r"(?i)[\"']?((?:[A-Za-z_][A-Za-z0-9_.-]*)?(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|session[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token))[\"']?\s*[:=]\s*([^\s,;]+)"
 )
 _CMD_FLAG_SECRET_RE = re.compile(
-    r"(?i)(?:^|\s)(?:--|-D|/)?([A-Za-z_][A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|client[_-]?secret|session[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token|access[_-]?key|secret[_-]?key))\s*(?:=|\s)\s*(\"[^\"]+\"|'[^']+'|[^\s,;]+)"
+    r"(?i)(?:^|\s)(?:--|-D|/)?((?:[A-Za-z_][A-Za-z0-9_.-]*)?(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|client[_-]?secret|session[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token|access[_-]?key|secret[_-]?key))\s*(?:=|\s)\s*(\"[^\"]+\"|'[^']+'|[^\s,;]+)"
 )
 _URL_CANDIDATE_RE = re.compile(
     r"(?i)\b(?:https?|ftp|postgres(?:ql)?|mysql|mariadb|redis|mongodb(?:\+srv)?|amqp|kafka)://[^\s\"'<>]+"

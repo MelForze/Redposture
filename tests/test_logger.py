@@ -18,7 +18,7 @@ def test_logger_outputs_human_readable_info(capsys: pytest.CaptureFixture[str]) 
     assert "method=GET" in out
     assert "path=/probe" in out
     assert "module=http_2xx" in out
-    assert "\x1b[36m" in out
+    assert "\x1b[1;96m" in out
 
 
 def test_logger_scanner_detect_phase_uses_scan_tag(capsys: pytest.CaptureFixture[str]) -> None:
@@ -45,7 +45,7 @@ def test_logger_highlights_password_events(capsys: pytest.CaptureFixture[str]) -
     assert "[CRED]" in out
     assert "user=default" in out
     assert "pass=secret" in out
-    assert "\x1b[38;5;208m" in out
+    assert "\x1b[1;38;5;208m" in out
 
 
 def test_logger_displays_empty_password(capsys: pytest.CaptureFixture[str]) -> None:
@@ -55,7 +55,7 @@ def test_logger_displays_empty_password(capsys: pytest.CaptureFixture[str]) -> N
     out = captured.out
     assert "[WARN]" in out
     assert "pass=<empty>" in out
-    assert "\x1b[33m" in out
+    assert "\x1b[1;93m" in out
 
 
 def test_logger_trigger_callback_mode_prints_callback_line_with_creds(capsys: pytest.CaptureFixture[str]) -> None:
@@ -70,7 +70,7 @@ def test_logger_trigger_callback_mode_prints_callback_line_with_creds(capsys: py
     assert "Redis Exporter" in out
     assert "(CRED!)" in out
     assert "pass=secret" in out
-    assert "\x1b[38;5;208m" in out
+    assert "\x1b[1;38;5;208m" in out
 
 
 def test_logger_trigger_callback_mode_prints_callback_line_without_creds(capsys: pytest.CaptureFixture[str]) -> None:
@@ -84,7 +84,7 @@ def test_logger_trigger_callback_mode_prints_callback_line_without_creds(capsys:
     assert "(CRED!)" not in out
     assert "(SSRF!)" in out
     assert "[SSRF]" in out
-    assert "\x1b[38;5;208m" in out
+    assert "\x1b[1;38;5;208m" in out
 
 
 def test_logger_trigger_callback_mode_deduplicates_repeated_events(capsys: pytest.CaptureFixture[str]) -> None:
