@@ -254,7 +254,11 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
 
     for event in sorted(
         check_events,
-        key=lambda item: (str(item.get("service") or ""), _callback_event_remote_host(item), str(item.get("listen_port") or "")),
+        key=lambda item: (
+            str(item.get("service") or ""),
+            _callback_event_remote_host(item),
+            str(item.get("listen_port") or ""),
+        ),
     ):
         service = str(event.get("service") or "").strip().lower()
         host = _callback_event_remote_host(event)
@@ -535,8 +539,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if selected_trigger_exporters:
         _auto_adjust_listener_services_for_trigger_exporters(args, selected_trigger_exporters, console)
         console.debug(
-            "trigger exporters filter="
-            + ",".join(sorted(str(item.get("name") or "") for item in trigger_exporters))
+            "trigger exporters filter=" + ",".join(sorted(str(item.get("name") or "") for item in trigger_exporters))
         )
     if args.with_listen:
         trigger_exporters = _patch_trigger_exporters_for_with_listen(trigger_exporters, args)
