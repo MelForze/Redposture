@@ -513,9 +513,32 @@ def test_patch_with_listen_postgres_target_uses_dsn() -> None:
         blackbox_port=19115,
         proxmox_tls=False,
     )
-    exporters = [{"name": "postgres_exporter", "target_fmt": "{our_host}:5432"}]
+    exporters = [
+        {
+            "name": "postgres_exporter",
+            "target_fmt": "postgresql://real_user:real_pass@db.example.internal:5432/appdb?sslmode=require",
+        }
+    ]
     patched = _patch_trigger_exporters_for_with_listen(exporters, args)
-    assert patched[0]["target_fmt"] == "postgresql://postgres:postgres@{our_host}:15432/postgres?sslmode=disable"
+    assert patched[0]["target_fmt"] == "postgresql://real_user:real_pass@{our_host}:15432/appdb?sslmode=require"
+
+
+def test_patch_with_listen_redis_target_preserves_credentials() -> None:
+    args = argparse.Namespace(
+        postgres_port=15432,
+        redis_port=16379,
+        proxmox_port=18006,
+        blackbox_port=19115,
+        proxmox_tls=False,
+    )
+    exporters = [
+        {
+            "name": "redis_exporter",
+            "target_fmt": "redis://default:redis@cache.example.internal:6379/1?dial_timeout=1s",
+        }
+    ]
+    patched = _patch_trigger_exporters_for_with_listen(exporters, args)
+    assert patched[0]["target_fmt"] == "redis://default:redis@{our_host}:16379/1?dial_timeout=1s"
 
 
 def test_patch_with_listen_blackbox_target_preserves_credentials() -> None:

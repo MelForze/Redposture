@@ -40,6 +40,7 @@ _CALLBACK_EXPORTER_NAMES = {
 _KEY_ALIASES = {
     "username": "user",
     "password": "pass",
+    "auth_scheme": "auth",
     "callback_target": "callback",
     "user_agent": "ua",
     "content_length": "len",
@@ -50,6 +51,7 @@ _KEY_ALIASES = {
 _PRIORITY_KEYS = (
     "phase",
     "method",
+    "auth_scheme",
     "protocol",
     "path",
     "query",

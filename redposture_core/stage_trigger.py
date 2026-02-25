@@ -181,9 +181,37 @@ def _with_listen_target_fmt(exporter: dict[str, Any], args: argparse.Namespace) 
     proxmox_port = int(getattr(args, "proxmox_port", 18006))
     proxmox_tls = bool(getattr(args, "proxmox_tls", False))
     if exporter_name == "redis_exporter":
-        return f"{{our_host}}:{redis_port}"
+        raw_target_fmt = str(exporter.get("target_fmt") or "").strip()
+        if not raw_target_fmt:
+            return f"{{our_host}}:{redis_port}"
+        if "://" not in raw_target_fmt and all(ch not in raw_target_fmt for ch in ("@", "/", "?")):
+            return f"{{our_host}}:{redis_port}"
+        parsed = urlparse(
+            raw_target_fmt if "://" in raw_target_fmt else f"redis://{raw_target_fmt}",
+            scheme="redis",
+        )
+        scheme = parsed.scheme or "redis"
+        netloc = parsed.netloc or ""
+        auth_part = ""
+        if "@" in netloc:
+            auth_part = netloc.rsplit("@", 1)[0]
+        new_netloc = f"{auth_part + '@' if auth_part else ''}{{our_host}}:{redis_port}"
+        return parsed._replace(scheme=scheme, netloc=new_netloc, fragment="").geturl()
     if exporter_name == "postgres_exporter":
-        return f"postgresql://postgres:postgres@{{our_host}}:{postgres_port}/postgres?sslmode=disable"
+        raw_target_fmt = str(exporter.get("target_fmt") or "").strip()
+        parsed = urlparse(
+            raw_target_fmt if "://" in raw_target_fmt else f"postgresql://{raw_target_fmt}",
+            scheme="postgresql",
+        )
+        scheme = parsed.scheme or "postgresql"
+        netloc = parsed.netloc or ""
+        auth_part = ""
+        if "@" in netloc:
+            auth_part = netloc.rsplit("@", 1)[0]
+        new_netloc = f"{auth_part + '@' if auth_part else ''}{{our_host}}:{postgres_port}"
+        path = parsed.path or "/postgres"
+        query = parsed.query or "sslmode=disable"
+        return parsed._replace(scheme=scheme, netloc=new_netloc, path=path, query=query, fragment="").geturl()
     if exporter_name == "blackbox_exporter":
         raw_target_fmt = str(exporter.get("target_fmt") or "").strip()
         parsed = urlparse(raw_target_fmt if "://" in raw_target_fmt else f"http://{raw_target_fmt}", scheme="http")
