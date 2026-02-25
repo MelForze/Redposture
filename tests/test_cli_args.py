@@ -251,6 +251,54 @@ def test_redis_defcreds_flag_is_parsed() -> None:
     assert args.defcreds is True
 
 
+def test_gitlab_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "gitlab",
+            "-t",
+            "10.0.0.20",
+            "--timeout",
+            "2.0",
+            "-w",
+            "12",
+            "-r",
+            "1",
+            "--port",
+            "80",
+            "--ports",
+            "80,443,8080",
+            "--https",
+            "--token",
+            "glpat-xxx",
+            "--project",
+            "group/app,42",
+            "--project",
+            "team/api",
+            "--clone",
+            "--clone-dir",
+            "./gitlab_clones",
+            "-f",
+            "json",
+            "-o",
+            "gitlab_audit.jsonl",
+        ]
+    )
+    assert args.command == "gitlab"
+    assert args.targets == "10.0.0.20"
+    assert args.timeout == 2.0
+    assert args.workers == 12
+    assert args.retries == 1
+    assert args.port == 80
+    assert args.ports == "80,443,8080"
+    assert args.https is True
+    assert args.token == "glpat-xxx"
+    assert args.project == ["group/app,42", "team/api"]
+    assert args.clone is True
+    assert args.clone_dir == "./gitlab_clones"
+    assert args.output_format == "json"
+    assert args.output == "gitlab_audit.jsonl"
+
+
 def test_etcd_flags_are_parsed() -> None:
     args = parse_args(
         [

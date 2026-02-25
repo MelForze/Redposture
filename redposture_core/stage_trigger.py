@@ -54,7 +54,19 @@ def _clip_text(value: str, width: int) -> str:
     return value[: width - 3] + "..."
 
 
-def _render_trigger_row(console: Console, target: str, marker: str, body: str) -> None:
+def _trigger_plain_row(stage_tag: str, target: str, port: str, marker: str, body: str) -> str:
+    clipped_target = _clip_text(target, 64)
+    clipped_port = _clip_text(port, 16)
+    return f"{stage_tag:<8}\t{clipped_target}\t{clipped_port}\t {marker} {body}"
+
+
+def _render_trigger_row(
+    console: Console,
+    target: str,
+    marker: str,
+    body: str,
+    logger: AttemptLogger | None = None,
+) -> None:
     marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "yellow", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(target, 64)
     target_segment = "\t" + clipped_target + "\t-\t"
@@ -65,6 +77,8 @@ def _render_trigger_row(console: Console, target: str, marker: str, body: str) -
         f"{console._paint(body, 'white', sys.stdout)}"
     )
     console.plain(line)
+    if logger is not None:
+        logger.write_text_line(_trigger_plain_row("TRIGGER", target, "-", marker, body))
 
 
 def _render_trigger_callback_row(
@@ -74,6 +88,7 @@ def _render_trigger_callback_row(
     marker: str,
     exporter_name: str,
     stage_tag: str = "TRIGGER",
+    logger: AttemptLogger | None = None,
 ) -> None:
     marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "yellow", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(callback_target, 64)
@@ -86,9 +101,18 @@ def _render_trigger_callback_row(
         f"{console._paint(exporter_name, 'white', sys.stdout)}"
     )
     console.plain(line)
+    if logger is not None:
+        logger.write_text_line(_trigger_plain_row(stage_tag, callback_target, callback_port, marker, exporter_name))
 
 
-def _render_trigger_check_row(console: Console, target: str, port: str, marker: str, body: str) -> None:
+def _render_trigger_check_row(
+    console: Console,
+    target: str,
+    port: str,
+    marker: str,
+    body: str,
+    logger: AttemptLogger | None = None,
+) -> None:
     marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "yellow", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(target, 64)
     clipped_port = _clip_text(port, 16)
@@ -138,6 +162,8 @@ def _render_trigger_check_row(console: Console, target: str, port: str, marker: 
         f"{body_colored}"
     )
     console.plain(line)
+    if logger is not None:
+        logger.write_text_line(_trigger_plain_row("CHECK", target, port, marker, body))
 
 
 def _exporter_display_name(raw_name: str) -> str:
@@ -307,7 +333,7 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
 
         if service == "redis":
             port = 6379
-            _render_trigger_check_row(console, host, str(port), "[*]", f"Redis credentials {cred_display}")
+            _render_trigger_check_row(console, host, str(port), "[*]", "Redis credentials Check", logger=logger)
             record = _audit_redis_host(
                 host=host,
                 port=port,
@@ -325,22 +351,29 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
             if status in {"valid_credentials", "open_no_auth", "weak_default_creds"}:
                 key_count = record.get("key_count")
                 keys_part = f" (keys:{key_count})" if isinstance(key_count, int) else " (keys:-)"
-                body = "Redis credentials valid" if status == "valid_credentials" else "Redis reachable (no-auth)"
-                _render_trigger_check_row(console, host, str(port), "[+]", f"{body}{keys_part}")
+                if status == "valid_credentials":
+                    body = f"{cred_display}{keys_part}"
+                elif status == "weak_default_creds":
+                    body = f"redis:redis{keys_part}"
+                else:
+                    body = f"no-auth access{keys_part}"
+                _render_trigger_check_row(console, host, str(port), "[+]", body, logger=logger)
             elif status == "auth_required":
-                body = f"Redis credentials invalid ({cred_display})"
+                body = f"{cred_display} auth failed"
                 if err:
                     body += f" err={_clip_text(err, 80)}"
-                _render_trigger_check_row(console, host, str(port), "[-]", body)
+                _render_trigger_check_row(console, host, str(port), "[-]", body, logger=logger)
             else:
                 body = "Redis connection failed"
                 if err:
                     body += f" err={_clip_text(err, 80)}"
-                _render_trigger_check_row(console, host, str(port), "[!]", body)
+                _render_trigger_check_row(console, host, str(port), "[!]", body, logger=logger)
             continue
 
         port = 5432
-        _render_trigger_check_row(console, host, str(port), "[*]", f"Postgres credentials {cred_display}")
+        _render_trigger_check_row(
+            console, host, str(port), "[*]", f"Postgres credentials {cred_display}", logger=logger
+        )
         record = _audit_postgres_host(
             host=host,
             port=port,
@@ -367,17 +400,17 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
                 body = f"postgres:postgres {_postgres_caps_suffix(record)}"
             else:
                 body = f"no-auth access {_postgres_caps_suffix(record)}"
-            _render_trigger_check_row(console, host, str(port), "[+]", body)
+            _render_trigger_check_row(console, host, str(port), "[+]", body, logger=logger)
         elif status == "auth_required":
             body = f"Postgres credentials invalid ({cred_display})"
             if err:
                 body += f" err={_clip_text(err, 80)}"
-            _render_trigger_check_row(console, host, str(port), "[-]", body)
+            _render_trigger_check_row(console, host, str(port), "[-]", body, logger=logger)
         else:
             body = "Postgres connection failed"
             if err:
                 body += f" err={_clip_text(err, 80)}"
-            _render_trigger_check_row(console, host, str(port), "[!]", body)
+            _render_trigger_check_row(console, host, str(port), "[!]", body, logger=logger)
 
 
 def _run_trigger_requests(
@@ -423,6 +456,7 @@ def _run_trigger_requests(
                 "[*]",
                 exporter_name,
                 stage_tag="SCAN",
+                logger=logger,
             )
 
     trigger_logger = logger if log_trigger_attempts else None
@@ -485,6 +519,7 @@ def _run_trigger_requests(
                         f"detected={stats['detected']} attempts={stats['attempted']} "
                         f"success={stats['success']} fail={stats['fail']}"
                     ),
+                    logger=logger,
                 )
             for target in callback_targets:
                 stats = summary["by_callback"].get(target, {"attempted": 0, "success": 0, "fail": 0})
@@ -497,6 +532,7 @@ def _run_trigger_requests(
                     f"callback={target}",
                     marker,
                     f"attempts={callback_attempted} success={callback_success} fail={callback_fail}",
+                    logger=logger,
                 )
     for host, stats in sorted(summary["by_host"].items()):
         console.debug(

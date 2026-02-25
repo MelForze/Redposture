@@ -1,0 +1,5 @@
+SCAN    	127.0.0.1	9121	 [*] Redis Exporter
+TRIGGER 	127.0.0.1	16379	 [+] Redis Exporter (CRED!)
+[07:24:38] [CRED] [REDIS] 127.0.0.1:62915 command=AUTH user=default pass=redis listen_port=16379
+CHECK   	127.0.0.1	6379	 [*] Redis credentials Check
+CHECK   	127.0.0.1	6379	 [+] default:redis (keys:15)

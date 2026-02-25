@@ -13,6 +13,7 @@ from .cli_args import (
     COMMAND_COLLECT,
     COMMAND_ETCD,
     COMMAND_EXPORTERS,
+    COMMAND_GITLAB,
     COMMAND_GRAFANA,
     COMMAND_KAFKA,
     COMMAND_POSTGRES,
@@ -27,6 +28,7 @@ from .cli_args import (
 from .logger import AttemptLogger
 from .stage_collect import run_collect_stage
 from .stage_etcd import run_etcd_stage
+from .stage_gitlab import run_gitlab_stage
 from .stage_grafana import run_grafana_stage
 from .stage_kafka import run_kafka_stage
 from .stage_postgres import run_postgres_stage
@@ -122,6 +124,9 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
 
     if args.command == COMMAND_GRAFANA:
         return run_grafana_stage(args, logger)
+
+    if args.command == COMMAND_GITLAB:
+        return run_gitlab_stage(args, logger)
 
     if args.command == COMMAND_KAFKA:
         return run_kafka_stage(args, logger)
