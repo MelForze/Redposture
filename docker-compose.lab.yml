@@ -498,15 +498,47 @@ services:
       - "15003:5000"
     restart: unless-stopped
 
-  nexus-mock:
+  gitlab-web-mock:
     image: python:3.12-alpine
-    container_name: redposture-lab-nexus-mock
-    command: ["python", "/app/nexus_mock.py"]
+    container_name: redposture-lab-gitlab-web-mock
+    command:
+      - /bin/sh
+      - -lc
+      - apk add --no-cache git >/dev/null && python /app/gitlab_web_mock.py
     volumes:
-      - ./docker/registry/nexus_mock.py:/app/nexus_mock.py:ro
+      - ./docker/gitlab/gitlab_web_mock.py:/app/gitlab_web_mock.py:ro
+    ports:
+      - "18080:8080"
+    restart: unless-stopped
+
+  nexus:
+    image: sonatype/nexus3:3.72.0
+    container_name: redposture-lab-nexus
+    environment:
+      INSTALL4J_ADD_VM_PARAMS: >-
+        -Xms768m -Xmx768m -XX:MaxDirectMemorySize=768m
+        -Djava.util.prefs.userRoot=/nexus-data/javaprefs
+    volumes:
+      - nexus-data:/nexus-data
     ports:
       - "15004:8081"
     restart: unless-stopped
+
+  nexus-seed:
+    image: python:3.12-slim
+    container_name: redposture-lab-nexus-seed
+    depends_on:
+      nexus:
+        condition: service_started
+    environment:
+      NEXUS_URL: "http://nexus:8081"
+      NEXUS_ADMIN_PASSWORD: "NexusAdmin!2026"
+      NEXUS_ADMIN_PASSWORD_FILE: "/nexus-data/admin.password"
+    command: ["python", "/seed/seed_nexus.py"]
+    volumes:
+      - ./docker/nexus/seed_nexus.py:/seed/seed_nexus.py:ro
+      - nexus-data:/nexus-data
+    restart: on-failure
 
   blackbox-exporter:
     image: prom/blackbox-exporter:v0.27.0
@@ -587,6 +619,67 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
+  gitlab:
+    image: gitlab/gitlab-ce:17.8.1-ce.0
+    container_name: redposture-lab-gitlab
+    profiles: ["gitlab-real"]
+    # Official GitLab CE Omnibus image is amd64-oriented. On arm64 hosts it may
+    # run under emulation (QEMU) and can crash during omnibus init.
+    platform: linux/amd64
+    hostname: gitlab
+    shm_size: "256m"
+    environment:
+      GITLAB_ROOT_PASSWORD: "redpostureRoot!2026"
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://gitlab:80'
+        nginx['listen_port'] = 80
+        nginx['listen_https'] = false
+        letsencrypt['enable'] = false
+        prometheus_monitoring['enable'] = false
+        alertmanager['enable'] = false
+        grafana['enable'] = false
+        node_exporter['enable'] = false
+        redis_exporter['enable'] = false
+        postgres_exporter['enable'] = false
+        gitlab_exporter['enable'] = false
+        registry['enable'] = false
+        pages_external_url ''
+        gitlab_rails['gitlab_shell_ssh_port'] = 2222
+    ports:
+      - "18081:80"
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/-/readiness >/dev/null || curl -fsS http://127.0.0.1/users/sign_in >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 60
+      start_period: 180s
+    restart: unless-stopped
+
+  gitlab-seed:
+    image: gitlab/gitlab-ce:17.8.1-ce.0
+    container_name: redposture-lab-gitlab-seed
+    profiles: ["gitlab-real"]
+    platform: linux/amd64
+    depends_on:
+      gitlab:
+        condition: service_started
+    environment:
+      GITLAB_URL: "http://gitlab:80"
+      GITLAB_ROOT_PASSWORD: "redpostureRoot!2026"
+      GITLAB_ROOT_PAT: "glpat-redposture-lab-root-2026"
+      GITLAB_ANALYST_PAT: "glpat-redposture-lab-analyst-2026"
+    entrypoint: ["/bin/bash", "/seed/seed.sh"]
+    volumes:
+      - ./docker/gitlab/seed.sh:/seed/seed.sh:ro
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+    restart: on-failure
+
   proxmox-exporter:
     image: prompve/prometheus-pve-exporter:latest
     container_name: redposture-lab-proxmox-exporter
@@ -640,3 +733,7 @@ volumes:
   etcd-open-data:
   etcd-auth-data:
   registry-open-data:
+  nexus-data:
+  gitlab-config:
+  gitlab-logs:
+  gitlab-data:

@@ -3,7 +3,7 @@
 RedPosture is a Python security CLI for:
 
 - exporter discovery / trigger / collect workflows (`exporters`)
-- service exposure auditing (`redis`, `postgres`, `etcd`, `kafka`, `zookeeper`, `grafana`, `registry`)
+- service exposure auditing (`redis`, `postgres`, `etcd`, `kafka`, `zookeeper`, `grafana`, `gitlab`, `registry`)
 - listener-based callback capture for exporter SSRF/credential leaks (`exporters trigger --with-listen`)
 
 Use only on systems you own or are explicitly authorized to assess.
@@ -26,6 +26,8 @@ Use this as a quick map before reading examples below:
   - `zookeeper`
 - Observability platform:
   - `grafana`
+- Dev platform / SCM:
+  - `gitlab`
 - Container registries / artifact platforms:
   - `registry --docker` (Docker Registry v2 / OCI)
   - `registry --harbor`
@@ -53,6 +55,7 @@ Python support: `3.10+` (tested targets in project tooling: `3.10-3.13`).
 ```bash
 redposture --help
 redposture exporters -h
+redposture gitlab -h
 redposture registry -h
 ```
 
@@ -71,6 +74,12 @@ Start lab:
 docker compose -f docker-compose.lab.yml up -d --build
 ```
 
+Optional (real GitLab CE, x86_64-oriented; may fail under QEMU on arm64 hosts):
+
+```bash
+docker compose -f docker-compose.lab.yml --profile gitlab-real up -d gitlab gitlab-seed
+```
+
 Stop lab:
 
 ```bash
@@ -81,6 +90,8 @@ Lab includes seeded/testable services for:
 
 - exporters (real + synthetic): `9100`, `9115`, `9116`, `9121`, `9127`, `9187`, `9216`, `9221`, `9256`, `9308`, `9342`, `9349`, `9427`
 - Grafana: `3000`
+- GitLab web/API mock (default, clone-capable for module testing): `18080`
+- GitLab CE (real, optional `gitlab-real` profile): `18081` (root: `root` / `redpostureRoot!2026`, PAT: `glpat-redposture-lab-root-2026`)
 - Kafka: `9092` (open), `29092` (SASL/PLAIN: `metrics:metricspass`)
 - ZooKeeper: `2181`
 - etcd: `2379` (open), `22379` (auth-enabled)
@@ -89,7 +100,7 @@ Lab includes seeded/testable services for:
   - `15001` Docker Registry v2 (basic auth proxy)
   - `15002` Harbor-like API mock
   - `15003` GitLab Container Registry-like mock
-  - `15004` Nexus Repository-like mock
+  - `15004` Nexus Repository (real, seeded REST API)
 
 ## Core Modules (Examples)
 
@@ -188,6 +199,34 @@ redposture grafana -t 127.0.0.1 --defcreds --show-datasources
 redposture grafana -t 127.0.0.1 --defcreds --ssrf-target host.docker.internal --ssrf-port 9115 --ssrf-path /debug/vars
 ```
 
+### GitLab
+
+```bash
+redposture gitlab -t gitlab.example.com --https
+redposture gitlab -t gitlab.example.com --https --token <PAT_OR_GAT>
+redposture gitlab -t gitlab.example.com --https --project group/app
+redposture gitlab -t gitlab.example.com --https --project group/app --clone
+redposture gitlab -t gitlab.example.com --https --clone --clone-dir ./gitlab_clones
+```
+
+Lab (built into main compose via `gitlab-web-mock`):
+
+```bash
+docker compose -f docker-compose.lab.yml up -d gitlab-web-mock
+redposture gitlab -t 127.0.0.1 --port 18080
+redposture gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-analyst-2026
+redposture gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-root-2026 --project redposture-lab/public-api --clone
+```
+
+Real GitLab CE (optional, x86_64 recommended):
+
+```bash
+docker compose -f docker-compose.lab.yml --profile gitlab-real up -d gitlab gitlab-seed
+redposture gitlab -t 127.0.0.1 --port 18081
+```
+
+Note: on Apple Silicon / arm64 hosts the official `gitlab/gitlab-ce` omnibus image may crash under QEMU emulation during startup. For reliable CE runs, use an x86_64 Docker host/VM.
+
 ### Registry (Docker / Harbor / GitLab / Nexus)
 
 Base detect (minimal output):
@@ -226,8 +265,8 @@ Nexus Repository:
 ```bash
 redposture registry -t 127.0.0.1 --port 15004 --nexus
 redposture registry -t 127.0.0.1 --port 15004 --nexus --assets
-redposture registry -t 127.0.0.1 --port 15004 --repository nexus/app-backend --show-tags
-redposture registry -t 127.0.0.1 --port 15004 --repository nexus/app-backend --tag latest --metadata
+# Nexus Docker/OCI tag/metadata examples require a separate Docker connector
+# (not exposed in the default lab on 15004, which is the Nexus UI/REST port).
 ```
 
 ## Development (Optional)

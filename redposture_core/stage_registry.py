@@ -1024,6 +1024,9 @@ def _fetch_nexus_info(
         return None, "not nexus"
     if status != 200:
         return None, f"/service/rest/v1/status returned status {status}"
+    if not body.strip():
+        # Newer Nexus versions can return 200 with an empty body on this endpoint.
+        return {}, None
     try:
         payload = _json_loads_bytes(body)
     except json.JSONDecodeError:
@@ -1338,6 +1341,35 @@ def _audit_registry_host(
             selected_repository_tags: list[str] | None = None
             metadata_result: dict[str, Any] | None = None
 
+            if nexus and is_nexus is True and nexus_repository_details:
+                component_counts: dict[str, int] = {}
+                assets_accum: list[dict[str, Any]] = []
+                repo_names = [str(item.get("name") or "").strip() for item in nexus_repository_details]
+                repo_names = [name for name in repo_names if name]
+                if repository_raw:
+                    repo_names = [repository_raw]
+                for repo_name in repo_names:
+                    components, components_error = _fetch_nexus_components(
+                        host,
+                        port,
+                        repo_name,
+                        timeout,
+                        headers=auth_headers,
+                    )
+                    if components_error and nexus_error is None:
+                        nexus_error = components_error
+                    if components is None:
+                        continue
+                    component_counts[repo_name] = len(components)
+                    if assets:
+                        assets_accum.extend(_extract_nexus_assets(components))
+                for repo_item in nexus_repository_details:
+                    repo_name = str(repo_item.get("name") or "").strip()
+                    if repo_name:
+                        repo_item["components"] = component_counts.get(repo_name)
+                if assets:
+                    nexus_assets_list = assets_accum
+
             if not is_registry:
                 return {
                     "timestamp": utc_now_iso(),
@@ -1517,35 +1549,6 @@ def _audit_registry_host(
                         artifacts_accum.extend(artifacts or [])
                 harbor_repositories = sorted(set(repos_accum))
                 harbor_artifacts = sorted(set(artifacts_accum))
-
-            if nexus and is_nexus is True and nexus_repository_details:
-                component_counts: dict[str, int] = {}
-                assets_accum: list[dict[str, Any]] = []
-                repo_names = [str(item.get("name") or "").strip() for item in nexus_repository_details]
-                repo_names = [name for name in repo_names if name]
-                if repository_raw:
-                    repo_names = [repository_raw]
-                for repo_name in repo_names:
-                    components, components_error = _fetch_nexus_components(
-                        host,
-                        port,
-                        repo_name,
-                        timeout,
-                        headers=auth_headers,
-                    )
-                    if components_error and nexus_error is None:
-                        nexus_error = components_error
-                    if components is None:
-                        continue
-                    component_counts[repo_name] = len(components)
-                    if assets:
-                        assets_accum.extend(_extract_nexus_assets(components))
-                for repo_item in nexus_repository_details:
-                    repo_name = str(repo_item.get("name") or "").strip()
-                    if repo_name:
-                        repo_item["components"] = component_counts.get(repo_name)
-                if assets:
-                    nexus_assets_list = assets_accum
 
             inspections: list[dict[str, Any]] | None = None
             inspection_error: str | None = None
