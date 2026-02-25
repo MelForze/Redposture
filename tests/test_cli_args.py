@@ -144,6 +144,24 @@ def test_trigger_workers_and_retries_flags_are_parsed() -> None:
     assert args.retries == 2
 
 
+def test_trigger_postgres_auth_module_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "exporters",
+            "trigger",
+            "-t",
+            "10.0.0.1",
+            "--callback-ip",
+            "10.0.0.2",
+            "--postgres-auth-module",
+            "lab,readonly",
+            "--postgres-auth-module",
+            "prod",
+        ]
+    )
+    assert args.postgres_auth_modules == ["lab,readonly", "prod"]
+
+
 def test_trigger_output_flag_is_parsed() -> None:
     args = parse_args(["exporters", "trigger", "-t", "10.0.0.1", "--callback-ip", "10.0.0.2", "-o", "trigger.txt"])
     assert args.output == "trigger.txt"
@@ -297,6 +315,123 @@ def test_gitlab_flags_are_parsed() -> None:
     assert args.clone_dir == "./gitlab_clones"
     assert args.output_format == "json"
     assert args.output == "gitlab_audit.jsonl"
+
+
+def test_kubeapi_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "kubeapi",
+            "-t",
+            "10.0.0.30,10.0.0.31",
+            "--timeout",
+            "2.5",
+            "-w",
+            "20",
+            "-r",
+            "1",
+            "--port",
+            "6443",
+            "--ports",
+            "6443,8443",
+            "--https",
+            "--insecure",
+            "--ca-file",
+            "./ca.crt",
+            "--token",
+            "k8s-token",
+            "-u",
+            "ignored",
+            "-p",
+            "ignored-pass",
+            "--namespaces",
+            "--pods",
+            "--namespace",
+            "default,kube-system",
+            "--namespace",
+            "prod",
+            "--pod",
+            "redposture-lab/exec-demo",
+            "-X",
+            "id && uname -a",
+            "--secrets",
+            "-f",
+            "json",
+            "-o",
+            "kubeapi_audit.jsonl",
+        ]
+    )
+    assert args.command == "kubeapi"
+    assert args.targets == "10.0.0.30,10.0.0.31"
+    assert args.timeout == 2.5
+    assert args.workers == 20
+    assert args.retries == 1
+    assert args.port == 6443
+    assert args.ports == "6443,8443"
+    assert args.https is True
+    assert args.insecure is True
+    assert args.ca_file == "./ca.crt"
+    assert args.token == "k8s-token"
+    assert args.username == "ignored"
+    assert args.password == "ignored-pass"
+    assert args.namespaces is True
+    assert args.pods is True
+    assert args.namespace == ["default,kube-system", "prod"]
+    assert args.pod == "redposture-lab/exec-demo"
+    assert args.exec_command == "id && uname -a"
+    assert args.secrets is True
+    assert args.output_format == "json"
+    assert args.output == "kubeapi_audit.jsonl"
+
+
+def test_consul_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "consul",
+            "-t",
+            "10.0.0.40,10.0.0.41",
+            "--timeout",
+            "2.0",
+            "-w",
+            "16",
+            "-r",
+            "1",
+            "--port",
+            "8500",
+            "--ports",
+            "8500,8501",
+            "--token",
+            "consul-token",
+            "-u",
+            "ignored",
+            "-p",
+            "ignored-pass",
+            "--ssrf-target",
+            "127.0.0.1,10.10.0.0/30",
+            "--ssrf-port",
+            "80,8080-8081",
+            "--ssrf-path",
+            "/debug/vars?full=1",
+            "-f",
+            "json",
+            "-o",
+            "consul_audit.jsonl",
+        ]
+    )
+    assert args.command == "consul"
+    assert args.targets == "10.0.0.40,10.0.0.41"
+    assert args.timeout == 2.0
+    assert args.workers == 16
+    assert args.retries == 1
+    assert args.port == 8500
+    assert args.ports == "8500,8501"
+    assert args.token == "consul-token"
+    assert args.username == "ignored"
+    assert args.password == "ignored-pass"
+    assert args.ssrf_target == "127.0.0.1,10.10.0.0/30"
+    assert args.ssrf_port == "80,8080-8081"
+    assert args.ssrf_path == "/debug/vars?full=1"
+    assert args.output_format == "json"
+    assert args.output == "consul_audit.jsonl"
 
 
 def test_etcd_flags_are_parsed() -> None:

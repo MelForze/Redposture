@@ -1052,7 +1052,14 @@ def _caps_suffix(record: dict[str, Any]) -> str:
     read_tables_text = "True" if can_read_tables is True else "False" if can_read_tables is False else "unknown"
     tables_text = str(readable_tables) if isinstance(readable_tables, int) else "-"
 
-    return f"(superuser:{superuser_text})(execute:{execute_text})(read:{read_tables_text})(tables:{tables_text})"
+    return " ".join(
+        (
+            f"(superuser:{superuser_text})",
+            f"(execute:{execute_text})",
+            f"(read:{read_tables_text})",
+            f"(tables:{tables_text})",
+        )
+    )
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
@@ -1305,7 +1312,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        return f"{prefix} [+] no-auth access {_caps_suffix(record)}"
+        return f"{prefix} [+] anonymous access {_caps_suffix(record)}"
 
     if status == "weak_default_creds":
         return f"{prefix} [+] postgres:postgres {_caps_suffix(record)}"
@@ -1505,7 +1512,15 @@ def audit_postgres_targets(
                 if bool(record.get("is_postgres")):
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
 
-                _emit_line(out_fh, emit_line, _format_record(record, output_format))
+                suppress_auth_required_status_line = (
+                    output_format == "txt"
+                    and bool(record.get("is_postgres"))
+                    and status == "auth_required"
+                    and not bool(record.get("provided_credentials"))
+                    and not bool(record.get("defcreds_enabled"))
+                )
+                if not suppress_auth_required_status_line:
+                    _emit_line(out_fh, emit_line, _format_record(record, output_format))
                 for database_line in _format_databases_detail_records(record, output_format):
                     _emit_line(out_fh, emit_line, database_line)
                 for table_line in _format_tables_detail_records(record, output_format):

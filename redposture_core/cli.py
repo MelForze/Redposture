@@ -11,11 +11,13 @@ from typing import Any, TextIO
 
 from .cli_args import (
     COMMAND_COLLECT,
+    COMMAND_CONSUL,
     COMMAND_ETCD,
     COMMAND_EXPORTERS,
     COMMAND_GITLAB,
     COMMAND_GRAFANA,
     COMMAND_KAFKA,
+    COMMAND_KUBEAPI,
     COMMAND_POSTGRES,
     COMMAND_REDIS,
     COMMAND_REGISTRY,
@@ -27,10 +29,12 @@ from .cli_args import (
 )
 from .logger import AttemptLogger
 from .stage_collect import run_collect_stage
+from .stage_consul import run_consul_stage
 from .stage_etcd import run_etcd_stage
 from .stage_gitlab import run_gitlab_stage
 from .stage_grafana import run_grafana_stage
 from .stage_kafka import run_kafka_stage
+from .stage_kubeapi import run_kubeapi_stage
 from .stage_postgres import run_postgres_stage
 from .stage_redis import run_redis_stage
 from .stage_registry import run_registry_stage
@@ -127,6 +131,12 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
 
     if args.command == COMMAND_GITLAB:
         return run_gitlab_stage(args, logger)
+
+    if args.command == COMMAND_CONSUL:
+        return run_consul_stage(args, logger)
+
+    if args.command == COMMAND_KUBEAPI:
+        return run_kubeapi_stage(args, logger)
 
     if args.command == COMMAND_KAFKA:
         return run_kafka_stage(args, logger)

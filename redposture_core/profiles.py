@@ -52,6 +52,7 @@ def _validate_trigger_exporters(raw: Any) -> list[dict[str, Any]]:
                 "markers": _as_str_list(item.get("markers"), f"{context}.markers"),
                 "trigger_path": str(item.get("trigger_path") or ""),
                 "target_fmt": str(item.get("target_fmt") or ""),
+                "trigger_query": str(item.get("trigger_query") or ""),
             }
         )
         if not validated[-1]["name"]:
