@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from redposture_core.utils import collect_scan_ports, collect_scan_targets, normalize_ip_literal, normalize_scan_host
+from redposture_core.utils import (
+    collect_scan_ports,
+    collect_scan_targets,
+    normalize_ip_literal,
+    normalize_scan_host,
+    parse_proxmox_api_token_auth,
+)
 
 
 def test_normalize_scan_host_strips_scheme_and_port() -> None:
@@ -46,3 +52,23 @@ def test_collect_scan_ports_rejects_invalid_values() -> None:
         collect_scan_ports("70000")
     with pytest.raises(ValueError):
         collect_scan_ports("9300-9200")
+
+
+def test_parse_proxmox_api_token_auth_parses_standard_header() -> None:
+    token_id, token_secret = parse_proxmox_api_token_auth(
+        "PVEAPIToken=prometheus@pve!metrics=super-secret-token-value"
+    )
+    assert token_id == "prometheus@pve!metrics"
+    assert token_secret == "super-secret-token-value"
+
+
+def test_parse_proxmox_api_token_auth_accepts_space_variant() -> None:
+    token_id, token_secret = parse_proxmox_api_token_auth(
+        "PVEAPIToken prometheus@pve!metrics=super-secret-token-value"
+    )
+    assert token_id == "prometheus@pve!metrics"
+    assert token_secret == "super-secret-token-value"
+
+
+def test_parse_proxmox_api_token_auth_rejects_other_schemes() -> None:
+    assert parse_proxmox_api_token_auth("Basic dXNlcjpwYXNz") == (None, None)
