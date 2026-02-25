@@ -18,6 +18,8 @@ COMMAND_POSTGRES = "postgres"
 COMMAND_ETCD = "etcd"
 COMMAND_GRAFANA = "grafana"
 COMMAND_GITLAB = "gitlab"
+COMMAND_CONSUL = "consul"
+COMMAND_KUBEAPI = "kubeapi"
 COMMAND_KAFKA = "kafka"
 COMMAND_ZOOKEEPER = "zookeeper"
 COMMAND_SELFCERT = "selfcert"
@@ -426,6 +428,17 @@ def _configure_trigger_parser(parser: argparse.ArgumentParser) -> None:
             "(Redis:6379, Postgres:5432)."
         ),
     )
+    trigger_options.add_argument(
+        "--postgres-auth-module",
+        dest="postgres_auth_modules",
+        action="append",
+        default=None,
+        metavar="name",
+        help=(
+            "Postgres exporter auth_module value(s) for /probe (repeatable; comma-separated values supported). "
+            "Examples: stage,prod,test. When multiple are provided, trigger attempts are repeated per auth_module."
+        ),
+    )
     _add_listener_flags(listen_options)
     parser.set_defaults(workers=50)
     for action in parser._actions:
@@ -533,12 +546,186 @@ def _configure_gitlab_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _configure_kubeapi_parser(parser: argparse.ArgumentParser) -> None:
+    _add_output_flags(parser)
+    _add_log_flag(parser)
+    _add_scan_host_flags(parser, include_profiles=False)
+    parser.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=6443,
+        metavar="port",
+        help="Kubernetes API port spec: single port, list/range, or file (examples: 6443, 6443,8443, ./ports.txt).",
+    )
+    _add_multi_ports_flag(parser)
+    parser.add_argument(
+        "--https",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use HTTPS for Kubernetes API requests.",
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Skip TLS certificate verification (useful for self-signed clusters).",
+    )
+    parser.add_argument(
+        "--ca-file",
+        dest="ca_file",
+        default=None,
+        metavar="path",
+        help="Custom CA certificate file for Kubernetes API TLS verification.",
+    )
+    parser.add_argument(
+        "--token",
+        dest="token",
+        default=None,
+        metavar="value",
+        help="Optional Kubernetes Bearer token for API authentication.",
+    )
+    parser.add_argument(
+        "-u",
+        "--username",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Optional Kubernetes API username for Basic auth.",
+    )
+    parser.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Optional Kubernetes API password for Basic auth.",
+    )
+    parser.add_argument(
+        "--namespaces",
+        action="store_true",
+        help="Enumerate namespaces accessible with no-auth or provided credentials.",
+    )
+    parser.add_argument(
+        "--pods",
+        action="store_true",
+        help="Enumerate pods across all namespaces or only selected --namespace values.",
+    )
+    parser.add_argument(
+        "--namespace",
+        dest="namespace",
+        action="append",
+        default=None,
+        metavar="name",
+        help="Namespace filter for --pods/--secrets (repeatable; comma-separated values also supported).",
+    )
+    parser.add_argument(
+        "--pod",
+        dest="pod",
+        default=None,
+        metavar="name",
+        help="Target pod for exec (name or namespace/pod).",
+    )
+    parser.add_argument(
+        "-X",
+        "--exec-command",
+        dest="exec_command",
+        default=None,
+        metavar="command",
+        help="Execute shell command in --pod via Kubernetes API exec websocket (/bin/sh -c).",
+    )
+    parser.add_argument(
+        "--secrets",
+        action="store_true",
+        help="Enumerate and decode readable Kubernetes Secret objects.",
+    )
+    _add_save_flag(parser, "Optional output file path. If omitted, results are printed to stdout.")
+    parser.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="Kubernetes API audit output format for stdout/file.",
+    )
+
+
+def _configure_consul_parser(parser: argparse.ArgumentParser) -> None:
+    _add_output_flags(parser)
+    _add_log_flag(parser)
+    _add_scan_host_flags(parser, include_profiles=False)
+    parser.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=8500,
+        metavar="port",
+        help="Consul port spec: single port, list/range, or file (examples: 8500, 8500,8501, ./ports.txt).",
+    )
+    _add_multi_ports_flag(parser)
+    parser.add_argument(
+        "--token",
+        dest="token",
+        default=None,
+        metavar="value",
+        help="Optional Consul ACL token (X-Consul-Token) for API auth.",
+    )
+    parser.add_argument(
+        "-u",
+        "--username",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Optional Basic auth username for Consul API (for proxied/fronted deployments).",
+    )
+    parser.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Optional Basic auth password for Consul API (for proxied/fronted deployments).",
+    )
+    parser.add_argument(
+        "--ssrf-target",
+        dest="ssrf_target",
+        default=None,
+        metavar="target",
+        help=(
+            "SSRF target URL/host/cidr (ip/dns/cidr/url; comma-separated supported). "
+            "When set, Consul agent-check SSRF probing is performed automatically."
+        ),
+    )
+    parser.add_argument(
+        "--ssrf-port",
+        dest="ssrf_port",
+        default=None,
+        metavar="ports",
+        help="Optional port override/list for --ssrf-target (single/list/range/file syntax supported).",
+    )
+    parser.add_argument(
+        "--ssrf-path",
+        dest="ssrf_path",
+        default=None,
+        metavar="path",
+        help="Optional path/query override for generated --ssrf-target URLs (example: /debug/vars).",
+    )
+    _add_save_flag(parser, "Optional output file path. If omitted, results are printed to stdout.")
+    parser.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="Consul audit output format for stdout/file.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
-            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper auditing. "
-            "Use one module command: exporters, registry, grafana, gitlab, kafka, postgres, redis, etcd, zookeeper. "
+            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Consul/Registry/Grafana/GitLab/Kubernetes API/Kafka/ZooKeeper auditing. "
+            "Use one module command: exporters, registry, grafana, gitlab, consul, kubeapi, kafka, postgres, redis, etcd, zookeeper. "
             "Listener mode is available inside trigger via --with-listen."
         ),
     )
@@ -852,6 +1039,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     _configure_gitlab_parser(gitlab_parser)
+
+    consul_parser = subparsers.add_parser(
+        COMMAND_CONSUL,
+        help="Audit Consul API exposure, anonymous access, and agent SSRF via health checks.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Consul module detects Consul agents/servers by API responses, checks anonymous access to KV, services, "
+            "agent members, and health checks, inspects script-check settings (EnableLocalScriptChecks / "
+            "EnableRemoteScriptChecks), and can perform SSRF probes via temporary agent HTTP checks."
+        ),
+    )
+    _configure_consul_parser(consul_parser)
+
+    kubeapi_parser = subparsers.add_parser(
+        COMMAND_KUBEAPI,
+        help="Audit Kubernetes API exposure, auth requirements, and resource visibility.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Kubernetes API module checks whether the cluster API is reachable without authentication, "
+            "supports Bearer token or Basic auth, and can enumerate namespaces, pods, and secrets "
+            "visible to the current access level."
+        ),
+    )
+    _configure_kubeapi_parser(kubeapi_parser)
 
     postgres_parser = subparsers.add_parser(
         COMMAND_POSTGRES,
@@ -1231,7 +1442,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     if raw_argv[0].startswith("-"):
         parser.error(
-            "module command is required: exporters, registry, grafana, gitlab, kafka, postgres, redis, etcd, zookeeper, or --selfcert"
+            "module command is required: exporters, registry, grafana, gitlab, consul, kubeapi, kafka, postgres, redis, etcd, zookeeper, or --selfcert"
         )
 
     return parser.parse_args(raw_argv)

@@ -38,6 +38,12 @@ trigger_events*.txt
 collect_raw/
 registry_downloads/
 gitlab_clones/
+docker/kubeapi/output/*
+!docker/kubeapi/output/.gitkeep
+docker/kubeapi/output-open/*
+!docker/kubeapi/output-open/.gitkeep
+docker/consul/output/*
+!docker/consul/output/.gitkeep
 cert.pem
 key.pem
 server.crt

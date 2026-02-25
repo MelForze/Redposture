@@ -530,8 +530,11 @@ def _trigger_detected_exporter_task(
     for callback_target in callback_targets:
         target = str(exporter["target_fmt"]).format(our_host=callback_target)
         callback_port = _extract_display_port(target)
-        target_q = urllib.parse.quote(target, safe=":/")
-        trigger_url = f"http://{host}:{port}{exporter['trigger_path']}?target={target_q}"
+        query_parts = [f"target={urllib.parse.quote(target, safe=':/')}"]
+        extra_query = str(exporter.get("trigger_query") or "").strip()
+        if extra_query:
+            query_parts.append(extra_query.lstrip("?"))
+        trigger_url = f"http://{host}:{port}{exporter['trigger_path']}?{'&'.join(query_parts)}"
 
         if emit_trigger_event is not None:
             emit_trigger_event(

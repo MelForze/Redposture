@@ -602,7 +602,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        return _with_optional_znodes(record, f"{prefix} [+] no-auth access")
+        return _with_optional_znodes(record, f"{prefix} [+] anonymous access")
 
     if status == "auth_required":
         return f"{prefix} [-] authentication required"

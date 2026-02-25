@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 from .console import Console
 from .listener_runtime import parse_services, start_listeners_for_trigger, stop_started_listeners
@@ -272,6 +272,50 @@ def _parse_trigger_exporter_filter(raw: str | None) -> set[str]:
     return selected
 
 
+def _parse_postgres_auth_modules(raw_values: list[str] | None) -> list[str]:
+    if not raw_values:
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_values:
+        for part in str(raw).split(","):
+            token = part.strip()
+            if not token:
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            result.append(token)
+    return result
+
+
+def _merge_trigger_query_auth_module(raw_query: str | None, auth_module: str) -> str:
+    pairs = [
+        (k, v) for k, v in parse_qsl(str(raw_query or "").lstrip("?"), keep_blank_values=True) if k != "auth_module"
+    ]
+    pairs.append(("auth_module", auth_module))
+    return urlencode(pairs, doseq=True)
+
+
+def _expand_trigger_exporters_postgres_auth_modules(
+    trigger_exporters: list[dict[str, Any]],
+    auth_modules: list[str],
+) -> list[dict[str, Any]]:
+    if not auth_modules:
+        return list(trigger_exporters)
+    expanded: list[dict[str, Any]] = []
+    for exporter in trigger_exporters:
+        name = str(exporter.get("name") or "").strip().lower()
+        if name != "postgres_exporter":
+            expanded.append(dict(exporter))
+            continue
+        for auth_module in auth_modules:
+            item = dict(exporter)
+            item["trigger_query"] = _merge_trigger_query_auth_module(item.get("trigger_query"), auth_module)
+            expanded.append(item)
+    return expanded
+
+
 def _filter_trigger_exporters(
     trigger_exporters: list[dict[str, Any]],
     selected_exporter_names: set[str],
@@ -384,7 +428,7 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
                 elif status == "weak_default_creds":
                     body = f"redis:redis{keys_part}"
                 else:
-                    body = f"no-auth access{keys_part}"
+                    body = f"anonymous access{keys_part}"
                 _render_trigger_check_row(console, host, str(port), "[+]", body, logger=logger)
             elif status == "auth_required":
                 body = f"{cred_display} auth failed"
@@ -427,7 +471,7 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
             elif status == "weak_default_creds":
                 body = f"postgres:postgres {_postgres_caps_suffix(record)}"
             else:
-                body = f"no-auth access {_postgres_caps_suffix(record)}"
+                body = f"anonymous access {_postgres_caps_suffix(record)}"
             _render_trigger_check_row(console, host, str(port), "[+]", body, logger=logger)
         elif status == "auth_required":
             body = f"Postgres credentials invalid ({cred_display})"
@@ -607,6 +651,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     except ValueError as exc:
         console.error(str(exc))
         return 2
+    postgres_auth_modules = _parse_postgres_auth_modules(getattr(args, "postgres_auth_modules", None))
 
     if not hosts:
         console.error("trigger requires -t/--targets")
@@ -645,6 +690,12 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if selected_trigger_exporters and not trigger_exporters:
         console.error("no trigger exporters matched filter")
         return 2
+    if postgres_auth_modules:
+        if not any(str(item.get("name") or "").strip().lower() == "postgres_exporter" for item in trigger_exporters):
+            console.error("--postgres-auth-module requires postgres_exporter to be enabled in trigger exporters")
+            return 2
+        trigger_exporters = _expand_trigger_exporters_postgres_auth_modules(trigger_exporters, postgres_auth_modules)
+        console.debug("postgres auth_module probes=" + ",".join(postgres_auth_modules))
     if selected_trigger_exporters:
         _auto_adjust_listener_services_for_trigger_exporters(args, selected_trigger_exporters, console)
         console.debug(
@@ -665,7 +716,13 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             )
         if args.debug:
             for item in trigger_exporters:
-                console.debug(f"trigger exporter={item.get('name')} target_fmt={item.get('target_fmt')}")
+                query = str(item.get("trigger_query") or "").strip()
+                if query:
+                    console.debug(
+                        f"trigger exporter={item.get('name')} target_fmt={item.get('target_fmt')} trigger_query={query}"
+                    )
+                else:
+                    console.debug(f"trigger exporter={item.get('name')} target_fmt={item.get('target_fmt')}")
 
     if not args.with_listen:
         _run_trigger_requests(

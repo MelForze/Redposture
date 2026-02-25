@@ -269,6 +269,74 @@ services:
           -d '{}' >/dev/null || true
         echo "[etcd-auth-seed] done"
 
+  kubeapi:
+    image: rancher/k3s:v1.31.6-k3s1
+    container_name: redposture-lab-kubeapi
+    privileged: true
+    command:
+      - server
+      - --disable=traefik
+      - --disable=servicelb
+      - --disable=metrics-server
+      - --write-kubeconfig=/output/kubeconfig.yaml
+      - --write-kubeconfig-mode=644
+      - --tls-san=127.0.0.1
+      - --tls-san=host.docker.internal
+      - --tls-san=kubeapi
+    tmpfs:
+      - /run
+      - /var/run
+    ports:
+      - "16443:6443"
+    volumes:
+      - k3s-data:/var/lib/rancher/k3s
+      - ./docker/kubeapi/output:/output
+    healthcheck:
+      test: ["CMD-SHELL", "kubectl get --raw=/readyz >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  kubeapi-seed:
+    image: rancher/k3s:v1.31.6-k3s1
+    container_name: redposture-lab-kubeapi-seed
+    depends_on:
+      kubeapi:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/seed/seed.sh"]
+    volumes:
+      - ./docker/kubeapi/seed.sh:/seed/seed.sh:ro
+      - ./docker/kubeapi/manifests.yaml:/seed/manifests.yaml:ro
+      - ./docker/kubeapi/output:/output
+    restart: on-failure
+
+  kubeapi-open:
+    image: nginx:1.27-alpine
+    container_name: redposture-lab-kubeapi-open
+    depends_on:
+      kubeapi:
+        condition: service_healthy
+      kubeapi-seed:
+        condition: service_completed_successfully
+    entrypoint: ["/bin/sh", "/proxy/start.sh"]
+    ports:
+      - "26443:26443"
+    volumes:
+      - ./docker/kubeapi/open_proxy/start.sh:/proxy/start.sh:ro
+      - ./docker/kubeapi/open_proxy/nginx.conf.template:/proxy/nginx.conf.template:ro
+      - ./docker/kubeapi/output:/tokens:ro
+      - ./docker/kubeapi/open_mock/cert.pem:/certs/cert.pem:ro
+      - ./docker/kubeapi/open_mock/key.pem:/certs/key.pem:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-check-certificate -qO- https://127.0.0.1:26443/version >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
   kafka-open:
     image: confluentinc/cp-kafka:7.6.1
     container_name: redposture-lab-kafka-open
@@ -592,6 +660,24 @@ services:
         condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  postgres-exporter-proxy:
+    image: python:3.12-alpine
+    container_name: redposture-lab-postgres-exporter-proxy
+    command: ["python", "/app/postgres_exporter_auth_proxy.py"]
+    environment:
+      BACKEND_BASE: "http://postgres-exporter:9187"
+      DEFAULT_AUTH_MODULE: "lab"
+      LISTEN_HOST: "0.0.0.0"
+      LISTEN_PORT: "9187"
+    volumes:
+      - ./docker/real_lab/postgres_exporter_auth_proxy.py:/app/postgres_exporter_auth_proxy.py:ro
+    depends_on:
+      postgres-exporter:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "9187:9187"
     restart: unless-stopped
@@ -618,6 +704,118 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+
+  consul:
+    image: hashicorp/consul:1.17
+    container_name: redposture-lab-consul
+    command:
+      - consul
+      - agent
+      - -dev
+      - -client=0.0.0.0
+      - -ui
+      - -enable-script-checks=true
+      - -enable-local-script-checks=true
+    ports:
+      - "8500:8500"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "consul version >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  consul-seed:
+    image: curlimages/curl:8.12.1
+    container_name: redposture-lab-consul-seed
+    depends_on:
+      consul:
+        condition: service_healthy
+    restart: on-failure
+    command:
+      - sh
+      - -ceu
+      - |
+        put_kv() {
+          key="$1"
+          value="$2"
+          curl -fsS -X PUT "http://consul:8500/v1/kv/$${key}" --data-binary "$${value}" >/dev/null
+        }
+        reg_service() {
+          payload="$1"
+          curl -fsS -X PUT "http://consul:8500/v1/agent/service/register" \
+            -H "Content-Type: application/json" \
+            -d "$${payload}" >/dev/null
+        }
+        reg_check() {
+          payload="$1"
+          curl -fsS -X PUT "http://consul:8500/v1/agent/check/register" \
+            -H "Content-Type: application/json" \
+            -d "$${payload}" >/dev/null
+        }
+
+        put_kv "redposture/env" "lab"
+        put_kv "redposture/postgres/dsn" "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+        put_kv "redposture/redis/uri" "redis://default:redis@redis:6379/0"
+        put_kv "redposture/grafana/admin_password" "admin"
+        put_kv "redposture/kafka/sasl_username" "metrics_collector"
+        put_kv "redposture/kafka/sasl_password" "Kfka-M0nitor-2026"
+        put_kv "inventory/services/grafana/url" "http://grafana:3000"
+        put_kv "inventory/services/registry/url" "http://registry-open:5000"
+
+        reg_service '{"ID":"svc-redposture-api","Name":"redposture-api","Address":"redposture-app.internal","Port":8080,"Tags":["prod","http","api"],"Meta":{"owner":"platform","env":"lab"},"Check":{"CheckID":"chk-redposture-api-http","Name":"redposture-api-http","HTTP":"http://redposture-app.internal:8080/healthz","Method":"GET","Interval":"15s","Timeout":"2s"}}'
+        reg_service '{"ID":"svc-grafana","Name":"grafana","Address":"grafana","Port":3000,"Tags":["observability","ui"],"Meta":{"team":"sre","env":"lab"},"Check":{"CheckID":"chk-grafana-http","Name":"grafana-http","HTTP":"http://grafana:3000/api/health","Method":"GET","Interval":"20s","Timeout":"2s"}}'
+        reg_service '{"ID":"svc-redis","Name":"redis","Address":"redis","Port":6379,"Tags":["cache","tcp"],"Meta":{"auth":"required"}}'
+        reg_service '{"ID":"svc-postgres","Name":"postgres","Address":"postgres","Port":5432,"Tags":["database","tcp"],"Meta":{"auth":"required"}}'
+
+        reg_check '{"ID":"chk-node-exporter-tcp","Name":"node-exporter-tcp","TCP":"node-exporter:9100","Interval":"30s","Timeout":"2s"}'
+        reg_check '{"ID":"chk-blackbox-ttl","Name":"blackbox-exporter-ttl","TTL":"45s","Status":"passing","Notes":"seeded TTL check for health state enumeration"}'
+        curl -fsS -X PUT "http://consul:8500/v1/agent/check/pass/chk-blackbox-ttl" >/dev/null || true
+        echo "[consul-seed] done"
+
+  consul-acl:
+    image: hashicorp/consul:1.17
+    container_name: redposture-lab-consul-acl
+    command:
+      - consul
+      - agent
+      - -dev
+      - -client=0.0.0.0
+      - -ui
+      - -enable-script-checks=true
+      - -enable-local-script-checks=true
+      - -config-file=/consul/config/acl.hcl
+    ports:
+      - "18500:8500"
+    volumes:
+      - ./docker/consul/acl.hcl:/consul/config/acl.hcl:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "consul info >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  consul-acl-seed:
+    image: python:3.12-alpine
+    container_name: redposture-lab-consul-acl-seed
+    depends_on:
+      consul-acl:
+        condition: service_started
+    environment:
+      CONSUL_HTTP_ADDR: "http://consul-acl:8500"
+      CONSUL_TOKENS_FILE: "/output/consul_acl_tokens.env"
+    volumes:
+      - ./docker/consul/seed_acl.py:/seed/seed_acl.py:ro
+      - ./docker/consul/output:/output
+    command: ["python", "/seed/seed_acl.py"]
+    restart: on-failure
 
   gitlab:
     image: gitlab/gitlab-ce:17.8.1-ce.0
@@ -732,6 +930,7 @@ services:
 volumes:
   etcd-open-data:
   etcd-auth-data:
+  k3s-data:
   registry-open-data:
   nexus-data:
   gitlab-config:

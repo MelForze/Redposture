@@ -55,17 +55,13 @@ def test_collect_scan_ports_rejects_invalid_values() -> None:
 
 
 def test_parse_proxmox_api_token_auth_parses_standard_header() -> None:
-    token_id, token_secret = parse_proxmox_api_token_auth(
-        "PVEAPIToken=prometheus@pve!metrics=super-secret-token-value"
-    )
+    token_id, token_secret = parse_proxmox_api_token_auth("PVEAPIToken=prometheus@pve!metrics=super-secret-token-value")
     assert token_id == "prometheus@pve!metrics"
     assert token_secret == "super-secret-token-value"
 
 
 def test_parse_proxmox_api_token_auth_accepts_space_variant() -> None:
-    token_id, token_secret = parse_proxmox_api_token_auth(
-        "PVEAPIToken prometheus@pve!metrics=super-secret-token-value"
-    )
+    token_id, token_secret = parse_proxmox_api_token_auth("PVEAPIToken prometheus@pve!metrics=super-secret-token-value")
     assert token_id == "prometheus@pve!metrics"
     assert token_secret == "super-secret-token-value"
 
