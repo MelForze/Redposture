@@ -568,7 +568,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
         )
 
     prefix = _nxc_prefix(record)
-    return f"{prefix} [*] etcd Database (api:{api_versions})(auth required:{auth_required_text})"
+    return f"{prefix} [*] etcd Database (api:{api_versions}) (auth required:{auth_required_text})"
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
@@ -582,8 +582,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if status == "open_no_auth":
         key_count = record.get("key_count")
         if isinstance(key_count, int):
-            return f"{prefix} [+] no-auth access (keys:{key_count})"
-        return f"{prefix} [+] no-auth access (keys:-)"
+            return f"{prefix} [+] anonymous access (keys:{key_count})"
+        return f"{prefix} [+] anonymous access (keys:-)"
 
     if status == "auth_required":
         return f"{prefix} [-] authentication required"

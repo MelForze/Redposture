@@ -3,7 +3,7 @@
 RedPosture is a Python security CLI for:
 
 - exporter discovery / trigger / collect workflows (`exporters`)
-- service exposure auditing (`redis`, `postgres`, `etcd`, `kafka`, `zookeeper`, `grafana`, `gitlab`, `registry`)
+- service exposure auditing (`redis`, `postgres`, `etcd`, `consul`, `kafka`, `zookeeper`, `grafana`, `gitlab`, `registry`)
 - listener-based callback capture for exporter SSRF/credential leaks (`exporters trigger --with-listen`)
 
 Use only on systems you own or are explicitly authorized to assess.
@@ -21,6 +21,7 @@ Use this as a quick map before reading examples below:
   - `redis`
   - `postgres`
   - `etcd`
+  - `consul`
 - Messaging / coordination:
   - `kafka`
   - `zookeeper`
@@ -28,6 +29,8 @@ Use this as a quick map before reading examples below:
   - `grafana`
 - Dev platform / SCM:
   - `gitlab`
+- Orchestration / cluster API:
+  - `kubeapi`
 - Container registries / artifact platforms:
   - `registry --docker` (Docker Registry v2 / OCI)
   - `registry --harbor`
@@ -56,6 +59,8 @@ Python support: `3.10+` (tested targets in project tooling: `3.10-3.13`).
 redposture --help
 redposture exporters -h
 redposture gitlab -h
+redposture consul -h
+redposture kubeapi -h
 redposture registry -h
 ```
 
@@ -95,6 +100,9 @@ Lab includes seeded/testable services for:
 - Kafka: `9092` (open), `29092` (SASL/PLAIN: `metrics:metricspass`)
 - ZooKeeper: `2181`
 - etcd: `2379` (open), `22379` (auth-enabled)
+- Consul (real, seeded): `8500`
+- Kubernetes API (real k3s, seeded): `16443` (auth required; token file: `docker/kubeapi/output/kubeapi_tokens.env`)
+- Kubernetes API (HTTPS no-auth proxy to real k3s API): `26443` (injects lab admin token to real `16443`, so data is real while `kubeapi` sees no-auth behavior)
 - registries:
   - `15000` Docker Registry v2 (open)
   - `15001` Docker Registry v2 (basic auth proxy)
@@ -181,6 +189,15 @@ redposture kafka -t 127.0.0.1 --dump --max-messages 1000
 redposture kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --dump
 ```
 
+### Consul
+
+```bash
+redposture consul -t 127.0.0.1
+redposture consul -t 127.0.0.1 --ssrf-target 127.0.0.1 --ssrf-port 3000,9115
+redposture consul -t 127.0.0.1 --port 18500 --token <CONSUL_ACL_TOKEN>
+# lab ACL tokens are written to docker/consul/output/consul_acl_tokens.env
+```
+
 ### ZooKeeper
 
 ```bash
@@ -216,6 +233,18 @@ docker compose -f docker-compose.lab.yml up -d gitlab-web-mock
 redposture gitlab -t 127.0.0.1 --port 18080
 redposture gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-analyst-2026
 redposture gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-root-2026 --project redposture-lab/public-api --clone
+```
+
+### Kubernetes API (`kubeapi`)
+
+```bash
+redposture kubeapi -t 127.0.0.1 --port 16443 --insecure
+redposture kubeapi -t 127.0.0.1 --port 16443 --insecure --token "$(grep '^KUBEAPI_AUDITOR_TOKEN=' docker/kubeapi/output/kubeapi_tokens.env | cut -d= -f2-)" --namespaces --pods
+redposture kubeapi -t 127.0.0.1 --port 16443 --insecure --token "$(grep '^KUBEAPI_ADMIN_TOKEN=' docker/kubeapi/output/kubeapi_tokens.env | cut -d= -f2-)" --secrets
+redposture kubeapi -t 127.0.0.1 --port 16443 --insecure --token "$(grep '^KUBEAPI_ADMIN_TOKEN=' docker/kubeapi/output/kubeapi_tokens.env | cut -d= -f2-)" --pod redposture-lab/exec-demo -X "id && env | head"
+
+# No-auth lab kubeapi on 26443 (reverse proxy to real k3s API with injected admin token)
+redposture kubeapi -t 127.0.0.1 --port 26443 --namespaces --pods --secrets
 ```
 
 Real GitLab CE (optional, x86_64 recommended):

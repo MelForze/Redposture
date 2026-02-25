@@ -861,14 +861,14 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     login_page_text = _bool_text(record.get("login_page"))
     version_text = str(record.get("version") or "-")
-    return f"{prefix} [*] GitLab Service (login page:{login_page_text})(version:{version_text})"
+    return f"{prefix} [*] GitLab Service (login page:{login_page_text}) (version:{version_text})"
 
 
 def _project_summary_line(project: dict[str, Any]) -> str:
     path = _project_path(project)
     visibility = str(project.get("visibility") or "-")
     archived = "True" if bool(project.get("archived")) else "False"
-    return f"{path} (visibility:{visibility})(archived:{archived})"
+    return f"{path} (visibility:{visibility}) (archived:{archived})"
 
 
 def _token_access_summary_line(item: dict[str, Any]) -> str:
@@ -882,8 +882,8 @@ def _token_access_summary_line(item: dict[str, Any]) -> str:
     wiki_text = "True" if bool(item.get("wiki_enabled")) else "False"
     snippets_text = "True" if bool(item.get("snippets_enabled")) else "False"
     return (
-        f"{path} (access:{access_text})(repo:{repo_text})(issues:{issues_text})"
-        f"(members:{members_text})(mr:{mr_text})(wiki:{wiki_text})(snippets:{snippets_text})"
+        f"{path} (access:{access_text}) (repo:{repo_text}) (issues:{issues_text}) "
+        f"(members:{members_text}) (mr:{mr_text}) (wiki:{wiki_text}) (snippets:{snippets_text})"
     )
 
 
@@ -897,9 +897,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     prefix = _nxc_prefix(record)
     lines: list[str] = []
     project_filters = record.get("project_filters")
-    targeted_mode = bool(record.get("clone_requested")) or (
-        isinstance(project_filters, list) and bool(project_filters)
-    )
+    targeted_mode = bool(record.get("clone_requested")) or (isinstance(project_filters, list) and bool(project_filters))
     normalized_filters = [
         str(item).strip()
         for item in (project_filters if isinstance(project_filters, list) else [])

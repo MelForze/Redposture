@@ -1780,7 +1780,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 96)
 
     if status == "open_no_auth":
-        return _with_optional_images(record, f"{prefix} [+] no-auth access")
+        return _with_optional_images(record, f"{prefix} [+] anonymous access")
 
     if status == "valid_credentials":
         if record.get("token_provided"):
@@ -2072,7 +2072,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     last_pushed = str(item.get("last_pushed") or "").strip() or "-"
                     tags_count_text = str(tags_count) if isinstance(tags_count, int) else "-"
                     lines.append(
-                        f"{prefix} {repo_name} (tags:{tags_count_text})(latest:{latest_tag})(last pushed:{last_pushed})"
+                        f"{prefix} {repo_name} (tags:{tags_count_text}) (latest:{latest_tag}) (last pushed:{last_pushed})"
                     )
             elif not suppress_vendor_inventory and gitlab_repositories:
                 lines.append(f"{prefix} [*] GitLab Repositories")
@@ -2154,7 +2154,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     components_raw = item.get("components")
                     components_text = str(components_raw) if isinstance(components_raw, int) else "-"
                     lines.append(
-                        f"{prefix} {repo_name} (type:{repo_type})(online:{online_text})(components:{components_text})"
+                        f"{prefix} {repo_name} (type:{repo_type}) (online:{online_text}) (components:{components_text})"
                     )
             elif not suppress_vendor_inventory and nexus_repositories:
                 lines.append(f"{prefix} [*] Nexus Repositories")
@@ -2200,7 +2200,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
 
                 layer_count = int(item.get("layer_count") or 0)
                 total_size = _human_bytes(int(item.get("total_size") or 0))
-                lines.append(f"{prefix} [*] Inspect {image_name} (layers:{layer_count})(size:{total_size})")
+                lines.append(f"{prefix} [*] Inspect {image_name} (layers:{layer_count}) (size:{total_size})")
 
                 env_values = item.get("env")
                 if isinstance(env_values, list):
@@ -2476,7 +2476,15 @@ def audit_registry_targets(
                 output_lines: list[str] = []
                 if bool(record.get("is_registry")):
                     output_lines.append(_format_detect_record(record, output_format))
-                output_lines.append(_format_record(record, output_format))
+                suppress_auth_required_status_line = (
+                    output_format == "txt"
+                    and bool(record.get("is_registry"))
+                    and state == "auth_required"
+                    and not bool(record.get("provided_credentials"))
+                    and not bool(record.get("token_provided"))
+                )
+                if not suppress_auth_required_status_line:
+                    output_lines.append(_format_record(record, output_format))
                 output_lines.extend(_format_detail_records(record, output_format))
 
                 for line in output_lines:

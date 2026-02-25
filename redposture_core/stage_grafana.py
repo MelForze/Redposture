@@ -818,7 +818,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        return _with_optional_datasources(record, f"{prefix} [+] no-auth access")
+        return _with_optional_datasources(record, f"{prefix} [+] anonymous access")
     if status == "valid_credentials":
         user = str(record.get("effective_username") or "admin")
         source = str(record.get("credentials_source") or "")
@@ -1086,7 +1086,14 @@ def audit_grafana_targets(
                     failed += 1
                 if bool(record.get("is_grafana")):
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
-                _emit_line(out_fh, emit_line, _format_record(record, output_format))
+                suppress_auth_required_status_line = (
+                    output_format == "txt"
+                    and bool(record.get("is_grafana"))
+                    and status == "auth_required"
+                    and int(record.get("attempted_credentials") or 0) <= 0
+                )
+                if not suppress_auth_required_status_line:
+                    _emit_line(out_fh, emit_line, _format_record(record, output_format))
                 if bool(record.get("is_grafana")):
                     for ds_line in _format_datasources_detail_records(record, output_format):
                         _emit_line(out_fh, emit_line, ds_line)

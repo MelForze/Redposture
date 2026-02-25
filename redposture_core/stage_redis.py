@@ -549,7 +549,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 64)
 
     if status == "open_no_auth":
-        return _with_optional_keys(record, f"{prefix} [+] no-auth access")
+        return _with_optional_keys(record, f"{prefix} [+] anonymous access")
 
     if status == "weak_default_creds":
         return _with_optional_keys(record, f"{prefix} [+] redis:redis")
@@ -739,7 +739,15 @@ def audit_redis_targets(
                 if bool(record.get("is_redis")):
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
 
-                _emit_line(out_fh, emit_line, _format_record(record, output_format))
+                suppress_auth_required_status_line = (
+                    output_format == "txt"
+                    and bool(record.get("is_redis"))
+                    and status == "auth_required"
+                    and not bool(record.get("provided_credentials"))
+                    and not bool(record.get("default_credentials_attempted"))
+                )
+                if not suppress_auth_required_status_line:
+                    _emit_line(out_fh, emit_line, _format_record(record, output_format))
                 for keys_detail in _format_keys_detail_records(record, output_format):
                     _emit_line(out_fh, emit_line, keys_detail)
 

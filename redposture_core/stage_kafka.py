@@ -1198,7 +1198,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        return _with_optional_topics(record, f"{prefix} [+] no-auth access")
+        return _with_optional_topics(record, f"{prefix} [+] anonymous access")
 
     if status == "valid_credentials":
         username = str(record.get("provided_username") or "user").strip() or "user"
@@ -1539,7 +1539,14 @@ def audit_kafka_targets(
                 if bool(record.get("is_kafka")):
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
 
-                _emit_line(out_fh, emit_line, _format_record(record, output_format))
+                suppress_auth_required_status_line = (
+                    output_format == "txt"
+                    and bool(record.get("is_kafka"))
+                    and status == "auth_required"
+                    and not bool(record.get("provided_credentials"))
+                )
+                if not suppress_auth_required_status_line:
+                    _emit_line(out_fh, emit_line, _format_record(record, output_format))
                 if bool(record.get("is_kafka")):
                     for topics_line in _format_topics_detail_records(record, output_format):
                         _emit_line(out_fh, emit_line, topics_line)
