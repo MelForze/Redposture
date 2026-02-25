@@ -29,6 +29,7 @@ from .utils import (
     is_http_inline_command,
     is_http_request_prefix,
     parse_basic_auth,
+    parse_proxmox_api_token_auth,
     prometheus_label_escape,
     safe_decode,
 )
@@ -336,12 +337,18 @@ def make_proxmox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
                 return
 
             if parsed.path.startswith("/api2/"):
+                auth_header = self.headers.get("Authorization")
                 basic_user, basic_pass = parse_basic_auth(self.headers.get("Authorization"))
+                token_id, token_secret = parse_proxmox_api_token_auth(auth_header)
+                auth_scheme: str | None = "pveapitoken" if token_id is not None else None
+                username = basic_user if basic_user is not None else token_id
+                password = basic_pass if basic_pass is not None else token_secret
                 logger.log(
                     "proxmox",
                     self._client_addr(),
-                    username=basic_user,
-                    password=basic_pass,
+                    username=username,
+                    password=password,
+                    auth_scheme=auth_scheme,
                     user_agent=self.headers.get("User-Agent"),
                     path=parsed.path,
                     method="GET",
@@ -373,11 +380,18 @@ def make_proxmox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
             username = fields.get("username")
             password = fields.get("password")
 
-            basic_user, basic_pass = parse_basic_auth(self.headers.get("Authorization"))
+            auth_header = self.headers.get("Authorization")
+            basic_user, basic_pass = parse_basic_auth(auth_header)
+            token_id, token_secret = parse_proxmox_api_token_auth(auth_header)
+            auth_scheme: str | None = "pveapitoken" if token_id is not None else None
             if username is None and basic_user is not None:
                 username = basic_user
             if password is None and basic_pass is not None:
                 password = basic_pass
+            if username is None and token_id is not None:
+                username = token_id
+            if password is None and token_secret is not None:
+                password = token_secret
 
             if parsed.path.rstrip("/") in {"/api2/json/access/ticket", "/api2/extjs/access/ticket"}:
                 logger.log(
@@ -385,6 +399,7 @@ def make_proxmox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
                     self._client_addr(),
                     username=username,
                     password=password,
+                    auth_scheme=auth_scheme,
                     user_agent=self.headers.get("User-Agent"),
                     path=parsed.path,
                     listen_port=self._listen_port(),

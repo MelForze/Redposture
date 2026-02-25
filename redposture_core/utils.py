@@ -40,6 +40,32 @@ def parse_basic_auth(header_value: str | None) -> tuple[str | None, str | None]:
     return username, password
 
 
+def parse_proxmox_api_token_auth(header_value: str | None) -> tuple[str | None, str | None]:
+    if not header_value:
+        return None, None
+    raw = header_value.strip()
+    if not raw:
+        return None, None
+
+    prefix_eq = "PVEAPIToken="
+    prefix_sp = "PVEAPIToken "
+    if raw.startswith(prefix_eq):
+        token_blob = raw[len(prefix_eq) :].strip()
+    elif raw.startswith(prefix_sp):
+        token_blob = raw[len(prefix_sp) :].strip()
+    else:
+        return None, None
+
+    if not token_blob:
+        return None, None
+    if "=" in token_blob:
+        token_id, token_secret = token_blob.split("=", 1)
+    else:
+        token_id, token_secret = token_blob, ""
+    token_id = token_id.strip()
+    return (token_id or None), token_secret
+
+
 def is_http_request_prefix(data: bytes) -> bool:
     return any(data.startswith(prefix) for prefix in HTTP_METHOD_PREFIXES)
 
