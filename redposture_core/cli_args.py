@@ -17,6 +17,7 @@ COMMAND_REGISTRY = "registry"
 COMMAND_POSTGRES = "postgres"
 COMMAND_ETCD = "etcd"
 COMMAND_GRAFANA = "grafana"
+COMMAND_GITLAB = "gitlab"
 COMMAND_KAFKA = "kafka"
 COMMAND_ZOOKEEPER = "zookeeper"
 COMMAND_SELFCERT = "selfcert"
@@ -476,12 +477,68 @@ def _configure_collect_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _configure_gitlab_parser(parser: argparse.ArgumentParser) -> None:
+    _add_output_flags(parser)
+    _add_log_flag(parser)
+    _add_scan_host_flags(parser, include_profiles=False)
+    parser.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=80,
+        metavar="port",
+        help="GitLab HTTP port spec: single port, list/range, or file (examples: 80, 80,443,8080, ./ports.txt).",
+    )
+    _add_multi_ports_flag(parser)
+    parser.add_argument(
+        "--https",
+        action="store_true",
+        help="Use HTTPS for GitLab web/API probing (default is HTTP).",
+    )
+    parser.add_argument(
+        "--token",
+        dest="token",
+        default=None,
+        metavar="value",
+        help="Optional GitLab Personal/Group Access Token for API auth and permission checks.",
+    )
+    parser.add_argument(
+        "--project",
+        dest="project",
+        action="append",
+        default=None,
+        metavar="name",
+        help="Project filter (path_with_namespace or numeric id). Repeatable; comma-separated values are also supported.",
+    )
+    parser.add_argument(
+        "--clone",
+        action="store_true",
+        help="Clone accessible projects. With --project clones selected project(s); otherwise clones all accessible projects.",
+    )
+    parser.add_argument(
+        "--clone-dir",
+        dest="clone_dir",
+        default="./gitlab_clones",
+        metavar="dir",
+        help="Output directory root for --clone repositories.",
+    )
+    _add_save_flag(parser, "Optional output file path. If omitted, results are printed to stdout.")
+    parser.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="GitLab audit output format for stdout/file.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
-            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Registry/Grafana/Kafka/ZooKeeper auditing. "
-            "Use one module command: exporters, registry, grafana, kafka, postgres, redis, etcd, zookeeper. "
+            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper auditing. "
+            "Use one module command: exporters, registry, grafana, gitlab, kafka, postgres, redis, etcd, zookeeper. "
             "Listener mode is available inside trigger via --with-listen."
         ),
     )
@@ -782,6 +839,19 @@ def build_parser() -> argparse.ArgumentParser:
         default="txt",
         help="Grafana audit output format for stdout/file.",
     )
+
+    gitlab_parser = subparsers.add_parser(
+        COMMAND_GITLAB,
+        help="Audit GitLab public/unprotected endpoints, public projects, token access, and cloning.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "GitLab module checks login-page presence alongside public/unprotected endpoints, "
+            "enumerates public projects by default, optionally validates PAT/GAT token API access "
+            "and per-project capabilities (repo/issues/members), and can clone selected or all "
+            "accessible repositories."
+        ),
+    )
+    _configure_gitlab_parser(gitlab_parser)
 
     postgres_parser = subparsers.add_parser(
         COMMAND_POSTGRES,
@@ -1161,7 +1231,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     if raw_argv[0].startswith("-"):
         parser.error(
-            "module command is required: exporters, registry, grafana, kafka, postgres, redis, etcd, zookeeper, or --selfcert"
+            "module command is required: exporters, registry, grafana, gitlab, kafka, postgres, redis, etcd, zookeeper, or --selfcert"
         )
 
     return parser.parse_args(raw_argv)

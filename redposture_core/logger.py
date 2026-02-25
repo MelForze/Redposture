@@ -160,6 +160,16 @@ class AttemptLogger:
             self._text_fh = open(path, "w", encoding="utf-8")
             self._text_path = path
 
+    def write_text_line(self, line: str) -> None:
+        with self._lock:
+            self._write_text_line_locked(line)
+
+    def _write_text_line_locked(self, line: str) -> None:
+        if self._text_fh is None:
+            return
+        self._text_fh.write(str(line) + "\n")
+        self._text_fh.flush()
+
     def log(self, service: str, remote: tuple[str, int], **fields: Any) -> None:
         event = {
             "timestamp": utc_now_iso(),
@@ -274,7 +284,13 @@ class AttemptLogger:
             f" {_paint('[+]', marker_color)} "
             f"{_paint(exporter_name, 'white')}{suffix}"
         )
+        line_plain = f"TRIGGER \t{_clip(display_target, 64)}\t{_clip(listen_port, 16)}\t [+] {exporter_name}"
+        if has_creds:
+            line_plain += " (CRED!)"
+        else:
+            line_plain += " (SSRF!)"
         print(line, flush=True)
+        self._write_text_line_locked(line_plain)
 
     def _is_trigger_callback_event(self, event: dict[str, Any]) -> bool:
         if not self._trigger_callback_mode:
