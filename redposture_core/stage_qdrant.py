@@ -843,7 +843,9 @@ def _audit_qdrant_host(
                 version = _qdrant_extract_version(root_auth_payload)
             record["version"] = version
 
-            anon_col_status, anon_col_payload, anon_col_error = _qdrant_get_collections(host, port, timeout, headers=None)
+            anon_col_status, anon_col_payload, anon_col_error = _qdrant_get_collections(
+                host, port, timeout, headers=None
+            )
             record["collections_list_error"] = anon_col_error
 
             anon_names = _qdrant_collections_from_payload(anon_col_payload) if anon_col_error is None else None
@@ -1006,7 +1008,9 @@ def _audit_qdrant_host(
                             item["ok"] = True
                             item["info_raw"] = _json_compact(info_payload)
                         else:
-                            item["error"] = _qdrant_error_text(info_payload, fallback_status=info_status) or f"status={info_status}"
+                            item["error"] = (
+                                _qdrant_error_text(info_payload, fallback_status=info_status) or f"status={info_status}"
+                            )
                         dump_items.append(item)
 
             edit_probe_target = collection_name
@@ -1126,7 +1130,11 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if isinstance(edit_probe, dict):
         probe_source = str(edit_probe.get("source") or "").strip().lower()
         if probe_source == "anonymous":
-            if bool(edit_probe.get("ok")) or bool(edit_probe.get("validation_only")) or bool(edit_probe.get("reachable")):
+            if (
+                bool(edit_probe.get("ok"))
+                or bool(edit_probe.get("validation_only"))
+                or bool(edit_probe.get("reachable"))
+            ):
                 idor_text = "true"
             else:
                 probe_status = edit_probe.get("status")
@@ -1758,8 +1766,7 @@ def run_qdrant_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 raw_request = str(hit.get("raw_request") or "").rstrip()
                 if raw_request:
                     emit_line(
-                        f"{listener_prefix} [*] ssrf raw request "
-                        f"(port:{port_value}) (from:{client_host}:{client_port})"
+                        f"{listener_prefix} [*] ssrf raw request (port:{port_value}) (from:{client_host}:{client_port})"
                     )
                     for raw_line in raw_request.splitlines():
                         emit_line(f"{listener_prefix} raw> {raw_line}")
