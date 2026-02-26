@@ -3,7 +3,7 @@
 RedPosture is a Python security CLI for:
 
 - exporter discovery / trigger / collect workflows (`exporters`)
-- service exposure auditing (`registry`, `grafana`, `gitlab`, `consul`, `kubeapi`, `postgres`, `redis`, `etcd`, `kafka`, `zookeeper`)
+- service exposure auditing (`registry`, `grafana`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `redis`, `etcd`, `kafka`, `zookeeper`)
 - listener-based callback capture for lab SSRF workflows
 
 Use only on systems you own or are explicitly authorized to assess.
@@ -37,6 +37,7 @@ redposture kubeapi -h
 redposture postgres -h
 redposture redis -h
 redposture etcd -h
+redposture qdrant -h
 redposture kafka -h
 redposture zookeeper -h
 ```
@@ -181,6 +182,19 @@ redposture etcd -t 127.0.0.1 --show-keys
 redposture etcd -t 127.0.0.1 --dump
 ```
 
+### Qdrant
+
+```bash
+# Baseline (anonymous collections access; GHSA /logger probe summary, debug shows details)
+redposture qdrant -t 127.0.0.1 --port 6333
+
+# Collections list + full collection info dump
+redposture qdrant -t 127.0.0.1 --collections --dump
+
+# SSRF via snapshot recover + local capture listener (Docker lab: use host.docker.internal)
+redposture qdrant -t 127.0.0.1 --collection demo_vectors --ssrf-target host.docker.internal --ssrf-port 18081 --ssrf-path /probe --listen
+```
+
 ### Kafka
 
 ```bash
@@ -229,3 +243,4 @@ python3 -m venv .venv
 - `txt` output is terminal-oriented; use `-f json` for parsing.
 - Use `-h` on each module for full flag dependencies and edge-case behavior.
 - `consul` lab containers are Ubuntu-based in the lab compose to make script-check behavior more realistic.
+- `qdrant` lab container is pinned to an intentionally vulnerable version for safe GHSA `/logger` detection demos.
