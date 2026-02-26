@@ -705,6 +705,67 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
+  qdrant:
+    image: qdrant/qdrant:v1.15.5
+    container_name: redposture-lab-qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  qdrant-seed:
+    image: curlimages/curl:8.12.1
+    container_name: redposture-lab-qdrant-seed
+    depends_on:
+      - qdrant
+    restart: on-failure
+    command:
+      - sh
+      - -ceu
+      - |
+        wait_qdrant() {
+          n=0
+          until curl -fsS "http://qdrant:6333/collections" >/dev/null 2>&1; do
+            n=$$((n+1))
+            if [ "$$n" -ge 90 ]; then
+              echo "[qdrant-seed] qdrant is not ready" >&2
+              return 1
+            fi
+            sleep 1
+          done
+        }
+
+        create_collection() {
+          name="$$1"
+          payload="$$2"
+          curl -fsS -X PUT "http://qdrant:6333/collections/$${name}" \
+            -H "Content-Type: application/json" \
+            -d "$${payload}" >/dev/null || true
+        }
+
+        upsert_points() {
+          name="$$1"
+          payload="$$2"
+          curl -fsS -X PUT "http://qdrant:6333/collections/$${name}/points?wait=true" \
+            -H "Content-Type: application/json" \
+            -d "$${payload}" >/dev/null || true
+        }
+
+        wait_qdrant
+
+        create_collection "demo_vectors" '{"vectors":{"size":4,"distance":"Cosine"}}'
+        create_collection "audit_logs" '{"vectors":{"size":8,"distance":"Dot"}}'
+        create_collection "service_inventory" '{"vectors":{"size":6,"distance":"Euclid"}}'
+
+        upsert_points "demo_vectors" '{"points":[{"id":1,"vector":[0.11,0.22,0.33,0.44],"payload":{"env":"lab","owner":"platform","service":"redposture-api"}},{"id":2,"vector":[0.91,0.15,0.05,0.77],"payload":{"env":"lab","service":"grafana","url":"http://grafana:3000"}}]}'
+        upsert_points "audit_logs" '{"points":[{"id":1001,"vector":[0.9,0.1,0.3,0.4,0.2,0.1,0.7,0.8],"payload":{"event":"token_created","actor":"grafana","severity":"medium"}},{"id":1002,"vector":[0.2,0.8,0.1,0.3,0.4,0.9,0.1,0.2],"payload":{"event":"api_key_used","service":"registry-open","severity":"low"}}]}'
+        upsert_points "service_inventory" '{"points":[{"id":2001,"vector":[0.1,0.3,0.5,0.7,0.2,0.4],"payload":{"name":"consul","url":"http://consul:8500","auth":"anonymous"}},{"id":2002,"vector":[0.9,0.8,0.7,0.6,0.5,0.4],"payload":{"name":"kubeapi","url":"https://kubeapi:6443","auth":"required"}}]}'
+
+        echo "[qdrant-seed] done"
+
   consul:
     build:
       context: .
@@ -949,5 +1010,6 @@ volumes:
   etcd-open-data:
   etcd-auth-data:
   k3s-data:
+  qdrant-data:
   registry-open-data:
   nexus-data:

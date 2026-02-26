@@ -19,6 +19,7 @@ COMMAND_ETCD = "etcd"
 COMMAND_GRAFANA = "grafana"
 COMMAND_GITLAB = "gitlab"
 COMMAND_CONSUL = "consul"
+COMMAND_QDRANT = "qdrant"
 COMMAND_KUBEAPI = "kubeapi"
 COMMAND_KAFKA = "kafka"
 COMMAND_ZOOKEEPER = "zookeeper"
@@ -845,12 +846,95 @@ def _configure_consul_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _configure_qdrant_parser(parser: argparse.ArgumentParser) -> None:
+    _add_output_flags(parser)
+    _add_log_flag(parser)
+    _add_scan_host_flags(parser, include_profiles=False)
+    parser.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=6333,
+        metavar="port",
+        help="Qdrant port(s): single, list/range, or file (e.g. 6333, 6333,6334, ./ports.txt).",
+    )
+    _add_multi_ports_flag(parser)
+    parser.add_argument(
+        "--api-key",
+        dest="api_key",
+        default=None,
+        metavar="value",
+        help="Qdrant API key for auth-required endpoints (anonymous check still runs).",
+    )
+
+    dump_options = parser.add_argument_group("Dump / Discovery")
+    ssrf_options = parser.add_argument_group("SSRF")
+
+    dump_options.add_argument(
+        "--collections",
+        dest="show_collections",
+        action="store_true",
+        help="List collection names (use --dump for collection info).",
+    )
+    dump_options.add_argument(
+        "--collection",
+        dest="collection",
+        default=None,
+        metavar="name",
+        help="Collection name for --dump and snapshot-restore SSRF probe.",
+    )
+    dump_options.add_argument(
+        "--dump",
+        dest="dump",
+        action="store_true",
+        help="Dump collection info (all with --collections, or one with --collection).",
+    )
+
+    ssrf_options.add_argument(
+        "--ssrf-target",
+        dest="ssrf_target",
+        default=None,
+        metavar="target",
+        help="SSRF target(s): ip/dns/cidr/url (comma-separated) via snapshot recover.",
+    )
+    ssrf_options.add_argument(
+        "--ssrf-port",
+        dest="ssrf_port",
+        default=None,
+        metavar="ports",
+        help="Ports for --ssrf-target (single/list/range/file syntax).",
+    )
+    ssrf_options.add_argument(
+        "--ssrf-path",
+        dest="ssrf_path",
+        default=None,
+        metavar="path",
+        help="Path/query override for SSRF URLs (e.g. /snapshot).",
+    )
+    ssrf_options.add_argument(
+        "--listen",
+        dest="ssrf_listen",
+        action="store_true",
+        help="Start local HTTP SSRF capture listener on --ssrf-port (best effort).",
+    )
+
+    _add_save_flag(parser, "Optional output file path. If omitted, results are printed to stdout.")
+    parser.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="Qdrant audit output format for stdout/file.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
-            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Consul/Registry/Grafana/GitLab/Kubernetes API/Kafka/ZooKeeper auditing. "
-            "Use one module command: exporters, registry, grafana, gitlab, consul, kubeapi, kafka, postgres, redis, etcd, zookeeper. "
+            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Qdrant/Consul/Registry/Grafana/GitLab/Kubernetes API/Kafka/ZooKeeper auditing. "
+            "Use one module command: exporters, registry, grafana, gitlab, consul, kubeapi, postgres, redis, etcd, qdrant, kafka, zookeeper. "
             "Listener mode is available inside trigger via --with-listen."
         ),
     )
@@ -1408,6 +1492,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="etcd audit output format for stdout/file.",
     )
 
+    qdrant_parser = subparsers.add_parser(
+        COMMAND_QDRANT,
+        help="Audit Qdrant collections exposure, dump collection info, and snapshot-recover SSRF.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Qdrant module checks anonymous access to /collections, lists and dumps collection metadata, "
+            "probes collection update reachability with a no-op PATCH {} request, and can test SSRF "
+            "via collection snapshot restore from a supplied URL."
+        ),
+    )
+    _configure_qdrant_parser(qdrant_parser)
+
     kafka_parser = subparsers.add_parser(
         COMMAND_KAFKA,
         help="Audit Kafka broker auth exposure and topic visibility.",
@@ -1567,7 +1663,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     if raw_argv[0].startswith("-"):
         parser.error(
-            "module command is required: exporters, registry, grafana, gitlab, consul, kubeapi, kafka, postgres, redis, etcd, zookeeper, or --selfcert"
+            "module command is required: exporters, registry, grafana, gitlab, consul, kubeapi, postgres, redis, etcd, qdrant, kafka, zookeeper, or --selfcert"
         )
 
     return parser.parse_args(raw_argv)

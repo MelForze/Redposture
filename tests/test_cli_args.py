@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from redposture_core.cli_args import COMMAND_EXPORTERS, COMMAND_SELFCERT, parse_args
+from redposture_core.cli_args import COMMAND_EXPORTERS, COMMAND_QDRANT, COMMAND_SELFCERT, parse_args
 
 
 def test_parse_args_without_args_shows_help_and_exits_cleanly() -> None:
@@ -587,6 +587,68 @@ def test_consul_dump_with_service_selector_flags_are_parsed() -> None:
     assert args.dump is True
     assert args.show_services is False
     assert args.service_dump_name == "web"
+
+
+def test_qdrant_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "qdrant",
+            "-t",
+            "10.0.0.60,10.0.0.61",
+            "--timeout",
+            "1.2",
+            "-w",
+            "10",
+            "-r",
+            "1",
+            "--port",
+            "6333",
+            "--ports",
+            "6333,7333",
+            "--api-key",
+            "qdrant-lab-key",
+            "--collections",
+            "--collection",
+            "demo_vectors",
+            "--dump",
+            "--ssrf-target",
+            "127.0.0.1,10.10.0.0/30",
+            "--ssrf-port",
+            "80,8080-8081",
+            "--ssrf-path",
+            "/snapshot.bin",
+            "--listen",
+            "-f",
+            "json",
+            "-o",
+            "qdrant_audit.jsonl",
+        ]
+    )
+    assert args.command == COMMAND_QDRANT
+    assert args.targets == "10.0.0.60,10.0.0.61"
+    assert args.timeout == 1.2
+    assert args.workers == 10
+    assert args.retries == 1
+    assert args.port == 6333
+    assert args.ports == "6333,7333"
+    assert args.api_key == "qdrant-lab-key"
+    assert args.show_collections is True
+    assert args.collection == "demo_vectors"
+    assert args.dump is True
+    assert args.ssrf_target == "127.0.0.1,10.10.0.0/30"
+    assert args.ssrf_port == "80,8080-8081"
+    assert args.ssrf_path == "/snapshot.bin"
+    assert args.ssrf_listen is True
+    assert args.output_format == "json"
+    assert args.output == "qdrant_audit.jsonl"
+
+
+def test_qdrant_dump_single_collection_flags_are_parsed() -> None:
+    args = parse_args(["qdrant", "-t", "127.0.0.1", "--collection", "demo", "--dump"])
+    assert args.command == COMMAND_QDRANT
+    assert args.collection == "demo"
+    assert args.dump is True
+    assert args.show_collections is False
 
 
 def test_etcd_flags_are_parsed() -> None:
