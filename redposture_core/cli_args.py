@@ -659,7 +659,7 @@ def _configure_consul_parser(parser: argparse.ArgumentParser) -> None:
         type=_port,
         default=8500,
         metavar="port",
-        help="Consul port spec: single port, list/range, or file (examples: 8500, 8500,8501, ./ports.txt).",
+        help="Consul port(s): single, list/range, or file (e.g. 8500, 8500,8501, ./ports.txt).",
     )
     _add_multi_ports_flag(parser)
     parser.add_argument(
@@ -667,7 +667,7 @@ def _configure_consul_parser(parser: argparse.ArgumentParser) -> None:
         dest="token",
         default=None,
         metavar="value",
-        help="Optional Consul ACL token (X-Consul-Token) for API auth.",
+        help="Consul ACL token (X-Consul-Token) for API auth.",
     )
     parser.add_argument(
         "-u",
@@ -675,7 +675,7 @@ def _configure_consul_parser(parser: argparse.ArgumentParser) -> None:
         dest="username",
         default=None,
         metavar="name",
-        help="Optional Basic auth username for Consul API (for proxied/fronted deployments).",
+        help="Basic auth username (for proxied/fronted Consul).",
     )
     parser.add_argument(
         "-p",
@@ -683,32 +683,157 @@ def _configure_consul_parser(parser: argparse.ArgumentParser) -> None:
         dest="password",
         default=None,
         metavar="value",
-        help="Optional Basic auth password for Consul API (for proxied/fronted deployments).",
+        help="Basic auth password (for proxied/fronted Consul).",
     )
-    parser.add_argument(
+    ssrf_options = parser.add_argument_group("SSRF")
+    dump_options = parser.add_argument_group("Dump / Discovery")
+    revshell_options = parser.add_argument_group("Reverse-shell")
+
+    ssrf_options.add_argument(
         "--ssrf-target",
         dest="ssrf_target",
         default=None,
         metavar="target",
-        help=(
-            "SSRF target URL/host/cidr (ip/dns/cidr/url; comma-separated supported). "
-            "When set, Consul agent-check SSRF probing is performed automatically."
-        ),
+        help=("SSRF target(s): ip/dns/cidr/url (comma-separated). Enables agent-check SSRF probing."),
     )
-    parser.add_argument(
+    ssrf_options.add_argument(
         "--ssrf-port",
         dest="ssrf_port",
         default=None,
         metavar="ports",
-        help="Optional port override/list for --ssrf-target (single/list/range/file syntax supported).",
+        help="Ports for --ssrf-target (single/list/range/file syntax).",
     )
-    parser.add_argument(
+    ssrf_options.add_argument(
         "--ssrf-path",
         dest="ssrf_path",
         default=None,
         metavar="path",
-        help="Optional path/query override for generated --ssrf-target URLs (example: /debug/vars).",
+        help="Path/query override for generated SSRF URLs (e.g. /debug/vars).",
     )
+    dump_options.add_argument(
+        "--keys",
+        dest="show_keys",
+        action="store_true",
+        help="List KV keys (names only; use --dump for values).",
+    )
+    dump_options.add_argument(
+        "--key",
+        dest="kv_key",
+        default=None,
+        metavar="namekey",
+        help="KV key to dump with --dump.",
+    )
+    revshell_options.add_argument(
+        "--revshell",
+        dest="revshell",
+        action="store_true",
+        help="Script-check RCE actions: create payload check or cleanup with --delete.",
+    )
+    revshell_options.add_argument(
+        "--lhost",
+        dest="revshell_host",
+        default=None,
+        metavar="addr",
+        help="Listener host for default --revshell payload.",
+    )
+    revshell_options.add_argument(
+        "--lport",
+        dest="revshell_port",
+        type=_port,
+        default=None,
+        metavar="port",
+        help="Listener port for default --revshell payload.",
+    )
+    revshell_options.add_argument(
+        "--listen",
+        dest="revshell_listen",
+        action="store_true",
+        help="Auto-start local listener on --lport (prefers rlwrap+nc, fallback nc).",
+    )
+    revshell_options.add_argument(
+        "--payload",
+        dest="revshell_payload",
+        default=None,
+        metavar="cmd",
+        help=("Custom command for --revshell. Replaces the default payload and makes --lhost/--lport optional."),
+    )
+    dump_options.add_argument(
+        "--services",
+        dest="show_services",
+        action="store_true",
+        help="List catalog services (use --dump for instances/details).",
+    )
+    dump_options.add_argument(
+        "--service",
+        dest="service_dump_name",
+        default=None,
+        metavar="name",
+        help="Catalog service name for --dump.",
+    )
+    dump_options.add_argument(
+        "--agents",
+        dest="show_agents",
+        action="store_true",
+        help="List agent members (use --dump for details).",
+    )
+    dump_options.add_argument(
+        "--agent",
+        dest="agent_name",
+        default=None,
+        metavar="name",
+        help="Agent member name for --dump.",
+    )
+    checks_action = dump_options.add_argument(
+        "--checks",
+        dest="show_checks",
+        action="store_true",
+        help="List agent checks (use --dump for details/status/output/definition).",
+    )
+    dump_options.add_argument(
+        "--nodes",
+        dest="show_nodes",
+        action="store_true",
+        help="List catalog nodes (use --dump for details).",
+    )
+    dump_options.add_argument(
+        "--node",
+        dest="node_name",
+        default=None,
+        metavar="name",
+        help="Catalog node name for --dump.",
+    )
+    dump_options.add_argument(
+        "--dump",
+        dest="dump",
+        action="store_true",
+        help=("Dump details for selected data. Without selectors, dumps KV/services/agents/checks/nodes."),
+    )
+    revshell_options.add_argument(
+        "--delete",
+        dest="delete_revshell",
+        action="store_true",
+        help="Delete revshell check(s): all rev-rp-* or a specific --check-id.",
+    )
+    check_id_action = revshell_options.add_argument(
+        "--check-id",
+        dest="revshell_check_id",
+        default=None,
+        metavar="id",
+        help=(
+            "Consul check ID for --dump filter, targeted --delete, or custom --revshell create ID "
+            "(supports id:<value>)."
+        ),
+    )
+    # Help-only duplication for shared flags that are relevant to both dump and revshell workflows.
+    _mirror_group_actions(dump_options, check_id_action)
+    dump_group_actions = getattr(dump_options, "_group_actions", None)
+    if (
+        isinstance(dump_group_actions, list)
+        and check_id_action in dump_group_actions
+        and checks_action in dump_group_actions
+    ):
+        dump_group_actions.remove(check_id_action)
+        dump_group_actions.insert(dump_group_actions.index(checks_action) + 1, check_id_action)
     _add_save_flag(parser, "Optional output file path. If omitted, results are printed to stdout.")
     parser.add_argument(
         "-f",

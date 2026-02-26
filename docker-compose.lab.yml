@@ -706,7 +706,12 @@ services:
     restart: unless-stopped
 
   consul:
-    image: hashicorp/consul:1.17
+    build:
+      context: .
+      dockerfile: docker/consul/Dockerfile
+      args:
+        CONSUL_VERSION: "1.17.3"
+    image: redposture-lab-consul-ubuntu:1.17.3
     container_name: redposture-lab-consul
     command:
       - consul
@@ -756,28 +761,102 @@ services:
             -H "Content-Type: application/json" \
             -d "$${payload}" >/dev/null
         }
+        catalog_reg() {
+          payload="$1"
+          curl -fsS -X PUT "http://consul:8500/v1/catalog/register" \
+            -H "Content-Type: application/json" \
+            -d "$${payload}" >/dev/null
+        }
 
         put_kv "redposture/env" "lab"
+        put_kv "redposture/cluster/name" "redposture-lab-core"
+        put_kv "redposture/cluster/region" "us-east-1"
+        put_kv "redposture/cluster/datacenter" "dc1"
+        put_kv "redposture/cluster/domain" "lab.internal"
         put_kv "redposture/postgres/dsn" "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable"
+        put_kv "redposture/postgres/readonly_dsn" "postgresql://reporter:reporter@postgres-replica-1.service.consul:5432/analytics?sslmode=disable"
+        put_kv "redposture/postgres/max_connections" "300"
         put_kv "redposture/redis/uri" "redis://default:redis@redis:6379/0"
+        put_kv "redposture/redis/sentinel/master" "mymaster"
+        put_kv "redposture/redis/sentinel/nodes" "10.20.1.21:26379,10.20.1.22:26379,10.20.1.23:26379"
         put_kv "redposture/grafana/admin_password" "admin"
+        put_kv "redposture/grafana/admin_user" "admin"
+        put_kv "redposture/grafana/url" "http://grafana:3000"
+        put_kv "redposture/kafka/bootstrap_servers" "kafka:9092,kafka-sasl:29092"
         put_kv "redposture/kafka/sasl_username" "metrics_collector"
         put_kv "redposture/kafka/sasl_password" "Kfka-M0nitor-2026"
+        put_kv "redposture/kafka/topics/audit_logs" "audit.logs"
+        put_kv "redposture/kafka/topics/orders" "secure.orders"
+        put_kv "redposture/kafka/topics/payments" "payments.events"
+        put_kv "redposture/registry/open" "http://registry-open:5000"
+        put_kv "redposture/registry/harbor" "http://harbor-mock:8080"
+        put_kv "redposture/registry/gitlab" "http://gitlab-web-mock:8080"
+        put_kv "redposture/registry/nexus" "http://nexus:8081"
+        put_kv "redposture/kubeapi/secure" "https://kubeapi:6443"
+        put_kv "redposture/kubeapi/open" "https://kubeapi-open:26443"
+        put_kv "redposture/observability/prometheus_url" "http://prometheus.service.consul:9090"
+        put_kv "redposture/observability/loki_url" "http://loki.service.consul:3100"
+        put_kv "redposture/observability/tempo_url" "http://tempo.service.consul:3200"
+        put_kv "redposture/feature_flags/enable_ssrf_probe" "true"
+        put_kv "redposture/feature_flags/enable_registry_downloads" "false"
+        put_kv "redposture/feature_flags/kubeapi_exec_enabled" "true"
+        put_kv "deploy/prod/redposture-api/image" "registry-open:5000/redposture/demo-api:2.0.1"
+        put_kv "deploy/prod/redposture-api/replicas" "3"
+        put_kv "deploy/prod/web-ui/image" "registry-open:5000/redposture/web-ui:2.0.1"
+        put_kv "deploy/prod/web-ui/replicas" "2"
+        put_kv "deploy/prod/maintenance_window" "Sun 02:00-03:00 UTC"
         put_kv "inventory/services/grafana/url" "http://grafana:3000"
         put_kv "inventory/services/registry/url" "http://registry-open:5000"
+        put_kv "inventory/services/nexus/url" "http://nexus:8081"
+        put_kv "inventory/services/gitlab/url" "http://gitlab-web-mock:8080"
+        put_kv "inventory/services/consul/url" "http://consul:8500"
+        put_kv "inventory/nodes/db-primary" "postgres"
+        put_kv "inventory/nodes/db-replica" "postgres-replica-1"
+        put_kv "inventory/nodes/cache-primary" "redis"
+        put_kv "inventory/nodes/cache-replica" "cache-1"
 
         reg_service '{"ID":"svc-redposture-api","Name":"redposture-api","Address":"redposture-app.internal","Port":8080,"Tags":["prod","http","api"],"Meta":{"owner":"platform","env":"lab"},"Check":{"CheckID":"chk-redposture-api-http","Name":"redposture-api-http","HTTP":"http://redposture-app.internal:8080/healthz","Method":"GET","Interval":"15s","Timeout":"2s"}}'
         reg_service '{"ID":"svc-grafana","Name":"grafana","Address":"grafana","Port":3000,"Tags":["observability","ui"],"Meta":{"team":"sre","env":"lab"},"Check":{"CheckID":"chk-grafana-http","Name":"grafana-http","HTTP":"http://grafana:3000/api/health","Method":"GET","Interval":"20s","Timeout":"2s"}}'
         reg_service '{"ID":"svc-redis","Name":"redis","Address":"redis","Port":6379,"Tags":["cache","tcp"],"Meta":{"auth":"required"}}'
         reg_service '{"ID":"svc-postgres","Name":"postgres","Address":"postgres","Port":5432,"Tags":["database","tcp"],"Meta":{"auth":"required"}}'
+        reg_service '{"ID":"svc-consul-ui","Name":"consul","Address":"consul","Port":8500,"Tags":["ui","control-plane"],"Meta":{"component":"consul","env":"lab"},"Check":{"CheckID":"chk-consul-http","Name":"consul-http","HTTP":"http://consul:8500/v1/status/leader","Method":"GET","Interval":"20s","Timeout":"2s"}}'
+        reg_service '{"ID":"svc-registry-open","Name":"registry","Address":"registry-open","Port":5000,"Tags":["registry","docker","open"],"Meta":{"auth":"anonymous"}}'
+        reg_service '{"ID":"svc-nexus","Name":"nexus","Address":"nexus","Port":8081,"Tags":["registry","artifact","nexus"],"Meta":{"role":"artifact"}}'
+        reg_service '{"ID":"svc-kubeapi","Name":"kubeapi","Address":"kubeapi","Port":6443,"Tags":["kubernetes","api","tls"],"Meta":{"auth":"required"}}'
+        reg_service '{"ID":"svc-kubeapi-open","Name":"kubeapi-open","Address":"kubeapi-open","Port":26443,"Tags":["kubernetes","api","proxy","anonymous"],"Meta":{"auth":"anonymous"}}'
+        reg_service '{"ID":"svc-gitlab-web-mock","Name":"gitlab","Address":"gitlab-web-mock","Port":8080,"Tags":["gitlab","web","mock"],"Meta":{"env":"lab"}}'
+        reg_service '{"ID":"svc-harbor-mock","Name":"harbor","Address":"harbor-mock","Port":8080,"Tags":["registry","harbor","mock"],"Meta":{"env":"lab"}}'
 
         reg_check '{"ID":"chk-node-exporter-tcp","Name":"node-exporter-tcp","TCP":"node-exporter:9100","Interval":"30s","Timeout":"2s"}'
         reg_check '{"ID":"chk-blackbox-ttl","Name":"blackbox-exporter-ttl","TTL":"45s","Status":"passing","Notes":"seeded TTL check for health state enumeration"}'
+        reg_check '{"ID":"chk-kafka-open-tcp","Name":"kafka-open-tcp","TCP":"kafka:9092","Interval":"30s","Timeout":"2s"}'
+        reg_check '{"ID":"chk-kafka-sasl-tcp","Name":"kafka-sasl-tcp","TCP":"kafka-sasl:29092","Interval":"30s","Timeout":"2s"}'
+        reg_check '{"ID":"chk-registry-open-http","Name":"registry-open-http","HTTP":"http://registry-open:5000/v2/","Method":"GET","Interval":"30s","Timeout":"2s"}'
+        reg_check '{"ID":"chk-kubeapi-open-http","Name":"kubeapi-open-http","HTTP":"http://kubeapi-open:26443/version","Method":"GET","Interval":"30s","Timeout":"2s"}'
+        reg_check '{"ID":"chk-consul-cli-info","Name":"consul-cli-info","ServiceID":"svc-consul-ui","Args":["sh","-c","consul info >/dev/null"],"Interval":"30s","Timeout":"3s","Notes":"realistic local script check using consul CLI"}'
+        reg_check '{"ID":"chk-consul-members-script","Name":"consul-members-script","ServiceID":"svc-consul-ui","Script":"consul members >/dev/null","Interval":"45s","Timeout":"3s","DeregisterCriticalServiceAfter":"2m","Notes":"legacy Script field check to emulate older operator usage"}'
+        reg_check '{"ID":"chk-hosts-file-script","Name":"hosts-file-script","Script":"test -s /etc/hosts","Interval":"60s","Timeout":"2s","Notes":"simple local script check using legacy Script field"}'
         curl -fsS -X PUT "http://consul:8500/v1/agent/check/pass/chk-blackbox-ttl" >/dev/null || true
+
+        # Register additional catalog nodes/services for more realistic node/service inventory.
+        catalog_reg '{"Datacenter":"dc1","Node":"worker-1","Address":"10.20.10.11","NodeMeta":{"az":"use1a","role":"worker","os":"linux"},"Service":{"ID":"worker-1-node-exporter","Service":"node-exporter","Address":"10.20.10.11","Port":9100,"Tags":["metrics","node","linux"],"Meta":{"team":"sre"}},"Check":{"Node":"worker-1","CheckID":"service:worker-1-node-exporter","Name":"node-exporter:9100","Status":"passing","ServiceID":"worker-1-node-exporter"}}'
+        catalog_reg '{"Datacenter":"dc1","Node":"worker-2","Address":"10.20.10.12","NodeMeta":{"az":"use1b","role":"worker","os":"linux"},"Service":{"ID":"worker-2-node-exporter","Service":"node-exporter","Address":"10.20.10.12","Port":9100,"Tags":["metrics","node","linux"],"Meta":{"team":"sre"}},"Check":{"Node":"worker-2","CheckID":"service:worker-2-node-exporter","Name":"node-exporter:9100","Status":"passing","ServiceID":"worker-2-node-exporter"}}'
+        catalog_reg '{"Datacenter":"dc1","Node":"obs-1","Address":"10.20.20.21","NodeMeta":{"az":"use1a","role":"observability","os":"linux"},"Service":{"ID":"obs-1-prometheus","Service":"prometheus","Address":"10.20.20.21","Port":9090,"Tags":["metrics","prometheus"],"Meta":{"retention":"15d"}},"Check":{"Node":"obs-1","CheckID":"service:obs-1-prometheus","Name":"prometheus:9090","Status":"passing","ServiceID":"obs-1-prometheus"}}'
+        catalog_reg '{"Datacenter":"dc1","Node":"obs-1","Address":"10.20.20.21","NodeMeta":{"az":"use1a","role":"observability","os":"linux"},"Service":{"ID":"obs-1-loki","Service":"loki","Address":"10.20.20.21","Port":3100,"Tags":["logs","loki"],"Meta":{"storage":"filesystem"}},"Check":{"Node":"obs-1","CheckID":"service:obs-1-loki","Name":"loki:3100","Status":"warning","ServiceID":"obs-1-loki","Notes":"disk usage 82%"}}'
+        catalog_reg '{"Datacenter":"dc1","Node":"obs-1","Address":"10.20.20.21","NodeMeta":{"az":"use1a","role":"observability","os":"linux"},"Service":{"ID":"obs-1-tempo","Service":"tempo","Address":"10.20.20.21","Port":3200,"Tags":["tracing","tempo"],"Meta":{"backend":"s3"}},"Check":{"Node":"obs-1","CheckID":"service:obs-1-tempo","Name":"tempo:3200","Status":"passing","ServiceID":"obs-1-tempo"}}'
+        catalog_reg '{"Datacenter":"dc1","Node":"db-replica-1","Address":"10.20.30.31","NodeMeta":{"az":"use1c","role":"database","engine":"postgres"},"Service":{"ID":"db-replica-1-postgres","Service":"postgres","Address":"10.20.30.31","Port":5432,"Tags":["database","tcp","replica"],"Meta":{"role":"replica","cluster":"orders"}},"Check":{"Node":"db-replica-1","CheckID":"service:db-replica-1-postgres","Name":"postgres replica","Status":"passing","ServiceID":"db-replica-1-postgres"}}'
+        catalog_reg '{"Datacenter":"dc1","Node":"cache-1","Address":"10.20.40.41","NodeMeta":{"az":"use1b","role":"cache","engine":"redis"},"Service":{"ID":"cache-1-redis","Service":"redis","Address":"10.20.40.41","Port":6379,"Tags":["cache","tcp","replica"],"Meta":{"role":"replica"}},"Check":{"Node":"cache-1","CheckID":"service:cache-1-redis","Name":"redis replica","Status":"critical","ServiceID":"cache-1-redis","Notes":"replication lag > 5s"}}'
+        catalog_reg '{"Datacenter":"dc1","Node":"edge-1","Address":"10.20.50.51","NodeMeta":{"az":"use1a","role":"edge","os":"linux"},"Service":{"ID":"edge-1-nginx","Service":"nginx-gateway","Address":"10.20.50.51","Port":443,"Tags":["edge","https","ingress"],"Meta":{"cert":"letsencrypt"}},"Check":{"Node":"edge-1","CheckID":"service:edge-1-nginx","Name":"nginx gateway","Status":"passing","ServiceID":"edge-1-nginx"}}'
+        catalog_reg '{"Datacenter":"dc1","Node":"ci-1","Address":"10.20.60.61","NodeMeta":{"az":"use1c","role":"ci","os":"linux"},"Service":{"ID":"ci-1-runner","Service":"gitlab-runner","Address":"10.20.60.61","Port":9252,"Tags":["ci","runner","metrics"],"Meta":{"executor":"docker"}},"Check":{"Node":"ci-1","CheckID":"service:ci-1-runner","Name":"gitlab-runner","Status":"passing","ServiceID":"ci-1-runner"}}'
         echo "[consul-seed] done"
 
   consul-acl:
-    image: hashicorp/consul:1.17
+    build:
+      context: .
+      dockerfile: docker/consul/Dockerfile
+      args:
+        CONSUL_VERSION: "1.17.3"
+    image: redposture-lab-consul-ubuntu:1.17.3
     container_name: redposture-lab-consul-acl
     command:
       - consul
@@ -815,67 +894,6 @@ services:
       - ./docker/consul/seed_acl.py:/seed/seed_acl.py:ro
       - ./docker/consul/output:/output
     command: ["python", "/seed/seed_acl.py"]
-    restart: on-failure
-
-  gitlab:
-    image: gitlab/gitlab-ce:17.8.1-ce.0
-    container_name: redposture-lab-gitlab
-    profiles: ["gitlab-real"]
-    # Official GitLab CE Omnibus image is amd64-oriented. On arm64 hosts it may
-    # run under emulation (QEMU) and can crash during omnibus init.
-    platform: linux/amd64
-    hostname: gitlab
-    shm_size: "256m"
-    environment:
-      GITLAB_ROOT_PASSWORD: "redpostureRoot!2026"
-      GITLAB_OMNIBUS_CONFIG: |
-        external_url 'http://gitlab:80'
-        nginx['listen_port'] = 80
-        nginx['listen_https'] = false
-        letsencrypt['enable'] = false
-        prometheus_monitoring['enable'] = false
-        alertmanager['enable'] = false
-        grafana['enable'] = false
-        node_exporter['enable'] = false
-        redis_exporter['enable'] = false
-        postgres_exporter['enable'] = false
-        gitlab_exporter['enable'] = false
-        registry['enable'] = false
-        pages_external_url ''
-        gitlab_rails['gitlab_shell_ssh_port'] = 2222
-    ports:
-      - "18081:80"
-    volumes:
-      - gitlab-config:/etc/gitlab
-      - gitlab-logs:/var/log/gitlab
-      - gitlab-data:/var/opt/gitlab
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1/-/readiness >/dev/null || curl -fsS http://127.0.0.1/users/sign_in >/dev/null"]
-      interval: 30s
-      timeout: 10s
-      retries: 60
-      start_period: 180s
-    restart: unless-stopped
-
-  gitlab-seed:
-    image: gitlab/gitlab-ce:17.8.1-ce.0
-    container_name: redposture-lab-gitlab-seed
-    profiles: ["gitlab-real"]
-    platform: linux/amd64
-    depends_on:
-      gitlab:
-        condition: service_started
-    environment:
-      GITLAB_URL: "http://gitlab:80"
-      GITLAB_ROOT_PASSWORD: "redpostureRoot!2026"
-      GITLAB_ROOT_PAT: "glpat-redposture-lab-root-2026"
-      GITLAB_ANALYST_PAT: "glpat-redposture-lab-analyst-2026"
-    entrypoint: ["/bin/bash", "/seed/seed.sh"]
-    volumes:
-      - ./docker/gitlab/seed.sh:/seed/seed.sh:ro
-      - gitlab-config:/etc/gitlab
-      - gitlab-logs:/var/log/gitlab
-      - gitlab-data:/var/opt/gitlab
     restart: on-failure
 
   proxmox-exporter:
@@ -933,6 +951,3 @@ volumes:
   k3s-data:
   registry-open-data:
   nexus-data:
-  gitlab-config:
-  gitlab-logs:
-  gitlab-data:
