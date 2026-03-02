@@ -478,6 +478,69 @@ def _audit_zookeeper_host(
                 elif not auth_error:
                     auth_error = "authentication failed"
 
+            if provided_credentials and provided_credentials_ok is False:
+                auth_required_value: bool | None
+                if anonymous_root_err == _ZK_ERR_NOAUTH:
+                    auth_required_value = True
+                elif anonymous_root_err == _ZK_ERR_OK:
+                    auth_required_value = False
+                else:
+                    auth_required_value = None
+
+                auth_error_text = str(auth_error or "").strip()
+                if auth_error_text and not auth_error_text.lower().startswith("authentication failed"):
+                    return {
+                        "timestamp": utc_now_iso(),
+                        "host": host,
+                        "port": port,
+                        "is_zookeeper": True,
+                        "status": "fail",
+                        "auth_required": auth_required_value,
+                        "provided_credentials": provided_credentials,
+                        "provided_username": username,
+                        "provided_password": password if provided_credentials else None,
+                        "provided_credentials_ok": provided_credentials_ok,
+                        "show_znodes": show_znodes,
+                        "dump": dump,
+                        "query_znode": query_znode,
+                        "max_znodes": max_znodes,
+                        "znode_count": None,
+                        "znodes": None,
+                        "znode_values": None,
+                        "znodes_truncated": False,
+                        "query_znode_value": None,
+                        "query_znode_dump": None,
+                        "query_znode_dump_error": None,
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "error": auth_error_text,
+                    }
+
+                return {
+                    "timestamp": utc_now_iso(),
+                    "host": host,
+                    "port": port,
+                    "is_zookeeper": True,
+                    "status": "auth_required",
+                    "auth_required": auth_required_value,
+                    "provided_credentials": provided_credentials,
+                    "provided_username": username,
+                    "provided_password": password if provided_credentials else None,
+                    "provided_credentials_ok": provided_credentials_ok,
+                    "show_znodes": show_znodes,
+                    "dump": dump,
+                    "query_znode": query_znode,
+                    "max_znodes": max_znodes,
+                    "znode_count": None,
+                    "znodes": None,
+                    "znode_values": None,
+                    "znodes_truncated": False,
+                    "query_znode_value": None,
+                    "query_znode_dump": None,
+                    "query_znode_dump_error": "authentication required",
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "error": auth_error_text or "authentication failed",
+                }
+
             if root_err == _ZK_ERR_NOAUTH:
                 return {
                     "timestamp": utc_now_iso(),
