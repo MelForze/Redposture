@@ -1,3 +1,0 @@
-SCAN    	127.0.0.1	9187	 [*] Postgres Exporter
-TRIGGER 	127.0.0.1	15432	 [+] Postgres Exporter (SSRF!)
-[08:49:07] [SSRF] [Postgres] 127.0.0.1:64429 user=nobody pass=<empty> listen_port=15432 startup={'extra_float_digits': '2', 'database': 'postgres', 'client_encoding': 'UTF8', 'datestyle': 'ISO, MDY', 'user': 'nobody'}

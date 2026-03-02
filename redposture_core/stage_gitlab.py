@@ -21,6 +21,7 @@ from .console import Console
 from .logger import AttemptLogger
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
+_CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _PUBLIC_ENDPOINT_PATHS: tuple[str, ...] = (
     "/api/v4/version",
     "/-/health",
@@ -91,6 +92,13 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "connection timeout"
     return _friendly_error_text(str(exc))
+
+
+def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
+    if str(record.get("status") or "") != "fail":
+        return False
+    error_text = str(record.get("error") or "").strip().lower()
+    return bool(error_text) and error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
 
 
 def _normalize_path(path: str) -> str:
@@ -1074,6 +1082,7 @@ def audit_gitlab_targets(
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
     append_output: bool = False,
+    suppress_timeout_status_lines: bool = False,
 ) -> tuple[int, int, int]:
     total = 0
     detected = 0
@@ -1111,7 +1120,13 @@ def audit_gitlab_targets(
                 elif status == "fail":
                     failed += 1
 
-                _emit_line(out_fh, emit_line, _format_record(record, output_format))
+                suppress_timeout_status_line = (
+                    suppress_timeout_status_lines
+                    and output_format == "txt"
+                    and _is_connection_timeout_fail_record(record)
+                )
+                if not suppress_timeout_status_line:
+                    _emit_line(out_fh, emit_line, _format_record(record, output_format))
                 for detail in _format_detail_records(record, output_format):
                     _emit_line(out_fh, emit_line, detail)
 
@@ -1223,6 +1238,7 @@ def run_gitlab_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 emit_line=emit_line,
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
+                suppress_timeout_status_lines=not bool(args.debug),
             )
             total += part_total
             detected += part_detected

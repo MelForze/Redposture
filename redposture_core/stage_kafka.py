@@ -29,6 +29,7 @@ KAFKA_AUTH_ERROR_CODES = {29, 31, 58}
 KAFKA_MAX_FRAME = 16 * 1024 * 1024
 KAFKA_FETCH_MAX_BYTES = 1024 * 1024
 _CONNECTION_REFUSED_PREFIX = "connection refused"
+_CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -90,6 +91,17 @@ def _is_connection_refused_error(value: Any) -> bool:
 
 def _is_connection_refused_fail_record(record: dict[str, Any]) -> bool:
     return str(record.get("status") or "") == "fail" and _is_connection_refused_error(record.get("error"))
+
+
+def _is_connection_timeout_error(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and text.startswith(_CONNECTION_TIMEOUT_PREFIX)
+
+
+def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
+    return str(record.get("status") or "") == "fail" and (
+        _is_connection_refused_error(record.get("error")) or _is_connection_timeout_error(record.get("error"))
+    )
 
 
 def _kafka_error_name(code: int) -> str:
@@ -1559,7 +1571,7 @@ def audit_kafka_targets(
                 suppress_connection_refused_status_line = (
                     suppress_connection_refused_status_lines
                     and output_format == "txt"
-                    and _is_connection_refused_fail_record(record)
+                    and _is_suppressed_fail_record(record)
                 )
                 if not suppress_auth_required_status_line and not suppress_connection_refused_status_line:
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))
@@ -1568,7 +1580,7 @@ def audit_kafka_targets(
                         _emit_line(out_fh, emit_line, topics_line)
 
                 if logger is not None and not (
-                    suppress_connection_refused_status_lines and _is_connection_refused_fail_record(record)
+                    suppress_connection_refused_status_lines and _is_suppressed_fail_record(record)
                 ):
                     logger.log(
                         "kafka",

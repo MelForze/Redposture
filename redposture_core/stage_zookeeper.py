@@ -27,9 +27,12 @@ _ZK_OP_CLOSE_SESSION = -11
 _ZK_ERR_OK = 0
 _ZK_ERR_NONODE = -101
 _ZK_ERR_NOAUTH = -102
+_ZK_ERR_RETRYABLE_ROOT_QUERY = -124
 _ZK_MAX_FRAME = 64 * 1024 * 1024
 _ZK_SYSTEM_PREFIX = "/zookeeper"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
+_CONNECTION_TIMEOUT_PREFIX = "connection timeout"
+_ROOT_QUERY_ERR_124_PREFIX = "root query failed: err_-124"
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -94,6 +97,24 @@ def _is_connection_refused_error(value: Any) -> bool:
 
 def _is_connection_refused_fail_record(record: dict[str, Any]) -> bool:
     return str(record.get("status") or "") == "fail" and _is_connection_refused_error(record.get("error"))
+
+
+def _is_connection_timeout_error(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and text.startswith(_CONNECTION_TIMEOUT_PREFIX)
+
+
+def _is_root_query_err_124_error(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and text.startswith(_ROOT_QUERY_ERR_124_PREFIX)
+
+
+def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
+    return str(record.get("status") or "") == "fail" and (
+        _is_connection_refused_error(record.get("error"))
+        or _is_connection_timeout_error(record.get("error"))
+        or _is_root_query_err_124_error(record.get("error"))
+    )
 
 
 def _zk_error_name(code: int) -> str:
@@ -400,10 +421,14 @@ def _audit_zookeeper_host(
     query_znode: str | None,
     max_znodes: int,
 ) -> dict[str, Any]:
-    attempts = max(1, retries + 1)
+    base_attempts = max(1, retries + 1)
+    bonus_retry_for_root_query_124 = False
     last_error: str | None = None
 
-    for attempt in range(attempts):
+    for attempt in range(base_attempts + 1):
+        max_attempts = base_attempts + (1 if bonus_retry_for_root_query_124 else 0)
+        if attempt >= max_attempts:
+            break
         started = time.monotonic()
         client = _ZkClient(host, port, timeout)
         try:
@@ -432,6 +457,12 @@ def _audit_zookeeper_host(
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": None,
                 }
+
+            if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and not bonus_retry_for_root_query_124:
+                bonus_retry_for_root_query_124 = True
+                last_error = f"root query failed: {_zk_error_name(root_err)}"
+                time.sleep(_retry_delay(attempt))
+                continue
 
             if root_err != _ZK_ERR_OK:
                 return {
@@ -534,7 +565,8 @@ def _audit_zookeeper_host(
             }
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             last_error = _friendly_error_from_exception(exc)
-            if attempt >= attempts - 1:
+            max_attempts = base_attempts + (1 if bonus_retry_for_root_query_124 else 0)
+            if attempt >= max_attempts - 1:
                 break
             time.sleep(_retry_delay(attempt))
         finally:
@@ -877,7 +909,7 @@ def audit_zookeeper_targets(
                 suppress_connection_refused_status_line = (
                     suppress_connection_refused_status_lines
                     and output_format == "txt"
-                    and _is_connection_refused_fail_record(record)
+                    and _is_suppressed_fail_record(record)
                 )
                 if not suppress_auth_required_status_line and not suppress_connection_refused_status_line:
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))
@@ -887,7 +919,7 @@ def audit_zookeeper_targets(
                         _emit_line(out_fh, emit_line, detail)
 
                 if logger is not None and not (
-                    suppress_connection_refused_status_lines and _is_connection_refused_fail_record(record)
+                    suppress_connection_refused_status_lines and _is_suppressed_fail_record(record)
                 ):
                     logger.log(
                         "zookeeper",
