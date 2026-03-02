@@ -1820,14 +1820,14 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if stream_to_stdout:
         if args.debug and args.output_format == "txt":
             console.info(
-                f"postgres audit complete: total={total} open={open_no_auth} "
+                f"postgres audit complete: total={total} anonymous={open_no_auth} "
                 f"weak={weak} valid={valid} auth={auth_required} fail={failed}"
             )
         return 0
 
     if args.debug:
         console.info(
-            f"postgres audit complete: total={total} open={open_no_auth} "
+            f"postgres audit complete: total={total} anonymous={open_no_auth} "
             f"weak={weak} valid={valid} auth={auth_required} fail={failed} "
             f"format={args.output_format} output={args.output}"
         )
