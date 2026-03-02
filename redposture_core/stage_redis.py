@@ -30,6 +30,17 @@ def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
 
 
+def _is_timeout_error(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return "connection timeout" in text or "timed out" in text or "timeout" in text
+
+
+def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
+    return str(record.get("status") or "") == "fail" and _is_timeout_error(record.get("error"))
+
+
 def _encode_resp_array(parts: list[str]) -> bytes:
     payload = [f"*{len(parts)}\r\n".encode("ascii")]
     for item in parts:
@@ -690,6 +701,7 @@ def audit_redis_targets(
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
     append_output: bool = False,
+    suppress_timeout_status_lines: bool = False,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -746,7 +758,12 @@ def audit_redis_targets(
                     and not bool(record.get("provided_credentials"))
                     and not bool(record.get("default_credentials_attempted"))
                 )
-                if not suppress_auth_required_status_line:
+                suppress_timeout_status_line = (
+                    suppress_timeout_status_lines
+                    and output_format == "txt"
+                    and _is_connection_timeout_fail_record(record)
+                )
+                if not suppress_auth_required_status_line and not suppress_timeout_status_line:
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))
                 for keys_detail in _format_keys_detail_records(record, output_format):
                     _emit_line(out_fh, emit_line, keys_detail)
@@ -880,6 +897,7 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 emit_line=emit_line,
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
+                suppress_timeout_status_lines=not bool(args.debug),
             )
             total += part_total
             open_no_auth += part_open

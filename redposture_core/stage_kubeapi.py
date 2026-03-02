@@ -28,6 +28,7 @@ _KUBE_LIST_PAGE_LIMIT = 500
 _KUBE_MAX_LIST_PAGES = 40
 _KUBE_WS_READ_TIMEOUT = 3.0
 _KUBE_WS_HANDSHAKE_TIMEOUT = 5.0
+_CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 
 
 def _clip(text: str, width: int = 72) -> str:
@@ -91,6 +92,13 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "connection timeout"
     return _friendly_error_text(str(exc))
+
+
+def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
+    if str(record.get("status") or "") != "fail":
+        return False
+    error_text = str(record.get("error") or "").strip().lower()
+    return bool(error_text) and error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
 
 
 def _is_tls_verify_error(value: str | None) -> bool:
@@ -1537,6 +1545,7 @@ def audit_kubeapi_targets(
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
     append_output: bool = False,
+    suppress_timeout_status_lines: bool = False,
 ) -> tuple[int, int, int]:
     total = 0
     detected = 0
@@ -1585,7 +1594,13 @@ def audit_kubeapi_targets(
                     record_for_output["_username_display"] = username or ""
                     record_for_output["_password_display"] = password or ""
 
-                _emit_line(out_fh, emit_line, _format_detect_record(record_for_output, output_format))
+                suppress_timeout_detect_line = (
+                    suppress_timeout_status_lines
+                    and output_format == "txt"
+                    and _is_connection_timeout_fail_record(record_for_output)
+                )
+                if not suppress_timeout_detect_line:
+                    _emit_line(out_fh, emit_line, _format_detect_record(record_for_output, output_format))
                 status_line = _status_summary_line(record_for_output)
                 suppress_auth_required_status_line = (
                     output_format == "txt"
@@ -1725,6 +1740,7 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 emit_line=emit_line,
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
+                suppress_timeout_status_lines=not bool(args.debug),
             )
             total += part_total
             detected += part_detected
