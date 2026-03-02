@@ -782,7 +782,7 @@ def audit_etcd_targets(
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
     append_output: bool = False,
-    suppress_connection_refused_debug_errors: bool = False,
+    suppress_connection_refused_status_lines: bool = False,
 ) -> tuple[int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -819,7 +819,7 @@ def audit_etcd_targets(
                     output_format == "txt" and bool(record.get("is_etcd")) and status == "auth_required"
                 )
                 suppress_connection_refused_status_line = (
-                    suppress_connection_refused_debug_errors
+                    suppress_connection_refused_status_lines
                     and output_format == "txt"
                     and _is_connection_refused_fail_record(record)
                 )
@@ -829,7 +829,7 @@ def audit_etcd_targets(
                     _emit_line(out_fh, emit_line, key_line)
 
                 if logger is not None and not (
-                    suppress_connection_refused_debug_errors and _is_connection_refused_fail_record(record)
+                    suppress_connection_refused_status_lines and _is_connection_refused_fail_record(record)
                 ):
                     logger.log(
                         "etcd",
@@ -931,7 +931,7 @@ def run_etcd_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 emit_line=emit_line,
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
-                suppress_connection_refused_debug_errors=bool(args.debug),
+                suppress_connection_refused_status_lines=not bool(args.debug),
             )
             total += part_total
             open_no_auth += part_open
