@@ -32,6 +32,7 @@ _REGISTRY_MANIFEST_ACCEPT = ",".join(
 _REGISTRY_DOWNLOAD_LIMIT_BYTES = 100 * 1024 * 1024
 _REGISTRY_MAX_INSPECT_IMAGES = 100
 _REGISTRY_MAX_HISTORY_LINES = 20
+_CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _SUSPICIOUS_TEXT_RE = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?key|aws[_-]?secret|private[_-]?key)"
 )
@@ -92,6 +93,13 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     if isinstance(exc, (socket.timeout, TimeoutError)):
         return "connection timeout"
     return _friendly_error_text(str(exc))
+
+
+def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
+    if str(record.get("status") or "") != "fail":
+        return False
+    error_text = str(record.get("error") or "").strip().lower()
+    return bool(error_text) and error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
 
 
 def _human_bytes(value: int | float | None) -> str:
@@ -2403,6 +2411,7 @@ def audit_registry_targets(
     console: Console,
     debug: bool,
     append_output: bool = False,
+    suppress_timeout_status_lines: bool = False,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -2484,7 +2493,13 @@ def audit_registry_targets(
                     and not bool(record.get("token_provided"))
                 )
                 if not suppress_auth_required_status_line:
-                    output_lines.append(_format_record(record, output_format))
+                    suppress_timeout_status_line = (
+                        suppress_timeout_status_lines
+                        and output_format == "txt"
+                        and _is_connection_timeout_fail_record(record)
+                    )
+                    if not suppress_timeout_status_line:
+                        output_lines.append(_format_record(record, output_format))
                 output_lines.extend(_format_detail_records(record, output_format))
 
                 for line in output_lines:
@@ -2710,6 +2725,7 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 console=console,
                 debug=args.debug,
                 append_output=idx > 0,
+                suppress_timeout_status_lines=not bool(args.debug),
             )
             total += part_total
             open_no_auth += part_open

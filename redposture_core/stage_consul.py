@@ -33,6 +33,7 @@ _CONSUL_REVSHELL_CHECK_TIMEOUT_SECONDS = 5
 _CONSUL_REVSHELL_MIN_WAIT_SECONDS = 8.0
 _CONSUL_REVSHELL_MAX_WAIT_SECONDS = 15.0
 _CONSUL_REVSHELL_SCHEDULER_SLACK_SECONDS = 2.0
+_CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 
 
 def _clip(text: str, width: int = 80) -> str:
@@ -98,6 +99,13 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "connection timeout"
     return _friendly_error_text(str(exc))
+
+
+def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
+    if str(record.get("status") or "") != "fail":
+        return False
+    error_text = str(record.get("error") or "").strip().lower()
+    return bool(error_text) and error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
 
 
 def _is_tls_verify_error_text(value: str | None) -> bool:
@@ -3051,6 +3059,7 @@ def audit_consul_targets(
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
     append_output: bool = False,
+    suppress_timeout_status_lines: bool = False,
 ) -> tuple[int, int, int, bool]:
     total = 0
     detected = 0
@@ -3138,7 +3147,13 @@ def audit_consul_targets(
                     record_out["_username_display"] = username or ""
                     record_out["_password_display"] = password or ""
 
-                _emit_line(out_fh, emit_line, _detect_line(record_out, output_format))
+                suppress_timeout_detect_line = (
+                    suppress_timeout_status_lines
+                    and output_format == "txt"
+                    and _is_connection_timeout_fail_record(record_out)
+                )
+                if not suppress_timeout_detect_line:
+                    _emit_line(out_fh, emit_line, _detect_line(record_out, output_format))
                 line = _summary_line(record_out)
                 suppress_anonymous_summary = (
                     output_format == "txt"
@@ -3446,6 +3461,7 @@ def run_consul_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 emit_line=emit_line,
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
+                suppress_timeout_status_lines=not bool(args.debug),
             )
             total += part_total
             detected += part_detected
