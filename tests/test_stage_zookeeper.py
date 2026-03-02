@@ -194,6 +194,57 @@ def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypat
     assert "/clickhouse:<access denied>" in znode_values
 
 
+def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls = {"auth": 0}
+
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def auth_digest(self, username: str, password: str) -> tuple[bool, str | None]:
+            calls["auth"] += 1
+            assert username == "admin"
+            assert password == "wrong"
+            return False, "authentication failed: AUTHFAILED"
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            _ = path
+            return ["clickhouse"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return b"ok", _ZK_ERR_OK, {"data_length": 2, "num_children": 0}
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username="admin",
+        password="wrong",
+        show_znodes=True,
+        dump=True,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert calls["auth"] == 1
+    assert record["status"] == "auth_required"
+    assert record["auth_required"] is False
+    assert record["provided_credentials_ok"] is False
+    assert "authentication failed" in str(record["error"]).lower()
+    line = _format_record(record, "txt")
+    assert "[-] admin:wrong invalid" in line
+
+
 def test_format_record_shows_zookeeper_password_for_valid_credentials() -> None:
     line = _format_record(
         {
