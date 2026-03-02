@@ -463,7 +463,15 @@ def _audit_zookeeper_host(
             provided_credentials_ok: bool | None = None
             auth_error: str | None = None
             root_children, root_err, _ = client.get_children2("/")
-            if root_err == _ZK_ERR_NOAUTH and provided_credentials and username and password:
+            anonymous_root_err = root_err
+
+            if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and not bonus_retry_for_root_query_124:
+                bonus_retry_for_root_query_124 = True
+                last_error = f"root query failed: {_zk_error_name(root_err)}"
+                time.sleep(_retry_delay(attempt))
+                continue
+
+            if provided_credentials and username and password:
                 provided_credentials_ok, auth_error = client.auth_digest(username, password)
                 if provided_credentials_ok:
                     root_children, root_err, _ = client.get_children2("/")
@@ -583,13 +591,21 @@ def _audit_zookeeper_host(
             if total_count == 0 and root_count > 0:
                 total_count = root_count
 
+            auth_required_value: bool | None
+            if anonymous_root_err == _ZK_ERR_NOAUTH:
+                auth_required_value = True
+            elif anonymous_root_err == _ZK_ERR_OK:
+                auth_required_value = False
+            else:
+                auth_required_value = None
+
             return {
                 "timestamp": utc_now_iso(),
                 "host": host,
                 "port": port,
                 "is_zookeeper": True,
                 "status": "valid_credentials" if provided_credentials_ok else "open_no_auth",
-                "auth_required": True if provided_credentials_ok else False,
+                "auth_required": auth_required_value,
                 "provided_credentials": provided_credentials,
                 "provided_username": username,
                 "provided_credentials_ok": provided_credentials_ok,
