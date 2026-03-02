@@ -1777,14 +1777,14 @@ def run_qdrant_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 console.warn("all qdrant targets are unreachable; check host/port and network reachability")
         if args.debug and args.output_format == "txt":
             console.info(
-                f"qdrant audit complete: total={total} no_auth={open_no_auth} with_key={open_with_key} "
+                f"qdrant audit complete: total={total} anonymous={open_no_auth} with_key={open_with_key} "
                 f"auth_required={auth_required} fail={failed}"
             )
         return 0
 
     if args.debug:
         console.info(
-            f"qdrant audit complete: total={total} no_auth={open_no_auth} with_key={open_with_key} "
+            f"qdrant audit complete: total={total} anonymous={open_no_auth} with_key={open_with_key} "
             f"auth_required={auth_required} fail={failed} format={args.output_format} output={args.output}"
         )
     return 0

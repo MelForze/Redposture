@@ -20,6 +20,8 @@ from .console import Console
 from .logger import AttemptLogger
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
+_CONNECTION_REFUSED_PREFIX = "connection refused"
+
 
 def _clip(text: str, width: int = 64) -> str:
     if len(text) <= width:
@@ -81,6 +83,15 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     if isinstance(exc, (socket.timeout, TimeoutError)):
         return "connection timeout"
     return _friendly_error_text(str(exc))
+
+
+def _is_connection_refused_error(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and text.startswith(_CONNECTION_REFUSED_PREFIX)
+
+
+def _is_connection_refused_fail_record(record: dict[str, Any]) -> bool:
+    return str(record.get("status") or "") == "fail" and _is_connection_refused_error(record.get("error"))
 
 
 def _http_json_request(
@@ -771,6 +782,7 @@ def audit_etcd_targets(
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
     append_output: bool = False,
+    suppress_connection_refused_debug_errors: bool = False,
 ) -> tuple[int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -806,12 +818,19 @@ def audit_etcd_targets(
                 suppress_auth_required_status_line = (
                     output_format == "txt" and bool(record.get("is_etcd")) and status == "auth_required"
                 )
-                if not suppress_auth_required_status_line:
+                suppress_connection_refused_status_line = (
+                    suppress_connection_refused_debug_errors
+                    and output_format == "txt"
+                    and _is_connection_refused_fail_record(record)
+                )
+                if not suppress_auth_required_status_line and not suppress_connection_refused_status_line:
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))
                 for key_line in _format_keys_detail_records(record, output_format):
                     _emit_line(out_fh, emit_line, key_line)
 
-                if logger is not None:
+                if logger is not None and not (
+                    suppress_connection_refused_debug_errors and _is_connection_refused_fail_record(record)
+                ):
                     logger.log(
                         "etcd",
                         (str(record.get("host") or "-"), int(record.get("port") or port)),
@@ -912,6 +931,7 @@ def run_etcd_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 emit_line=emit_line,
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
+                suppress_connection_refused_debug_errors=bool(args.debug),
             )
             total += part_total
             open_no_auth += part_open
@@ -926,13 +946,15 @@ def run_etcd_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             console.warn("all etcd targets are unreachable; check host/port, network reachability, and service status")
         if args.debug and args.output_format == "txt":
             console.info(
-                f"etcd audit complete: total={total} no_auth={open_no_auth} auth_required={auth_required} fail={failed}"
+                f"etcd audit complete: total={total} anonymous={open_no_auth} auth_required={auth_required} "
+                f"fail={failed}"
             )
         return 0
 
     if args.debug:
         console.info(
-            f"etcd audit complete: total={total} no_auth={open_no_auth} auth_required={auth_required} fail={failed} "
+            f"etcd audit complete: total={total} anonymous={open_no_auth} auth_required={auth_required} "
+            f"fail={failed} "
             f"format={args.output_format} output={args.output}"
         )
     return 0

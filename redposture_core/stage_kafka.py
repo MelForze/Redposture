@@ -28,6 +28,7 @@ KAFKA_SASL_AUTHENTICATE = 36
 KAFKA_AUTH_ERROR_CODES = {29, 31, 58}
 KAFKA_MAX_FRAME = 16 * 1024 * 1024
 KAFKA_FETCH_MAX_BYTES = 1024 * 1024
+_CONNECTION_REFUSED_PREFIX = "connection refused"
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -80,6 +81,15 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     if isinstance(exc, (socket.timeout, TimeoutError)):
         return "connection timeout"
     return _friendly_error_text(str(exc))
+
+
+def _is_connection_refused_error(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and text.startswith(_CONNECTION_REFUSED_PREFIX)
+
+
+def _is_connection_refused_fail_record(record: dict[str, Any]) -> bool:
+    return str(record.get("status") or "") == "fail" and _is_connection_refused_error(record.get("error"))
 
 
 def _kafka_error_name(code: int) -> str:
@@ -1493,6 +1503,7 @@ def audit_kafka_targets(
     emit_line: Callable[[str], None] | None = None,
     logger: AttemptLogger | None = None,
     append_output: bool = False,
+    suppress_connection_refused_debug_errors: bool = False,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -1545,13 +1556,20 @@ def audit_kafka_targets(
                     and status == "auth_required"
                     and not bool(record.get("provided_credentials"))
                 )
-                if not suppress_auth_required_status_line:
+                suppress_connection_refused_status_line = (
+                    suppress_connection_refused_debug_errors
+                    and output_format == "txt"
+                    and _is_connection_refused_fail_record(record)
+                )
+                if not suppress_auth_required_status_line and not suppress_connection_refused_status_line:
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))
                 if bool(record.get("is_kafka")):
                     for topics_line in _format_topics_detail_records(record, output_format):
                         _emit_line(out_fh, emit_line, topics_line)
 
-                if logger is not None:
+                if logger is not None and not (
+                    suppress_connection_refused_debug_errors and _is_connection_refused_fail_record(record)
+                ):
                     logger.log(
                         "kafka",
                         (str(record.get("host") or "-"), int(record.get("port") or port)),
@@ -1684,6 +1702,7 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 emit_line=emit_line,
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
+                suppress_connection_refused_debug_errors=bool(args.debug),
             )
             total += part_total
             open_no_auth += part_open
@@ -1707,7 +1726,7 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug:
         console.info(
-            f"kafka audit complete: total={total} no_auth={open_no_auth} valid={valid} "
+            f"kafka audit complete: total={total} anonymous={open_no_auth} valid={valid} "
             f"auth_required={auth_required} fail={failed}"
         )
 

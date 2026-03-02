@@ -1257,7 +1257,7 @@ def run_grafana_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug:
         console.info(
-            f"grafana audit complete: total={total} no_auth={open_no_auth} valid={valid} "
+            f"grafana audit complete: total={total} anonymous={open_no_auth} valid={valid} "
             f"auth_required={auth_required} fail={failed}"
         )
 

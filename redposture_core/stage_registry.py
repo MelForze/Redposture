@@ -2729,7 +2729,7 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug:
         console.info(
-            f"registry audit complete: total={total} open={open_no_auth} valid={valid} "
+            f"registry audit complete: total={total} anonymous={open_no_auth} valid={valid} "
             f"auth_required={auth_required} not_registry={not_registry} fail={failed}"
         )
 
