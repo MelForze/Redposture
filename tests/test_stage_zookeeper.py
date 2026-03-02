@@ -93,7 +93,7 @@ def test_audit_zookeeper_suppresses_unexpected_eof_when_suppression_enabled(monk
     assert lines == []
 
 
-def test_audit_zookeeper_uses_provided_credentials_on_anonymous_open_target(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_zookeeper_marks_provided_credentials_invalid_on_anonymous_open_target(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     calls = {"auth": 0}
 
     class _FakeZkClient:
@@ -136,9 +136,12 @@ def test_audit_zookeeper_uses_provided_credentials_on_anonymous_open_target(monk
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "open_no_auth"
-    assert record["provided_credentials_ok"] is None
+    assert record["status"] == "fail"
+    assert record["provided_credentials_ok"] is False
     assert record["auth_required"] is False
+    assert "authentication failed" in str(record["error"]).lower()
+    line = _format_record(record, "txt")
+    assert "[-] admin:admin invalid" in line
 
 
 def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -147,6 +150,7 @@ def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypat
     class _FakeZkClient:
         def __init__(self, host: str, port: int, timeout: float) -> None:
             _ = (host, port, timeout)
+            self._authed = False
 
         def connect(self) -> None:
             return
@@ -158,9 +162,12 @@ def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypat
             calls["auth"] += 1
             assert username == "admin"
             assert password == "admin"
+            self._authed = True
             return True, None
 
         def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            if path == "/" and not self._authed:
+                return None, _ZK_ERR_NOAUTH, None
             if path == "/":
                 return ["clickhouse"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
             if path == "/clickhouse":
@@ -187,8 +194,8 @@ def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypat
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "open_no_auth"
-    assert record["provided_credentials_ok"] is None
+    assert record["status"] == "valid_credentials"
+    assert record["provided_credentials_ok"] is True
     znode_values = record.get("znode_values")
     assert isinstance(znode_values, list)
     assert "/clickhouse:<access denied>" in znode_values
