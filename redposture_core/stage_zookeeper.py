@@ -478,7 +478,7 @@ def _audit_zookeeper_host(
                     root_children, root_err, _ = client.get_children2("/")
                     if anonymous_root_err == _ZK_ERR_NOAUTH and root_err == _ZK_ERR_OK:
                         provided_credentials_ok = True
-                    elif anonymous_root_err == _ZK_ERR_NOAUTH:
+                    elif anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_OK}:
                         provided_credentials_ok = False
                 else:
                     provided_credentials_ok = False
