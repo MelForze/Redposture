@@ -891,6 +891,10 @@ def test_zookeeper_flags_are_parsed() -> None:
             "22181",
             "--ports",
             "2181,22181",
+            "-u",
+            "zk-user",
+            "-p",
+            "zk-pass",
             "--show-znodes",
             "--dump",
             "-znode",
@@ -910,6 +914,8 @@ def test_zookeeper_flags_are_parsed() -> None:
     assert args.retries == 2
     assert args.port == 22181
     assert args.ports == "2181,22181"
+    assert args.username == "zk-user"
+    assert args.password == "zk-pass"
     assert args.show_znodes is True
     assert args.dump is True
     assert args.znode == "/brokers/ids/1"

@@ -8,6 +8,7 @@ from redposture_core.stage_zookeeper import (
     _normalize_znode_path,
     _parse_children_vector,
     _parse_stat,
+    audit_zookeeper_targets,
 )
 
 
@@ -49,3 +50,40 @@ def test_format_znode_data_text_and_binary() -> None:
     assert _format_znode_data(b"") == "<empty>"
     assert _format_znode_data(b"line1\nline2") == "line1\\nline2"
     assert _format_znode_data(b"\x01\x02\xff") == "<base64:AQL/>"
+
+
+def test_audit_zookeeper_suppresses_unexpected_eof_when_suppression_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **_kwargs):
+        return {
+            "timestamp": "2026-03-02T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 2181,
+            "is_zookeeper": False,
+            "status": "fail",
+            "auth_required": None,
+            "error": "unexpected EOF",
+        }
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
+
+    lines: list[str] = []
+    total, open_no_auth, valid, auth_required, failed = audit_zookeeper_targets(
+        hosts=["127.0.0.1"],
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+        output_path=None,
+        output_format="txt",
+        emit_line=lines.append,
+        suppress_connection_refused_status_lines=True,
+    )
+
+    assert (total, open_no_auth, valid, auth_required, failed) == (1, 0, 0, 0, 1)
+    assert lines == []

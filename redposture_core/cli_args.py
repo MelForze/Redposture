@@ -1590,6 +1590,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_multi_ports_flag(zookeeper_parser)
     zookeeper_parser.add_argument(
+        "-u",
+        "--username",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Optional ZooKeeper username for digest auth credential check.",
+    )
+    zookeeper_parser.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Optional ZooKeeper password for digest auth credential check.",
+    )
+    zookeeper_parser.add_argument(
         "--show-znodes",
         action="store_true",
         help="Show znode paths after successful access/auth.",

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from redposture_core.stage_postgres import _audit_postgres_host, _PgSession
+from redposture_core.stage_postgres import _audit_postgres_host, _PgSession, audit_postgres_targets
 
 
 class _DummySocket:
@@ -209,3 +209,73 @@ def test_show_columns_with_dump_prints_columns_and_dump(monkeypatch) -> None:  #
     assert dumped == [("public.users", ["id"])]
     table_columns_info = record.get("table_columns_info")
     assert isinstance(table_columns_info, list) and len(table_columns_info) == 1
+
+
+def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **_kwargs):
+        return {
+            "timestamp": "2026-03-02T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "database": "postgres",
+            "is_postgres": False,
+            "status": "fail",
+            "auth_required": None,
+            "auth_method": None,
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "defcreds_enabled": False,
+            "effective_username": "postgres",
+            "show_databases": False,
+            "database_names": None,
+            "show_tables": False,
+            "show_columns": False,
+            "table_names": None,
+            "table_targets": [],
+            "table_columns": [],
+            "table_dump_enabled": False,
+            "table_columns_info": [],
+            "table_dumps": [],
+            "execute_command": None,
+            "execute_attempted": False,
+            "execute_ok": None,
+            "execute_output": None,
+            "execute_error": None,
+            "server_version": None,
+            "superuser": None,
+            "can_execute_commands": None,
+            "can_read_tables": None,
+            "readable_tables": None,
+            "elapsed_ms": None,
+            "error": "[Errno 111] Connection refused",
+        }
+
+    monkeypatch.setattr("redposture_core.stage_postgres._audit_postgres_host", fake_audit)
+
+    lines: list[str] = []
+    total, open_no_auth, weak, valid, auth_required, failed = audit_postgres_targets(
+        hosts=["127.0.0.1"],
+        port=5432,
+        timeout=0.2,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        database="postgres",
+        show_databases=False,
+        show_tables=False,
+        show_columns=False,
+        table_targets=[],
+        table_columns=[],
+        dump_table_rows=False,
+        execute_command=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=lines.append,
+        suppress_timeout_status_lines=True,
+    )
+
+    assert (total, open_no_auth, weak, valid, auth_required, failed) == (1, 0, 0, 0, 0, 1)
+    assert lines == []

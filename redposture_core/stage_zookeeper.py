@@ -24,6 +24,7 @@ _ZK_PASSWD_DEFAULT = b"\x00" * 16
 _ZK_OP_GET_DATA = 4
 _ZK_OP_GET_CHILDREN2 = 12
 _ZK_OP_CLOSE_SESSION = -11
+_ZK_OP_AUTH = 100
 _ZK_ERR_OK = 0
 _ZK_ERR_NONODE = -101
 _ZK_ERR_NOAUTH = -102
@@ -32,7 +33,9 @@ _ZK_MAX_FRAME = 64 * 1024 * 1024
 _ZK_SYSTEM_PREFIX = "/zookeeper"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
+_UNEXPECTED_EOF_PREFIX = "unexpected eof"
 _ROOT_QUERY_ERR_124_PREFIX = "root query failed: err_-124"
+_ZK_AUTH_XID = -4
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -104,6 +107,11 @@ def _is_connection_timeout_error(value: Any) -> bool:
     return bool(text) and text.startswith(_CONNECTION_TIMEOUT_PREFIX)
 
 
+def _is_unexpected_eof_error(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and text.startswith(_UNEXPECTED_EOF_PREFIX)
+
+
 def _is_root_query_err_124_error(value: Any) -> bool:
     text = str(value or "").strip().lower()
     return bool(text) and text.startswith(_ROOT_QUERY_ERR_124_PREFIX)
@@ -113,6 +121,7 @@ def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
     return str(record.get("status") or "") == "fail" and (
         _is_connection_refused_error(record.get("error"))
         or _is_connection_timeout_error(record.get("error"))
+        or _is_unexpected_eof_error(record.get("error"))
         or _is_root_query_err_124_error(record.get("error"))
     )
 
@@ -334,9 +343,8 @@ class _ZkClient:
         self._xid += 1
         return xid
 
-    def _request(self, opcode: int, payload: bytes = b"") -> tuple[int, bytes]:
+    def _request_with_xid(self, xid: int, opcode: int, payload: bytes = b"") -> tuple[int, bytes]:
         sock = self._require_sock()
-        xid = self._next_xid()
         frame = struct.pack(">ii", xid, int(opcode)) + payload
         _send_frame(sock, frame)
         response = _recv_frame(sock)
@@ -350,6 +358,21 @@ class _ZkClient:
         if rxid != xid:
             raise ValueError(f"unexpected ZooKeeper xid {rxid} (expected {xid})")
         return int(err), response[16:]
+
+    def _request(self, opcode: int, payload: bytes = b"") -> tuple[int, bytes]:
+        return self._request_with_xid(self._next_xid(), opcode, payload)
+
+    def auth_digest(self, username: str, password: str) -> tuple[bool, str | None]:
+        raw_auth = f"{username}:{password}".encode("utf-8", errors="replace")
+        payload = struct.pack(">i", 0) + _encode_zk_string("digest") + struct.pack(">i", len(raw_auth)) + raw_auth
+        try:
+            err, _ = self._request_with_xid(_ZK_AUTH_XID, _ZK_OP_AUTH, payload)
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            return False, _friendly_error_from_exception(exc)
+
+        if err == _ZK_ERR_OK:
+            return True, None
+        return False, f"authentication failed: {_zk_error_name(err)}"
 
     def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
         payload = _encode_zk_string(path) + b"\x00"
@@ -416,6 +439,8 @@ def _audit_zookeeper_host(
     port: int,
     timeout: float,
     retries: int,
+    username: str | None,
+    password: str | None,
     show_znodes: bool,
     dump: bool,
     query_znode: str | None,
@@ -424,6 +449,7 @@ def _audit_zookeeper_host(
     base_attempts = max(1, retries + 1)
     bonus_retry_for_root_query_124 = False
     last_error: str | None = None
+    provided_credentials = bool(username and password)
 
     for attempt in range(base_attempts + 1):
         max_attempts = base_attempts + (1 if bonus_retry_for_root_query_124 else 0)
@@ -434,7 +460,16 @@ def _audit_zookeeper_host(
         try:
             client.connect()
 
+            provided_credentials_ok: bool | None = None
+            auth_error: str | None = None
             root_children, root_err, _ = client.get_children2("/")
+            if root_err == _ZK_ERR_NOAUTH and provided_credentials and username and password:
+                provided_credentials_ok, auth_error = client.auth_digest(username, password)
+                if provided_credentials_ok:
+                    root_children, root_err, _ = client.get_children2("/")
+                elif not auth_error:
+                    auth_error = "authentication failed"
+
             if root_err == _ZK_ERR_NOAUTH:
                 return {
                     "timestamp": utc_now_iso(),
@@ -443,6 +478,9 @@ def _audit_zookeeper_host(
                     "is_zookeeper": True,
                     "status": "auth_required",
                     "auth_required": True,
+                    "provided_credentials": provided_credentials,
+                    "provided_username": username,
+                    "provided_credentials_ok": provided_credentials_ok,
                     "show_znodes": show_znodes,
                     "dump": dump,
                     "query_znode": query_znode,
@@ -455,7 +493,7 @@ def _audit_zookeeper_host(
                     "query_znode_dump": None,
                     "query_znode_dump_error": "authentication required",
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
-                    "error": None,
+                    "error": auth_error,
                 }
 
             if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and not bonus_retry_for_root_query_124:
@@ -472,6 +510,9 @@ def _audit_zookeeper_host(
                     "is_zookeeper": True,
                     "status": "fail",
                     "auth_required": None,
+                    "provided_credentials": provided_credentials,
+                    "provided_username": username,
+                    "provided_credentials_ok": provided_credentials_ok,
                     "show_znodes": show_znodes,
                     "dump": dump,
                     "query_znode": query_znode,
@@ -547,8 +588,11 @@ def _audit_zookeeper_host(
                 "host": host,
                 "port": port,
                 "is_zookeeper": True,
-                "status": "open_no_auth",
-                "auth_required": False,
+                "status": "valid_credentials" if provided_credentials_ok else "open_no_auth",
+                "auth_required": True if provided_credentials_ok else False,
+                "provided_credentials": provided_credentials,
+                "provided_username": username,
+                "provided_credentials_ok": provided_credentials_ok,
                 "show_znodes": show_znodes,
                 "dump": dump,
                 "query_znode": query_znode,
@@ -579,6 +623,9 @@ def _audit_zookeeper_host(
         "is_zookeeper": False,
         "status": "fail",
         "auth_required": None,
+        "provided_credentials": provided_credentials,
+        "provided_username": username,
+        "provided_credentials_ok": None,
         "show_znodes": show_znodes,
         "dump": dump,
         "query_znode": query_znode,
@@ -646,7 +693,17 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if status == "open_no_auth":
         return _with_optional_znodes(record, f"{prefix} [+] anonymous access")
 
+    if status == "valid_credentials":
+        username = str(record.get("provided_username") or "user").strip() or "user"
+        return _with_optional_znodes(record, f"{prefix} [+] {username}")
+
     if status == "auth_required":
+        if record.get("provided_credentials"):
+            username = str(record.get("provided_username") or "user").strip() or "user"
+            line = f"{prefix} [-] {username} invalid"
+            if err != "-":
+                return f"{line} err={err}"
+            return line
         return f"{prefix} [-] authentication required"
 
     line = f"{prefix} [!] connection failed"
@@ -850,6 +907,8 @@ def audit_zookeeper_targets(
     timeout: float,
     retries: int,
     workers: int,
+    username: str | None,
+    password: str | None,
     show_znodes: bool,
     dump: bool,
     query_znode: str | None,
@@ -860,9 +919,10 @@ def audit_zookeeper_targets(
     logger: AttemptLogger | None = None,
     append_output: bool = False,
     suppress_connection_refused_status_lines: bool = False,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
+    valid = 0
     auth_required = 0
     failed = 0
 
@@ -880,6 +940,8 @@ def audit_zookeeper_targets(
                     port,
                     timeout,
                     retries,
+                    username,
+                    password,
                     show_znodes,
                     dump,
                     query_znode,
@@ -895,6 +957,8 @@ def audit_zookeeper_targets(
 
                 if status == "open_no_auth":
                     open_no_auth += 1
+                elif status == "valid_credentials":
+                    valid += 1
                 elif status == "auth_required":
                     auth_required += 1
                 else:
@@ -904,7 +968,10 @@ def audit_zookeeper_targets(
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
 
                 suppress_auth_required_status_line = (
-                    output_format == "txt" and bool(record.get("is_zookeeper")) and status == "auth_required"
+                    output_format == "txt"
+                    and bool(record.get("is_zookeeper"))
+                    and status == "auth_required"
+                    and not bool(record.get("provided_credentials"))
                 )
                 suppress_connection_refused_status_line = (
                     suppress_connection_refused_status_lines
@@ -927,6 +994,7 @@ def audit_zookeeper_targets(
                         phase="audit",
                         status=record.get("status"),
                         auth_required=record.get("auth_required"),
+                        provided_credentials_ok=record.get("provided_credentials_ok"),
                         znode_count=record.get("znode_count"),
                         error=record.get("error"),
                     )
@@ -934,7 +1002,7 @@ def audit_zookeeper_targets(
         if out_fh is not None:
             out_fh.close()
 
-    return total, open_no_auth, auth_required, failed
+    return total, open_no_auth, valid, auth_required, failed
 
 
 def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
@@ -948,6 +1016,9 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
     if args.max_znodes <= 0:
         console.error("--max-znodes must be > 0")
+        return 2
+    if bool(args.username) != bool(args.password):
+        console.error("--username and --password must be set together")
         return 2
     try:
         ports = collect_scan_ports(getattr(args, "ports", None))
@@ -993,6 +1064,8 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug and stream_to_stdout and args.output_format == "txt":
         mode_parts = ["count-znodes"]
+        if args.username and args.password:
+            mode_parts.append("provided-creds")
         if show_znodes:
             mode_parts.append("show-znodes")
         if dump:
@@ -1007,6 +1080,8 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         )
     if args.debug and not stream_to_stdout:
         mode_parts = ["count-znodes"]
+        if args.username and args.password:
+            mode_parts.append("provided-creds")
         if show_znodes:
             mode_parts.append("show-znodes")
         if dump:
@@ -1022,16 +1097,19 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     total = 0
     open_no_auth = 0
+    valid = 0
     auth_required = 0
     failed = 0
     try:
         for idx, audit_port in enumerate(ports):
-            part_total, part_open, part_auth, part_failed = audit_zookeeper_targets(
+            part_total, part_open, part_valid, part_auth, part_failed = audit_zookeeper_targets(
                 hosts=hosts,
                 port=audit_port,
                 timeout=args.timeout,
                 retries=args.retries,
                 workers=args.workers,
+                username=args.username,
+                password=args.password,
                 show_znodes=show_znodes,
                 dump=dump,
                 query_znode=query_znode,
@@ -1045,6 +1123,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             )
             total += part_total
             open_no_auth += part_open
+            valid += part_valid
             auth_required += part_auth
             failed += part_failed
     except OSError as exc:
@@ -1052,20 +1131,27 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
 
     if stream_to_stdout:
-        if total > 0 and open_no_auth == 0 and auth_required == 0 and failed == total and args.output_format == "txt":
+        if (
+            total > 0
+            and open_no_auth == 0
+            and valid == 0
+            and auth_required == 0
+            and failed == total
+            and args.output_format == "txt"
+        ):
             console.warn(
                 "all zookeeper targets are unreachable; check host/port, network reachability, and service status"
             )
         if args.debug and args.output_format == "txt":
             console.info(
-                f"zookeeper audit complete: total={total} anonymous={open_no_auth} "
+                f"zookeeper audit complete: total={total} anonymous={open_no_auth} valid={valid} "
                 f"auth_required={auth_required} fail={failed}"
             )
         return 0
 
     if args.debug:
         console.info(
-            f"zookeeper audit complete: total={total} anonymous={open_no_auth} "
+            f"zookeeper audit complete: total={total} anonymous={open_no_auth} valid={valid} "
             f"auth_required={auth_required} fail={failed} "
             f"format={args.output_format} output={args.output}"
         )
