@@ -488,6 +488,7 @@ def _audit_zookeeper_host(
                     "auth_required": True,
                     "provided_credentials": provided_credentials,
                     "provided_username": username,
+                    "provided_password": password if provided_credentials else None,
                     "provided_credentials_ok": provided_credentials_ok,
                     "show_znodes": show_znodes,
                     "dump": dump,
@@ -499,7 +500,7 @@ def _audit_zookeeper_host(
                     "znodes_truncated": False,
                     "query_znode_value": None,
                     "query_znode_dump": None,
-                    "query_znode_dump_error": "authentication required",
+                    "query_znode_dump_error": "access denied" if provided_credentials_ok else "authentication required",
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": auth_error,
                 }
@@ -520,6 +521,7 @@ def _audit_zookeeper_host(
                     "auth_required": None,
                     "provided_credentials": provided_credentials,
                     "provided_username": username,
+                    "provided_password": password if provided_credentials else None,
                     "provided_credentials_ok": provided_credentials_ok,
                     "show_znodes": show_znodes,
                     "dump": dump,
@@ -536,6 +538,8 @@ def _audit_zookeeper_host(
                     "error": f"root query failed: {_zk_error_name(root_err)}",
                 }
 
+            noauth_detail_text = "access denied" if provided_credentials_ok else "authentication required"
+
             znodes, truncated, enum_error = _enumerate_znodes(client, max_znodes)
             if enum_error:
                 last_error = enum_error
@@ -548,7 +552,7 @@ def _audit_zookeeper_host(
                     if value_err == _ZK_ERR_OK:
                         znode_values.append(f"{path}:{_format_znode_data(value_bytes)}")
                     elif value_err == _ZK_ERR_NOAUTH:
-                        znode_values.append(f"{path}:<authentication required>")
+                        znode_values.append(f"{path}:<{noauth_detail_text}>")
                     elif value_err == _ZK_ERR_NONODE:
                         znode_values.append(f"{path}:<not found>")
                     else:
@@ -564,9 +568,9 @@ def _audit_zookeeper_host(
                     if dump:
                         query_znode_dump_error = "znode not found"
                 elif q_err == _ZK_ERR_NOAUTH:
-                    query_znode_value = f"{query_znode}:<authentication required>"
+                    query_znode_value = f"{query_znode}:<{noauth_detail_text}>"
                     if dump:
-                        query_znode_dump_error = "authentication required"
+                        query_znode_dump_error = noauth_detail_text
                 elif q_err == _ZK_ERR_OK:
                     child_count = len(q_children or [])
                     data_length = int((q_stat or {}).get("data_length") or 0)
@@ -578,7 +582,7 @@ def _audit_zookeeper_host(
                         elif value_err == _ZK_ERR_NONODE:
                             query_znode_dump_error = "znode not found"
                         elif value_err == _ZK_ERR_NOAUTH:
-                            query_znode_dump_error = "authentication required"
+                            query_znode_dump_error = noauth_detail_text
                         else:
                             query_znode_dump_error = _zk_error_name(value_err)
                 else:
@@ -608,6 +612,7 @@ def _audit_zookeeper_host(
                 "auth_required": auth_required_value,
                 "provided_credentials": provided_credentials,
                 "provided_username": username,
+                "provided_password": password if provided_credentials else None,
                 "provided_credentials_ok": provided_credentials_ok,
                 "show_znodes": show_znodes,
                 "dump": dump,
@@ -641,6 +646,7 @@ def _audit_zookeeper_host(
         "auth_required": None,
         "provided_credentials": provided_credentials,
         "provided_username": username,
+        "provided_password": password if provided_credentials else None,
         "provided_credentials_ok": None,
         "show_znodes": show_znodes,
         "dump": dump,
@@ -672,6 +678,15 @@ def _with_optional_znodes(record: dict[str, Any], message: str) -> str:
     if truncated:
         return f"{message} (znodes:{znode_count}+)"
     return f"{message} (znodes:{znode_count})"
+
+
+def _credentials_label(record: dict[str, Any]) -> str:
+    username = str(record.get("provided_username") or "user").strip() or "user"
+    provided_password = record.get("provided_password")
+    password_text = (
+        "<empty>" if provided_password == "" else str(provided_password) if provided_password is not None else "<none>"
+    )
+    return f"{username}:{password_text}"
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
@@ -710,13 +725,11 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return _with_optional_znodes(record, f"{prefix} [+] anonymous access")
 
     if status == "valid_credentials":
-        username = str(record.get("provided_username") or "user").strip() or "user"
-        return _with_optional_znodes(record, f"{prefix} [+] {username}")
+        return _with_optional_znodes(record, f"{prefix} [+] {_credentials_label(record)}")
 
     if status == "auth_required":
         if record.get("provided_credentials"):
-            username = str(record.get("provided_username") or "user").strip() or "user"
-            line = f"{prefix} [-] {username} invalid"
+            line = f"{prefix} [-] {_credentials_label(record)} invalid"
             if err != "-":
                 return f"{line} err={err}"
             return line
