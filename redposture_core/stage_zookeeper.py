@@ -461,6 +461,7 @@ def _audit_zookeeper_host(
             client.connect()
 
             provided_credentials_ok: bool | None = None
+            auth_applied_ok: bool | None = None
             auth_error: str | None = None
             root_children, root_err, _ = client.get_children2("/")
             anonymous_root_err = root_err
@@ -472,10 +473,16 @@ def _audit_zookeeper_host(
                 continue
 
             if provided_credentials and username and password:
-                provided_credentials_ok, auth_error = client.auth_digest(username, password)
-                if provided_credentials_ok:
+                auth_applied_ok, auth_error = client.auth_digest(username, password)
+                if auth_applied_ok:
                     root_children, root_err, _ = client.get_children2("/")
-                elif not auth_error:
+                    if anonymous_root_err == _ZK_ERR_NOAUTH and root_err == _ZK_ERR_OK:
+                        provided_credentials_ok = True
+                    elif anonymous_root_err == _ZK_ERR_NOAUTH:
+                        provided_credentials_ok = False
+                else:
+                    provided_credentials_ok = False
+                if not auth_applied_ok and not auth_error:
                     auth_error = "authentication failed"
 
             if provided_credentials and provided_credentials_ok is False:
@@ -515,12 +522,13 @@ def _audit_zookeeper_host(
                         "error": auth_error_text,
                     }
 
+                invalid_status = "auth_required" if auth_required_value is True else "fail"
                 return {
                     "timestamp": utc_now_iso(),
                     "host": host,
                     "port": port,
                     "is_zookeeper": True,
-                    "status": "auth_required",
+                    "status": invalid_status,
                     "auth_required": auth_required_value,
                     "provided_credentials": provided_credentials,
                     "provided_username": username,
@@ -563,7 +571,9 @@ def _audit_zookeeper_host(
                     "znodes_truncated": False,
                     "query_znode_value": None,
                     "query_znode_dump": None,
-                    "query_znode_dump_error": "access denied" if provided_credentials_ok else "authentication required",
+                    "query_znode_dump_error": (
+                        "access denied" if (provided_credentials and auth_applied_ok) else "authentication required"
+                    ),
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": auth_error,
                 }
@@ -601,7 +611,9 @@ def _audit_zookeeper_host(
                     "error": f"root query failed: {_zk_error_name(root_err)}",
                 }
 
-            noauth_detail_text = "access denied" if provided_credentials_ok else "authentication required"
+            noauth_detail_text = (
+                "access denied" if (provided_credentials and auth_applied_ok) else "authentication required"
+            )
 
             znodes, truncated, enum_error = _enumerate_znodes(client, max_znodes)
             if enum_error:
@@ -797,6 +809,12 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
                 return f"{line} err={err}"
             return line
         return f"{prefix} [-] authentication required"
+
+    if status == "fail" and record.get("provided_credentials") and err.lower().startswith("authentication failed"):
+        line = f"{prefix} [-] {_credentials_label(record)} invalid"
+        if err != "-":
+            return f"{line} err={err}"
+        return line
 
     line = f"{prefix} [!] connection failed"
     if err != "-":

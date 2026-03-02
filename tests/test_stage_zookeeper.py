@@ -136,8 +136,8 @@ def test_audit_zookeeper_uses_provided_credentials_on_anonymous_open_target(monk
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "valid_credentials"
-    assert record["provided_credentials_ok"] is True
+    assert record["status"] == "open_no_auth"
+    assert record["provided_credentials_ok"] is None
     assert record["auth_required"] is False
 
 
@@ -187,11 +187,66 @@ def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypat
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "valid_credentials"
-    assert record["provided_credentials_ok"] is True
+    assert record["status"] == "open_no_auth"
+    assert record["provided_credentials_ok"] is None
     znode_values = record.get("znode_values")
     assert isinstance(znode_values, list)
     assert "/clickhouse:<access denied>" in znode_values
+
+
+def test_audit_zookeeper_valid_credentials_when_auth_was_required(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls = {"auth": 0}
+
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+            self._authed = False
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def auth_digest(self, username: str, password: str) -> tuple[bool, str | None]:
+            calls["auth"] += 1
+            assert username == "admin"
+            assert password == "admin"
+            self._authed = True
+            return True, None
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            if path == "/" and not self._authed:
+                return None, _ZK_ERR_NOAUTH, None
+            if path == "/":
+                return ["secure"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
+            if path == "/secure":
+                return [], _ZK_ERR_OK, {"data_length": 2, "num_children": 0}
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return b"ok", _ZK_ERR_OK, {"data_length": 2, "num_children": 0}
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username="admin",
+        password="admin",
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert calls["auth"] == 1
+    assert record["status"] == "valid_credentials"
+    assert record["provided_credentials_ok"] is True
+    assert record["auth_required"] is True
 
 
 def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -237,7 +292,7 @@ def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(mo
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "auth_required"
+    assert record["status"] == "fail"
     assert record["auth_required"] is False
     assert record["provided_credentials_ok"] is False
     assert "authentication failed" in str(record["error"]).lower()
