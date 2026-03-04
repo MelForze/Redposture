@@ -576,13 +576,11 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             username = str(record.get("provided_username") or "default").strip() or "default"
             provided_password = record.get("provided_password")
             password_text = "<empty>" if provided_password == "" else str(provided_password or "")
-            base = f"{prefix} [-] {username}:{password_text} invalid"
+            base = f"{prefix} [-] {username}:{password_text}"
         elif record.get("default_credentials_attempted"):
-            base = f"{prefix} [-] redis:redis invalid"
+            base = f"{prefix} [-] redis:redis"
         else:
             base = f"{prefix} [-] authentication required"
-        if err != "-":
-            return f"{base} err={err}"
         return base
 
     fail_line = f"{prefix} [!] connection failed"
@@ -622,7 +620,7 @@ def _render_colored_redis_line(console: Console, line: str) -> bool:
     marker_color = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "yellow",
+        "[-]": "red",
         "[!]": "red",
     }
     for marker in ("[!]", "[-]", "[+]", "[*]"):

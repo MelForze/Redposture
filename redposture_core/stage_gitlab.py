@@ -22,6 +22,7 @@ from .logger import AttemptLogger
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
+_CONNECTION_REFUSED_PREFIX = "connection refused"
 _PUBLIC_ENDPOINT_PATHS: tuple[str, ...] = (
     "/api/v4/version",
     "/-/health",
@@ -98,7 +99,10 @@ def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
     if str(record.get("status") or "") != "fail":
         return False
     error_text = str(record.get("error") or "").strip().lower()
-    return bool(error_text) and error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
+    return bool(error_text) and (
+        error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
+        or error_text.startswith(_CONNECTION_REFUSED_PREFIX)
+    )
 
 
 def _normalize_path(path: str) -> str:
@@ -1003,7 +1007,7 @@ def _render_colored_gitlab_line(console: Console, line: str) -> bool:
     marker_color = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "yellow",
+        "[-]": "red",
         "[!]": "red",
     }
     for marker in ("[!]", "[-]", "[+]", "[*]"):

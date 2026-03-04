@@ -903,6 +903,7 @@ def _audit_kafka_via_sasl_fallback(
                 "auth_required": auth_required,
                 "provided_credentials": provided_credentials,
                 "provided_username": username,
+                "provided_password": password if provided_credentials else None,
                 "provided_credentials_ok": provided_credentials_ok,
                 "show_topics": show_topics,
                 "query_topic": query_topic_name or None,
@@ -973,6 +974,7 @@ def _audit_kafka_host(
                         "auth_required": None,
                         "provided_credentials": provided_credentials,
                         "provided_username": username,
+                        "provided_password": password if provided_credentials else None,
                         "provided_credentials_ok": None,
                         "show_topics": show_topics,
                         "query_topic": query_topic,
@@ -1112,6 +1114,7 @@ def _audit_kafka_host(
                     "auth_required": auth_required,
                     "provided_credentials": provided_credentials,
                     "provided_username": username,
+                    "provided_password": password if provided_credentials else None,
                     "provided_credentials_ok": provided_credentials_ok,
                     "show_topics": show_topics,
                     "query_topic": query_topic_name or None,
@@ -1158,6 +1161,7 @@ def _audit_kafka_host(
         "auth_required": None,
         "provided_credentials": provided_credentials,
         "provided_username": username,
+        "provided_password": password if provided_credentials else None,
         "provided_credentials_ok": None,
         "show_topics": show_topics,
         "query_topic": (query_topic or "").strip() or None,
@@ -1224,16 +1228,18 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     if status == "valid_credentials":
         username = str(record.get("provided_username") or "user").strip() or "user"
-        return _with_optional_topics(record, f"{prefix} [+] {username}")
+        provided_password = record.get("provided_password")
+        password_text = "<empty>" if provided_password == "" else str(provided_password or "")
+        return _with_optional_topics(record, f"{prefix} [+] {username}:{password_text}")
 
     if status == "auth_required":
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "user").strip() or "user"
-            base = f"{prefix} [-] {username} invalid"
+            provided_password = record.get("provided_password")
+            password_text = "<empty>" if provided_password == "" else str(provided_password or "")
+            base = f"{prefix} [-] {username}:{password_text}"
         else:
             base = f"{prefix} [-] authentication required"
-        if err != "-":
-            return f"{base} err={err}"
         return base
 
     if status == "unknown_auth":
@@ -1429,7 +1435,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
     marker_color = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "yellow",
+        "[-]": "red",
         "[!]": "red",
     }
 

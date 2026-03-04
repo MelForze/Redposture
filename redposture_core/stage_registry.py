@@ -33,6 +33,7 @@ _REGISTRY_DOWNLOAD_LIMIT_BYTES = 100 * 1024 * 1024
 _REGISTRY_MAX_INSPECT_IMAGES = 100
 _REGISTRY_MAX_HISTORY_LINES = 20
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
+_CONNECTION_REFUSED_PREFIX = "connection refused"
 _SUSPICIOUS_TEXT_RE = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?key|aws[_-]?secret|private[_-]?key)"
 )
@@ -99,7 +100,10 @@ def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
     if str(record.get("status") or "") != "fail":
         return False
     error_text = str(record.get("error") or "").strip().lower()
-    return bool(error_text) and error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
+    return bool(error_text) and (
+        error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
+        or error_text.startswith(_CONNECTION_REFUSED_PREFIX)
+    )
 
 
 def _human_bytes(value: int | float | None) -> str:
@@ -1391,6 +1395,7 @@ def _audit_registry_host(
                     "auth_required": None,
                     "provided_credentials": provided_credentials,
                     "provided_username": username,
+                    "provided_password": password if provided_credentials else None,
                     "token_provided": token_provided,
                     "debug": debug,
                     "show_images": show_images,
@@ -1632,6 +1637,7 @@ def _audit_registry_host(
                 "auth_required": auth_required if state != "unknown_auth" else None,
                 "provided_credentials": provided_credentials,
                 "provided_username": username,
+                "provided_password": password if provided_credentials else None,
                 "token_provided": token_provided,
                 "debug": debug,
                 "show_images": show_images,
@@ -1694,6 +1700,7 @@ def _audit_registry_host(
         "auth_required": None,
         "provided_credentials": provided_credentials,
         "provided_username": username,
+        "provided_password": password if provided_credentials else None,
         "token_provided": token_provided,
         "debug": debug,
         "show_images": show_images,
@@ -1794,15 +1801,20 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         if record.get("token_provided"):
             return _with_optional_images(record, f"{prefix} [+] token auth")
         username = str(record.get("provided_username") or "user").strip() or "user"
-        return _with_optional_images(record, f"{prefix} [+] {username}")
+        provided_password = record.get("provided_password")
+        password_text = "<empty>" if provided_password == "" else str(provided_password or "")
+        return _with_optional_images(record, f"{prefix} [+] {username}:{password_text}")
 
     if status == "auth_required":
-        if record.get("provided_credentials") or record.get("token_provided"):
-            line = f"{prefix} [-] authentication required (credentials invalid)"
+        if record.get("token_provided"):
+            line = f"{prefix} [-] token auth"
+        elif record.get("provided_credentials"):
+            username = str(record.get("provided_username") or "user").strip() or "user"
+            provided_password = record.get("provided_password")
+            password_text = "<empty>" if provided_password == "" else str(provided_password or "")
+            line = f"{prefix} [-] {username}:{password_text}"
         else:
             line = f"{prefix} [-] authentication required"
-        if err != "-":
-            return f"{line} err={err}"
         return line
 
     if status == "not_registry":
@@ -2272,7 +2284,7 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
     marker_default_color = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "yellow",
+        "[-]": "red",
         "[!]": "red",
     }
 

@@ -67,7 +67,7 @@ def _render_trigger_row(
     body: str,
     logger: AttemptLogger | None = None,
 ) -> None:
-    marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "yellow", "[!]": "red"}.get(marker, "white")
+    marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "red", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(target, 64)
     target_segment = "\t" + clipped_target + "\t-\t"
     line = (
@@ -90,7 +90,7 @@ def _render_trigger_callback_row(
     stage_tag: str = "TRIGGER",
     logger: AttemptLogger | None = None,
 ) -> None:
-    marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "yellow", "[!]": "red"}.get(marker, "white")
+    marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "red", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(callback_target, 64)
     clipped_port = _clip_text(callback_port, 16)
     target_segment = "\t" + clipped_target + "\t" + clipped_port + "\t"
@@ -113,7 +113,7 @@ def _render_trigger_check_row(
     body: str,
     logger: AttemptLogger | None = None,
 ) -> None:
-    marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "yellow", "[!]": "red"}.get(marker, "white")
+    marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "red", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(target, 64)
     clipped_port = _clip_text(port, 16)
     target_segment = "\t" + clipped_target + "\t" + clipped_port + "\t"
