@@ -1526,21 +1526,19 @@ def _format_findings_detail_records(record: dict[str, Any], output_format: str) 
     for finding in findings:
         if not isinstance(finding, dict):
             continue
-        endpoint = _clip(str(finding.get("endpoint") or "-"), 100)
         reason = _clip(str(finding.get("reason") or "-"), 80)
         path = _clip(str(finding.get("path") or "-"), 100)
         sample = _clip(str(finding.get("sample") or "-"), 100)
-        lines.append(f"{prefix} [!] credential candidate endpoint={endpoint} reason={reason} path={path} sample={sample}")
+        lines.append(f"{prefix} [!] credential candidate reason={reason} path={path} sample={sample}")
     return lines
 
 
 def _format_single_finding_detail_line(record: dict[str, Any], finding: dict[str, Any]) -> str:
     prefix = _nxc_prefix(record)
-    endpoint = _clip(str(finding.get("endpoint") or "-"), 100)
     reason = _clip(str(finding.get("reason") or "-"), 80)
     path = _clip(str(finding.get("path") or "-"), 100)
     sample = _clip(str(finding.get("sample") or "-"), 100)
-    return f"{prefix} [!] credential candidate endpoint={endpoint} reason={reason} path={path} sample={sample}"
+    return f"{prefix} [!] credential candidate reason={reason} path={path} sample={sample}"
 
 
 def _format_discovered_urls_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
