@@ -30,6 +30,7 @@ _QDRANT_SSRF_LISTENER_BIND = "0.0.0.0"
 _QDRANT_GHSA_F632_VM87_2M2F_RANGE_MIN = (1, 9, 3)
 _QDRANT_GHSA_F632_VM87_2M2F_RANGE_MAX_EXCL = (1, 15, 6)
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
+_CONNECTION_REFUSED_PREFIX = "connection refused"
 
 
 def _clip(text: str, width: int = 80) -> str:
@@ -98,7 +99,10 @@ def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
     if str(record.get("status") or "") != "fail":
         return False
     error_text = str(record.get("error") or "").strip().lower()
-    return bool(error_text) and error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
+    return bool(error_text) and (
+        error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
+        or error_text.startswith(_CONNECTION_REFUSED_PREFIX)
+    )
 
 
 def _normalize_inline_text(value: str) -> str:
@@ -1427,7 +1431,7 @@ def _render_colored_qdrant_line(console: Console, line: str) -> bool:
     marker_color = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "yellow",
+        "[-]": "red",
         "[!]": "red",
     }
     for marker in ("[!]", "[-]", "[+]", "[*]"):

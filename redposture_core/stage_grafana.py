@@ -23,6 +23,7 @@ from .logger import AttemptLogger
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
+_CONNECTION_REFUSED_PREFIX = "connection refused"
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -88,7 +89,10 @@ def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
     if str(record.get("status") or "") != "fail":
         return False
     error_text = str(record.get("error") or "").strip().lower()
-    return bool(error_text) and error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
+    return bool(error_text) and (
+        error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
+        or error_text.startswith(_CONNECTION_REFUSED_PREFIX)
+    )
 
 
 def _http_request(
@@ -616,6 +620,7 @@ def _audit_grafana_host(
                     "effective_password": None,
                     "datasource_count": None,
                     "datasources": None,
+                    "auth_attempts": [],
                     "check_urls": check_urls,
                     "check_results": None,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
@@ -639,35 +644,49 @@ def _audit_grafana_host(
             default_credentials = False
             provided_credentials_ok: bool | None = None
             auth_header: str | None = None
+            candidates_checked = False
+            auth_attempts: list[dict[str, Any]] = []
 
             def _try_candidates(
                 candidates_local: list[tuple[str, str, str]] = candidates,
                 errors_local: list[str] = errors,
+                auth_attempts_local: list[dict[str, Any]] = auth_attempts,
             ) -> None:
+                nonlocal candidates_checked
                 nonlocal attempted_credentials, credentials_source, effective_username, effective_password
                 nonlocal default_credentials, provided_credentials_ok, auth_header
-                if effective_username is not None:
+                if candidates_checked or effective_username is not None:
                     return
+                candidates_checked = True
                 for cand_user, cand_pass, source in candidates_local:
                     attempted_credentials += 1
                     ok, cred_error = _verify_credentials(host, port, timeout, cand_user, cand_pass)
+                    auth_attempts_local.append(
+                        {
+                            "username": cand_user,
+                            "password": cand_pass,
+                            "source": source,
+                            "ok": bool(ok),
+                            "error": str(cred_error or ""),
+                        }
+                    )
                     if ok:
-                        credentials_source = source
-                        effective_username = cand_user
-                        effective_password = cand_pass
-                        auth_header = _auth_header(cand_user, cand_pass)
+                        if effective_username is None:
+                            credentials_source = source
+                            effective_username = cand_user
+                            effective_password = cand_pass
+                            auth_header = _auth_header(cand_user, cand_pass)
                         if source == "default":
                             default_credentials = True
                         if source == "provided":
                             provided_credentials_ok = True
-                        return
                     if cred_error:
                         errors_local.append(cred_error)
 
             if provided_credentials:
                 provided_credentials_ok = False
 
-            if auth_required is True or auth_required is None:
+            if candidates and (auth_required is True or auth_required is None or provided_credentials or defcreds):
                 _try_candidates()
 
             datasources: list[dict[str, str]] | None = None
@@ -708,10 +727,12 @@ def _audit_grafana_host(
                     )
                     check_results.append(res)
 
-            if auth_required is False:
-                status = "open_no_auth"
-            elif effective_username is not None:
+            if effective_username is not None:
                 status = "valid_credentials"
+            elif auth_required is False and attempted_credentials > 0 and (provided_credentials or defcreds):
+                status = "invalid_credentials_anonymous"
+            elif auth_required is False:
+                status = "open_no_auth"
             elif auth_required is True:
                 status = "auth_required"
             else:
@@ -744,6 +765,7 @@ def _audit_grafana_host(
                 "effective_password": effective_password,
                 "datasource_count": datasource_count,
                 "datasources": datasources,
+                "auth_attempts": auth_attempts,
                 "check_urls": check_urls,
                 "check_results": check_results,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
@@ -774,6 +796,7 @@ def _audit_grafana_host(
         "effective_password": None,
         "datasource_count": None,
         "datasources": None,
+        "auth_attempts": [],
         "check_urls": check_urls,
         "check_results": None,
         "elapsed_ms": None,
@@ -820,6 +843,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
         payload = dict(record)
         payload.pop("effective_password", None)
+        payload.pop("auth_attempts", None)
         return json.dumps(payload, ensure_ascii=False)
 
     status = str(record.get("status") or "fail")
@@ -828,6 +852,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     if status == "open_no_auth":
         return _with_optional_datasources(record, f"{prefix} [+] anonymous access")
+    if status == "invalid_credentials_anonymous":
+        return _with_optional_datasources(record, f"{prefix} [-] credentials invalid (anonymous access)")
     if status == "valid_credentials":
         user = str(record.get("effective_username") or "admin")
         source = str(record.get("credentials_source") or "")
@@ -848,6 +874,32 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if err != "-":
         return f"{line} err={err}"
     return line
+
+
+def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt":
+        return []
+
+    attempts_raw = record.get("auth_attempts")
+    if not isinstance(attempts_raw, list) or not attempts_raw:
+        return []
+
+    attempts: list[dict[str, Any]] = [item for item in attempts_raw if isinstance(item, dict)]
+    if not attempts:
+        return []
+
+    prefix = _nxc_prefix(record)
+    lines: list[str] = []
+    for attempt in attempts:
+        username = str(attempt.get("username") or "admin")
+        password = str(attempt.get("password") or "")
+        password_text = "<empty>" if password == "" else password
+        ok = bool(attempt.get("ok"))
+        if ok:
+            lines.append(_with_optional_datasources(record, f"{prefix} [+] {username}:{password_text}"))
+            continue
+        lines.append(f"{prefix} [-] {username}:{password_text}")
+    return lines
 
 
 def _format_datasources_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -976,7 +1028,7 @@ def _render_colored_grafana_line(console: Console, line: str) -> bool:
     marker_color = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "yellow",
+        "[-]": "red",
         "[!]": "red",
     }
     for marker in ("[!]", "[-]", "[+]", "[*]"):
@@ -1086,7 +1138,7 @@ def audit_grafana_targets(
                 record["show_datasources"] = show_datasources
                 total += 1
                 status = str(record.get("status") or "fail")
-                if status == "open_no_auth":
+                if status in {"open_no_auth", "invalid_credentials_anonymous"}:
                     open_no_auth += 1
                 elif status == "valid_credentials":
                     valid += 1
@@ -1096,6 +1148,14 @@ def audit_grafana_targets(
                     failed += 1
                 if bool(record.get("is_grafana")):
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
+                    for auth_line in _format_auth_attempt_detail_records(record, output_format):
+                        _emit_line(out_fh, emit_line, auth_line)
+                suppress_status_when_auth_attempts_present = (
+                    output_format == "txt"
+                    and bool(record.get("is_grafana"))
+                    and int(record.get("attempted_credentials") or 0) > 0
+                    and status in {"valid_credentials", "invalid_credentials_anonymous", "auth_required"}
+                )
                 suppress_auth_required_status_line = (
                     output_format == "txt"
                     and bool(record.get("is_grafana"))
@@ -1107,7 +1167,11 @@ def audit_grafana_targets(
                     and output_format == "txt"
                     and _is_connection_timeout_fail_record(record)
                 )
-                if not suppress_auth_required_status_line and not suppress_timeout_status_line:
+                if (
+                    not suppress_status_when_auth_attempts_present
+                    and not suppress_auth_required_status_line
+                    and not suppress_timeout_status_line
+                ):
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))
                 if bool(record.get("is_grafana")):
                     for ds_line in _format_datasources_detail_records(record, output_format):

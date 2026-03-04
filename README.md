@@ -3,7 +3,7 @@
 RedPosture is a Python security CLI for:
 
 - exporter discovery / trigger / collect workflows (`exporters`)
-- service exposure auditing (`registry`, `grafana`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `redis`, `etcd`, `proxmox`, `kafka`, `zookeeper`)
+- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `redis`, `etcd`, `kafka`, `zookeeper`)
 - listener-based callback capture for lab SSRF workflows
 
 Use only on systems you own or are explicitly authorized to assess.
@@ -31,13 +31,13 @@ redposture --help
 redposture exporters -h
 redposture registry -h
 redposture grafana -h
+redposture proxmox -h
 redposture gitlab -h
 redposture consul -h
 redposture kubeapi -h
 redposture postgres -h
 redposture redis -h
 redposture etcd -h
-redposture proxmox -h
 redposture qdrant -h
 redposture kafka -h
 redposture zookeeper -h
@@ -98,6 +98,11 @@ redposture grafana -t 127.0.0.1 --defcreds
 # Datasources
 redposture grafana -t 127.0.0.1 --defcreds --show-datasources
 ```
+
+`--defcreds` behavior:
+
+- always checks both default pairs in deterministic order: `admin:admin` then `admin:prom-operator`
+- prints per-credential result lines in `txt` output
 
 ### GitLab
 
@@ -187,9 +192,7 @@ redposture etcd -t 127.0.0.1 --dump
 
 ```bash
 # Lab mock (docker-compose.lab.yml service: proxmox-mock)
-redposture proxmox -t 127.0.0.1 --port 18006 --insecure \
-  --pveapitoken 'audit@pve!redposture=pve-redposture-token-2026' \
-  --nodes --users
+redposture proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken 'audit@pve!redposture=pve-redposture-token-2026' --nodes --users
 ```
 
 ### Qdrant
@@ -254,3 +257,4 @@ python3 -m venv .venv
 - Use `-h` on each module for full flag dependencies and edge-case behavior.
 - `consul` lab containers are Ubuntu-based in the lab compose to make script-check behavior more realistic.
 - `qdrant` lab container is pinned to an intentionally vulnerable version for safe GHSA `/logger` detection demos.
+- invalid provided credentials in `grafana/postgres/redis/kafka/zookeeper/registry` are shown in a unified short form: `[-] username:password`.
