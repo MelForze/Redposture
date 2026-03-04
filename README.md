@@ -3,7 +3,7 @@
 RedPosture is a Python security CLI for:
 
 - exporter discovery / trigger / collect workflows (`exporters`)
-- service exposure auditing (`registry`, `grafana`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `redis`, `etcd`, `kafka`, `zookeeper`)
+- service exposure auditing (`registry`, `grafana`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `redis`, `etcd`, `proxmox`, `kafka`, `zookeeper`)
 - listener-based callback capture for lab SSRF workflows
 
 Use only on systems you own or are explicitly authorized to assess.
@@ -37,6 +37,7 @@ redposture kubeapi -h
 redposture postgres -h
 redposture redis -h
 redposture etcd -h
+redposture proxmox -h
 redposture qdrant -h
 redposture kafka -h
 redposture zookeeper -h
@@ -180,6 +181,15 @@ redposture etcd -t 127.0.0.1 --show-keys
 
 # Dump
 redposture etcd -t 127.0.0.1 --dump
+```
+
+### Proxmox
+
+```bash
+# Lab mock (docker-compose.lab.yml service: proxmox-mock)
+redposture proxmox -t 127.0.0.1 --port 18006 --insecure \
+  --pveapitoken 'audit@pve!redposture=pve-redposture-token-2026' \
+  --nodes --users
 ```
 
 ### Qdrant

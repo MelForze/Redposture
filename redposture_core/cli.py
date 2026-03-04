@@ -19,6 +19,7 @@ from .cli_args import (
     COMMAND_KAFKA,
     COMMAND_KUBEAPI,
     COMMAND_POSTGRES,
+    COMMAND_PROXMOX,
     COMMAND_QDRANT,
     COMMAND_REDIS,
     COMMAND_REGISTRY,
@@ -37,6 +38,7 @@ from .stage_grafana import run_grafana_stage
 from .stage_kafka import run_kafka_stage
 from .stage_kubeapi import run_kubeapi_stage
 from .stage_postgres import run_postgres_stage
+from .stage_proxmox import run_proxmox_stage
 from .stage_qdrant import run_qdrant_stage
 from .stage_redis import run_redis_stage
 from .stage_registry import run_registry_stage
@@ -151,6 +153,9 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
 
     if args.command == COMMAND_ETCD:
         return run_etcd_stage(args, logger)
+
+    if args.command == COMMAND_PROXMOX:
+        return run_proxmox_stage(args, logger)
 
     if args.command == COMMAND_ZOOKEEPER:
         return run_zookeeper_stage(args, logger)
