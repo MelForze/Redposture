@@ -699,9 +699,7 @@ def _pg_try_execute_command(
     return lines, None
 
 
-def _pg_try_query_sql(
-    sock: socket.socket, query: str, *, max_rows: int = 500
-) -> tuple[list[str] | None, str | None]:
+def _pg_try_query_sql(sock: socket.socket, query: str, *, max_rows: int = 500) -> tuple[list[str] | None, str | None]:
     rows, error = _pg_query_rows(sock, query)
     if error:
         return None, error

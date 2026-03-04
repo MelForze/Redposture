@@ -100,8 +100,7 @@ def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
         return False
     error_text = str(record.get("error") or "").strip().lower()
     return bool(error_text) and (
-        error_text.startswith(_CONNECTION_TIMEOUT_PREFIX)
-        or error_text.startswith(_CONNECTION_REFUSED_PREFIX)
+        error_text.startswith(_CONNECTION_TIMEOUT_PREFIX) or error_text.startswith(_CONNECTION_REFUSED_PREFIX)
     )
 
 
