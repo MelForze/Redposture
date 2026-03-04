@@ -710,6 +710,82 @@ def test_etcd_show_keys_flag_is_parsed() -> None:
     assert args.dump is False
 
 
+def test_proxmox_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "proxmox",
+            "-t",
+            "10.0.0.21,10.0.0.22",
+            "--timeout",
+            "1.2",
+            "-w",
+            "7",
+            "-r",
+            "2",
+            "--port",
+            "18006",
+            "--ports",
+            "8006,18006",
+            "--https",
+            "--insecure",
+            "--pveapitoken",
+            "monitor@pve!audit=super-secret-token",
+            "--proxy",
+            "socks5h://audit:token@127.0.0.1:1080",
+            "--discover-creds",
+            "--nodes",
+            "--users",
+            "-f",
+            "json",
+            "-o",
+            "proxmox_audit.jsonl",
+        ]
+    )
+    assert args.command == "proxmox"
+    assert args.targets == "10.0.0.21,10.0.0.22"
+    assert args.timeout == 1.2
+    assert args.workers == 7
+    assert args.retries == 2
+    assert args.port == 18006
+    assert args.ports == "8006,18006"
+    assert args.https is True
+    assert args.insecure is True
+    assert args.pve_api_token == "monitor@pve!audit=super-secret-token"
+    assert args.proxy == "socks5h://audit:token@127.0.0.1:1080"
+    assert args.discover_creds is True
+    assert args.nodes is True
+    assert args.users is True
+    assert args.output_format == "json"
+    assert args.output == "proxmox_audit.jsonl"
+
+
+def test_proxmox_requires_pve_api_token() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["proxmox", "-t", "10.0.0.21"])
+    assert exc.value.code == 2
+
+
+def test_proxmox_discover_creds_default_is_disabled() -> None:
+    args = parse_args(["proxmox", "-t", "10.0.0.21", "--pveapitoken", "monitor@pve!audit=token"])
+    assert args.discover_creds is False
+
+
+def test_proxmox_rejects_profiles_file_flag() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(
+            [
+                "proxmox",
+                "-t",
+                "10.0.0.21",
+                "--pveapitoken",
+                "monitor@pve!audit=super-secret-token",
+                "--profiles-file",
+                "profiles.json",
+            ]
+        )
+    assert exc.value.code == 2
+
+
 def test_registry_flags_are_parsed() -> None:
     args = parse_args(
         [

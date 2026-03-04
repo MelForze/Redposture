@@ -957,6 +957,31 @@ services:
     command: ["python", "/seed/seed_acl.py"]
     restart: on-failure
 
+  proxmox-mock:
+    image: python:3.12-alpine
+    container_name: redposture-lab-proxmox-mock
+    environment:
+      PVE_MOCK_BIND: "0.0.0.0"
+      PVE_MOCK_PORT: "8006"
+      PVE_MOCK_TOKEN: "audit@pve!redposture=pve-redposture-token-2026"
+      PVE_MOCK_ADMIN_TOKEN: "admin@pve!root=pve-redposture-admin-2026"
+      PVE_MOCK_CERT: "/certs/cert.pem"
+      PVE_MOCK_KEY: "/certs/key.pem"
+    command: ["python", "/app/proxmox_api_mock.py"]
+    volumes:
+      - ./docker/proxmox/proxmox_api_mock.py:/app/proxmox_api_mock.py:ro
+      - ./docker/kubeapi/open_mock/cert.pem:/certs/cert.pem:ro
+      - ./docker/kubeapi/open_mock/key.pem:/certs/key.pem:ro
+    ports:
+      - "18006:8006"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - --no-check-certificate https://127.0.0.1:8006/healthz >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
   proxmox-exporter:
     image: prompve/prometheus-pve-exporter:latest
     container_name: redposture-lab-proxmox-exporter
