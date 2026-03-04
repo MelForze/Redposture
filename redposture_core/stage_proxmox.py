@@ -981,7 +981,9 @@ def _collect_text_findings(
         )
     jwt_match = _JWT_RE.search(text)
     if jwt_match:
-        _add_finding(findings, seen, endpoint=endpoint, reason="jwt_token", path=path, sample=str(jwt_match.group(0) or ""))
+        _add_finding(
+            findings, seen, endpoint=endpoint, reason="jwt_token", path=path, sample=str(jwt_match.group(0) or "")
+        )
     opaque_match = _OPAQUE_TOKEN_RE.search(text)
     if opaque_match:
         _add_finding(
@@ -1242,7 +1244,8 @@ def _audit_proxmox_host(
             "use_https": use_https,
             "show_nodes": show_nodes,
             "nodes": None,
-            "nodes_error": access_error_text or ("authentication failed" if auth_status == "auth_failed" else "permission denied"),
+            "nodes_error": access_error_text
+            or ("authentication failed" if auth_status == "auth_failed" else "permission denied"),
             "show_users": show_users,
             "users": users,
             "users_error": users_error,
@@ -1256,7 +1259,8 @@ def _audit_proxmox_host(
             "credential_hits": len(findings),
             "endpoint_results": endpoint_results,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
-            "error": access_error_text or ("authentication failed" if auth_status == "auth_failed" else "insufficient privileges"),
+            "error": access_error_text
+            or ("authentication failed" if auth_status == "auth_failed" else "insufficient privileges"),
         }
         if on_status_ready is not None:
             on_status_ready(result)
@@ -1344,7 +1348,9 @@ def _audit_proxmox_host(
     stream_started = True
     flush_stream_buffers()
 
-    discover_creds_crawl = discover_creds and (cap_read is not False or cap_modify is not False or cap_backup is not False)
+    discover_creds_crawl = discover_creds and (
+        cap_read is not False or cap_modify is not False or cap_backup is not False
+    )
 
     nodes: list[str] = []
     nodes_error: str | None = None

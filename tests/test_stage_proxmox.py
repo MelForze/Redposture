@@ -38,7 +38,12 @@ def test_audit_proxmox_collects_credential_hits(monkeypatch) -> None:  # type: i
         if path == "/nodes":
             return 200, _json_payload([{"node": "pve1"}]), {}, None
         if path == "/access/permissions?path=/":
-            return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 1, "User.Modify": 0, "VM.Backup": 1}}}), {}, None
+            return (
+                200,
+                _json_payload({"permissions": {"/": {"Sys.Audit": 1, "User.Modify": 0, "VM.Backup": 1}}}),
+                {},
+                None,
+            )
         if path == "/access/users":
             return 200, _json_payload([{"userid": "root@pam"}, {"userid": "audit@pve"}]), {}, None
         if path == "/nodes/pve1/syslog":
@@ -286,7 +291,12 @@ def test_audit_proxmox_skips_discovery_crawl_when_caps_are_false(monkeypatch) ->
         if path == "/access":
             return 200, _json_payload({"clustername": "lab"}), {}, None
         if path == "/access/permissions?path=/":
-            return 200, _json_payload({"permissions": {"/": {"User.Modify": 0, "Sys.Audit": 0, "VM.Backup": 0}}}), {}, None
+            return (
+                200,
+                _json_payload({"permissions": {"/": {"User.Modify": 0, "Sys.Audit": 0, "VM.Backup": 0}}}),
+                {},
+                None,
+            )
         raise AssertionError(f"unexpected endpoint when all caps are false: {path}")
 
     monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
@@ -417,13 +427,7 @@ def test_audit_proxmox_denylist_ignores_csrfpreventiontoken(monkeypatch) -> None
 
 
 def test_audit_proxmox_detects_uri_jwt_and_base64_cloud_init(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    cloud_init = (
-        "#cloud-config\n"
-        "chpasswd:\n"
-        "  list: |\n"
-        "    root:SuperSecret2026!\n"
-        "  expire: false\n"
-    )
+    cloud_init = "#cloud-config\nchpasswd:\n  list: |\n    root:SuperSecret2026!\n  expire: false\n"
     cloud_init_b64 = base64.b64encode(cloud_init.encode("utf-8")).decode("ascii")
 
     def fake_request(
@@ -475,11 +479,7 @@ def test_audit_proxmox_detects_uri_jwt_and_base64_cloud_init(monkeypatch) -> Non
         discover_creds=True,
     )
 
-    reasons = {
-        str(item.get("reason") or "")
-        for item in (record.get("findings") or [])
-        if isinstance(item, dict)
-    }
+    reasons = {str(item.get("reason") or "") for item in (record.get("findings") or []) if isinstance(item, dict)}
     assert "uri_with_auth" in reasons
     assert "jwt_token" in reasons
     assert "cloud_init_blob" in reasons
