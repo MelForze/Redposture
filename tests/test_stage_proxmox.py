@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 
 from redposture_core.stage_proxmox import (
@@ -308,6 +309,182 @@ def test_audit_proxmox_skips_discovery_crawl_when_caps_are_false(monkeypatch) ->
     assert int(record.get("credential_hits") or 0) == 0
 
 
+def test_audit_proxmox_stream_callbacks_receive_urls_and_findings(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        _retries: int,
+        *,
+        pve_api_token: str,
+        use_https: bool,
+        insecure: bool,
+        proxy,
+    ):
+        _ = (pve_api_token, use_https, insecure, proxy)
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 1}}}), {}, None
+        if path == "/nodes":
+            return 200, _json_payload([{"node": "pve1"}]), {}, None
+        if path == "/nodes/pve1/syslog":
+            return 200, b"db_password=UltraSecret123\n", {}, None
+        if path == "/nodes/pve1/report":
+            return 200, b"backup_url=https://backup:pass@pbs.local/api", {}, None
+        if path == "/nodes/pve1/tasks":
+            return 200, _json_payload([]), {}, None
+        if path == "/nodes/pve1/qemu":
+            return 200, _json_payload([]), {}, None
+        if path == "/nodes/pve1/lxc":
+            return 200, _json_payload([]), {}, None
+        if path == "/nodes/pve1/storage":
+            return 200, _json_payload([]), {}, None
+        if path == "/sdn":
+            return 200, _json_payload({}), {}, None
+        if path == "/cluster/backup":
+            return 200, _json_payload([]), {}, None
+        return 404, b"{}", {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+
+    discovered_paths: list[str] = []
+    streamed_findings: list[dict[str, str]] = []
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+        on_discovered_url=discovered_paths.append,
+        on_credential_finding=streamed_findings.append,
+    )
+
+    assert record["status"] == "token_ok"
+    assert "/access" in discovered_paths
+    assert "/nodes/pve1/syslog" in discovered_paths
+    assert streamed_findings
+    assert any("password" in str(item.get("reason") or "").lower() for item in streamed_findings)
+
+
+def test_audit_proxmox_denylist_ignores_csrfpreventiontoken(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        _retries: int,
+        *,
+        pve_api_token: str,
+        use_https: bool,
+        insecure: bool,
+        proxy,
+    ):
+        _ = (pve_api_token, use_https, insecure, proxy)
+        if path == "/access":
+            return 200, _json_payload({"CSRFPreventionToken": "mock-csrf-token", "clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 1}}}), {}, None
+        if path == "/nodes":
+            return 200, _json_payload([]), {}, None
+        if path == "/sdn":
+            return 200, _json_payload({}), {}, None
+        if path == "/cluster/backup":
+            return 200, _json_payload([]), {}, None
+        return 404, b"{}", {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+    )
+
+    findings = [item for item in (record.get("findings") or []) if isinstance(item, dict)]
+    assert not any("csrfpreventiontoken" in str(item.get("reason") or "").lower() for item in findings)
+
+
+def test_audit_proxmox_detects_uri_jwt_and_base64_cloud_init(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    cloud_init = (
+        "#cloud-config\n"
+        "chpasswd:\n"
+        "  list: |\n"
+        "    root:SuperSecret2026!\n"
+        "  expire: false\n"
+    )
+    cloud_init_b64 = base64.b64encode(cloud_init.encode("utf-8")).decode("ascii")
+
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        _retries: int,
+        *,
+        pve_api_token: str,
+        use_https: bool,
+        insecure: bool,
+        proxy,
+    ):
+        _ = (pve_api_token, use_https, insecure, proxy)
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 1}}}), {}, None
+        if path == "/nodes":
+            return 200, _json_payload([]), {}, None
+        if path == "/sdn":
+            return (
+                200,
+                _json_payload(
+                    {
+                        "upstream_dsn": "postgresql://app:AppSecret2026@db.internal:5432/app",
+                        "jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJzdmMiLCJyb2xlIjoiYWRtaW4ifQ.c2lnbmF0dXJlVG9rZW5WYWx1ZTIwMjY",
+                    }
+                ),
+                {},
+                None,
+            )
+        if path == "/cluster/backup":
+            return 200, _json_payload([{"cloud_init_userdata": cloud_init_b64}]), {}, None
+        return 404, b"{}", {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+    )
+
+    reasons = {
+        str(item.get("reason") or "")
+        for item in (record.get("findings") or [])
+        if isinstance(item, dict)
+    }
+    assert "uri_with_auth" in reasons
+    assert "jwt_token" in reasons
+    assert "cloud_init_blob" in reasons
+
+
 def test_parse_proxy_config_accepts_http_proxy() -> None:
     proxy, error = _parse_proxy_config("http://127.0.0.1:8080")
     assert error is None
@@ -372,5 +549,6 @@ def test_format_discovered_urls_detail_records_for_discover_creds() -> None:
     )
     assert lines
     assert lines[0].endswith("[*] Discovered Credentials")
-    assert any("https://10.10.10.10:8006/api2/json/access" in line for line in lines)
-    assert any("https://10.10.10.10:8006/api2/json/nodes" in line for line in lines)
+    assert any(line.endswith("[*] Discovered URL") for line in lines)
+    assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/access") for line in lines)
+    assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/nodes") for line in lines)
