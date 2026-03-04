@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import http.client
 import ipaddress
 import json
@@ -11,6 +13,7 @@ import re
 import socket
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -51,6 +54,20 @@ _SENSITIVE_KEY_TOKENS = (
     "credential",
 )
 
+_NON_SECRET_KEY_TOKENS = {
+    # Proxmox non-secret operational fields that may look sensitive by name.
+    "csrfpreventiontoken",
+    "tokenid",
+    "nodeid",
+    "userid",
+    "username",
+    "vmid",
+    "volid",
+    "upid",
+    "clustername",
+    "ticketid",
+}
+
 _NON_SECRET_LITERALS = {
     "",
     "-",
@@ -67,11 +84,17 @@ _NON_SECRET_LITERALS = {
 }
 
 _TEXT_SECRET_RE = re.compile(
-    r"(?i)([A-Za-z_][A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|credential))\s*[:=]\s*([^\s,;]+)"
+    r"(?i)([A-Za-z_][A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|credential))\s*[:=]\s*(?:\"([^\"]{1,512})\"|'([^']{1,512})'|([^\s,;{}\[\]\"']{1,512}))"
 )
 _URL_BASIC_AUTH_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]+:([^@\s/]+)@")
 _AUTH_BASIC_RE = re.compile(r"(?i)\bauthorization\s*[:=]\s*basic\s+[A-Za-z0-9+/=]{8,}")
 _AUTH_BEARER_RE = re.compile(r"(?i)\bauthorization\s*[:=]\s*bearer\s+[A-Za-z0-9._~+/-]{10,}")
+_URI_WITH_AUTH_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]{1,128}:[^@\s/]{4,256}@[^ \t\r\n\"'<>]{1,512}")
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")
+_OPAQUE_TOKEN_RE = re.compile(
+    r"\b(?:glpat-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|ya29\.[A-Za-z0-9._-]{20,}|[A-Fa-f0-9]{32,64})\b"
+)
+_BASE64_TEXT_RE = re.compile(r"\b[A-Za-z0-9+/]{20,}={0,2}\b")
 _PEM_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 _PERMISSION_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z][A-Za-z0-9_.-]*$")
 
@@ -780,10 +803,19 @@ def _normalize_key_token(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.lower())
 
 
+def _key_is_non_secret(key: str) -> bool:
+    normalized = _normalize_key_token(key)
+    if not normalized:
+        return False
+    return normalized in _NON_SECRET_KEY_TOKENS
+
+
 def _clean_value_text(value: Any) -> str:
     text = str(value if value is not None else "").strip()
-    if text.endswith(",") or text.endswith(";"):
+    while text and text[-1] in ",;)}]>":
         text = text[:-1].strip()
+    while text and text[0] in "({[<":
+        text = text[1:].strip()
     if len(text) >= 2 and (
         (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'"))
     ):
@@ -805,10 +837,51 @@ def _value_looks_secret(value: Any) -> bool:
 
 
 def _key_looks_sensitive(key: str) -> bool:
+    if _key_is_non_secret(key):
+        return False
     normalized = _normalize_key_token(key)
     if not normalized:
         return False
     return any(token in normalized for token in _SENSITIVE_KEY_TOKENS)
+
+
+def _decode_base64_text(value: str) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if len(raw) < 20 or len(raw) > 4096:
+        return None
+    if not _BASE64_TEXT_RE.fullmatch(raw):
+        return None
+
+    padded = raw + ("=" * ((4 - (len(raw) % 4)) % 4))
+    try:
+        decoded = base64.b64decode(padded, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    if not decoded:
+        return None
+    if len(decoded) > 8192:
+        return None
+    try:
+        text = decoded.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not text.strip():
+        return None
+    printable_ratio = sum(1 for ch in text if ch.isprintable() or ch in "\r\n\t") / max(1, len(text))
+    if printable_ratio < 0.90:
+        return None
+    return text
+
+
+def _looks_like_cloud_init_secret_blob(value: str) -> bool:
+    text = str(value or "")
+    lower = text.lower()
+    if "#cloud-config" not in lower:
+        return False
+    needles = ("chpasswd:", "password:", "plain_text_passwd", "passwd:", "ssh_authorized_keys:")
+    return any(needle in lower for needle in needles)
 
 
 def _add_finding(
@@ -845,13 +918,15 @@ def _collect_text_findings(
     *,
     path: str,
     limit: int,
+    depth: int = 0,
 ) -> None:
     added = 0
     for match in _TEXT_SECRET_RE.finditer(text):
         if added >= limit:
             break
         key = str(match.group(1) or "")
-        value = _clean_value_text(match.group(2) or "")
+        value_raw = match.group(2) or match.group(3) or match.group(4) or ""
+        value = _clean_value_text(value_raw)
         if not _key_looks_sensitive(key) or not _value_looks_secret(value):
             continue
         _add_finding(
@@ -864,6 +939,8 @@ def _collect_text_findings(
         )
         added += 1
 
+    if _URI_WITH_AUTH_RE.search(text):
+        _add_finding(findings, seen, endpoint=endpoint, reason="uri_with_auth", path=path, sample="scheme://user:pass@host")
     if _URL_BASIC_AUTH_RE.search(text):
         _add_finding(findings, seen, endpoint=endpoint, reason="url_basic_auth", path=path, sample="url://user:pass@host")
     if _AUTH_BASIC_RE.search(text):
@@ -877,6 +954,12 @@ def _collect_text_findings(
             path=path,
             sample="Authorization: Bearer <token>",
         )
+    if _JWT_RE.search(text):
+        _add_finding(findings, seen, endpoint=endpoint, reason="jwt_token", path=path, sample="eyJ...<jwt>")
+    if _OPAQUE_TOKEN_RE.search(text):
+        _add_finding(findings, seen, endpoint=endpoint, reason="opaque_token", path=path, sample="opaque-token-like-value")
+    if _looks_like_cloud_init_secret_blob(text):
+        _add_finding(findings, seen, endpoint=endpoint, reason="cloud_init_blob", path=path, sample="#cloud-config ...")
     if _PEM_PRIVATE_KEY_RE.search(text):
         _add_finding(
             findings,
@@ -885,6 +968,23 @@ def _collect_text_findings(
             reason="private_key_pem",
             path=path,
             sample="-----BEGIN ... PRIVATE KEY-----",
+        )
+
+    if depth >= 1:
+        return
+    for match in _BASE64_TEXT_RE.finditer(text):
+        candidate = str(match.group(0) or "")
+        decoded_text = _decode_base64_text(candidate)
+        if not decoded_text:
+            continue
+        _collect_text_findings(
+            decoded_text,
+            endpoint,
+            findings,
+            seen,
+            path=f"{path}.base64",
+            limit=max(4, limit // 2),
+            depth=depth + 1,
         )
 
 
@@ -976,10 +1076,34 @@ def _audit_proxmox_host(
     discover_creds: bool = False,
     show_nodes: bool = False,
     show_users: bool = False,
+    on_status_ready: Callable[[dict[str, Any]], None] | None = None,
+    on_discovered_url: Callable[[str], None] | None = None,
+    on_credential_finding: Callable[[dict[str, str]], None] | None = None,
 ) -> dict[str, Any]:
     endpoint_results: list[dict[str, Any]] = []
     findings: list[dict[str, str]] = []
     findings_seen: set[tuple[str, str, str, str]] = set()
+    stream_started = False
+    streamed_url_count = 0
+    streamed_finding_count = 0
+
+    def flush_stream_buffers() -> None:
+        nonlocal streamed_url_count, streamed_finding_count
+        if not stream_started:
+            return
+        if discover_creds and on_discovered_url is not None:
+            while streamed_url_count < len(endpoint_results):
+                item = endpoint_results[streamed_url_count]
+                streamed_url_count += 1
+                path = str(item.get("path") or "").strip()
+                if path.startswith("/"):
+                    on_discovered_url(path)
+        if discover_creds and on_credential_finding is not None:
+            while streamed_finding_count < len(findings):
+                finding = findings[streamed_finding_count]
+                streamed_finding_count += 1
+                if isinstance(finding, dict):
+                    on_credential_finding(finding)
 
     def fetch(path: str) -> tuple[int, bytes, str | None]:
         status, payload, _headers, error = _proxmox_request(
@@ -1002,12 +1126,13 @@ def _audit_proxmox_host(
         )
         if discover_creds and status == 200 and payload and len(findings) < _MAX_FINDINGS_PER_TARGET:
             _scan_endpoint_payload(path, payload, findings, findings_seen)
+        flush_stream_buffers()
         return status, payload, error
 
     started = time.monotonic()
     access_status, access_payload, access_error = fetch("/access")
     if access_error:
-        return {
+        result = {
             "timestamp": utc_now_iso(),
             "host": host,
             "port": port,
@@ -1033,6 +1158,9 @@ def _audit_proxmox_host(
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": access_error,
         }
+        if on_status_ready is not None:
+            on_status_ready(result)
+        return result
 
     if access_status in {401, 403}:
         access_error_text = _extract_error_message(access_payload)
@@ -1069,7 +1197,7 @@ def _audit_proxmox_host(
             else:
                 users = _collect_user_ids(users_payload)
 
-        return {
+        result = {
             "timestamp": utc_now_iso(),
             "host": host,
             "port": port,
@@ -1095,9 +1223,12 @@ def _audit_proxmox_host(
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": access_error_text or ("authentication failed" if auth_status == "auth_failed" else "insufficient privileges"),
         }
+        if on_status_ready is not None:
+            on_status_ready(result)
+        return result
 
     if access_status != 200:
-        return {
+        result = {
             "timestamp": utc_now_iso(),
             "host": host,
             "port": port,
@@ -1123,6 +1254,9 @@ def _audit_proxmox_host(
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": f"unexpected HTTP {access_status} from /access",
         }
+        if on_status_ready is not None:
+            on_status_ready(result)
+        return result
 
     permissions_status, permissions_payload, permissions_error = fetch("/access/permissions?path=/")
     if permissions_error:
@@ -1157,6 +1291,23 @@ def _audit_proxmox_host(
     else:
         users = None
         users_error = None
+
+    status_preview = {
+        "timestamp": utc_now_iso(),
+        "host": host,
+        "port": port,
+        "is_proxmox": True,
+        "status": "token_ok",
+        "cap_adduser": cap_adduser,
+        "cap_read": cap_read,
+        "cap_modify": cap_modify,
+        "cap_backup": cap_backup,
+        "error": None,
+    }
+    if on_status_ready is not None:
+        on_status_ready(status_preview)
+    stream_started = True
+    flush_stream_buffers()
 
     discover_creds_crawl = discover_creds and (cap_read is not False or cap_modify is not False or cap_backup is not False)
 
@@ -1240,7 +1391,7 @@ def _audit_proxmox_host(
             fetch("/cluster/backup")
 
     successful_endpoints = sum(1 for item in endpoint_results if int(item.get("status") or 0) == 200)
-    return {
+    result = {
         "timestamp": utc_now_iso(),
         "host": host,
         "port": port,
@@ -1266,6 +1417,7 @@ def _audit_proxmox_host(
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "error": None,
     }
+    return result
 
 
 def _nxc_prefix(record: dict[str, Any]) -> str:
@@ -1347,6 +1499,15 @@ def _format_findings_detail_records(record: dict[str, Any], output_format: str) 
     return lines
 
 
+def _format_single_finding_detail_line(record: dict[str, Any], finding: dict[str, Any]) -> str:
+    prefix = _nxc_prefix(record)
+    endpoint = _clip(str(finding.get("endpoint") or "-"), 100)
+    reason = _clip(str(finding.get("reason") or "-"), 80)
+    path = _clip(str(finding.get("path") or "-"), 100)
+    sample = _clip(str(finding.get("sample") or "-"), 100)
+    return f"{prefix} [!] credential candidate endpoint={endpoint} reason={reason} path={path} sample={sample}"
+
+
 def _format_discovered_urls_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
     if output_format != "txt":
         return []
@@ -1380,10 +1541,12 @@ def _format_discovered_urls_detail_records(record: dict[str, Any], output_format
     prefix = _nxc_prefix(record)
     lines = [f"{prefix} [*] Discovered Credentials"]
     if not urls:
-        lines.append(f"{prefix} [*] Discovered URL <none>")
+        lines.append(f"{prefix} [*] Discovered URL")
+        lines.append(f"{prefix} [*] <none>")
         return lines
+    lines.append(f"{prefix} [*] Discovered URL")
     for url in urls:
-        lines.append(f"{prefix} [*] Discovered URL {url}")
+        lines.append(f"{prefix} [*] {url}")
     return lines
 
 
@@ -1477,35 +1640,38 @@ def _render_colored_proxmox_line(console: Console, line: str) -> bool:
         tag = "PROXMOX"
         rest = left[len(tag) :] if left.startswith(tag) else left
 
-        spans: list[tuple[int, int, str]] = []
-        for cap_name in ("adduser", "modify", "backup", "read"):
-            cap_match = re.search(rf"\({cap_name}:(true|false|unknown)\)", right)
-            if not cap_match:
-                continue
-            value = cap_match.group(1)
-            if value == "true":
-                cap_color = "red"
-            elif value == "false":
-                cap_color = "bright_green"
-            else:
-                cap_color = "yellow"
-            spans.append((cap_match.start(), cap_match.end(), cap_color))
-
-        if spans:
-            chunks: list[str] = []
-            cursor = 0
-            for start, end, color in sorted(spans, key=lambda item: item[0]):
-                if start < cursor:
-                    continue
-                if start > cursor:
-                    chunks.append(console._paint(right[cursor:start], "white", sys.stdout))
-                chunks.append(console._paint(right[start:end], color, sys.stdout))
-                cursor = end
-            if cursor < len(right):
-                chunks.append(console._paint(right[cursor:], "white", sys.stdout))
-            right_colored = "".join(chunks)
+        if marker == "[!]" and right.startswith("credential candidate "):
+            right_colored = console._paint(right, "orange", sys.stdout)
         else:
-            right_colored = console._paint(right, "white", sys.stdout)
+            spans: list[tuple[int, int, str]] = []
+            for cap_name in ("adduser", "modify", "backup", "read"):
+                cap_match = re.search(rf"\({cap_name}:(true|false|unknown)\)", right)
+                if not cap_match:
+                    continue
+                value = cap_match.group(1)
+                if value == "true":
+                    cap_color = "red"
+                elif value == "false":
+                    cap_color = "bright_green"
+                else:
+                    cap_color = "yellow"
+                spans.append((cap_match.start(), cap_match.end(), cap_color))
+
+            if spans:
+                chunks: list[str] = []
+                cursor = 0
+                for start, end, color in sorted(spans, key=lambda item: item[0]):
+                    if start < cursor:
+                        continue
+                    if start > cursor:
+                        chunks.append(console._paint(right[cursor:start], "white", sys.stdout))
+                    chunks.append(console._paint(right[start:end], color, sys.stdout))
+                    cursor = end
+                if cursor < len(right):
+                    chunks.append(console._paint(right[cursor:], "white", sys.stdout))
+                right_colored = "".join(chunks)
+            else:
+                right_colored = console._paint(right, "white", sys.stdout)
 
         colored = (
             f"{console._paint(tag, 'blue', sys.stdout)}"
@@ -1524,6 +1690,84 @@ def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) 
         out_fh.flush()
     if emit_line is not None:
         emit_line(line)
+
+
+def _stream_proxmox_discovered_url(
+    *,
+    out_fh: Any,
+    emit_line: Callable[[str], None] | None,
+    lock: threading.Lock,
+    headers_seen: set[tuple[str, int]],
+    urls_seen: set[tuple[str, int, str]],
+    host: str,
+    port: int,
+    use_https: bool,
+    path: str,
+) -> None:
+    if not path.startswith("/"):
+        return
+    with lock:
+        record = {"host": host, "port": port, "use_https": use_https}
+        header_key = (host, port)
+        if header_key not in headers_seen:
+            _emit_line(out_fh, emit_line, f"{_nxc_prefix(record)} [*] Discovered Credentials")
+            _emit_line(out_fh, emit_line, f"{_nxc_prefix(record)} [*] Discovered URL")
+            headers_seen.add(header_key)
+
+        url_key = (host, port, path)
+        if url_key in urls_seen:
+            return
+        urls_seen.add(url_key)
+        scheme = "https" if use_https else "http"
+        url = f"{scheme}://{host}:{port}{_PROXMOX_API_PREFIX}{path}"
+        _emit_line(out_fh, emit_line, f"{_nxc_prefix(record)} [*] {url}")
+
+
+def _stream_proxmox_finding(
+    *,
+    out_fh: Any,
+    emit_line: Callable[[str], None] | None,
+    lock: threading.Lock,
+    findings_seen: set[tuple[str, int, str, str, str, str]],
+    host: str,
+    port: int,
+    finding: dict[str, Any],
+) -> None:
+    endpoint = str(finding.get("endpoint") or "").strip()
+    reason = str(finding.get("reason") or "").strip()
+    path = str(finding.get("path") or "").strip()
+    sample = str(finding.get("sample") or "").strip()
+    finding_key = (host, port, endpoint, reason, path, sample)
+    with lock:
+        if finding_key in findings_seen:
+            return
+        findings_seen.add(finding_key)
+        line = _format_single_finding_detail_line({"host": host, "port": port}, finding)
+        _emit_line(out_fh, emit_line, line)
+
+
+def _stream_proxmox_status(
+    *,
+    out_fh: Any,
+    emit_line: Callable[[str], None] | None,
+    lock: threading.Lock,
+    status_emitted: set[tuple[str, int]],
+    record: dict[str, Any],
+    output_format: str,
+    suppress_fail_status_lines: bool,
+) -> None:
+    host = str(record.get("host") or "-")
+    port = int(record.get("port") or 0)
+    key = (host, port)
+    with lock:
+        if key in status_emitted:
+            return
+        if bool(record.get("is_proxmox")):
+            _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
+        suppress_status = suppress_fail_status_lines and output_format == "txt" and _is_suppressed_fail_record(record)
+        if not suppress_status:
+            _emit_line(out_fh, emit_line, _format_record(record, output_format))
+        status_emitted.add(key)
 
 
 def audit_proxmox_targets(
@@ -1557,6 +1801,12 @@ def audit_proxmox_targets(
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
+    output_lock = threading.Lock()
+    stream_discovery = bool(discover_creds and output_format == "txt" and emit_line is not None)
+    streamed_headers: set[tuple[str, int]] = set()
+    streamed_urls: set[tuple[str, int, str]] = set()
+    streamed_findings: set[tuple[str, int, str, str, str, str]] = set()
+    streamed_statuses: set[tuple[str, int]] = set()
 
     try:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
@@ -1574,6 +1824,53 @@ def audit_proxmox_targets(
                     discover_creds=discover_creds,
                     show_nodes=show_nodes,
                     show_users=show_users,
+                    on_discovered_url=(
+                        (
+                            lambda path, _host=host: _stream_proxmox_discovered_url(
+                                out_fh=out_fh,
+                                emit_line=emit_line,
+                                lock=output_lock,
+                                headers_seen=streamed_headers,
+                                urls_seen=streamed_urls,
+                                host=_host,
+                                port=port,
+                                use_https=use_https,
+                                path=path,
+                            )
+                        )
+                        if stream_discovery
+                        else None
+                    ),
+                    on_status_ready=(
+                        (
+                            lambda status_record: _stream_proxmox_status(
+                                out_fh=out_fh,
+                                emit_line=emit_line,
+                                lock=output_lock,
+                                status_emitted=streamed_statuses,
+                                record=status_record,
+                                output_format=output_format,
+                                suppress_fail_status_lines=suppress_fail_status_lines,
+                            )
+                        )
+                        if stream_discovery
+                        else None
+                    ),
+                    on_credential_finding=(
+                        (
+                            lambda finding, _host=host: _stream_proxmox_finding(
+                                out_fh=out_fh,
+                                emit_line=emit_line,
+                                lock=output_lock,
+                                findings_seen=streamed_findings,
+                                host=_host,
+                                port=port,
+                                finding=finding,
+                            )
+                        )
+                        if stream_discovery
+                        else None
+                    ),
                 ): host
                 for host in hosts
             }
@@ -1593,21 +1890,26 @@ def audit_proxmox_targets(
                     fail += 1
                 credential_hits += int(record.get("credential_hits") or 0)
 
-                if bool(record.get("is_proxmox")):
-                    _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
-                suppress_status = (
-                    suppress_fail_status_lines and output_format == "txt" and _is_suppressed_fail_record(record)
-                )
-                if not suppress_status:
-                    _emit_line(out_fh, emit_line, _format_record(record, output_format))
-                for detail_line in _format_discovered_urls_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, detail_line)
-                for detail_line in _format_nodes_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, detail_line)
-                for detail_line in _format_users_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, detail_line)
-                for detail_line in _format_findings_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, detail_line)
+                with output_lock:
+                    host_key = (str(record.get("host") or "-"), int(record.get("port") or port))
+                    if host_key not in streamed_statuses:
+                        if bool(record.get("is_proxmox")):
+                            _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
+                        suppress_status = (
+                            suppress_fail_status_lines and output_format == "txt" and _is_suppressed_fail_record(record)
+                        )
+                        if not suppress_status:
+                            _emit_line(out_fh, emit_line, _format_record(record, output_format))
+                    if not stream_discovery:
+                        for detail_line in _format_discovered_urls_detail_records(record, output_format):
+                            _emit_line(out_fh, emit_line, detail_line)
+                    for detail_line in _format_nodes_detail_records(record, output_format):
+                        _emit_line(out_fh, emit_line, detail_line)
+                    for detail_line in _format_users_detail_records(record, output_format):
+                        _emit_line(out_fh, emit_line, detail_line)
+                    if not stream_discovery:
+                        for detail_line in _format_findings_detail_records(record, output_format):
+                            _emit_line(out_fh, emit_line, detail_line)
 
                 if logger is not None:
                     logger.log(
