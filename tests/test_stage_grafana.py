@@ -173,7 +173,11 @@ def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkey
         auth_header: str | None = None,
     ) -> tuple[list[dict[str, str]] | None, str | None, int | None]:
         _ = (host, port, timeout, auth_header)
-        return [{"name": "prometheus", "type": "prometheus", "url": "http://127.0.0.1:9090", "access": "proxy"}], None, 200
+        return (
+            [{"name": "prometheus", "type": "prometheus", "url": "http://127.0.0.1:9090", "access": "proxy"}],
+            None,
+            200,
+        )
 
     monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http_request)
     monkeypatch.setattr("redposture_core.stage_grafana._verify_credentials", fake_verify_credentials)
