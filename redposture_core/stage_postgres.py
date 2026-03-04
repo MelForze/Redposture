@@ -699,6 +699,25 @@ def _pg_try_execute_command(
     return lines, None
 
 
+def _pg_try_query_sql(
+    sock: socket.socket, query: str, *, max_rows: int = 500
+) -> tuple[list[str] | None, str | None]:
+    rows, error = _pg_query_rows(sock, query)
+    if error:
+        return None, error
+
+    rendered_rows: list[str] = []
+    limit = max(1, int(max_rows))
+    for row in rows[:limit]:
+        if not row:
+            rendered_rows.append("")
+            continue
+        rendered_rows.append(" | ".join("NULL" if value is None else _pg_text(value) for value in row))
+    if len(rows) > limit:
+        rendered_rows.append(f"<truncated:{len(rows) - limit}>")
+    return rendered_rows, None
+
+
 def _pg_execute_remote_command(
     host: str,
     port: int,
@@ -723,6 +742,46 @@ def _pg_execute_remote_command(
             except Exception:
                 pass
             return output, exec_error
+        except _PgAuditError as exc:
+            return None, str(exc)
+        except (OSError, ValueError, ConnectionError) as exc:
+            last_error = str(exc)
+            if attempt >= attempts - 1:
+                break
+            time.sleep(_retry_delay(attempt))
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+    return None, last_error or "connection failed"
+
+
+def _pg_execute_sql_query(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    username: str,
+    password: str | None,
+    database: str,
+    query: str,
+) -> tuple[list[str] | None, str | None]:
+    attempts = max(1, retries + 1)
+    last_error: str | None = None
+    for attempt in range(attempts):
+        sock: socket.socket | None = None
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout)
+            sock.settimeout(timeout)
+            _pg_startup_and_auth(sock, username=username, password=password, database=database)
+            output, query_error = _pg_try_query_sql(sock, query, max_rows=500)
+            try:
+                _pg_send_terminate(sock)
+            except Exception:
+                pass
+            return output, query_error
         except _PgAuditError as exc:
             return None, str(exc)
         except (OSError, ValueError, ConnectionError) as exc:
@@ -828,6 +887,7 @@ def _audit_postgres_host(
     table_columns: list[str],
     dump_table_rows: bool,
     execute_command: str | None,
+    sql_command: str | None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -859,14 +919,14 @@ def _audit_postgres_host(
                 superuser, can_execute_commands, can_read_tables, readable_tables, query_error = (
                     _collect_postgres_privileges(sock)
                 )
-                database_names: list[str] | None = None
-                if show_databases:
-                    database_names, databases_error = _pg_query_databases(sock)
-                    if databases_error:
-                        if query_error:
-                            query_error = f"{query_error}; {databases_error}"
-                        else:
-                            query_error = databases_error
+                database_names_all, databases_error = _pg_query_databases(sock)
+                database_count = len(database_names_all) if isinstance(database_names_all, list) else None
+                database_names = database_names_all if show_databases and isinstance(database_names_all, list) else None
+                if show_databases and databases_error:
+                    if query_error:
+                        query_error = f"{query_error}; {databases_error}"
+                    else:
+                        query_error = databases_error
                 table_names: list[str] | None = None
                 if (show_tables or (dump_table_rows and not table_targets)) and can_read_tables is True:
                     table_names, table_error = _pg_query_readable_tables(sock)
@@ -919,6 +979,15 @@ def _audit_postgres_host(
                     execute_output, execute_error = _pg_try_execute_command(sock, execute_command)
                     execute_ok = execute_error is None
 
+                sql_attempted = False
+                sql_ok: bool | None = None
+                sql_output: list[str] | None = None
+                sql_error: str | None = None
+                if sql_command:
+                    sql_attempted = True
+                    sql_output, sql_error = _pg_try_query_sql(sock, sql_command, max_rows=500)
+                    sql_ok = sql_error is None
+
                 try:
                     _pg_send_terminate(sock)
                 except Exception:
@@ -949,6 +1018,7 @@ def _audit_postgres_host(
                     "effective_username": effective_username,
                     "show_databases": show_databases,
                     "database_names": database_names,
+                    "database_count": database_count,
                     "show_tables": show_tables,
                     "show_columns": show_columns,
                     "table_names": table_names,
@@ -962,6 +1032,11 @@ def _audit_postgres_host(
                     "execute_ok": execute_ok,
                     "execute_output": execute_output,
                     "execute_error": execute_error,
+                    "sql_command": sql_command,
+                    "sql_attempted": sql_attempted,
+                    "sql_ok": sql_ok,
+                    "sql_output": sql_output,
+                    "sql_error": sql_error,
                     "server_version": session.server_version,
                     "superuser": superuser,
                     "can_execute_commands": can_execute_commands,
@@ -988,6 +1063,7 @@ def _audit_postgres_host(
                 "effective_username": effective_username,
                 "show_databases": show_databases,
                 "database_names": None,
+                "database_count": None,
                 "show_tables": show_tables,
                 "show_columns": show_columns,
                 "table_names": None,
@@ -1001,6 +1077,11 @@ def _audit_postgres_host(
                 "execute_ok": None,
                 "execute_output": None,
                 "execute_error": None,
+                "sql_command": sql_command,
+                "sql_attempted": False,
+                "sql_ok": None,
+                "sql_output": None,
+                "sql_error": None,
                 "server_version": None,
                 "superuser": None,
                 "can_execute_commands": None,
@@ -1032,6 +1113,7 @@ def _audit_postgres_host(
         "effective_username": effective_username,
         "show_databases": show_databases,
         "database_names": None,
+        "database_count": None,
         "show_tables": show_tables,
         "show_columns": show_columns,
         "table_names": None,
@@ -1045,6 +1127,11 @@ def _audit_postgres_host(
         "execute_ok": None,
         "execute_output": None,
         "execute_error": None,
+        "sql_command": sql_command,
+        "sql_attempted": False,
+        "sql_ok": None,
+        "sql_output": None,
+        "sql_error": None,
         "server_version": None,
         "superuser": None,
         "can_execute_commands": None,
@@ -1065,19 +1152,25 @@ def _caps_suffix(record: dict[str, Any]) -> str:
     superuser = record.get("superuser")
     can_execute_commands = record.get("can_execute_commands")
     can_read_tables = record.get("can_read_tables")
-    readable_tables = record.get("readable_tables")
+    database_count = record.get("database_count")
+    database_names = record.get("database_names")
 
     superuser_text = "True" if superuser is True else "False" if superuser is False else "unknown"
     execute_text = "True" if can_execute_commands is True else "False" if can_execute_commands is False else "unknown"
     read_tables_text = "True" if can_read_tables is True else "False" if can_read_tables is False else "unknown"
-    tables_text = str(readable_tables) if isinstance(readable_tables, int) else "-"
+    if isinstance(database_count, int):
+        databases_text = str(database_count)
+    elif isinstance(database_names, list):
+        databases_text = str(len(database_names))
+    else:
+        databases_text = "-"
 
     return " ".join(
         (
             f"(superuser:{superuser_text})",
             f"(execute:{execute_text})",
             f"(read:{read_tables_text})",
-            f"(tables:{tables_text})",
+            f"(DBs:{databases_text})",
         )
     )
 
@@ -1321,6 +1414,49 @@ def _format_execute_detail_records(record: dict[str, Any], output_format: str) -
     return lines
 
 
+def _format_sql_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    sql_command = record.get("sql_command")
+    if not sql_command:
+        return []
+
+    sql_ok = record.get("sql_ok")
+    sql_output = record.get("sql_output")
+    sql_error = record.get("sql_error")
+
+    if output_format == "json":
+        return [
+            json.dumps(
+                {
+                    "timestamp": record.get("timestamp"),
+                    "type": "sql_dump",
+                    "service": "postgres",
+                    "host": record.get("host"),
+                    "port": record.get("port"),
+                    "database": record.get("database"),
+                    "query": str(sql_command),
+                    "ok": sql_ok,
+                    "output": [str(item) for item in sql_output] if isinstance(sql_output, list) else [],
+                    "error": str(sql_error) if sql_error else None,
+                },
+                ensure_ascii=False,
+            )
+        ]
+
+    prefix = _nxc_prefix(record)
+    lines = [f"{prefix} [*] SQL Query", f"{prefix} query={_pg_text(sql_command)}"]
+    if sql_ok is True:
+        if isinstance(sql_output, list) and sql_output:
+            for line in sql_output:
+                lines.append(f"{prefix} {_pg_text(line)}")
+        else:
+            lines.append(f"{prefix} <ok>")
+    elif sql_ok is False:
+        lines.append(f"{prefix} <error:{_pg_text(sql_error or 'query failed')}>")
+    else:
+        lines.append(f"{prefix} <not attempted>")
+    return lines
+
+
 def _format_record(record: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
         payload = dict(record)
@@ -1407,16 +1543,24 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
         if idx_unknown >= 0:
             spans.append((idx_unknown, idx_unknown + len(auth_unknown), "yellow"))
 
-        for fragment in ("(superuser:True)", "(execute:True)", "(read:True)"):
-            idx = right.find(fragment)
-            if idx >= 0:
-                spans.append((idx, idx + len(fragment), "red"))
+        for capability in ("superuser", "execute", "read"):
+            capability_match = re.search(rf"\({capability}:(True|False|unknown)\)", right)
+            if not capability_match:
+                continue
+            capability_value = capability_match.group(1)
+            if capability_value == "True":
+                capability_color = "red"
+            elif capability_value == "False":
+                capability_color = "bright_green"
+            else:
+                capability_color = "yellow"
+            spans.append((capability_match.start(), capability_match.end(), capability_color))
 
-        table_match = re.search(r"\(tables:(\d+)\)", right)
-        if table_match:
-            table_count = int(table_match.group(1))
-            if table_count > 0:
-                spans.append((table_match.start(), table_match.end(), "orange"))
+        database_match = re.search(r"\(DBs:(\d+)\)", right)
+        if database_match:
+            database_count = int(database_match.group(1))
+            if database_count > 0:
+                spans.append((database_match.start(), database_match.end(), "orange"))
 
         if not spans:
             right_colored = console._paint(right, "white", sys.stdout)
@@ -1471,6 +1615,7 @@ def audit_postgres_targets(
     table_columns: list[str],
     dump_table_rows: bool,
     execute_command: str | None,
+    sql_command: str | None,
     output_path: str | None,
     output_format: str,
     emit_line: Callable[[str], None] | None = None,
@@ -1510,6 +1655,7 @@ def audit_postgres_targets(
                     table_columns,
                     dump_table_rows,
                     execute_command,
+                    sql_command,
                 ): host
                 for host in hosts
             }
@@ -1557,6 +1703,8 @@ def audit_postgres_targets(
                     _emit_line(out_fh, emit_line, table_dump_line)
                 for execute_line in _format_execute_detail_records(record, output_format):
                     _emit_line(out_fh, emit_line, execute_line)
+                for sql_line in _format_sql_detail_records(record, output_format):
+                    _emit_line(out_fh, emit_line, sql_line)
 
                 if logger is not None:
                     logger.log(
@@ -1573,6 +1721,9 @@ def audit_postgres_targets(
                         execute_attempted=record.get("execute_attempted"),
                         execute_ok=record.get("execute_ok"),
                         execute_error=record.get("execute_error"),
+                        sql_attempted=record.get("sql_attempted"),
+                        sql_ok=record.get("sql_ok"),
+                        sql_error=record.get("sql_error"),
                         error=record.get("error"),
                     )
 
@@ -1639,6 +1790,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             console.plain(line)
 
     execute_command = str(getattr(args, "execute", "") or "").strip() or None
+    sql_command = str(getattr(args, "sql_cmd", "") or "").strip() or None
     table_targets_raw = list(getattr(args, "tables", []) or [])
     table_targets: list[str] = []
     seen_table_targets: set[str] = set()
@@ -1659,12 +1811,28 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     dump_table_rows = bool(getattr(args, "dump", False))
     show_columns = bool(getattr(args, "show_columns", False))
     os_shell_mode = bool(getattr(args, "os_shell", False))
+    sql_shell_mode = bool(getattr(args, "sql_shell", False))
 
     if show_columns and not table_targets:
         console.error("--show-columns requires --table")
         return 2
     if table_columns and not table_targets:
         console.error("--column/--columns requires --table")
+        return 2
+    if execute_command and sql_command:
+        console.error("--execute cannot be combined with --sql-cmd")
+        return 2
+    if os_shell_mode and sql_shell_mode:
+        console.error("--os-shell cannot be combined with --sql-shell")
+        return 2
+    if os_shell_mode and sql_command:
+        console.error("--os-shell cannot be combined with --sql-cmd")
+        return 2
+    if sql_shell_mode and execute_command:
+        console.error("--sql-shell cannot be combined with --execute")
+        return 2
+    if sql_shell_mode and sql_command:
+        console.error("--sql-shell cannot be combined with --sql-cmd")
         return 2
 
     if os_shell_mode:
@@ -1702,6 +1870,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             table_columns=table_columns,
             dump_table_rows=dump_table_rows,
             execute_command=None,
+            sql_command=None,
         )
         if bool(record.get("is_postgres")):
             emit_line(_format_detect_record(record, "txt"))
@@ -1778,6 +1947,112 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 )
         return 0
 
+    if sql_shell_mode:
+        if args.output:
+            console.error("--sql-shell does not support --output; use --log instead")
+            return 2
+        if args.output_format != "txt":
+            console.error("--sql-shell requires --format txt")
+            return 2
+        if len(hosts) != 1:
+            console.error("--sql-shell requires exactly one target host")
+            return 2
+        if len(ports) != 1:
+            console.error("--sql-shell requires exactly one port (use --port with a single value)")
+            return 2
+
+        host = hosts[0]
+        shell_port = int(ports[0])
+        record = _audit_postgres_host(
+            host=host,
+            port=shell_port,
+            timeout=args.timeout,
+            retries=args.retries,
+            username=effective_username,
+            password=args.password,
+            defcreds=args.defcreds,
+            database=args.database,
+            show_databases=args.show_databases,
+            show_tables=args.show_tables,
+            show_columns=show_columns,
+            table_targets=table_targets,
+            table_columns=table_columns,
+            dump_table_rows=dump_table_rows,
+            execute_command=None,
+            sql_command=None,
+        )
+        if bool(record.get("is_postgres")):
+            emit_line(_format_detect_record(record, "txt"))
+        emit_line(_format_record(record, "txt"))
+        for database_line in _format_databases_detail_records(record, "txt"):
+            emit_line(database_line)
+        for table_line in _format_tables_detail_records(record, "txt"):
+            emit_line(table_line)
+        for table_columns_line in _format_table_columns_detail_records(record, "txt"):
+            emit_line(table_columns_line)
+        for table_dump_line in _format_table_dump_detail_records(record, "txt"):
+            emit_line(table_dump_line)
+
+        if not bool(record.get("is_postgres")):
+            return 1
+        if str(record.get("status") or "") in {"auth_required", "fail"}:
+            return 1
+
+        shell_username = str(record.get("effective_username") or "postgres")
+        if args.password is not None:
+            shell_password: str | None = args.password
+        elif args.defcreds and args.username is None:
+            shell_password = "postgres"
+        else:
+            shell_password = None
+
+        console.success("postgres sql-shell ready; type 'exit' or 'quit' to stop")
+        while True:
+            try:
+                raw_query = input("pg-sql> ")
+            except EOFError:
+                console.plain("")
+                break
+            except KeyboardInterrupt:
+                console.plain("")
+                break
+
+            query = raw_query.strip()
+            if not query:
+                continue
+            if query.lower() in {"exit", "quit"}:
+                break
+
+            query_output, query_error = _pg_execute_sql_query(
+                host=host,
+                port=shell_port,
+                timeout=args.timeout,
+                retries=args.retries,
+                username=shell_username,
+                password=shell_password,
+                database=args.database,
+                query=query,
+            )
+            shell_record = dict(record)
+            shell_record["timestamp"] = utc_now_iso()
+            shell_record["sql_command"] = query
+            shell_record["sql_attempted"] = True
+            shell_record["sql_ok"] = query_error is None
+            shell_record["sql_output"] = query_output
+            shell_record["sql_error"] = query_error
+            for sql_line in _format_sql_detail_records(shell_record, "txt"):
+                emit_line(sql_line)
+            if args.debug:
+                logger.log(
+                    "postgres",
+                    (host, shell_port),
+                    phase="sql_shell",
+                    query=query,
+                    sql_ok=query_error is None,
+                    sql_error=query_error,
+                )
+        return 0
+
     if args.debug and stream_to_stdout and args.output_format == "txt":
         if args.password is not None:
             mode = "provided-creds"
@@ -1827,6 +2102,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 table_columns=table_columns,
                 dump_table_rows=dump_table_rows,
                 execute_command=execute_command,
+                sql_command=sql_command,
                 output_path=args.output,
                 output_format=args.output_format,
                 emit_line=emit_line,

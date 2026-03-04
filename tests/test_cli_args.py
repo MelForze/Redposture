@@ -1060,6 +1060,7 @@ def test_postgres_flags_are_parsed() -> None:
             "--show-tables",
             "--show-columns",
             "--os-shell",
+            "--sql-shell",
             "--table",
             "public.users",
             "--dump",
@@ -1071,6 +1072,8 @@ def test_postgres_flags_are_parsed() -> None:
             "created_at",
             "--execute",
             "id",
+            "--sql-cmd",
+            "select 1",
             "-f",
             "json",
             "-o",
@@ -1092,10 +1095,12 @@ def test_postgres_flags_are_parsed() -> None:
     assert args.show_tables is True
     assert args.show_columns is True
     assert args.os_shell is True
+    assert args.sql_shell is True
     assert args.tables == ["public.users", "redposture.demo_accounts,public.audit_log"]
     assert args.dump is True
     assert args.columns == ["id,username", "created_at"]
     assert args.execute == "id"
+    assert args.sql_cmd == "select 1"
     assert args.output_format == "json"
     assert args.output == "postgres_audit.jsonl"
 
@@ -1127,10 +1132,12 @@ def test_postgres_short_user_password_flags_are_parsed() -> None:
     assert args.show_tables is False
     assert args.show_columns is False
     assert args.os_shell is False
+    assert args.sql_shell is False
     assert args.tables == ["public.users"]
     assert args.dump is False
     assert args.columns is None
     assert args.execute == "whoami"
+    assert args.sql_cmd is None
 
 
 def test_postgres_columns_alias_is_parsed() -> None:
