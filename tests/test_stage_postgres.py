@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from redposture_core.stage_postgres import _audit_postgres_host, _PgSession, audit_postgres_targets
+from redposture_core.stage_postgres import _audit_postgres_host, _caps_suffix, _PgSession, audit_postgres_targets
 
 
 class _DummySocket:
@@ -31,6 +31,7 @@ def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # ty
         "redposture_core.stage_postgres._collect_postgres_privileges",
         lambda *_args, **_kwargs: (False, False, True, 2, None),
     )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_databases", lambda *_args, **_kwargs: ([], None))
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_query_readable_tables",
         lambda *_args, **_kwargs: (["public.users", "public.audit_events"], None),
@@ -67,6 +68,7 @@ def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # ty
         table_columns=[],
         dump_table_rows=True,
         execute_command=None,
+        sql_command=None,
     )
 
     assert dumped_tables == ["public.users", "public.audit_events"]
@@ -89,6 +91,7 @@ def test_dump_with_table_and_columns_uses_only_selected(monkeypatch) -> None:  #
         "redposture_core.stage_postgres._collect_postgres_privileges",
         lambda *_args, **_kwargs: (False, False, True, 1, None),
     )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_databases", lambda *_args, **_kwargs: ([], None))
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_query_readable_tables",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
@@ -135,6 +138,7 @@ def test_dump_with_table_and_columns_uses_only_selected(monkeypatch) -> None:  #
         table_columns=["id"],
         dump_table_rows=True,
         execute_command=None,
+        sql_command=None,
     )
 
     assert column_targets == []
@@ -157,6 +161,7 @@ def test_show_columns_with_dump_prints_columns_and_dump(monkeypatch) -> None:  #
         "redposture_core.stage_postgres._collect_postgres_privileges",
         lambda *_args, **_kwargs: (False, False, True, 1, None),
     )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_databases", lambda *_args, **_kwargs: ([], None))
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_query_readable_tables",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("unexpected")),
@@ -203,6 +208,7 @@ def test_show_columns_with_dump_prints_columns_and_dump(monkeypatch) -> None:  #
         table_columns=["id"],
         dump_table_rows=True,
         execute_command=None,
+        sql_command=None,
     )
 
     assert column_targets == ["public.users"]
@@ -229,6 +235,7 @@ def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(m
             "effective_username": "postgres",
             "show_databases": False,
             "database_names": None,
+            "database_count": None,
             "show_tables": False,
             "show_columns": False,
             "table_names": None,
@@ -242,6 +249,11 @@ def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(m
             "execute_ok": None,
             "execute_output": None,
             "execute_error": None,
+            "sql_command": None,
+            "sql_attempted": False,
+            "sql_ok": None,
+            "sql_output": None,
+            "sql_error": None,
             "server_version": None,
             "superuser": None,
             "can_execute_commands": None,
@@ -271,6 +283,7 @@ def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(m
         table_columns=[],
         dump_table_rows=False,
         execute_command=None,
+        sql_command=None,
         output_path=None,
         output_format="txt",
         emit_line=lines.append,
@@ -279,3 +292,19 @@ def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(m
 
     assert (total, open_no_auth, weak, valid, auth_required, failed) == (1, 0, 0, 0, 0, 1)
     assert lines == []
+
+
+def test_caps_suffix_reports_database_count_and_not_tables() -> None:
+    suffix = _caps_suffix(
+        {
+            "superuser": False,
+            "can_execute_commands": False,
+            "can_read_tables": True,
+            "database_count": 7,
+            "database_names": None,
+            "readable_tables": 99,
+        }
+    )
+
+    assert "(DBs:7)" in suffix
+    assert "(tables:" not in suffix

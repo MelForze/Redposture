@@ -1365,9 +1365,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Try executing OS command via Postgres COPY FROM PROGRAM and print output.",
     )
     postgres_parser.add_argument(
+        "--sql-cmd",
+        dest="sql_cmd",
+        default=None,
+        metavar="query",
+        help="Execute SQL query after successful connection/auth and print result rows.",
+    )
+    postgres_parser.add_argument(
         "--os-shell",
         action="store_true",
         help="Interactive command mode via Postgres COPY FROM PROGRAM (single target).",
+    )
+    postgres_parser.add_argument(
+        "--sql-shell",
+        action="store_true",
+        help="Interactive SQL mode (single target).",
     )
     _add_save_flag(postgres_parser, "Optional output file path. If omitted, results are printed to stdout.")
     postgres_parser.add_argument(
