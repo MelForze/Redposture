@@ -713,7 +713,7 @@ def _render_colored_etcd_line(console: Console, line: str) -> bool:
     marker_color = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "yellow",
+        "[-]": "red",
         "[!]": "red",
     }
     for marker in ("[!]", "[-]", "[+]", "[*]"):

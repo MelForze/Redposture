@@ -935,7 +935,7 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Proxmox/Qdrant/Consul/Registry/Grafana/GitLab/Kubernetes API/Kafka/ZooKeeper auditing. "
-            "Use one module command: exporters, registry, grafana, gitlab, consul, kubeapi, postgres, redis, etcd, proxmox, qdrant, kafka, zookeeper. "
+            "Use one module command: exporters, registry, grafana, proxmox, gitlab, consul, kubeapi, postgres, redis, etcd, qdrant, kafka, zookeeper. "
             "Listener mode is available inside trigger via --with-listen."
         ),
     )
@@ -1237,6 +1237,75 @@ def build_parser() -> argparse.ArgumentParser:
         help="Grafana audit output format for stdout/file.",
     )
 
+    proxmox_parser = subparsers.add_parser(
+        COMMAND_PROXMOX,
+        help="Audit Proxmox API with PVE API token and search leaked credentials in API responses.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    _add_output_flags(proxmox_parser)
+    _add_log_flag(proxmox_parser)
+    _add_scan_host_flags(proxmox_parser, include_profiles=False)
+    proxmox_parser.set_defaults(timeout=3.0)
+    proxmox_parser.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=8006,
+        metavar="port",
+        help="Proxmox API port spec: single port, list/range, or file (examples: 8006, 8006,18006, ./ports.txt).",
+    )
+    _add_multi_ports_flag(proxmox_parser)
+    proxmox_parser.add_argument(
+        "--https",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use HTTPS for Proxmox API requests.",
+    )
+    proxmox_parser.add_argument(
+        "--insecure",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Skip TLS certificate verification (recommended for self-signed Proxmox certs).",
+    )
+    proxmox_parser.add_argument(
+        "--pveapitoken",
+        dest="pve_api_token",
+        required=True,
+        metavar="value",
+        help="Proxmox API token value: either '<user@realm!tokenid>=<secret>' or full 'PVEAPIToken=...'.",
+    )
+    proxmox_parser.add_argument(
+        "--proxy",
+        dest="proxy",
+        default=None,
+        metavar="url",
+        help="Optional proxy URL for Proxmox requests (http[s]://host:port or socks5[h]://[user:pass@]host:port).",
+    )
+    proxmox_parser.add_argument(
+        "--discover-creds",
+        action="store_true",
+        help="Enable extended endpoint crawl and credential discovery in API responses.",
+    )
+    proxmox_parser.add_argument(
+        "--nodes",
+        action="store_true",
+        help="Show discovered Proxmox node names.",
+    )
+    proxmox_parser.add_argument(
+        "--users",
+        action="store_true",
+        help="Show users returned by /access/users for current token.",
+    )
+    _add_save_flag(proxmox_parser, "Optional output file path. If omitted, results are printed to stdout.")
+    proxmox_parser.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="Proxmox audit output format for stdout/file.",
+    )
+
     gitlab_parser = subparsers.add_parser(
         COMMAND_GITLAB,
         help="Audit GitLab public/unprotected endpoints, public projects, token access, and cloning.",
@@ -1503,75 +1572,6 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("json", "txt"),
         default="txt",
         help="etcd audit output format for stdout/file.",
-    )
-
-    proxmox_parser = subparsers.add_parser(
-        COMMAND_PROXMOX,
-        help="Audit Proxmox API with PVE API token and search leaked credentials in API responses.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    _add_output_flags(proxmox_parser)
-    _add_log_flag(proxmox_parser)
-    _add_scan_host_flags(proxmox_parser, include_profiles=False)
-    proxmox_parser.set_defaults(timeout=3.0)
-    proxmox_parser.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=8006,
-        metavar="port",
-        help="Proxmox API port spec: single port, list/range, or file (examples: 8006, 8006,18006, ./ports.txt).",
-    )
-    _add_multi_ports_flag(proxmox_parser)
-    proxmox_parser.add_argument(
-        "--https",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use HTTPS for Proxmox API requests.",
-    )
-    proxmox_parser.add_argument(
-        "--insecure",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Skip TLS certificate verification (recommended for self-signed Proxmox certs).",
-    )
-    proxmox_parser.add_argument(
-        "--pveapitoken",
-        dest="pve_api_token",
-        required=True,
-        metavar="value",
-        help="Proxmox API token value: either '<user@realm!tokenid>=<secret>' or full 'PVEAPIToken=...'.",
-    )
-    proxmox_parser.add_argument(
-        "--proxy",
-        dest="proxy",
-        default=None,
-        metavar="url",
-        help="Optional proxy URL for Proxmox requests (http[s]://host:port or socks5[h]://[user:pass@]host:port).",
-    )
-    proxmox_parser.add_argument(
-        "--discover-creds",
-        action="store_true",
-        help="Enable extended endpoint crawl and credential discovery in API responses.",
-    )
-    proxmox_parser.add_argument(
-        "--nodes",
-        action="store_true",
-        help="Show discovered Proxmox node names.",
-    )
-    proxmox_parser.add_argument(
-        "--users",
-        action="store_true",
-        help="Show users returned by /access/users for current token.",
-    )
-    _add_save_flag(proxmox_parser, "Optional output file path. If omitted, results are printed to stdout.")
-    proxmox_parser.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Proxmox audit output format for stdout/file.",
     )
 
     qdrant_parser = subparsers.add_parser(

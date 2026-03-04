@@ -141,7 +141,7 @@ def test_audit_zookeeper_marks_provided_credentials_invalid_on_anonymous_open_ta
     assert record["auth_required"] is False
     assert "authentication failed" in str(record["error"]).lower()
     line = _format_record(record, "txt")
-    assert "[-] admin:admin invalid" in line
+    assert "[-] admin:admin" in line
 
 
 def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -304,7 +304,7 @@ def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(mo
     assert record["provided_credentials_ok"] is False
     assert "authentication failed" in str(record["error"]).lower()
     line = _format_record(record, "txt")
-    assert "[-] admin:wrong invalid" in line
+    assert "[-] admin:wrong" in line
 
 
 def test_format_record_shows_zookeeper_password_for_valid_credentials() -> None:

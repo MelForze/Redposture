@@ -804,17 +804,11 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     if status == "auth_required":
         if record.get("provided_credentials"):
-            line = f"{prefix} [-] {_credentials_label(record)} invalid"
-            if err != "-":
-                return f"{line} err={err}"
-            return line
+            return f"{prefix} [-] {_credentials_label(record)}"
         return f"{prefix} [-] authentication required"
 
     if status == "fail" and record.get("provided_credentials") and err.lower().startswith("authentication failed"):
-        line = f"{prefix} [-] {_credentials_label(record)} invalid"
-        if err != "-":
-            return f"{line} err={err}"
-        return line
+        return f"{prefix} [-] {_credentials_label(record)}"
 
     line = f"{prefix} [!] connection failed"
     if err != "-":
@@ -941,7 +935,7 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
     marker_color = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "yellow",
+        "[-]": "red",
         "[!]": "red",
     }
 

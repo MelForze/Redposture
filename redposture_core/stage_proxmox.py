@@ -1662,7 +1662,7 @@ def _render_colored_proxmox_line(console: Console, line: str) -> bool:
     marker_color = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "yellow",
+        "[-]": "red",
         "[!]": "red",
     }
     for marker in ("[!]", "[-]", "[+]", "[*]"):
@@ -2065,7 +2065,7 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 emit_line=emit_line,
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
-                suppress_fail_status_lines=False,
+                suppress_fail_status_lines=not bool(args.debug),
             )
             total += part_total
             token_ok += part_ok

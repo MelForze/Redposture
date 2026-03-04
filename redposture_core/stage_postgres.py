@@ -1496,9 +1496,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
                 if provided_password is not None
                 else "<none>"
             )
-            return f"{prefix} [-] {username}:{password_text} auth failed"
+            return f"{prefix} [-] {username}:{password_text}"
         elif record.get("defcreds_enabled"):
-            return f"{prefix} [-] postgres:postgres auth failed"
+            return f"{prefix} [-] postgres:postgres"
         else:
             return f"{prefix} [-] authentication required"
 
@@ -1513,7 +1513,7 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
     marker_color = {
         "[*]": "cyan",
         "[+]": "bright_green",
-        "[-]": "yellow",
+        "[-]": "red",
         "[!]": "red",
     }
 
