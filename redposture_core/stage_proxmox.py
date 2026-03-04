@@ -939,35 +939,70 @@ def _collect_text_findings(
         )
         added += 1
 
-    if _URI_WITH_AUTH_RE.search(text):
-        _add_finding(findings, seen, endpoint=endpoint, reason="uri_with_auth", path=path, sample="scheme://user:pass@host")
-    if _URL_BASIC_AUTH_RE.search(text):
-        _add_finding(findings, seen, endpoint=endpoint, reason="url_basic_auth", path=path, sample="url://user:pass@host")
-    if _AUTH_BASIC_RE.search(text):
-        _add_finding(findings, seen, endpoint=endpoint, reason="authorization_basic", path=path, sample="Authorization: Basic")
-    if _AUTH_BEARER_RE.search(text):
+    uri_auth_match = _URI_WITH_AUTH_RE.search(text)
+    if uri_auth_match:
+        _add_finding(
+            findings,
+            seen,
+            endpoint=endpoint,
+            reason="uri_with_auth",
+            path=path,
+            sample=str(uri_auth_match.group(0) or ""),
+        )
+    url_basic_match = _URL_BASIC_AUTH_RE.search(text)
+    if url_basic_match:
+        _add_finding(
+            findings,
+            seen,
+            endpoint=endpoint,
+            reason="url_basic_auth",
+            path=path,
+            sample=str(url_basic_match.group(0) or ""),
+        )
+    auth_basic_match = _AUTH_BASIC_RE.search(text)
+    if auth_basic_match:
+        _add_finding(
+            findings,
+            seen,
+            endpoint=endpoint,
+            reason="authorization_basic",
+            path=path,
+            sample=str(auth_basic_match.group(0) or ""),
+        )
+    auth_bearer_match = _AUTH_BEARER_RE.search(text)
+    if auth_bearer_match:
         _add_finding(
             findings,
             seen,
             endpoint=endpoint,
             reason="authorization_bearer",
             path=path,
-            sample="Authorization: Bearer <token>",
+            sample=str(auth_bearer_match.group(0) or ""),
         )
-    if _JWT_RE.search(text):
-        _add_finding(findings, seen, endpoint=endpoint, reason="jwt_token", path=path, sample="eyJ...<jwt>")
-    if _OPAQUE_TOKEN_RE.search(text):
-        _add_finding(findings, seen, endpoint=endpoint, reason="opaque_token", path=path, sample="opaque-token-like-value")
+    jwt_match = _JWT_RE.search(text)
+    if jwt_match:
+        _add_finding(findings, seen, endpoint=endpoint, reason="jwt_token", path=path, sample=str(jwt_match.group(0) or ""))
+    opaque_match = _OPAQUE_TOKEN_RE.search(text)
+    if opaque_match:
+        _add_finding(
+            findings,
+            seen,
+            endpoint=endpoint,
+            reason="opaque_token",
+            path=path,
+            sample=str(opaque_match.group(0) or ""),
+        )
     if _looks_like_cloud_init_secret_blob(text):
-        _add_finding(findings, seen, endpoint=endpoint, reason="cloud_init_blob", path=path, sample="#cloud-config ...")
-    if _PEM_PRIVATE_KEY_RE.search(text):
+        _add_finding(findings, seen, endpoint=endpoint, reason="cloud_init_blob", path=path, sample=text)
+    pem_match = _PEM_PRIVATE_KEY_RE.search(text)
+    if pem_match:
         _add_finding(
             findings,
             seen,
             endpoint=endpoint,
             reason="private_key_pem",
             path=path,
-            sample="-----BEGIN ... PRIVATE KEY-----",
+            sample=str(pem_match.group(0) or ""),
         )
 
     if depth >= 1:
