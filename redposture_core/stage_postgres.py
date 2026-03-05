@@ -999,7 +999,9 @@ def _audit_postgres_host(
                 except Exception:
                     pass
 
-                if session.auth_required is False:
+                if session.auth_required is False and defcreds:
+                    status = "weak_default_creds"
+                elif session.auth_required is False:
                     status = "open_no_auth"
                 elif provided_credentials:
                     status = "valid_credentials"
