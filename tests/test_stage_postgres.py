@@ -319,6 +319,44 @@ def test_caps_suffix_reports_database_count_and_not_tables() -> None:
     assert "(tables:" not in suffix
 
 
+def test_defcreds_is_reported_when_anonymous_access_is_allowed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: _PgSession(auth_required=False, auth_method=None, server_version="16.0"),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._collect_postgres_privileges",
+        lambda *_args, **_kwargs: (False, False, False, None, None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_databases", lambda *_args, **_kwargs: ([], None))
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
+
+    record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=True,
+        database="postgres",
+        show_databases=False,
+        show_tables=False,
+        show_columns=False,
+        table_targets=[],
+        table_columns=[],
+        dump_table_rows=False,
+        execute_command=None,
+        sql_command=None,
+    )
+
+    assert record["auth_required"] is False
+    assert record["status"] == "weak_default_creds"
+
+
 def test_scram_client_final_avoids_zip_strict_for_py39_compat(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def forbidden_zip(*_args, **_kwargs):
         raise AssertionError("zip() should not be used in SCRAM proof generation")
