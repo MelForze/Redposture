@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from redposture_core.stage_postgres import _audit_postgres_host, _caps_suffix, _PgSession, audit_postgres_targets
+import base64
+
+from redposture_core.stage_postgres import (
+    _audit_postgres_host,
+    _caps_suffix,
+    _PgSession,
+    _scram_client_final,
+    _scram_client_first,
+    audit_postgres_targets,
+)
 
 
 class _DummySocket:
@@ -308,3 +317,20 @@ def test_caps_suffix_reports_database_count_and_not_tables() -> None:
 
     assert "(DBs:7)" in suffix
     assert "(tables:" not in suffix
+
+
+def test_scram_client_final_avoids_zip_strict_for_py39_compat(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def forbidden_zip(*_args, **_kwargs):
+        raise AssertionError("zip() should not be used in SCRAM proof generation")
+
+    monkeypatch.setattr("redposture_core.stage_postgres.zip", forbidden_zip, raising=False)
+
+    state, _ = _scram_client_first("postgres")
+    salt_b64 = base64.b64encode(b"redposture-salt").decode("ascii")
+    server_first = f"r={state.client_nonce}server,s={salt_b64},i=4096"
+
+    final_message, server_signature = _scram_client_final(state, "postgres", server_first)
+
+    assert final_message.startswith("c=biws,r=")
+    assert ",p=" in final_message
+    assert isinstance(server_signature, str) and server_signature != ""

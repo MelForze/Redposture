@@ -14,12 +14,13 @@ import socket
 import sys
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
+from .progress import iter_completed_with_progress
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 _PG_PROTOCOL_VERSION = 196608
@@ -320,7 +321,14 @@ def _scram_client_final(state: _ScramState, password: str, server_first: str) ->
     auth_message = f"{state.client_first_bare},{server_first},{client_final_without_proof}"
 
     client_signature = hmac.new(stored_key, auth_message.encode("utf-8", errors="replace"), hashlib.sha256).digest()
-    proof_bytes = bytes(left ^ right for left, right in zip(client_key, client_signature, strict=True))
+    if len(client_key) != len(client_signature):
+        raise _PgAuditError(
+            "invalid SCRAM key/signature length",
+            detected=True,
+            auth_required=True,
+            auth_method="scram-sha-256",
+        )
+    proof_bytes = bytes(left ^ client_signature[index] for index, left in enumerate(client_key))
     proof = base64.b64encode(proof_bytes).decode("ascii")
 
     server_key = hmac.new(salted_password, b"Server Key", hashlib.sha256).digest()
@@ -1658,7 +1666,7 @@ def audit_postgres_targets(
                 for host in hosts
             }
 
-            for future in as_completed(future_map):
+            for future in iter_completed_with_progress(future_map, label="POSTGRES"):
                 record = future.result()
                 total += 1
 

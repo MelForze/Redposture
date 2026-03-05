@@ -30,6 +30,7 @@ from .cli_args import (
     parse_args,
 )
 from .logger import AttemptLogger
+from .network_proxy import parse_proxy_config, proxy_socket_context
 from .stage_collect import run_collect_stage
 from .stage_consul import run_consul_stage
 from .stage_etcd import run_etcd_stage
@@ -171,14 +172,22 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     logger = AttemptLogger()
     log_path = str(getattr(args, "log", "") or "").strip()
+    raw_proxy = str(getattr(args, "proxy", "") or "").strip()
+    proxy_cfg = None
+    if raw_proxy and getattr(args, "command", None) != COMMAND_PROXMOX:
+        proxy_cfg, proxy_error = parse_proxy_config(raw_proxy)
+        if proxy_error:
+            print(f"[error] failed to parse --proxy: {proxy_error}", file=sys.stderr)
+            return 2
     try:
-        if log_path:
-            try:
-                with _tee_console_output(log_path):
-                    return _run_command(args, logger)
-            except OSError as exc:
-                print(f"[error] failed to open --log file '{log_path}': {exc}", file=sys.stderr)
-                return 2
-        return _run_command(args, logger)
+        with proxy_socket_context(proxy_cfg):
+            if log_path:
+                try:
+                    with _tee_console_output(log_path):
+                        return _run_command(args, logger)
+                except OSError as exc:
+                    print(f"[error] failed to open --log file '{log_path}': {exc}", file=sys.stderr)
+                    return 2
+            return _run_command(args, logger)
     finally:
         logger.close()

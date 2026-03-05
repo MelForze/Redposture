@@ -15,11 +15,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
+from .progress import iter_completed_with_progress
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
@@ -1132,7 +1133,7 @@ def audit_grafana_targets(
                 ): host
                 for host in hosts
             }
-            for future in as_completed(future_map):
+            for future in iter_completed_with_progress(future_map, label="GRAFANA"):
                 record = future.result()
                 record["show_datasources"] = show_datasources
                 total += 1

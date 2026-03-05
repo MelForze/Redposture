@@ -765,37 +765,54 @@ def run_validation_records(
     debug: bool = False,
     console: Console | None = None,
 ) -> int:
-    out = console or Console(debug=debug)
-    if debug:
-        out.info(f"validate started: source=memory records={len(records)} format={input_format}")
+    accumulator = ValidationRecordAccumulator(input_format=input_format, max_lines=max_lines)
+    for record in records:
+        accumulator.feed(record)
+    return accumulator.finish(
+        show=show,
+        fail_on_creds=fail_on_creds,
+        debug=debug,
+        console=console,
+        source="memory",
+        records_total=len(records),
+    )
 
-    total_lines = 0
-    hit_count = 0
-    matches: list[dict[str, str | int]] = []
-    unlimited = max_lines <= 0
 
-    for record_no, record in enumerate(records, start=1):
+class ValidationRecordAccumulator:
+    """Streaming credential-hit accumulator for in-memory validation records."""
+
+    def __init__(self, *, input_format: str = "auto", max_lines: int = 20) -> None:
+        self._input_format = input_format
+        self._max_lines = max_lines
+        self._unlimited = max_lines <= 0
+        self._record_no = 0
+        self.total_lines = 0
+        self.hit_count = 0
+        self.matches: list[dict[str, str | int]] = []
+
+    def feed(self, record: dict[str, Any]) -> None:
+        self._record_no += 1
         body = str(record.get("body") or "")
         if not body:
-            continue
+            return
 
         host = str(record.get("host") or "-")
         port = str(record.get("port") or "-")
         exporter = str(record.get("exporter") or "-")
         endpoint = str(record.get("endpoint") or "-")
 
-        line_count, hits = _scan_body_hits(body, input_format)
-        total_lines += line_count
+        line_count, hits = _scan_body_hits(body, self._input_format)
+        self.total_lines += line_count
         if not hits:
-            continue
+            return
 
         for hit in hits:
-            hit_count += 1
-            if not unlimited and len(matches) >= max_lines:
+            self.hit_count += 1
+            if not self._unlimited and len(self.matches) >= self._max_lines:
                 continue
-            matches.append(
+            self.matches.append(
                 {
-                    "record_no": record_no,
+                    "record_no": self._record_no,
                     "line_no": int(hit.get("line_no") or 1),
                     "reason": str(hit.get("reason") or "-"),
                     "sample": str(hit.get("sample") or ""),
@@ -806,57 +823,72 @@ def run_validation_records(
                 }
             )
 
-    if hit_count <= 0:
-        _render_validate_complete_row(
-            out,
-            host="-",
-            port="-",
-            total_lines=total_lines,
-            credential_hits=0,
-            ok=True,
-        )
-        return 0
+    def finish(
+        self,
+        *,
+        show: bool,
+        fail_on_creds: bool,
+        debug: bool,
+        console: Console | None = None,
+        source: str = "memory",
+        records_total: int | None = None,
+    ) -> int:
+        out = console or Console(debug=debug)
+        if debug:
+            records_value = records_total if records_total is not None else self._record_no
+            out.info(f"validate started: source={source} records={records_value} format={self._input_format}")
 
-    if show:
-        for item in matches:
-            host = str(item.get("host") or "-")
-            port = str(item.get("port") or "-")
-            exporter = str(item.get("exporter") or "-")
-            endpoint = str(item.get("endpoint") or "-")
-            reason = str(item.get("reason") or "-")
-            sample = str(item.get("sample") or "")
-            if host == "-":
-                record_no = int(item.get("record_no") or 0)
-                line_no = int(item.get("line_no") or 0)
-                _render_validate_source_row(
+        if self.hit_count <= 0:
+            _render_validate_complete_row(
+                out,
+                host="-",
+                port="-",
+                total_lines=self.total_lines,
+                credential_hits=0,
+                ok=True,
+            )
+            return 0
+
+        if show:
+            for item in self.matches:
+                host = str(item.get("host") or "-")
+                port = str(item.get("port") or "-")
+                exporter = str(item.get("exporter") or "-")
+                endpoint = str(item.get("endpoint") or "-")
+                reason = str(item.get("reason") or "-")
+                sample = str(item.get("sample") or "")
+                if host == "-":
+                    record_no = int(item.get("record_no") or 0)
+                    line_no = int(item.get("line_no") or 0)
+                    _render_validate_source_row(
+                        out,
+                        source=f"record#{record_no}:{line_no}",
+                        reason=reason,
+                        sample=sample,
+                    )
+                    continue
+                _render_validate_row(
                     out,
-                    source=f"record#{record_no}:{line_no}",
+                    host=host,
+                    port=port,
+                    exporter=exporter,
                     reason=reason,
+                    endpoint=endpoint,
                     sample=sample,
                 )
-                continue
-            _render_validate_row(
-                out,
-                host=host,
-                port=port,
-                exporter=exporter,
-                reason=reason,
-                endpoint=endpoint,
-                sample=sample,
-            )
-        hidden = hit_count - len(matches)
-        if hidden > 0:
-            out.warn(f"... {hidden} additional hit(s) hidden")
+            hidden = self.hit_count - len(self.matches)
+            if hidden > 0:
+                out.warn(f"... {hidden} additional hit(s) hidden")
 
-    summary_host, summary_port = _resolve_validate_summary_target(matches)
-    _render_validate_complete_row(
-        out,
-        host=summary_host,
-        port=summary_port,
-        total_lines=total_lines,
-        credential_hits=hit_count,
-        ok=False,
-    )
-    if fail_on_creds:
-        return 1
-    return 0
+        summary_host, summary_port = _resolve_validate_summary_target(self.matches)
+        _render_validate_complete_row(
+            out,
+            host=summary_host,
+            port=summary_port,
+            total_lines=self.total_lines,
+            credential_hits=self.hit_count,
+            ok=False,
+        )
+        if fail_on_creds:
+            return 1
+        return 0

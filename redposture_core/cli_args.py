@@ -247,6 +247,16 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         metavar="count",
         help="Retry attempts for network requests (with exponential backoff).",
     )
+    parser.add_argument(
+        "--proxy",
+        dest="proxy",
+        default=None,
+        metavar="url",
+        help=(
+            "Optional outbound proxy URL for module requests "
+            "(http[s]://host:port or socks5[h]://[user:pass@]host:port)."
+        ),
+    )
     if include_profiles:
         parser.add_argument(
             "--profiles-file",
@@ -461,6 +471,14 @@ def _configure_collect_parser(parser: argparse.ArgumentParser) -> None:
         choices=("json", "txt"),
         default="txt",
         help="Collect output format for stdout/file.",
+    )
+    parser.add_argument(
+        "-p",
+        "--ports",
+        dest="ports",
+        default=None,
+        metavar="ports",
+        help="Optional custom ports to probe (e.g. 9100,9115,9200-9210).",
     )
     parser.add_argument(
         "--save-responses-dir",
@@ -1273,13 +1291,6 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="value",
         help="Proxmox API token value: either '<user@realm!tokenid>=<secret>' or full 'PVEAPIToken=...'.",
-    )
-    proxmox_parser.add_argument(
-        "--proxy",
-        dest="proxy",
-        default=None,
-        metavar="url",
-        help="Optional proxy URL for Proxmox requests (http[s]://host:port or socks5[h]://[user:pass@]host:port).",
     )
     proxmox_parser.add_argument(
         "--discover-creds",

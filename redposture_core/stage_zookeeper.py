@@ -12,11 +12,12 @@ import struct
 import sys
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
+from .progress import iter_completed_with_progress
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 _ZK_PROTOCOL_VERSION = 0
@@ -461,6 +462,7 @@ def _audit_zookeeper_host(
             client.connect()
 
             provided_credentials_ok: bool | None = None
+            invalid_provided_credentials = False
             auth_applied_ok: bool | None = None
             auth_error: str | None = None
             root_children, root_err, _ = client.get_children2("/")
@@ -495,7 +497,11 @@ def _audit_zookeeper_host(
                     auth_required_value = None
 
                 auth_error_text = str(auth_error or "").strip()
-                if auth_error_text and not auth_error_text.lower().startswith("authentication failed"):
+                if (
+                    auth_required_value is not False
+                    and auth_error_text
+                    and not auth_error_text.lower().startswith("authentication failed")
+                ):
                     return {
                         "timestamp": utc_now_iso(),
                         "host": host,
@@ -521,33 +527,35 @@ def _audit_zookeeper_host(
                         "elapsed_ms": int((time.monotonic() - started) * 1000),
                         "error": auth_error_text,
                     }
-
-                invalid_status = "auth_required" if auth_required_value is True else "fail"
-                return {
-                    "timestamp": utc_now_iso(),
-                    "host": host,
-                    "port": port,
-                    "is_zookeeper": True,
-                    "status": invalid_status,
-                    "auth_required": auth_required_value,
-                    "provided_credentials": provided_credentials,
-                    "provided_username": username,
-                    "provided_password": password if provided_credentials else None,
-                    "provided_credentials_ok": provided_credentials_ok,
-                    "show_znodes": show_znodes,
-                    "dump": dump,
-                    "query_znode": query_znode,
-                    "max_znodes": max_znodes,
-                    "znode_count": None,
-                    "znodes": None,
-                    "znode_values": None,
-                    "znodes_truncated": False,
-                    "query_znode_value": None,
-                    "query_znode_dump": None,
-                    "query_znode_dump_error": "authentication required",
-                    "elapsed_ms": int((time.monotonic() - started) * 1000),
-                    "error": auth_error_text or "authentication failed",
-                }
+                if auth_required_value is False:
+                    invalid_provided_credentials = True
+                else:
+                    invalid_status = "auth_required" if auth_required_value is True else "fail"
+                    return {
+                        "timestamp": utc_now_iso(),
+                        "host": host,
+                        "port": port,
+                        "is_zookeeper": True,
+                        "status": invalid_status,
+                        "auth_required": auth_required_value,
+                        "provided_credentials": provided_credentials,
+                        "provided_username": username,
+                        "provided_password": password if provided_credentials else None,
+                        "provided_credentials_ok": provided_credentials_ok,
+                        "show_znodes": show_znodes,
+                        "dump": dump,
+                        "query_znode": query_znode,
+                        "max_znodes": max_znodes,
+                        "znode_count": None,
+                        "znodes": None,
+                        "znode_values": None,
+                        "znodes_truncated": False,
+                        "query_znode_value": None,
+                        "query_znode_dump": None,
+                        "query_znode_dump_error": "authentication required",
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "error": auth_error_text or "authentication failed",
+                    }
 
             if root_err == _ZK_ERR_NOAUTH:
                 return {
@@ -683,7 +691,13 @@ def _audit_zookeeper_host(
                 "host": host,
                 "port": port,
                 "is_zookeeper": True,
-                "status": "valid_credentials" if provided_credentials_ok else "open_no_auth",
+                "status": (
+                    "valid_credentials"
+                    if provided_credentials_ok
+                    else "invalid_credentials_anonymous"
+                    if invalid_provided_credentials
+                    else "open_no_auth"
+                ),
                 "auth_required": auth_required_value,
                 "provided_credentials": provided_credentials,
                 "provided_username": username,
@@ -701,7 +715,7 @@ def _audit_zookeeper_host(
                 "query_znode_dump": query_znode_dump,
                 "query_znode_dump_error": query_znode_dump_error,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
-                "error": last_error,
+                "error": last_error if not invalid_provided_credentials else (auth_error or "authentication failed"),
             }
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             last_error = _friendly_error_from_exception(exc)
@@ -798,6 +812,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     if status == "open_no_auth":
         return _with_optional_znodes(record, f"{prefix} [+] anonymous access")
+
+    if status == "invalid_credentials_anonymous":
+        return f"{prefix} [-] {_credentials_label(record)}"
 
     if status == "valid_credentials":
         return _with_optional_znodes(record, f"{prefix} [+] {_credentials_label(record)}")
@@ -1054,12 +1071,12 @@ def audit_zookeeper_targets(
                 for host in hosts
             }
 
-            for future in as_completed(future_map):
+            for future in iter_completed_with_progress(future_map, label="ZOOKEEPER"):
                 record = future.result()
                 total += 1
                 status = str(record.get("status") or "fail")
 
-                if status == "open_no_auth":
+                if status in {"open_no_auth", "invalid_credentials_anonymous"}:
                     open_no_auth += 1
                 elif status == "valid_credentials":
                     valid += 1

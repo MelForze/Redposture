@@ -136,7 +136,7 @@ def test_audit_zookeeper_marks_provided_credentials_invalid_on_anonymous_open_ta
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "fail"
+    assert record["status"] == "invalid_credentials_anonymous"
     assert record["provided_credentials_ok"] is False
     assert record["auth_required"] is False
     assert "authentication failed" in str(record["error"]).lower()
@@ -299,7 +299,7 @@ def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(mo
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "fail"
+    assert record["status"] == "invalid_credentials_anonymous"
     assert record["auth_required"] is False
     assert record["provided_credentials_ok"] is False
     assert "authentication failed" in str(record["error"]).lower()

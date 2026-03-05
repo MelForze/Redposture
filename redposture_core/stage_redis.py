@@ -10,11 +10,12 @@ import socket
 import sys
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
+from .progress import iter_completed_with_progress
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 
@@ -731,7 +732,7 @@ def audit_redis_targets(
                 ): host
                 for host in hosts
             }
-            for future in as_completed(future_map):
+            for future in iter_completed_with_progress(future_map, label="REDIS"):
                 record = future.result()
                 total += 1
                 status = str(record.get("status") or "fail")
