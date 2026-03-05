@@ -168,9 +168,9 @@ def test_collect_stage_runs_validation_always(monkeypatch: pytest.MonkeyPatch) -
     def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
         calls.append("collect")
         captured["save_responses_dir"] = kwargs.get("save_responses_dir")
-        records_sink = kwargs.get("records_sink")
-        if isinstance(records_sink, list):
-            records_sink.append(
+        record_callback = kwargs.get("record_callback")
+        if callable(record_callback):
+            record_callback(
                 {
                     "host": "10.0.0.1",
                     "port": 9100,
@@ -181,30 +181,40 @@ def test_collect_stage_runs_validation_always(monkeypatch: pytest.MonkeyPatch) -
             )
         return 1, 1
 
-    def fake_validate_records(
-        records: list[dict[str, object]],
-        *,
-        input_format: str,
-        show: bool,
-        max_lines: int,
-        fail_on_creds: bool,
-        debug: bool,
-        console: object,
-    ) -> int:
-        calls.append("validate")
-        captured["records_len"] = len(records)
-        captured["input_format"] = input_format
-        captured["show"] = show
-        captured["max_lines"] = max_lines
-        captured["fail_on_creds"] = fail_on_creds
-        captured["debug"] = debug
-        captured["console_set"] = console is not None
-        return 0
+    class FakeAccumulator:
+        def __init__(self, *, input_format: str, max_lines: int) -> None:
+            calls.append("validator_init")
+            self._records: list[dict[str, object]] = []
+            captured["input_format"] = input_format
+            captured["max_lines"] = max_lines
+
+        def feed(self, record: dict[str, object]) -> None:
+            calls.append("validator_feed")
+            self._records.append(record)
+
+        def finish(
+            self,
+            *,
+            show: bool,
+            fail_on_creds: bool,
+            debug: bool,
+            console: object,
+            source: str,
+            records_total: int | None = None,
+        ) -> int:
+            calls.append("validate")
+            captured["records_len"] = len(self._records)
+            captured["show"] = show
+            captured["fail_on_creds"] = fail_on_creds
+            captured["debug"] = debug
+            captured["console_set"] = console is not None
+            captured["source"] = source
+            return 0
 
     monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
     monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
     monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
-    monkeypatch.setattr("redposture_core.stage_collect.run_validation_records", fake_validate_records)
+    monkeypatch.setattr("redposture_core.stage_collect.ValidationRecordAccumulator", FakeAccumulator)
 
     rc = run_collect_stage(
         _base_args(
@@ -213,7 +223,7 @@ def test_collect_stage_runs_validation_always(monkeypatch: pytest.MonkeyPatch) -
         AttemptLogger(),
     )
     assert rc == 0
-    assert calls == ["scan", "collect", "validate"]
+    assert calls == ["validator_init", "scan", "collect", "validator_feed", "validate"]
     assert captured["save_responses_dir"] == "collect_raw"
     assert captured["records_len"] == 1
     assert captured["input_format"] == "auto"
@@ -222,6 +232,7 @@ def test_collect_stage_runs_validation_always(monkeypatch: pytest.MonkeyPatch) -
     assert captured["fail_on_creds"] is False
     assert captured["debug"] is False
     assert captured["console_set"] is True
+    assert captured["source"] == "stream"
 
 
 def test_collect_stage_builds_deep_endpoints_with_custom_seconds(monkeypatch: pytest.MonkeyPatch) -> None:

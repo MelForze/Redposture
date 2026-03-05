@@ -11,14 +11,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from typing import Any
 from urllib.parse import urlparse
 
 from .constants import COLLECT_DEBUG_ENDPOINTS, COLLECT_EXPORTERS, DISCOVERY_EXPORTERS, SCAN_EXPORTERS
 from .logger import AttemptLogger
+from .progress import ProgressBar, iter_completed_with_progress
 from .utils import utc_now_iso
 
 _EXPORTER_DISPLAY_NAMES = {
@@ -443,6 +443,46 @@ def _collect_task(
     return record, ok
 
 
+def _is_pprof_endpoint(endpoint: str) -> bool:
+    raw = str(endpoint or "").split("?", 1)[0]
+    return raw == "/debug/pprof" or raw == "/debug/pprof/" or raw.startswith("/debug/pprof/")
+
+
+def _plan_collect_endpoints_for_target(
+    host: str,
+    exporter_name: str,
+    port: int,
+    endpoints: tuple[str, ...],
+    timeout: float,
+    retries: int,
+) -> tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]:
+    # Use pprof index as a cheap capability probe:
+    # if it returns HTTP >= 400, skip deeper pprof paths for this target.
+    probe_endpoint = "/debug/pprof/"
+    if probe_endpoint not in endpoints:
+        return endpoints, {}
+
+    probe_record, probe_ok = _collect_task(
+        host,
+        exporter_name,
+        port,
+        probe_endpoint,
+        timeout,
+        retries,
+    )
+    prefetched = {probe_endpoint: (probe_record, probe_ok)}
+    status = probe_record.get("status")
+
+    # Keep all pprof endpoints if probe is successful or inconclusive.
+    if status is None or probe_ok:
+        return endpoints, prefetched
+
+    planned = tuple(
+        endpoint for endpoint in endpoints if endpoint == probe_endpoint or not _is_pprof_endpoint(endpoint)
+    )
+    return planned, prefetched
+
+
 def _detect_trigger_exporter_task(
     logger: AttemptLogger | None,
     host: str,
@@ -667,7 +707,7 @@ def scan_exporters_and_trigger(
             for host in hosts
             for exporter in exporters
         }
-        for future in as_completed(future_map):
+        for future in iter_completed_with_progress(future_map, label="TRIGGER"):
             result = future.result()
             host, exporter = future_map[future]
 
@@ -695,7 +735,7 @@ def scan_exporters_and_trigger(
             ): (host, exporter)
             for host, exporter in detected_pairs
         }
-        for future in as_completed(future_map):
+        for future in iter_completed_with_progress(future_map, label="TRIGGER"):
             result = future.result()
             host = str(result["host"])
 
@@ -753,6 +793,8 @@ def scan_exporter_presence(
     discovery_exporters: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     custom_ports: list[int] | tuple[int, ...] | None = None,
     emit_summary: bool = True,
+    show_progress: bool = True,
+    progress_leave: bool = True,
 ) -> tuple[int, int, dict[str, list[dict[str, Any]]]]:
     exporters = list(discovery_exporters or DISCOVERY_EXPORTERS)
     ports = list(custom_ports or [])
@@ -780,7 +822,12 @@ def scan_exporter_presence(
                     for exporter in exporters
                 }
 
-            for future in as_completed(future_map):
+            for future in iter_completed_with_progress(
+                future_map,
+                label="SCAN",
+                enabled=show_progress,
+                leave=progress_leave,
+            ):
                 record, hit = future.result()
                 total_checks += 1
                 if hit is not None:
@@ -835,6 +882,7 @@ def collect_exporter_debug_data(
     found_by_host: dict[str, list[dict[str, Any]]] | None = None,
     save_responses_dir: str | None = None,
     records_sink: list[dict[str, Any]] | None = None,
+    record_callback: Callable[[dict[str, Any]], None] | None = None,
     output_mode: str = "w",
     index_mode: str = "w",
     emit_summary: bool = True,
@@ -893,32 +941,55 @@ def collect_exporter_debug_data(
             )
         )
 
-        jobs = [
-            (host, exporter_name, port, endpoint)
-            for host, exporter_name, port in collect_targets
-            for endpoint in endpoints
-        ]
         max_workers = max(1, workers)
         max_inflight = max(max_workers * 4, max_workers)
 
+        target_plans: dict[tuple[str, str, int], tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]] = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as planner:
+            plan_futures = {
+                planner.submit(
+                    _plan_collect_endpoints_for_target,
+                    host,
+                    exporter_name,
+                    port,
+                    endpoints,
+                    timeout,
+                    retries,
+                ): (host, exporter_name, port)
+                for host, exporter_name, port in collect_targets
+            }
+            for future in as_completed(plan_futures):
+                target = plan_futures[future]
+                target_plans[target] = future.result()
+
+        jobs: list[tuple[str, str, int, str, tuple[dict[str, Any], bool] | None]] = []
+        for host, exporter_name, port in collect_targets:
+            planned_endpoints, prefetched = target_plans.get((host, exporter_name, port), (endpoints, {}))
+            for endpoint in planned_endpoints:
+                jobs.append((host, exporter_name, port, endpoint, prefetched.get(endpoint)))
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            job_iter = iter(jobs)
-            pending: deque[Any] = deque()
+            job_index = 0
+            pending: dict[Future[tuple[dict[str, Any], bool]], int] = {}
+            completed: dict[int, tuple[dict[str, Any], bool]] = {}
+            next_emit_index = 0
 
             def _submit_next() -> bool:
-                try:
-                    host, exporter_name, port, endpoint = next(job_iter)
-                except StopIteration:
+                nonlocal job_index
+                if job_index >= len(jobs):
                     return False
-                pending.append(executor.submit(_collect_task, host, exporter_name, port, endpoint, timeout, retries))
+                host, exporter_name, port, endpoint, prefetched_result = jobs[job_index]
+                current_index = job_index
+                job_index += 1
+                if prefetched_result is not None:
+                    completed[current_index] = prefetched_result
+                    return True
+                future = executor.submit(_collect_task, host, exporter_name, port, endpoint, timeout, retries)
+                pending[future] = current_index
                 return True
 
-            while len(pending) < max_inflight and _submit_next():
-                pass
-
-            while pending:
-                future = pending.popleft()
-                record, ok = future.result()
+            def _process_record(record: dict[str, Any], ok: bool) -> None:
+                nonlocal total, success
                 response_file, response_size = (None, 0)
                 total += 1
                 if ok:
@@ -957,6 +1028,8 @@ def collect_exporter_debug_data(
                             "body": str(record.get("body") or ""),
                         }
                     )
+                if record_callback is not None:
+                    record_callback(record)
                 _emit_line(out_fh, emit_line, _format_collect_record(record, output_format))
 
                 if logger is not None:
@@ -970,7 +1043,30 @@ def collect_exporter_debug_data(
                         error=record["error"],
                         output=output_path,
                     )
-                _submit_next()
+
+            while len(pending) < max_inflight and _submit_next():
+                pass
+
+            collect_progress = ProgressBar("COLLECT", len(jobs))
+            try:
+                while pending or next_emit_index < len(jobs):
+                    if pending:
+                        done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+                        for future in done:
+                            emit_index = pending.pop(future)
+                            completed[emit_index] = future.result()
+
+                    while len(pending) < max_inflight and _submit_next():
+                        pass
+
+                    while next_emit_index in completed:
+                        collect_progress.pause_for_output()
+                        record, ok = completed.pop(next_emit_index)
+                        _process_record(record, ok)
+                        collect_progress.advance()
+                        next_emit_index += 1
+            finally:
+                collect_progress.close()
 
         if emit_summary:
             summary = {

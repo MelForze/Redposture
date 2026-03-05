@@ -19,12 +19,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
+from .progress import iter_completed_with_progress
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 _PROXMOX_API_PREFIX = "/api2/json"
@@ -288,7 +289,7 @@ def _socks5_open_tunnel(
         atyp: int
         addr_payload: bytes
         if use_remote_dns:
-            host_raw = target_host.encode("idna", errors="ignore")
+            host_raw = target_host.encode("idna")
             if not host_raw or len(host_raw) > 255:
                 return sock, "invalid target host for socks5h proxy"
             atyp = 0x03
@@ -302,7 +303,7 @@ def _socks5_open_tunnel(
                     atyp = 0x04
                 addr_payload = ip.packed
             except ValueError:
-                host_raw = target_host.encode("idna", errors="ignore")
+                host_raw = target_host.encode("idna")
                 if not host_raw or len(host_raw) > 255:
                     return sock, "invalid target host for socks5 proxy"
                 atyp = 0x03
@@ -1914,7 +1915,7 @@ def audit_proxmox_targets(
                 for host in hosts
             }
 
-            for future in as_completed(future_map):
+            for future in iter_completed_with_progress(future_map, label="PROXMOX"):
                 record = future.result()
                 total += 1
 

@@ -5,15 +5,14 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Any
 
 from .console import Console
 from .constants import COLLECT_DEEP_ENDPOINT_TEMPLATES
 from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import collect_exporter_debug_data, scan_exporter_presence
-from .stage_validate import run_validation_records
-from .utils import collect_scan_targets
+from .stage_validate import ValidationRecordAccumulator
+from .utils import collect_scan_ports, collect_scan_targets
 
 COLLECT_VALIDATE_INPUT_FORMAT = "auto"
 COLLECT_VALIDATE_SHOW = True
@@ -84,6 +83,11 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     except (OSError, ValueError) as exc:
         console.error(f"failed to load profiles: {exc}")
         return 2
+    try:
+        custom_ports = collect_scan_ports(getattr(args, "ports", None))
+    except ValueError as exc:
+        console.error(f"failed to parse --ports: {exc}")
+        return 2
 
     if not hosts:
         console.error("collect requires -t/--targets")
@@ -94,7 +98,10 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     deep = bool(getattr(args, "deep", False))
     pprof_seconds = int(getattr(args, "pprof_seconds", 5))
     trace_seconds = int(getattr(args, "trace_seconds", 2))
-    collected_records: list[dict[str, Any]] = []
+    validator = ValidationRecordAccumulator(
+        input_format=COLLECT_VALIDATE_INPUT_FORMAT,
+        max_lines=COLLECT_VALIDATE_MAX_LINES,
+    )
     collect_endpoints = _build_collect_endpoints(
         profiles["collect_debug_endpoints"],
         deep=deep,
@@ -153,59 +160,53 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug and stream_to_stdout and args.output_format == "txt":
         save_suffix = f" save_responses={save_responses_dir}" if save_responses_dir else ""
+        ports_hint = f" ports={len(custom_ports)}(custom)" if custom_ports else ""
         console.info(
             f"collect started: hosts={len(hosts)} timeout={args.timeout}s "
-            f"workers={args.workers} retries={args.retries} format=txt{save_suffix}"
+            f"workers={args.workers} retries={args.retries} format=txt{ports_hint}{save_suffix}"
         )
     if args.debug and not stream_to_stdout:
         save_suffix = f" save_responses={save_responses_dir}" if save_responses_dir else ""
+        ports_hint = f" ports={len(custom_ports)}(custom)" if custom_ports else ""
         console.info(
             f"collect started: hosts={len(hosts)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} "
-            f"format={args.output_format} output={args.output}{save_suffix}"
+            f"format={args.output_format} output={args.output}{ports_hint}{save_suffix}"
         )
 
-    scan_checks = 0
-    scan_found = 0
+    try:
+        scan_checks, scan_found, found_by_host = scan_exporter_presence(
+            hosts=hosts,
+            timeout=args.timeout,
+            output_path=None,
+            output_format="txt",
+            logger=logger if args.debug else None,
+            emit_line=emit_line if args.output_format == "txt" else None,
+            workers=args.workers,
+            retries=args.retries,
+            discovery_exporters=profiles["discovery_exporters"],
+            custom_ports=custom_ports or None,
+            emit_summary=False,
+            show_progress=False,
+            progress_leave=False,
+        )
+    except OSError as exc:
+        console.error(f"failed to process collect discovery scan: {exc}")
+        return 2
+
+    if args.debug:
+        for host in hosts:
+            host_hits = list(found_by_host.get(host, []))
+            console.debug(f"collect discovery host={host}: detected={len(host_hits)}")
+        console.debug(f"collect discovery: checks={scan_checks} detected={scan_found}")
+
     requests = 0
     success = 0
-    found_by_host: dict[str, list[dict[str, Any]]] = {host: [] for host in hosts}
-    collect_output_mode = "w"
-    collect_index_mode = "w"
-
-    for host in hosts:
+    if scan_found > 0:
         try:
-            host_checks, host_found, host_found_map = scan_exporter_presence(
-                hosts=[host],
-                timeout=args.timeout,
-                output_path=None,
-                output_format="txt",
+            requests, success = collect_exporter_debug_data(
                 logger=logger if args.debug else None,
-                emit_line=emit_line if args.output_format == "txt" else None,
-                workers=args.workers,
-                retries=args.retries,
-                discovery_exporters=profiles["discovery_exporters"],
-                emit_summary=False,
-            )
-        except OSError as exc:
-            console.error(f"failed to process collect discovery scan: {exc}")
-            return 2
-
-        scan_checks += host_checks
-        scan_found += host_found
-        host_hits = list(host_found_map.get(host, []))
-        found_by_host[host] = host_hits
-
-        if args.debug:
-            console.debug(f"collect discovery host={host}: checks={host_checks} detected={host_found}")
-
-        if host_found <= 0:
-            continue
-
-        try:
-            host_requests, host_success = collect_exporter_debug_data(
-                logger=logger if args.debug else None,
-                hosts=[host],
+                hosts=hosts,
                 timeout=args.timeout,
                 output_path=args.output,
                 output_format=args.output_format,
@@ -214,26 +215,14 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 retries=args.retries,
                 collect_exporters=profiles["collect_exporters"],
                 collect_debug_endpoints=collect_endpoints,
-                found_by_host={host: host_hits},
+                found_by_host=found_by_host,
                 save_responses_dir=save_responses_dir,
-                records_sink=collected_records,
-                output_mode=collect_output_mode,
-                index_mode=collect_index_mode,
+                record_callback=validator.feed,
                 emit_summary=False,
             )
         except OSError as exc:
             console.error(f"failed to process collect output: {exc}")
             return 2
-
-        requests += host_requests
-        success += host_success
-        if args.output:
-            collect_output_mode = "a"
-        if save_responses_dir:
-            collect_index_mode = "a"
-
-    if args.debug:
-        console.debug(f"collect discovery: checks={scan_checks} detected={scan_found}")
 
     if scan_found <= 0:
         if save_responses_dir:
@@ -254,14 +243,12 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             )
             if args.debug:
                 console.debug("debug mode enabled; detailed collect events emitted in text logs")
-        validate_rc = run_validation_records(
-            collected_records,
-            input_format=COLLECT_VALIDATE_INPUT_FORMAT,
+        validate_rc = validator.finish(
             show=COLLECT_VALIDATE_SHOW,
-            max_lines=COLLECT_VALIDATE_MAX_LINES,
             fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
             debug=bool(args.debug),
             console=console,
+            source="stream",
         )
         if validate_rc == 2:
             return 2
@@ -285,14 +272,12 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         )
         if args.debug:
             console.debug("debug mode enabled; detailed collect events emitted in text logs")
-    validate_rc = run_validation_records(
-        collected_records,
-        input_format=COLLECT_VALIDATE_INPUT_FORMAT,
+    validate_rc = validator.finish(
         show=COLLECT_VALIDATE_SHOW,
-        max_lines=COLLECT_VALIDATE_MAX_LINES,
         fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
         debug=bool(args.debug),
         console=console,
+        source="stream",
     )
     if validate_rc == 2:
         return 2
