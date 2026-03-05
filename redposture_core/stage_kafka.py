@@ -11,11 +11,12 @@ import struct
 import sys
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
+from .progress import iter_completed_with_progress
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 KAFKA_CLIENT_ID = "redposture"
@@ -1029,14 +1030,16 @@ def _audit_kafka_host(
                         error_parts.append(metadata_error)
 
                 provided_credentials_ok: bool | None = None
-                if (auth_required is True or auth_required is None) and provided_credentials and username and password:
+                if provided_credentials and username and password:
                     auth_ok, auth_metadata, auth_error = _authenticate_and_fetch_metadata(
                         host, port, timeout, username, password
                     )
                     provided_credentials_ok = auth_ok
                     if auth_ok and auth_metadata is not None:
-                        auth_required = True
-                        topic_map = dict(auth_metadata.get("topic_map") or {})
+                        if auth_required is not False:
+                            auth_required = True
+                        if topic_map is None:
+                            topic_map = dict(auth_metadata.get("topic_map") or {})
                         error_parts = []
                     elif auth_error:
                         error_parts.append(auth_error)
@@ -1095,7 +1098,12 @@ def _audit_kafka_host(
                     topic_read_error = dump_errors.get(query_topic_name) or dump_error
 
                 if auth_required is False:
-                    status = "open_no_auth"
+                    if provided_credentials and provided_credentials_ok is False:
+                        status = "invalid_credentials_anonymous"
+                    elif provided_credentials_ok:
+                        status = "valid_credentials"
+                    else:
+                        status = "open_no_auth"
                 elif provided_credentials_ok:
                     status = "valid_credentials"
                 elif auth_required is True:
@@ -1225,6 +1233,12 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     if status == "open_no_auth":
         return _with_optional_topics(record, f"{prefix} [+] anonymous access")
+
+    if status == "invalid_credentials_anonymous":
+        username = str(record.get("provided_username") or "user").strip() or "user"
+        provided_password = record.get("provided_password")
+        password_text = "<empty>" if provided_password == "" else str(provided_password or "")
+        return f"{prefix} [-] {username}:{password_text}"
 
     if status == "valid_credentials":
         username = str(record.get("provided_username") or "user").strip() or "user"
@@ -1552,11 +1566,11 @@ def audit_kafka_targets(
                 ): host
                 for host in hosts
             }
-            for future in as_completed(future_map):
+            for future in iter_completed_with_progress(future_map, label="KAFKA"):
                 record = future.result()
                 total += 1
                 status = str(record.get("status") or "fail")
-                if status == "open_no_auth":
+                if status in {"open_no_auth", "invalid_credentials_anonymous"}:
                     open_no_auth += 1
                 elif status == "valid_credentials":
                     valid += 1

@@ -135,3 +135,96 @@ def test_collect_can_save_raw_responses_and_index(tmp_path: Path, monkeypatch) -
     saved_file = save_dir / response_file
     assert saved_file.exists()
     assert "password=redis" in saved_file.read_text(encoding="utf-8")
+
+
+def test_collect_skips_deep_pprof_when_pprof_index_is_unavailable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    called_urls: list[str] = []
+
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        called_urls.append(url)
+        if url.endswith("/debug/pprof/"):
+            return {
+                "status": 404,
+                "body": "not found",
+                "content_type": "text/plain",
+                "elapsed_ms": 1,
+                "truncated": False,
+                "error": None,
+            }
+        if "/debug/pprof/goroutine?debug=1" in url:
+            raise AssertionError("deep pprof endpoint must be skipped when pprof index is unavailable")
+        return {
+            "status": 200,
+            "body": "ok",
+            "content_type": "text/plain",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    lines: list[str] = []
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        emit_line=lines.append,
+        workers=2,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/vars", "/debug/pprof/", "/debug/pprof/goroutine?debug=1", "/metrics"],
+        found_by_host={"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+    )
+
+    assert total == 3
+    assert success == 2
+    assert all("/debug/pprof/goroutine?debug=1" not in url for url in called_urls)
+
+    payloads = [json.loads(line) for line in lines]
+    records = [item for item in payloads if item.get("type") != "summary"]
+    endpoints = [str(item.get("endpoint")) for item in records]
+    assert endpoints == ["/debug/vars", "/debug/pprof/", "/metrics"]
+
+
+def test_collect_reuses_pprof_probe_response_without_duplicate_request(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    call_count: dict[str, int] = {}
+
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        call_count[url] = call_count.get(url, 0) + 1
+        return {
+            "status": 200,
+            "body": "ok",
+            "content_type": "text/plain",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    lines: list[str] = []
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        emit_line=lines.append,
+        workers=2,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/vars", "/debug/pprof/", "/debug/pprof/goroutine?debug=1"],
+        found_by_host={"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+    )
+
+    assert total == 3
+    assert success == 3
+    assert call_count["http://10.0.0.1:9100/debug/pprof/"] == 1
+
+    payloads = [json.loads(line) for line in lines]
+    records = [item for item in payloads if item.get("type") != "summary"]
+    endpoints = [str(item.get("endpoint")) for item in records]
+    assert endpoints == ["/debug/vars", "/debug/pprof/", "/debug/pprof/goroutine?debug=1"]
