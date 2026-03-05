@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
+from typing import TextIO
 
 from .console import Console
 from .constants import COLLECT_DEEP_ENDPOINT_TEMPLATES
@@ -18,6 +20,7 @@ COLLECT_VALIDATE_INPUT_FORMAT = "auto"
 COLLECT_VALIDATE_SHOW = True
 COLLECT_VALIDATE_MAX_LINES = 0
 COLLECT_VALIDATE_FAIL_ON_CREDS = False
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def _materialize_collect_endpoint(template: str, pprof_seconds: int, trace_seconds: int) -> str:
@@ -124,9 +127,11 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if args.output_format != "txt":
             print(line, flush=True)
             return
-        if line.startswith("SCAN"):
-            if not args.debug:
-                return
+        is_discovery_line = line.startswith("SCAN")
+        if is_discovery_line:
+            line = f"{'DISCOVER':<8}" + line[8:]
+        if is_discovery_line and not args.debug and " [+] " not in line:
+            return
         if " [*] " in line:
             if args.debug:
                 console.plain(line, color="cyan")
@@ -134,7 +139,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if " [+] " in line:
             left, right = line.split(" [+] ", 1)
             tag, rest = _split_tabbed_tag(left)
-            if tag in {"SCAN", "COLLECT"}:
+            if tag in {"DISCOVER", "COLLECT"}:
                 tag_text = f"{tag:<8}"
                 rest_text = rest
             else:
@@ -174,6 +179,34 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             f"format={args.output_format} output={args.output}{ports_hint}{save_suffix}"
         )
 
+    class _ValidationConsoleProxy:
+        def __init__(self, base: Console, *, suppress_summary: bool) -> None:
+            self._base = base
+            self._suppress_summary = suppress_summary
+            self.debug_enabled = base.debug_enabled
+
+        def _paint(self, text: str, color: str, stream: TextIO) -> str:
+            return self._base._paint(text, color, stream)
+
+        def plain(self, message: str, color: str | None = None, stream: TextIO | None = None) -> None:
+            if self._suppress_summary:
+                cleaned = _ANSI_RE.sub("", str(message))
+                if "validate complete: lines=" in cleaned:
+                    return
+            self._base.plain(message, color=color, stream=stream)
+
+        def info(self, message: str) -> None:
+            self._base.info(message)
+
+        def warn(self, message: str) -> None:
+            self._base.warn(message)
+
+        def error(self, message: str) -> None:
+            self._base.error(message)
+
+        def debug(self, message: str) -> None:
+            self._base.debug(message)
+
     try:
         scan_checks, scan_found, found_by_host = scan_exporter_presence(
             hosts=hosts,
@@ -187,7 +220,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             discovery_exporters=profiles["discovery_exporters"],
             custom_ports=custom_ports or None,
             emit_summary=False,
-            show_progress=False,
+            show_progress=True,
             progress_leave=False,
         )
     except OSError as exc:
@@ -247,7 +280,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             show=COLLECT_VALIDATE_SHOW,
             fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
             debug=bool(args.debug),
-            console=console,
+            console=_ValidationConsoleProxy(console, suppress_summary=True),
             source="stream",
         )
         if validate_rc == 2:
@@ -276,7 +309,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         show=COLLECT_VALIDATE_SHOW,
         fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
         debug=bool(args.debug),
-        console=console,
+        console=_ValidationConsoleProxy(console, suppress_summary=True),
         source="stream",
     )
     if validate_rc == 2:

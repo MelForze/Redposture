@@ -37,6 +37,8 @@ _EXPORTER_DISPLAY_NAMES = {
     "proxmox_exporter": "Proxmox Exporter",
 }
 
+_COLLECT_PPROF_PREFLIGHT_MAX_TARGETS = 1000
+
 
 def _clip(value: Any, width: int) -> str:
     text = str(value if value is not None else "-").replace("\n", "\\n")
@@ -797,7 +799,12 @@ def scan_exporter_presence(
     progress_leave: bool = True,
 ) -> tuple[int, int, dict[str, list[dict[str, Any]]]]:
     exporters = list(discovery_exporters or DISCOVERY_EXPORTERS)
-    ports = list(custom_ports or [])
+    if custom_ports:
+        ports = list(dict.fromkeys(int(port) for port in custom_ports))
+    else:
+        ports = list(
+            dict.fromkeys(int(exporter.get("port")) for exporter in exporters if exporter.get("port") is not None)
+        )
     total_checks = 0
     total_found = 0
     found_by_host: dict[str, list[dict[str, Any]]] = {host: [] for host in hosts}
@@ -809,18 +816,11 @@ def scan_exporter_presence(
 
     try:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            if ports:
-                future_map = {
-                    executor.submit(_scan_presence_port_task, host, port, exporters, timeout, retries): (host, port)
-                    for host in hosts
-                    for port in ports
-                }
-            else:
-                future_map = {
-                    executor.submit(_scan_presence_task, host, exporter, timeout, retries): (host, exporter)
-                    for host in hosts
-                    for exporter in exporters
-                }
+            future_map = {
+                executor.submit(_scan_presence_port_task, host, port, exporters, timeout, retries): (host, port)
+                for host in hosts
+                for port in ports
+            }
 
             for future in iter_completed_with_progress(
                 future_map,
@@ -943,24 +943,31 @@ def collect_exporter_debug_data(
 
         max_workers = max(1, workers)
         max_inflight = max(max_workers * 4, max_workers)
+        preflight_enabled = (
+            len(collect_targets) <= _COLLECT_PPROF_PREFLIGHT_MAX_TARGETS and "/debug/pprof/" in endpoints
+        )
 
         target_plans: dict[tuple[str, str, int], tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]] = {}
-        with ThreadPoolExecutor(max_workers=max_workers) as planner:
-            plan_futures = {
-                planner.submit(
-                    _plan_collect_endpoints_for_target,
-                    host,
-                    exporter_name,
-                    port,
-                    endpoints,
-                    timeout,
-                    retries,
-                ): (host, exporter_name, port)
-                for host, exporter_name, port in collect_targets
-            }
-            for future in as_completed(plan_futures):
-                target = plan_futures[future]
-                target_plans[target] = future.result()
+        if preflight_enabled:
+            with ThreadPoolExecutor(max_workers=max_workers) as planner:
+                plan_futures = {
+                    planner.submit(
+                        _plan_collect_endpoints_for_target,
+                        host,
+                        exporter_name,
+                        port,
+                        endpoints,
+                        timeout,
+                        retries,
+                    ): (host, exporter_name, port)
+                    for host, exporter_name, port in collect_targets
+                }
+                for future in as_completed(plan_futures):
+                    target = plan_futures[future]
+                    target_plans[target] = future.result()
+        else:
+            for host, exporter_name, port in collect_targets:
+                target_plans[(host, exporter_name, port)] = (endpoints, {})
 
         jobs: list[tuple[str, str, int, str, tuple[dict[str, Any], bool] | None]] = []
         for host, exporter_name, port in collect_targets:
@@ -988,7 +995,12 @@ def collect_exporter_debug_data(
                 pending[future] = current_index
                 return True
 
-            def _process_record(record: dict[str, Any], ok: bool) -> None:
+            def _process_record(
+                record: dict[str, Any],
+                ok: bool,
+                *,
+                pause_before_emit: Callable[[], None] | None = None,
+            ) -> None:
                 nonlocal total, success
                 response_file, response_size = (None, 0)
                 total += 1
@@ -1030,6 +1042,8 @@ def collect_exporter_debug_data(
                     )
                 if record_callback is not None:
                     record_callback(record)
+                if pause_before_emit is not None and emit_line is not None:
+                    pause_before_emit()
                 _emit_line(out_fh, emit_line, _format_collect_record(record, output_format))
 
                 if logger is not None:
@@ -1060,9 +1074,8 @@ def collect_exporter_debug_data(
                         pass
 
                     while next_emit_index in completed:
-                        collect_progress.pause_for_output()
                         record, ok = completed.pop(next_emit_index)
-                        _process_record(record, ok)
+                        _process_record(record, ok, pause_before_emit=collect_progress.pause_for_output)
                         collect_progress.advance()
                         next_emit_index += 1
             finally:
