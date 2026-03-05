@@ -29,10 +29,14 @@ COMMAND_EXPORTERS = "exporters"
 
 
 def _package_version() -> str:
+    # Prefer version from local source tree when running from repository checkout.
+    local_version = _local_package_version()
+    if local_version != "0+local":
+        return local_version
     try:
         return metadata.version("redposture")
     except metadata.PackageNotFoundError:
-        return _local_package_version()
+        return local_version
 
 
 def _local_package_version() -> str:

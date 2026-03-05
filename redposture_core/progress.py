@@ -55,8 +55,7 @@ class ProgressBar:
         self._leave = bool(leave)
         self._started = time.monotonic()
         item_word = "target" if self._total == 1 else "targets"
-        # Keep wording close to NetExec progress line.
-        self._description = f"Running nxc against {self._total} {item_word}"
+        self._description = f"Running redposture against {self._total} {item_word}"
 
     def advance(self, step: int = 1) -> None:
         if not self._enabled:

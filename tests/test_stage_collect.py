@@ -122,6 +122,7 @@ def test_collect_stage_hides_scan_and_meta_without_debug(
 
     out = capsys.readouterr().out
     assert "SCAN" not in out
+    assert "DISCOVER" in out
     assert "collect started" not in out
     assert "collect complete" in out
     assert "Node Exporter url=http://10.0.0.1:9100/debug/vars" in out
@@ -270,3 +271,52 @@ def test_collect_stage_builds_deep_endpoints_with_custom_seconds(monkeypatch: py
     assert "/debug/vars" in endpoints
     assert "/debug/pprof/profile?seconds=11" in endpoints
     assert "/debug/pprof/trace?seconds=4" in endpoints
+
+
+@pytest.mark.parametrize("debug_mode", [False, True])
+def test_collect_stage_hides_validate_summary_line(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    debug_mode: bool,
+) -> None:
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/vars"],
+        }
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return 1, 0, {"10.0.0.1": []}
+
+    class FakeAccumulator:
+        def __init__(self, *, input_format: str, max_lines: int) -> None:
+            _ = input_format
+            _ = max_lines
+
+        def feed(self, record: dict[str, object]) -> None:
+            _ = record
+
+        def finish(
+            self,
+            *,
+            show: bool,
+            fail_on_creds: bool,
+            debug: bool,
+            console: object,
+            source: str,
+            records_total: int | None = None,
+        ) -> int:
+            _ = (show, fail_on_creds, debug, source, records_total)
+            console.plain("VALIDATE\t-\t-\t [!] validate complete: lines=10 credential_hits=2")
+            return 0
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.ValidationRecordAccumulator", FakeAccumulator)
+
+    rc = run_collect_stage(_base_args(debug=debug_mode), AttemptLogger())
+    assert rc == 0
+
+    out = capsys.readouterr().out
+    assert "validate complete: lines=" not in out

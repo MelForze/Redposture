@@ -228,3 +228,52 @@ def test_collect_reuses_pprof_probe_response_without_duplicate_request(monkeypat
     records = [item for item in payloads if item.get("type") != "summary"]
     endpoints = [str(item.get("endpoint")) for item in records]
     assert endpoints == ["/debug/vars", "/debug/pprof/", "/debug/pprof/goroutine?debug=1"]
+
+
+def test_collect_disables_pprof_preflight_for_large_target_sets(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr("redposture_core.scanner._COLLECT_PPROF_PREFLIGHT_MAX_TARGETS", 1)
+
+    called_urls: list[str] = []
+
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        called_urls.append(url)
+        if url.endswith("/debug/pprof/"):
+            return {
+                "status": 404,
+                "body": "not found",
+                "content_type": "text/plain",
+                "elapsed_ms": 1,
+                "truncated": False,
+                "error": None,
+            }
+        return {
+            "status": 200,
+            "body": "ok",
+            "content_type": "text/plain",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.1", "10.0.0.2"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        emit_line=None,
+        workers=2,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/pprof/", "/debug/pprof/goroutine?debug=1"],
+        found_by_host={
+            "10.0.0.1": [{"exporter": "node_exporter", "port": 9100}],
+            "10.0.0.2": [{"exporter": "node_exporter", "port": 9100}],
+        },
+    )
+
+    assert total == 4
+    assert success == 2
+    assert sum(1 for url in called_urls if url.endswith("/debug/pprof/goroutine?debug=1")) == 2
