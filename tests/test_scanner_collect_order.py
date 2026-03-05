@@ -7,7 +7,7 @@ from pathlib import Path
 from redposture_core.scanner import collect_exporter_debug_data
 
 
-def test_collect_output_is_sorted_by_host_then_path_order(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_collect_output_is_emitted_as_soon_as_requests_complete(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
         # Force out-of-order completion to ensure final output is explicitly sorted.
         if "/debug/vars" in url:
@@ -48,13 +48,9 @@ def test_collect_output_is_sorted_by_host_then_path_order(monkeypatch) -> None: 
 
     payloads = [json.loads(line) for line in lines]
     records = [item for item in payloads if item.get("type") != "summary"]
-    order = [(str(item.get("host")), str(item.get("endpoint"))) for item in records]
-    assert order == [
-        ("10.0.0.2", "/debug/vars"),
-        ("10.0.0.2", "/debug/pprof/cmdline?debug=1"),
-        ("10.0.0.1", "/debug/vars"),
-        ("10.0.0.1", "/debug/pprof/cmdline?debug=1"),
-    ]
+    positions = {(str(item.get("host")), str(item.get("endpoint"))): idx for idx, item in enumerate(records)}
+    assert positions[("10.0.0.2", "/debug/pprof/cmdline?debug=1")] < positions[("10.0.0.2", "/debug/vars")]
+    assert positions[("10.0.0.1", "/debug/pprof/cmdline?debug=1")] < positions[("10.0.0.1", "/debug/vars")]
 
 
 def test_collect_txt_line_contains_display_name_and_full_url(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -186,7 +182,7 @@ def test_collect_skips_deep_pprof_when_pprof_index_is_unavailable(monkeypatch) -
     payloads = [json.loads(line) for line in lines]
     records = [item for item in payloads if item.get("type") != "summary"]
     endpoints = [str(item.get("endpoint")) for item in records]
-    assert endpoints == ["/debug/vars", "/debug/pprof/", "/metrics"]
+    assert sorted(endpoints) == sorted(["/debug/vars", "/debug/pprof/", "/metrics"])
 
 
 def test_collect_reuses_pprof_probe_response_without_duplicate_request(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -227,7 +223,7 @@ def test_collect_reuses_pprof_probe_response_without_duplicate_request(monkeypat
     payloads = [json.loads(line) for line in lines]
     records = [item for item in payloads if item.get("type") != "summary"]
     endpoints = [str(item.get("endpoint")) for item in records]
-    assert endpoints == ["/debug/vars", "/debug/pprof/", "/debug/pprof/goroutine?debug=1"]
+    assert sorted(endpoints) == sorted(["/debug/vars", "/debug/pprof/", "/debug/pprof/goroutine?debug=1"])
 
 
 def test_collect_disables_pprof_preflight_for_large_target_sets(monkeypatch) -> None:  # type: ignore[no-untyped-def]

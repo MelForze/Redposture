@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import errno
+import http.client
 import json
 import os
 import re
 import socket
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import deque
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlparse
 
@@ -38,6 +42,151 @@ _EXPORTER_DISPLAY_NAMES = {
 }
 
 _COLLECT_PPROF_PREFLIGHT_MAX_TARGETS = 1000
+_HTTP_POOL_MAX_IDLE_TOTAL = 512
+_HTTP_POOL_MAX_IDLE_PER_HOST = 4
+
+
+class _HTTPConnectionPool:
+    def __init__(
+        self,
+        *,
+        max_idle_total: int = _HTTP_POOL_MAX_IDLE_TOTAL,
+        max_idle_per_host: int = _HTTP_POOL_MAX_IDLE_PER_HOST,
+    ) -> None:
+        self._max_idle_total = max(1, int(max_idle_total))
+        self._max_idle_per_host = max(1, int(max_idle_per_host))
+        self._idle: dict[tuple[str, int], list[http.client.HTTPConnection]] = {}
+        self._idle_total = 0
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _target_from_url(url: str) -> tuple[str, int, str]:
+        parsed = urllib.parse.urlsplit(url)
+        scheme = parsed.scheme.lower()
+        if scheme and scheme != "http":
+            raise ValueError(f"unsupported URL scheme for pooled request: {scheme}")
+        host = parsed.hostname
+        if not host:
+            raise ValueError("invalid URL host")
+        port = int(parsed.port or 80)
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        return host, port, path
+
+    def _acquire(self, host: str, port: int, timeout: float) -> http.client.HTTPConnection:
+        key = (host, port)
+        with self._lock:
+            bucket = self._idle.get(key)
+            if bucket:
+                conn = bucket.pop()
+                self._idle_total = max(0, self._idle_total - 1)
+                if not bucket:
+                    self._idle.pop(key, None)
+                conn.timeout = timeout
+                return conn
+        return http.client.HTTPConnection(host, port, timeout=timeout)
+
+    def _evict_one(self) -> None:
+        for key in list(self._idle):
+            bucket = self._idle.get(key)
+            if not bucket:
+                continue
+            victim = bucket.pop(0)
+            self._idle_total = max(0, self._idle_total - 1)
+            if not bucket:
+                self._idle.pop(key, None)
+            try:
+                victim.close()
+            except OSError:
+                pass
+            return
+
+    def _release(self, host: str, port: int, conn: http.client.HTTPConnection, reusable: bool) -> None:
+        if not reusable:
+            try:
+                conn.close()
+            except OSError:
+                pass
+            return
+
+        key = (host, port)
+        with self._lock:
+            bucket = self._idle.setdefault(key, [])
+            if len(bucket) >= self._max_idle_per_host:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                return
+            while self._idle_total >= self._max_idle_total:
+                self._evict_one()
+                if self._idle_total < self._max_idle_total:
+                    break
+            if self._idle_total >= self._max_idle_total:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+                return
+            bucket.append(conn)
+            self._idle_total += 1
+
+    def get(self, url: str, timeout: float) -> tuple[int | None, bytes, str | None, BaseException | None]:
+        host, port, path = self._target_from_url(url)
+        conn = self._acquire(host, port, timeout)
+        reusable = False
+        try:
+            conn.request(
+                "GET",
+                path,
+                headers={
+                    "User-Agent": "RedPosture/1.0",
+                    "Connection": "keep-alive",
+                },
+            )
+            response = conn.getresponse()
+            raw = response.read()
+            reusable = not response.will_close
+            return int(response.status), raw, response.getheader("Content-Type"), None
+        except BaseException as exc:
+            return None, b"", None, exc
+        finally:
+            self._release(host, port, conn, reusable)
+
+    def close(self) -> None:
+        with self._lock:
+            buckets = list(self._idle.values())
+            self._idle.clear()
+            self._idle_total = 0
+        for bucket in buckets:
+            for conn in bucket:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+
+_ACTIVE_HTTP_POOL: _HTTPConnectionPool | None = None
+_ACTIVE_HTTP_POOL_LOCK = threading.Lock()
+
+
+@contextmanager
+def _activate_http_pool(pool: _HTTPConnectionPool | None):
+    global _ACTIVE_HTTP_POOL
+    if pool is None:
+        yield
+        return
+
+    with _ACTIVE_HTTP_POOL_LOCK:
+        previous = _ACTIVE_HTTP_POOL
+        _ACTIVE_HTTP_POOL = pool
+    try:
+        yield
+    finally:
+        with _ACTIVE_HTTP_POOL_LOCK:
+            _ACTIVE_HTTP_POOL = previous
+        pool.close()
 
 
 def _clip(value: Any, width: int) -> str:
@@ -150,6 +299,22 @@ def _save_collect_body(
 
 
 def http_get_text(url: str, timeout: float, retries: int = 1) -> tuple[int, str]:
+    pool = _ACTIVE_HTTP_POOL
+    if pool is not None:
+        attempts = max(1, retries + 1)
+        for attempt in range(attempts):
+            status, raw, _content_type, error = pool.get(url, timeout)
+            if error is None:
+                body = raw.decode("utf-8", errors="replace")
+                return int(status or 0), body
+            should_retry = _should_retry_http_exception(error) or isinstance(
+                _unwrap_network_error(error), http.client.HTTPException
+            )
+            if attempt >= attempts - 1 or not should_retry:
+                raise error
+            time.sleep(_retry_delay(attempt))
+        raise RuntimeError("unreachable")
+
     req = urllib.request.Request(url, headers={"User-Agent": "RedPosture/1.0"})
     attempts = max(1, retries + 1)
     for attempt in range(attempts):
@@ -169,6 +334,39 @@ def http_get_text(url: str, timeout: float, retries: int = 1) -> tuple[int, str]
 
 
 def http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, Any]:
+    pool = _ACTIVE_HTTP_POOL
+    if pool is not None:
+        attempts = max(1, retries + 1)
+        for attempt in range(attempts):
+            started = time.monotonic()
+            status, raw, content_type, error = pool.get(url, timeout)
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            if error is None:
+                body = raw.decode("utf-8", errors="replace")
+                return {
+                    "status": status,
+                    "body": body,
+                    "content_type": content_type,
+                    "elapsed_ms": elapsed_ms,
+                    "truncated": False,
+                    "error": None,
+                }
+            should_retry = _should_retry_http_exception(error) or isinstance(
+                _unwrap_network_error(error), http.client.HTTPException
+            )
+            if attempt < attempts - 1 and should_retry:
+                time.sleep(_retry_delay(attempt))
+                continue
+            return {
+                "status": None,
+                "body": "",
+                "content_type": None,
+                "elapsed_ms": elapsed_ms,
+                "truncated": False,
+                "error": str(error),
+            }
+        raise RuntimeError("unreachable")
+
     req = urllib.request.Request(url, headers={"User-Agent": "RedPosture/1.0"})
     attempts = max(1, retries + 1)
     for attempt in range(attempts):
@@ -275,7 +473,6 @@ def _format_collect_record(record: dict[str, Any], output_format: str) -> str:
 def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) -> None:
     if out_fh is not None:
         out_fh.write(line + "\n")
-        out_fh.flush()
     if emit_line is not None:
         emit_line(line)
 
@@ -942,144 +1139,151 @@ def collect_exporter_debug_data(
         )
 
         max_workers = max(1, workers)
-        max_inflight = max(max_workers * 4, max_workers)
+        max_inflight = max(max_workers * 8, max_workers)
         preflight_enabled = (
             len(collect_targets) <= _COLLECT_PPROF_PREFLIGHT_MAX_TARGETS and "/debug/pprof/" in endpoints
         )
 
         target_plans: dict[tuple[str, str, int], tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]] = {}
-        if preflight_enabled:
-            with ThreadPoolExecutor(max_workers=max_workers) as planner:
-                plan_futures = {
-                    planner.submit(
-                        _plan_collect_endpoints_for_target,
-                        host,
-                        exporter_name,
-                        port,
-                        endpoints,
-                        timeout,
-                        retries,
-                    ): (host, exporter_name, port)
-                    for host, exporter_name, port in collect_targets
-                }
-                for future in as_completed(plan_futures):
-                    target = plan_futures[future]
-                    target_plans[target] = future.result()
-        else:
+
+        def _process_record(
+            record: dict[str, Any],
+            ok: bool,
+            *,
+            pause_before_emit: Callable[[], None] | None = None,
+        ) -> None:
+            nonlocal total, success
+            response_file, response_size = (None, 0)
+            total += 1
+            if ok:
+                success += 1
+            if save_responses_dir:
+                response_file, response_size = _save_collect_body(save_responses_dir, record)
+                if response_file is not None:
+                    record["response_file"] = response_file
+                if index_fh is not None:
+                    index_payload = {
+                        "timestamp": record.get("timestamp"),
+                        "host": record.get("host"),
+                        "exporter": record.get("exporter"),
+                        "port": record.get("port"),
+                        "endpoint": record.get("endpoint"),
+                        "url": record.get("url"),
+                        "ok": bool(record.get("ok")),
+                        "status": record.get("status"),
+                        "error": record.get("error"),
+                        "truncated": bool(record.get("truncated")),
+                        "response_file": response_file,
+                        "response_size": response_size,
+                    }
+                    index_fh.write(json.dumps(index_payload, ensure_ascii=False) + "\n")
+            if records_sink is not None:
+                records_sink.append(
+                    {
+                        "host": str(record.get("host") or "-"),
+                        "port": record.get("port"),
+                        "exporter": str(record.get("exporter") or "-"),
+                        "endpoint": str(record.get("endpoint") or "-"),
+                        "url": str(record.get("url") or "-"),
+                        "status": record.get("status"),
+                        "error": record.get("error"),
+                        "ok": bool(record.get("ok")),
+                        "body": str(record.get("body") or ""),
+                    }
+                )
+            if record_callback is not None:
+                record_callback(record)
+            if pause_before_emit is not None and emit_line is not None:
+                pause_before_emit()
+            _emit_line(out_fh, emit_line, _format_collect_record(record, output_format))
+
+            if logger is not None:
+                logger.log(
+                    "collect",
+                    (str(record["host"]), int(record["port"])),
+                    exporter=str(record["exporter"]),
+                    endpoint=str(record["endpoint"]),
+                    status=record["status"],
+                    ok=ok,
+                    error=record["error"],
+                    output=output_path,
+                )
+
+        pool = _HTTPConnectionPool(
+            max_idle_total=max(max_workers * 16, _HTTP_POOL_MAX_IDLE_TOTAL),
+            max_idle_per_host=max(_HTTP_POOL_MAX_IDLE_PER_HOST, min(max_workers, 8)),
+        )
+        with _activate_http_pool(pool):
+            if preflight_enabled:
+                with ThreadPoolExecutor(max_workers=max_workers) as planner:
+                    plan_futures = {
+                        planner.submit(
+                            _plan_collect_endpoints_for_target,
+                            host,
+                            exporter_name,
+                            port,
+                            endpoints,
+                            timeout,
+                            retries,
+                        ): (host, exporter_name, port)
+                        for host, exporter_name, port in collect_targets
+                    }
+                    for future in as_completed(plan_futures):
+                        target = plan_futures[future]
+                        target_plans[target] = future.result()
+            else:
+                for host, exporter_name, port in collect_targets:
+                    target_plans[(host, exporter_name, port)] = (endpoints, {})
+
+            jobs: list[tuple[str, str, int, str, tuple[dict[str, Any], bool] | None]] = []
             for host, exporter_name, port in collect_targets:
-                target_plans[(host, exporter_name, port)] = (endpoints, {})
+                planned_endpoints, prefetched = target_plans.get((host, exporter_name, port), (endpoints, {}))
+                for endpoint in planned_endpoints:
+                    jobs.append((host, exporter_name, port, endpoint, prefetched.get(endpoint)))
 
-        jobs: list[tuple[str, str, int, str, tuple[dict[str, Any], bool] | None]] = []
-        for host, exporter_name, port in collect_targets:
-            planned_endpoints, prefetched = target_plans.get((host, exporter_name, port), (endpoints, {}))
-            for endpoint in planned_endpoints:
-                jobs.append((host, exporter_name, port, endpoint, prefetched.get(endpoint)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                job_index = 0
+                pending: dict[Future[tuple[dict[str, Any], bool]], None] = {}
+                prefetched_ready: deque[tuple[dict[str, Any], bool]] = deque()
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            job_index = 0
-            pending: dict[Future[tuple[dict[str, Any], bool]], int] = {}
-            completed: dict[int, tuple[dict[str, Any], bool]] = {}
-            next_emit_index = 0
-
-            def _submit_next() -> bool:
-                nonlocal job_index
-                if job_index >= len(jobs):
-                    return False
-                host, exporter_name, port, endpoint, prefetched_result = jobs[job_index]
-                current_index = job_index
-                job_index += 1
-                if prefetched_result is not None:
-                    completed[current_index] = prefetched_result
+                def _submit_next() -> bool:
+                    nonlocal job_index
+                    if job_index >= len(jobs):
+                        return False
+                    host, exporter_name, port, endpoint, prefetched_result = jobs[job_index]
+                    job_index += 1
+                    if prefetched_result is not None:
+                        prefetched_ready.append(prefetched_result)
+                        return True
+                    future = executor.submit(_collect_task, host, exporter_name, port, endpoint, timeout, retries)
+                    pending[future] = None
                     return True
-                future = executor.submit(_collect_task, host, exporter_name, port, endpoint, timeout, retries)
-                pending[future] = current_index
-                return True
 
-            def _process_record(
-                record: dict[str, Any],
-                ok: bool,
-                *,
-                pause_before_emit: Callable[[], None] | None = None,
-            ) -> None:
-                nonlocal total, success
-                response_file, response_size = (None, 0)
-                total += 1
-                if ok:
-                    success += 1
-                if save_responses_dir:
-                    response_file, response_size = _save_collect_body(save_responses_dir, record)
-                    if response_file is not None:
-                        record["response_file"] = response_file
-                    if index_fh is not None:
-                        index_payload = {
-                            "timestamp": record.get("timestamp"),
-                            "host": record.get("host"),
-                            "exporter": record.get("exporter"),
-                            "port": record.get("port"),
-                            "endpoint": record.get("endpoint"),
-                            "url": record.get("url"),
-                            "ok": bool(record.get("ok")),
-                            "status": record.get("status"),
-                            "error": record.get("error"),
-                            "truncated": bool(record.get("truncated")),
-                            "response_file": response_file,
-                            "response_size": response_size,
-                        }
-                        index_fh.write(json.dumps(index_payload, ensure_ascii=False) + "\n")
-                if records_sink is not None:
-                    records_sink.append(
-                        {
-                            "host": str(record.get("host") or "-"),
-                            "port": record.get("port"),
-                            "exporter": str(record.get("exporter") or "-"),
-                            "endpoint": str(record.get("endpoint") or "-"),
-                            "url": str(record.get("url") or "-"),
-                            "status": record.get("status"),
-                            "error": record.get("error"),
-                            "ok": bool(record.get("ok")),
-                            "body": str(record.get("body") or ""),
-                        }
-                    )
-                if record_callback is not None:
-                    record_callback(record)
-                if pause_before_emit is not None and emit_line is not None:
-                    pause_before_emit()
-                _emit_line(out_fh, emit_line, _format_collect_record(record, output_format))
+                while len(pending) < max_inflight and _submit_next():
+                    pass
 
-                if logger is not None:
-                    logger.log(
-                        "collect",
-                        (str(record["host"]), int(record["port"])),
-                        exporter=str(record["exporter"]),
-                        endpoint=str(record["endpoint"]),
-                        status=record["status"],
-                        ok=ok,
-                        error=record["error"],
-                        output=output_path,
-                    )
+                collect_progress = ProgressBar("COLLECT", len(jobs))
+                try:
+                    while pending or prefetched_ready or job_index < len(jobs):
+                        while prefetched_ready:
+                            record, ok = prefetched_ready.popleft()
+                            _process_record(record, ok, pause_before_emit=collect_progress.pause_for_output)
+                            collect_progress.advance()
 
-            while len(pending) < max_inflight and _submit_next():
-                pass
+                        while len(pending) < max_inflight and _submit_next():
+                            pass
 
-            collect_progress = ProgressBar("COLLECT", len(jobs))
-            try:
-                while pending or next_emit_index < len(jobs):
-                    if pending:
+                        if not pending:
+                            continue
+
                         done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
                         for future in done:
-                            emit_index = pending.pop(future)
-                            completed[emit_index] = future.result()
-
-                    while len(pending) < max_inflight and _submit_next():
-                        pass
-
-                    while next_emit_index in completed:
-                        record, ok = completed.pop(next_emit_index)
-                        _process_record(record, ok, pause_before_emit=collect_progress.pause_for_output)
-                        collect_progress.advance()
-                        next_emit_index += 1
-            finally:
-                collect_progress.close()
+                            pending.pop(future, None)
+                            record, ok = future.result()
+                            _process_record(record, ok, pause_before_emit=collect_progress.pause_for_output)
+                            collect_progress.advance()
+                finally:
+                    collect_progress.close()
 
         if emit_summary:
             summary = {
