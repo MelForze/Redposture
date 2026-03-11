@@ -2,13 +2,57 @@ from __future__ import annotations
 
 import pytest
 
-from redposture_core.cli_args import COMMAND_EXPORTERS, COMMAND_QDRANT, COMMAND_SELFCERT, parse_args
+from redposture_core.cli_args import COMMAND_EXPORTERS, COMMAND_QDRANT, COMMAND_SELFCERT, build_parser, parse_args
 
 
 def test_parse_args_without_args_shows_help_and_exits_cleanly() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args([])
     assert exc.value.code == 0
+
+
+def test_help_color_is_disabled_when_supported() -> None:
+    parser = build_parser()
+    parser_color = getattr(parser, "color", None)
+    if parser_color is None:
+        return
+
+    assert parser_color is False
+    root_action = parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
+    exporters_parser = root_action.choices["exporters"]
+    assert getattr(exporters_parser, "color", None) is False
+    exporters_action = exporters_parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
+    scan_parser = exporters_action.choices["scan"]
+    assert getattr(scan_parser, "color", None) is False
+
+
+def _command_help(command: str) -> str:
+    parser = build_parser()
+    root_action = parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
+    command_parser = root_action.choices[command]
+    return command_parser.format_help()
+
+
+def test_postgres_help_orders_show_columns_column_dump() -> None:
+    help_text = _command_help("postgres")
+    show_columns_idx = help_text.find("--show-columns")
+    column_idx = help_text.find("--column")
+    dump_idx = help_text.find("--dump")
+    assert show_columns_idx != -1
+    assert column_idx != -1
+    assert dump_idx != -1
+    assert show_columns_idx < column_idx < dump_idx
+
+
+def test_clickhouse_help_orders_show_columns_column_dump() -> None:
+    help_text = _command_help("clickhouse")
+    show_columns_idx = help_text.find("--show-columns")
+    column_idx = help_text.find("--column")
+    dump_idx = help_text.find("--dump")
+    assert show_columns_idx != -1
+    assert column_idx != -1
+    assert dump_idx != -1
+    assert show_columns_idx < column_idx < dump_idx
 
 
 def test_trigger_with_listen_flag_parses_listener_options() -> None:
@@ -735,6 +779,8 @@ def test_proxmox_flags_are_parsed() -> None:
             "--discover-creds",
             "--nodes",
             "--users",
+            "-add-user",
+            "scanner-bot",
             "-f",
             "json",
             "-o",
@@ -755,6 +801,7 @@ def test_proxmox_flags_are_parsed() -> None:
     assert args.discover_creds is True
     assert args.nodes is True
     assert args.users is True
+    assert args.add_user == "scanner-bot"
     assert args.output_format == "json"
     assert args.output == "proxmox_audit.jsonl"
 
@@ -768,6 +815,11 @@ def test_proxmox_requires_pve_api_token() -> None:
 def test_proxmox_discover_creds_default_is_disabled() -> None:
     args = parse_args(["proxmox", "-t", "10.0.0.21", "--pveapitoken", "monitor@pve!audit=token"])
     assert args.discover_creds is False
+
+
+def test_proxmox_add_user_default_is_none() -> None:
+    args = parse_args(["proxmox", "-t", "10.0.0.21", "--pveapitoken", "monitor@pve!audit=token"])
+    assert args.add_user is None
 
 
 def test_proxmox_rejects_profiles_file_flag() -> None:
@@ -1216,11 +1268,10 @@ def test_postgres_short_user_password_flags_are_parsed() -> None:
     assert args.sql_cmd is None
 
 
-def test_postgres_columns_alias_is_parsed() -> None:
-    args = parse_args(["postgres", "-t", "10.0.0.7", "--table", "public.users", "--columns", "id"])
-    assert args.command == "postgres"
-    assert args.tables == ["public.users"]
-    assert args.columns == ["id"]
+def test_postgres_rejects_columns_alias() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["postgres", "-t", "10.0.0.7", "--table", "public.users", "--columns", "id"])
+    assert exc.value.code == 2
 
 
 def test_postgres_rejects_profiles_file_flag() -> None:
@@ -1242,6 +1293,117 @@ def test_postgres_debug_flag_is_long_only() -> None:
 
     args = parse_args(["postgres", "-t", "10.0.0.7", "--debug"])
     assert args.debug is True
+
+
+def test_clickhouse_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "clickhouse",
+            "-t",
+            "10.0.0.7,10.0.0.8",
+            "--timeout",
+            "0.8",
+            "-w",
+            "8",
+            "-r",
+            "1",
+            "--port",
+            "9000",
+            "--ports",
+            "9000,8123,19000",
+            "--http",
+            "--database",
+            "analytics",
+            "--username",
+            "default",
+            "--password",
+            "default",
+            "--defcreds",
+            "--show-databases",
+            "--show-tables",
+            "--show-columns",
+            "--table",
+            "analytics.sessions",
+            "--dump",
+            "--table",
+            "observability.events,analytics.tokens",
+            "--column",
+            "id,token",
+            "--column",
+            "created_at",
+            "-x",
+            "FLUSH LOGS",
+            "--sql-cmd",
+            "select 1",
+            "--sql-shell",
+            "-f",
+            "json",
+            "-o",
+            "clickhouse_audit.jsonl",
+        ]
+    )
+    assert args.command == "clickhouse"
+    assert args.targets == "10.0.0.7,10.0.0.8"
+    assert args.timeout == 0.8
+    assert args.workers == 8
+    assert args.retries == 1
+    assert args.port == 9000
+    assert args.ports == "9000,8123,19000"
+    assert args.http is True
+    assert args.database == "analytics"
+    assert args.username == "default"
+    assert args.password == "default"
+    assert args.defcreds is True
+    assert args.show_databases is True
+    assert args.show_tables is True
+    assert args.show_columns is True
+    assert args.tables == ["analytics.sessions", "observability.events,analytics.tokens"]
+    assert args.dump is True
+    assert args.columns == ["id,token", "created_at"]
+    assert args.execute == "FLUSH LOGS"
+    assert args.sql_cmd == "select 1"
+    assert args.os_shell is False
+    assert args.sql_shell is True
+    assert args.output_format == "json"
+    assert args.output == "clickhouse_audit.jsonl"
+
+
+def test_clickhouse_short_user_password_flags_are_parsed() -> None:
+    args = parse_args(["clickhouse", "-t", "10.0.0.7", "-u", "default", "-p", "default", "-d", "analytics"])
+    assert args.command == "clickhouse"
+    assert args.username == "default"
+    assert args.password == "default"
+    assert args.database == "analytics"
+    assert args.http is False
+    assert args.defcreds is False
+    assert args.execute is None
+    assert args.os_shell is False
+    assert args.sql_cmd is None
+    assert args.sql_shell is False
+
+
+def test_clickhouse_os_shell_flag_is_parsed() -> None:
+    args = parse_args(["clickhouse", "-t", "10.0.0.7", "--os-shell"])
+    assert args.command == "clickhouse"
+    assert args.os_shell is True
+
+
+def test_clickhouse_rejects_columns_alias() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["clickhouse", "-t", "10.0.0.7", "--table", "analytics.sessions", "--columns", "id"])
+    assert exc.value.code == 2
+
+
+def test_clickhouse_rejects_profiles_file_flag() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["clickhouse", "-t", "10.0.0.7", "--profiles-file", "profiles.json"])
+    assert exc.value.code == 2
+
+
+def test_clickhouse_defcreds_flag_is_parsed() -> None:
+    args = parse_args(["clickhouse", "-t", "10.0.0.7", "--defcreds"])
+    assert args.command == "clickhouse"
+    assert args.defcreds is True
 
 
 def test_version_flag_exits_cleanly() -> None:

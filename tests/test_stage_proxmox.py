@@ -5,6 +5,7 @@ import json
 
 from redposture_core.stage_proxmox import (
     _audit_proxmox_host,
+    _format_add_user_detail_records,
     _format_discovered_urls_detail_records,
     _format_record,
     _parse_proxy_config,
@@ -104,6 +105,218 @@ def test_audit_proxmox_collects_credential_hits(monkeypatch) -> None:  # type: i
     findings = record.get("findings")
     assert isinstance(findings, list) and findings
     assert any("password" in str(item.get("reason", "")).lower() for item in findings if isinstance(item, dict))
+
+
+def test_audit_proxmox_add_user_success(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    created_forms: list[dict[str, str]] = []
+    acl_forms: list[dict[str, str]] = []
+
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        _retries: int,
+        *,
+        pve_api_token: str,
+        use_https: bool,
+        insecure: bool,
+        proxy,
+        method: str = "GET",
+        form=None,
+    ):
+        _ = (pve_api_token, use_https, insecure, proxy)
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return (
+                200,
+                _json_payload({"permissions": {"/": {"Sys.Audit": 1, "User.Modify": 1, "VM.Backup": 0}}}),
+                {},
+                None,
+            )
+        if path == "/access/users" and method == "POST":
+            assert isinstance(form, dict)
+            created_forms.append({str(k): str(v) for k, v in form.items()})
+            return 200, _json_payload({"userid": str(form.get("userid") or "")}), {}, None
+        if path == "/access/acl" and method == "PUT":
+            assert isinstance(form, dict)
+            acl_forms.append({str(k): str(v) for k, v in form.items()})
+            return 200, _json_payload({"path": "/", "roleid": "Administrator"}), {}, None
+        if path == "/access/users":
+            return 200, _json_payload([{"userid": "root@pam"}, {"userid": "scanner-bot@pve"}]), {}, None
+        return 404, b"{}", {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="admin@pve!root=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        add_user="scanner-bot",
+        show_users=True,
+    )
+
+    assert record["status"] == "token_ok"
+    assert record.get("added_user") == "scanner-bot@pve"
+    generated_password = str(record.get("added_password") or "")
+    assert len(generated_password) == 20
+    assert generated_password.isalnum()
+    assert record.get("add_user_error") is None
+    assert created_forms and created_forms[0].get("userid") == "scanner-bot@pve"
+    assert created_forms[0].get("password") == generated_password
+    assert acl_forms and acl_forms[0].get("users") == "scanner-bot@pve"
+    assert acl_forms[0].get("path") == "/"
+    assert acl_forms[0].get("roles") == "Administrator"
+    assert record.get("add_user_privileges_granted") is True
+    assert record.get("add_user_privileges_role") == "Administrator"
+    assert record.get("add_user_privileges_error") is None
+
+
+def test_audit_proxmox_add_user_shows_error_when_creation_fails(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        _retries: int,
+        *,
+        pve_api_token: str,
+        use_https: bool,
+        insecure: bool,
+        proxy,
+        method: str = "GET",
+        form=None,
+    ):
+        _ = (pve_api_token, use_https, insecure, proxy, form)
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 1, "User.Modify": 0}}}), {}, None
+        if path == "/access/users" and method == "POST":
+            return 403, b'{"errors":"permission check failed"}', {}, None
+        return 404, b"{}", {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        add_user="scanner-bot",
+    )
+
+    assert record["status"] == "token_ok"
+    assert record.get("added_user") is None
+    assert record.get("added_password") is None
+    assert "permission" in str(record.get("add_user_error") or "").lower()
+    assert record.get("add_user_privileges_granted") is None
+    assert record.get("add_user_privileges_role") is None
+    assert record.get("add_user_privileges_error") is None
+
+
+def test_format_add_user_detail_records_success_line() -> None:
+    lines = _format_add_user_detail_records(
+        {
+            "host": "127.0.0.1",
+            "port": 8006,
+            "add_user": "scanner-bot",
+            "added_user": "scanner-bot@pve",
+            "added_password": "AbCdEf1234567890ZzYx",
+            "add_user_error": None,
+            "add_user_privileges_granted": True,
+            "add_user_privileges_role": "Administrator",
+            "add_user_privileges_error": None,
+        },
+        "txt",
+    )
+    assert lines == [
+        "PROXMOX \t127.0.0.1\t8006\t [+] User scanner-bot@pve added with password AbCdEf1234567890ZzYx and granted privileges Administrator"
+    ]
+
+
+def test_format_add_user_detail_records_warns_when_privileges_not_granted() -> None:
+    lines = _format_add_user_detail_records(
+        {
+            "host": "127.0.0.1",
+            "port": 8006,
+            "add_user": "scanner-bot",
+            "added_user": "scanner-bot@pve",
+            "added_password": "AbCdEf1234567890ZzYx",
+            "add_user_error": None,
+            "add_user_privileges_granted": False,
+            "add_user_privileges_role": None,
+            "add_user_privileges_error": "permission check failed",
+        },
+        "txt",
+    )
+    assert lines == [
+        "PROXMOX \t127.0.0.1\t8006\t [!] User scanner-bot@pve added with password AbCdEf1234567890ZzYx, but privileges were not granted err=permission check failed"
+    ]
+
+
+def test_audit_proxmox_add_user_reports_acl_grant_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        _retries: int,
+        *,
+        pve_api_token: str,
+        use_https: bool,
+        insecure: bool,
+        proxy,
+        method: str = "GET",
+        form=None,
+    ):
+        _ = (pve_api_token, use_https, insecure, proxy, form)
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return (
+                200,
+                _json_payload({"permissions": {"/": {"Sys.Audit": 1, "User.Modify": 1, "Permissions.Modify": 1}}}),
+                {},
+                None,
+            )
+        if path == "/access/users" and method == "POST":
+            return 200, _json_payload({"userid": "scanner-bot@pve"}), {}, None
+        if path == "/access/acl" and method == "PUT":
+            return 403, b'{"errors":"permission check failed"}', {}, None
+        return 404, b"{}", {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="admin@pve!root=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        add_user="scanner-bot",
+    )
+
+    assert record["status"] == "token_ok"
+    assert record.get("added_user") == "scanner-bot@pve"
+    assert isinstance(record.get("added_password"), str)
+    assert record.get("add_user_error") is None
+    assert record.get("add_user_privileges_granted") is False
+    assert record.get("add_user_privileges_role") is None
+    assert "permission" in str(record.get("add_user_privileges_error") or "").lower()
 
 
 def test_audit_proxmox_marks_auth_failed_on_401(monkeypatch) -> None:  # type: ignore[no-untyped-def]
