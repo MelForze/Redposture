@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import re
 import sys
 from importlib import metadata
 from pathlib import Path
+from typing import Any
 
 COMMAND_LISTEN = "listen"
 COMMAND_SCAN = "scan"
@@ -15,6 +17,7 @@ COMMAND_COLLECT = "collect"
 COMMAND_REDIS = "redis"
 COMMAND_REGISTRY = "registry"
 COMMAND_POSTGRES = "postgres"
+COMMAND_CLICKHOUSE = "clickhouse"
 COMMAND_ETCD = "etcd"
 COMMAND_PROXMOX = "proxmox"
 COMMAND_GRAFANA = "grafana"
@@ -26,6 +29,16 @@ COMMAND_KAFKA = "kafka"
 COMMAND_ZOOKEEPER = "zookeeper"
 COMMAND_SELFCERT = "selfcert"
 COMMAND_EXPORTERS = "exporters"
+
+
+_ARGPARSE_SUPPORTS_COLOR = "color" in inspect.signature(argparse.ArgumentParser.__init__).parameters
+
+
+class _NoColorArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        if _ARGPARSE_SUPPORTS_COLOR:
+            kwargs.setdefault("color", False)
+        super().__init__(*args, **kwargs)
 
 
 def _package_version() -> str:
@@ -331,7 +344,7 @@ def _normalize_multi_port_port_flag(raw_argv: list[str]) -> list[str]:
 
 
 def _build_selfcert_option_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _NoColorArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description="Generate local self-signed TLS cert/key files and exit.",
     )
@@ -953,23 +966,27 @@ def _configure_qdrant_parser(parser: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _NoColorArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
-            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Proxmox/Qdrant/Consul/Registry/Grafana/GitLab/Kubernetes API/Kafka/ZooKeeper auditing. "
-            "Use one module command: exporters, registry, grafana, proxmox, gitlab, consul, kubeapi, postgres, redis, etcd, qdrant, kafka, zookeeper. "
+            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/ClickHouse/etcd/Proxmox/Qdrant/Consul/Registry/Grafana/GitLab/Kubernetes API/Kafka/ZooKeeper auditing. "
+            "Use one module command: exporters, registry, grafana, proxmox, gitlab, consul, kubeapi, postgres, clickhouse, redis, etcd, qdrant, kafka, zookeeper. "
             "Listener mode is available inside trigger via --with-listen."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_package_version()}")
-    subparsers = parser.add_subparsers(dest="command")
+    subparsers = parser.add_subparsers(dest="command", parser_class=_NoColorArgumentParser)
 
     exporters_parser = subparsers.add_parser(
         COMMAND_EXPORTERS,
         help="Unified exporter workflows: scan/collect/trigger.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    exporters_subparsers = exporters_parser.add_subparsers(dest="exporters_action", required=True)
+    exporters_subparsers = exporters_parser.add_subparsers(
+        dest="exporters_action",
+        required=True,
+        parser_class=_NoColorArgumentParser,
+    )
 
     exporters_scan_parser = exporters_subparsers.add_parser(
         COMMAND_SCAN,
@@ -1311,6 +1328,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Show users returned by /access/users for current token.",
     )
+    proxmox_parser.add_argument(
+        "-add-user",
+        "--add-user",
+        dest="add_user",
+        type=str,
+        default=None,
+        metavar="username",
+        help="Create user via /access/users and generate random 20-char password.",
+    )
     _add_save_flag(proxmox_parser, "Optional output file path. If omitted, results are printed to stdout.")
     proxmox_parser.add_argument(
         "-f",
@@ -1428,18 +1454,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show column names for --table target(s).",
     )
     postgres_parser.add_argument(
-        "--dump",
-        action="store_true",
-        help="Dump table rows. With --table dumps selected table(s); without --table dumps all readable tables.",
-    )
-    postgres_parser.add_argument(
         "--column",
-        "--columns",
         dest="columns",
         action="append",
         default=None,
         metavar="name",
         help="Column filter for --show-columns/--dump (repeatable, comma-separated is also supported). Applies to all --table targets.",
+    )
+    postgres_parser.add_argument(
+        "--dump",
+        action="store_true",
+        help="Dump table rows. With --table dumps selected table(s); without --table dumps all readable tables.",
     )
     postgres_parser.add_argument(
         "-x",
@@ -1474,6 +1499,128 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("json", "txt"),
         default="txt",
         help="Postgres audit output format for stdout/file.",
+    )
+
+    clickhouse_parser = subparsers.add_parser(
+        COMMAND_CLICKHOUSE,
+        help="Audit ClickHouse auth exposure and privileges.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    _add_output_flags(clickhouse_parser, short=False)
+    _add_log_flag(clickhouse_parser)
+    _add_scan_host_flags(clickhouse_parser, include_profiles=False)
+    clickhouse_parser.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=9000,
+        metavar="port",
+        help="ClickHouse port spec: single port, list/range, or file (examples: 9000, 8123, 9000,8123, ./ports.txt).",
+    )
+    _add_multi_ports_flag(clickhouse_parser)
+    clickhouse_parser.add_argument(
+        "--http",
+        action="store_true",
+        help="Use ClickHouse HTTP/HTTPS API mode. By default native protocol is used.",
+    )
+    clickhouse_parser.add_argument(
+        "-d",
+        "--database",
+        dest="database",
+        default="default",
+        metavar="name",
+        help="Database used for authentication context and table operations.",
+    )
+    clickhouse_parser.add_argument(
+        "-u",
+        "--username",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Optional ClickHouse username for credential check.",
+    )
+    clickhouse_parser.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Optional ClickHouse password for credential check.",
+    )
+    clickhouse_parser.add_argument(
+        "--defcreds",
+        action="store_true",
+        help="Try default ClickHouse credentials default:<empty> and default:default.",
+    )
+    clickhouse_parser.add_argument(
+        "--show-databases",
+        action="store_true",
+        help="Show database names after successful access/auth.",
+    )
+    clickhouse_parser.add_argument(
+        "--show-tables",
+        action="store_true",
+        help="Show readable table names after successful access/auth.",
+    )
+    clickhouse_parser.add_argument(
+        "--table",
+        dest="tables",
+        action="append",
+        default=None,
+        metavar="name",
+        help="Target table (db.table or table). Can be used multiple times or with comma-separated values.",
+    )
+    clickhouse_parser.add_argument(
+        "--show-columns",
+        action="store_true",
+        help="Show column names for --table target(s).",
+    )
+    clickhouse_parser.add_argument(
+        "--column",
+        dest="columns",
+        action="append",
+        default=None,
+        metavar="name",
+        help="Column filter for --show-columns/--dump (repeatable, comma-separated is also supported).",
+    )
+    clickhouse_parser.add_argument(
+        "--dump",
+        action="store_true",
+        help="Dump table rows. With --table dumps selected table(s); without --table dumps all readable tables.",
+    )
+    clickhouse_parser.add_argument(
+        "-x",
+        "--execute",
+        dest="execute",
+        default=None,
+        metavar="command",
+        help="Execute OS command via ClickHouse executable() path when available (or SYSTEM command if prefixed with SYSTEM).",
+    )
+    clickhouse_parser.add_argument(
+        "--sql-cmd",
+        dest="sql_cmd",
+        default=None,
+        metavar="query",
+        help="Execute SQL query after successful connection/auth and print result rows.",
+    )
+    clickhouse_parser.add_argument(
+        "--os-shell",
+        action="store_true",
+        help="Interactive OS command mode (single target).",
+    )
+    clickhouse_parser.add_argument(
+        "--sql-shell",
+        action="store_true",
+        help="Interactive SQL mode (single target).",
+    )
+    _add_save_flag(clickhouse_parser, "Optional output file path. If omitted, results are printed to stdout.")
+    clickhouse_parser.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="ClickHouse audit output format for stdout/file.",
     )
 
     redis_parser = subparsers.add_parser(
@@ -1776,7 +1923,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     if raw_argv[0].startswith("-"):
         parser.error(
-            "module command is required: exporters, registry, grafana, gitlab, consul, kubeapi, postgres, redis, etcd, proxmox, qdrant, kafka, zookeeper, or --selfcert"
+            "module command is required: exporters, registry, grafana, gitlab, consul, kubeapi, postgres, clickhouse, redis, etcd, proxmox, qdrant, kafka, zookeeper, or --selfcert"
         )
 
     return parser.parse_args(raw_argv)

