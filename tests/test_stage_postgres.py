@@ -5,6 +5,7 @@ import base64
 from redposture_core.stage_postgres import (
     _audit_postgres_host,
     _caps_suffix,
+    _format_table_dump_detail_records,
     _PgSession,
     _scram_client_final,
     _scram_client_first,
@@ -28,6 +29,7 @@ class _DummySocket:
 
 def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     dumped_tables: list[str] = []
+    dumped_columns_queries: list[str] = []
 
     monkeypatch.setattr(
         "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
@@ -44,6 +46,14 @@ def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # ty
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_query_readable_tables",
         lambda *_args, **_kwargs: (["public.users", "public.audit_events"], None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_table_columns",
+        lambda _sock, table_name, **_kwargs: (
+            dumped_columns_queries.append(table_name) or table_name,
+            ["id", "payload"],
+            None,
+        ),
     )
     monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
 
@@ -81,8 +91,10 @@ def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # ty
     )
 
     assert dumped_tables == ["public.users", "public.audit_events"]
+    assert dumped_columns_queries == ["public.users", "public.audit_events"]
     assert record["table_targets"] == ["public.users", "public.audit_events"]
     assert isinstance(record["table_dumps"], list) and len(record["table_dumps"]) == 2
+    assert record["table_dumps"][0]["columns"] == ["id", "payload"]
 
 
 def test_dump_with_table_and_columns_uses_only_selected(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -224,6 +236,31 @@ def test_show_columns_with_dump_prints_columns_and_dump(monkeypatch) -> None:  #
     assert dumped == [("public.users", ["id"])]
     table_columns_info = record.get("table_columns_info")
     assert isinstance(table_columns_info, list) and len(table_columns_info) == 1
+
+
+def test_table_dump_txt_renders_columns_header_line() -> None:
+    record = {
+        "timestamp": "2026-03-11T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 5432,
+        "database": "postgres",
+        "table_dump_enabled": True,
+        "table_columns": [],
+        "table_dumps": [
+            {
+                "table": "public.users",
+                "columns": ["id", "email"],
+                "rows": ['{"id":1,"email":"admin@example.com"}'],
+                "error": None,
+            }
+        ],
+    }
+
+    lines = _format_table_dump_detail_records(record, "txt")
+
+    assert any("(columns:auto)" in line for line in lines)
+    assert any("[id, email]" in line for line in lines)
+    assert any('{"id":1,"email":"admin@example.com"}' in line for line in lines)
 
 
 def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]

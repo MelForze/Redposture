@@ -72,6 +72,33 @@ def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
 
 
+def _load_readline_module() -> Any | None:
+    try:
+        import readline  # noqa: PLC0415
+    except Exception:
+        return None
+    try:
+        readline.parse_and_bind("set bell-style none")
+    except Exception:
+        pass
+    return readline
+
+
+def _add_readline_history(readline_module: Any | None, line: str) -> None:
+    if readline_module is None:
+        return
+    value = str(line or "").strip()
+    if not value:
+        return
+    try:
+        history_length = int(readline_module.get_current_history_length())
+        if history_length > 0 and readline_module.get_history_item(history_length) == value:
+            return
+        readline_module.add_history(value)
+    except Exception:
+        return
+
+
 def _is_timeout_error(value: Any) -> bool:
     text = str(value or "").strip().lower()
     if not text:
@@ -945,6 +972,7 @@ def _audit_postgres_host(
                 table_columns_info: list[dict[str, Any]] = []
                 table_dumps: list[dict[str, Any]] = []
                 dump_targets: list[str] = table_targets if table_targets else (table_names or [])
+                table_columns_map: dict[str, list[str]] = {}
                 should_collect_table_columns = bool(table_targets) and (show_columns or not dump_table_rows)
                 if should_collect_table_columns:
                     for table_name in table_targets:
@@ -960,9 +988,25 @@ def _audit_postgres_host(
                                 "error": columns_error,
                             }
                         )
+                        if isinstance(columns_rows, list) and columns_rows:
+                            normalized_columns = [str(column) for column in columns_rows]
+                            table_columns_map[table_name] = normalized_columns
+                            table_columns_map[str(columns_table)] = normalized_columns
 
                 if dump_table_rows:
+                    selected_dump_columns = [str(column) for column in table_columns] if table_columns else None
                     for table_name in dump_targets:
+                        dump_columns = selected_dump_columns
+                        if not dump_columns:
+                            cached_columns = table_columns_map.get(table_name)
+                            if cached_columns:
+                                dump_columns = list(cached_columns)
+                            else:
+                                columns_table, columns_rows, _columns_error = _pg_query_table_columns(sock, table_name)
+                                if isinstance(columns_rows, list) and columns_rows:
+                                    dump_columns = [str(column) for column in columns_rows]
+                                    table_columns_map[table_name] = list(dump_columns)
+                                    table_columns_map[str(columns_table)] = list(dump_columns)
                         dump_table, dump_rows, dump_error = _pg_query_table_rows(
                             sock,
                             table_name,
@@ -971,6 +1015,7 @@ def _audit_postgres_host(
                         table_dumps.append(
                             {
                                 "table": dump_table,
+                                "columns": dump_columns,
                                 "rows": dump_rows,
                                 "error": dump_error,
                             }
@@ -1345,7 +1390,7 @@ def _format_table_dump_detail_records(record: dict[str, Any], output_format: str
                         "port": record.get("port"),
                         "database": record.get("database"),
                         "table": table_name,
-                        "columns": selected_columns,
+                        "columns": [str(col) for col in item.get("columns") or selected_columns or []],
                         "rows": [str(row) for row in item.get("rows") or []],
                         "error": str(item.get("error")) if item.get("error") else None,
                     },
@@ -1360,10 +1405,16 @@ def _format_table_dump_detail_records(record: dict[str, Any], output_format: str
         if not isinstance(item, dict):
             continue
         table_name = str(item.get("table") or "").strip() or "<unknown>"
+        item_columns = [str(col) for col in item.get("columns") or []]
+        header_columns = item_columns or [str(col) for col in selected_columns or []]
         if columns_label:
             lines.append(f"{prefix} [*] Dump Table {table_name} (columns:{columns_label})")
+        elif item_columns:
+            lines.append(f"{prefix} [*] Dump Table {table_name} (columns:auto)")
         else:
             lines.append(f"{prefix} [*] Dump Table {table_name}")
+        if header_columns:
+            lines.append(f"{prefix} [{', '.join(header_columns)}]")
 
         table_error = item.get("error")
         if table_error:
@@ -1825,7 +1876,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.error("--show-columns requires --table")
         return 2
     if table_columns and not table_targets:
-        console.error("--column/--columns requires --table")
+        console.error("--column requires --table")
         return 2
     if execute_command and sql_command:
         console.error("--execute cannot be combined with --sql-cmd")
@@ -1907,6 +1958,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             shell_password = "postgres"
         else:
             shell_password = None
+        shell_readline = _load_readline_module()
 
         console.success("postgres os-shell ready; type 'exit' or 'quit' to stop")
         while True:
@@ -1924,6 +1976,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 continue
             if command.lower() in {"exit", "quit"}:
                 break
+            _add_readline_history(shell_readline, command)
 
             command_output, command_error = _pg_execute_remote_command(
                 host=host,
@@ -2013,6 +2066,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             shell_password = "postgres"
         else:
             shell_password = None
+        shell_readline = _load_readline_module()
 
         console.success("postgres sql-shell ready; type 'exit' or 'quit' to stop")
         while True:
@@ -2030,6 +2084,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 continue
             if query.lower() in {"exit", "quit"}:
                 break
+            _add_readline_history(shell_readline, query)
 
             query_output, query_error = _pg_execute_sql_query(
                 host=host,

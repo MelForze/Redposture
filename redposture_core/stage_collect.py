@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -14,7 +15,7 @@ from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import collect_exporter_debug_data, scan_exporter_presence
 from .stage_validate import ValidationRecordAccumulator
-from .utils import collect_scan_ports, collect_scan_targets
+from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 COLLECT_VALIDATE_INPUT_FORMAT = "auto"
 COLLECT_VALIDATE_SHOW = True
@@ -180,32 +181,56 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         )
 
     class _ValidationConsoleProxy:
-        def __init__(self, base: Console, *, suppress_summary: bool) -> None:
+        def __init__(self, base: Console, *, suppress_summary: bool, output_path: str | None = None) -> None:
             self._base = base
             self._suppress_summary = suppress_summary
             self.debug_enabled = base.debug_enabled
+            self._output_fh: TextIO | None = None
+            if output_path:
+                os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+                self._output_fh = open(output_path, "a", encoding="utf-8")
 
         def _paint(self, text: str, color: str, stream: TextIO) -> str:
             return self._base._paint(text, color, stream)
 
+        def _write_output_line(self, message: str) -> None:
+            if self._output_fh is None:
+                return
+            self._output_fh.write(message + "\n")
+            self._output_fh.flush()
+
         def plain(self, message: str, color: str | None = None, stream: TextIO | None = None) -> None:
-            if self._suppress_summary:
-                cleaned = _ANSI_RE.sub("", str(message))
-                if "validate complete: lines=" in cleaned:
-                    return
+            cleaned = _ANSI_RE.sub("", str(message))
+            is_summary = "validate complete: lines=" in cleaned
+            if self._suppress_summary and is_summary:
+                # Keep validation summary in -o output but hide noisy console row.
+                self._write_output_line(cleaned)
+                return
             self._base.plain(message, color=color, stream=stream)
+            self._write_output_line(cleaned)
 
         def info(self, message: str) -> None:
             self._base.info(message)
+            self._write_output_line(f"[*] {message}")
 
         def warn(self, message: str) -> None:
             self._base.warn(message)
+            self._write_output_line(f"[-] {message}")
 
         def error(self, message: str) -> None:
             self._base.error(message)
+            self._write_output_line(f"[!] {message}")
 
         def debug(self, message: str) -> None:
             self._base.debug(message)
+            if self.debug_enabled:
+                self._write_output_line(f"[d] {message}")
+
+        def close(self) -> None:
+            if self._output_fh is None:
+                return
+            self._output_fh.close()
+            self._output_fh = None
 
     try:
         scan_checks, scan_found, found_by_host = scan_exporter_presence(
@@ -258,6 +283,23 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             return 2
 
     if scan_found <= 0:
+        if args.output and args.output_format == "json":
+            os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+            with open(args.output, "w", encoding="utf-8") as out_fh:
+                out_fh.write(
+                    json.dumps(
+                        {
+                            "timestamp": utc_now_iso(),
+                            "type": "summary",
+                            "hosts": len(hosts),
+                            "requests": 0,
+                            "success": 0,
+                            "output_path": args.output,
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
         if save_responses_dir:
             os.makedirs(save_responses_dir, exist_ok=True)
             index_path = os.path.join(save_responses_dir, "index.jsonl")
@@ -276,13 +318,21 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             )
             if args.debug:
                 console.debug("debug mode enabled; detailed collect events emitted in text logs")
-        validate_rc = validator.finish(
-            show=COLLECT_VALIDATE_SHOW,
-            fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
-            debug=bool(args.debug),
-            console=_ValidationConsoleProxy(console, suppress_summary=True),
-            source="stream",
+        validate_console = _ValidationConsoleProxy(
+            console,
+            suppress_summary=True,
+            output_path=args.output if args.output_format == "txt" else None,
         )
+        try:
+            validate_rc = validator.finish(
+                show=COLLECT_VALIDATE_SHOW,
+                fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
+                debug=bool(args.debug),
+                console=validate_console,
+                source="stream",
+            )
+        finally:
+            validate_console.close()
         if validate_rc == 2:
             return 2
         if validate_rc == 1:
@@ -305,13 +355,21 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         )
         if args.debug:
             console.debug("debug mode enabled; detailed collect events emitted in text logs")
-    validate_rc = validator.finish(
-        show=COLLECT_VALIDATE_SHOW,
-        fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
-        debug=bool(args.debug),
-        console=_ValidationConsoleProxy(console, suppress_summary=True),
-        source="stream",
+    validate_console = _ValidationConsoleProxy(
+        console,
+        suppress_summary=True,
+        output_path=args.output if args.output_format == "txt" else None,
     )
+    try:
+        validate_rc = validator.finish(
+            show=COLLECT_VALIDATE_SHOW,
+            fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
+            debug=bool(args.debug),
+            console=validate_console,
+            source="stream",
+        )
+    finally:
+        validate_console.close()
     if validate_rc == 2:
         return 2
     if validate_rc == 1:

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "3.1.6"
-description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper auditing"
+version = "3.2.1"
+description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper auditing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -27,7 +27,10 @@ classifiers = [
   "Topic :: Security",
   "Topic :: System :: Networking",
 ]
-dependencies = []
+dependencies = [
+  "clickhouse-connect>=0.8.0",
+  "clickhouse-driver>=0.2.9",
+]
 
 [project.urls]
 Homepage = "https://github.com/MelForze/Redposture"
