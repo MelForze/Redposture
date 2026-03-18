@@ -98,3 +98,34 @@ def test_http_get_text_without_pool_does_not_retry_http_exception(
         scanner.http_get_text("http://example.test/metrics", timeout=1.0, retries=3)
 
     assert call_counter["count"] == 1
+
+
+def test_http_pool_get_propagates_keyboard_interrupt() -> None:
+    pool = scanner._HTTPConnectionPool()
+
+    class _InterruptConn:
+        def __init__(self) -> None:
+            self.timeout = None
+
+        def request(self, *_args: Any, **_kwargs: Any) -> None:
+            raise KeyboardInterrupt("stop")
+
+        def close(self) -> None:
+            return
+
+    conn = _InterruptConn()
+    releases: list[bool] = []
+
+    def fake_acquire(_host: str, _port: int, _timeout: float) -> _InterruptConn:
+        return conn
+
+    def fake_release(_host: str, _port: int, _conn: _InterruptConn, reusable: bool) -> None:
+        releases.append(reusable)
+
+    pool._acquire = fake_acquire  # type: ignore[method-assign]
+    pool._release = fake_release  # type: ignore[method-assign]
+
+    with pytest.raises(KeyboardInterrupt, match="stop"):
+        pool.get("http://example.test/metrics", timeout=1.0)
+
+    assert releases == [False]

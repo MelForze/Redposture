@@ -281,11 +281,11 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
 
 def _socks5_open_tunnel(
     proxy: _ProxyConfig, target_host: str, target_port: int, timeout: float
-) -> tuple[socket.socket, str | None]:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+) -> tuple[socket.socket | None, str | None]:
+    sock: socket.socket | None = None
     try:
+        sock = socket.create_connection((proxy.host, proxy.port), timeout=timeout)
         sock.settimeout(timeout)
-        sock.connect((proxy.host, proxy.port))
 
         methods = [0x00]
         if proxy.username is not None:
@@ -354,7 +354,12 @@ def _socks5_open_tunnel(
         _recv_exact(sock, 2)
         return sock, None
     except (OSError, ValueError, ConnectionError) as exc:
-        return sock, _friendly_error_from_exception(exc)
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        return None, _friendly_error_from_exception(exc)
 
 
 def _read_http_response_from_socket(sock: socket.socket) -> tuple[int, bytes, dict[str, str], str | None]:
@@ -388,6 +393,8 @@ def _request_via_socks_proxy(
         sock, connect_error = _socks5_open_tunnel(proxy, host, port, timeout)
         if connect_error:
             return 0, b"", {}, connect_error
+        if sock is None:
+            return 0, b"", {}, "proxy connection failed"
         transport_sock = sock
         if use_https:
             ctx = _ssl_context(use_https=True, insecure=insecure)
@@ -1359,7 +1366,7 @@ def _audit_proxmox_host(
             "timestamp": utc_now_iso(),
             "host": host,
             "port": port,
-            "is_proxmox": bool(access_status),
+            "is_proxmox": False,
             "status": "fail",
             "discover_creds": discover_creds,
             "use_https": use_https,

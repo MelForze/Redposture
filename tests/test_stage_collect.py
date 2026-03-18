@@ -26,6 +26,10 @@ def _base_args(**overrides: object) -> argparse.Namespace:
         "deep": False,
         "pprof_seconds": 5,
         "trace_seconds": 2,
+        "resume": False,
+        "checkpoint_file": None,
+        "max_inflight": None,
+        "adaptive_collect": True,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -507,3 +511,91 @@ def test_collect_stage_hides_validate_summary_line(
 
     out = capsys.readouterr().out
     assert "validate complete: lines=" not in out
+
+
+def test_collect_stage_resume_passes_checkpoint_options(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    checkpoint_path = tmp_path / "collect.ckpt.jsonl"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "host": "10.0.0.1",
+                "exporter": "node_exporter",
+                "port": 9100,
+                "endpoint": "/debug/vars",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/vars"],
+        }
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return 1, 1, {"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        captured.update(kwargs)
+        return 1, 1
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+
+    rc = run_collect_stage(
+        _base_args(
+            output=str(tmp_path / "collect.txt"),
+            save_responses_dir=str(tmp_path / "collect_raw"),
+            resume=True,
+            checkpoint_file=str(checkpoint_path),
+        ),
+        AttemptLogger(),
+    )
+
+    assert rc == 0
+    assert captured["output_mode"] == "a"
+    assert captured["index_mode"] == "a"
+    assert captured["checkpoint_mode"] == "a"
+    assert captured["checkpoint_path"] == str(checkpoint_path)
+    completed = captured["resume_completed_jobs"]
+    assert ("10.0.0.1", "node_exporter", 9100, "/debug/vars") in completed
+
+
+def test_collect_stage_passes_adaptive_and_max_inflight_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/vars"],
+        }
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return 1, 1, {"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        captured["adaptive_collect"] = kwargs.get("adaptive_collect")
+        captured["max_inflight_requests"] = kwargs.get("max_inflight_requests")
+        return 1, 1
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+
+    rc = run_collect_stage(
+        _base_args(
+            adaptive_collect=False,
+            max_inflight=256,
+        ),
+        AttemptLogger(),
+    )
+
+    assert rc == 0
+    assert captured["adaptive_collect"] is False
+    assert captured["max_inflight_requests"] == 256

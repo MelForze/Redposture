@@ -1451,21 +1451,52 @@ services:
       - "host.docker.internal:host-gateway"
     ports:
       # Additional exporters on their standard ports.
+      - "7777:7777"
+      - "9102:9102"
+      - "9104:9104"
+      - "9113:9113"
+      - "9114:9114"
       - "9116:9116"
+      - "9117:9117"
+      - "9119:9119"
       - "9127:9127"
+      - "9128:9128"
+      - "9131:9131"
+      - "9150:9150"
+      - "9182:9182"
       - "9216:9216"
       - "9256:9256"
+      - "9290:9290"
       - "9342:9342"
       - "9349:9349"
+      - "9399:9399"
+      - "9419:9419"
       - "9427:9427"
+      # Conflict-safe lab ports for exporters that overlap canonical defaults.
+      - "19101:19101" # haproxy_exporter (canonical 9101 collides with node_exporter)
+      - "19119:19119" # apache_exporter (canonical 9117 collides with snmp_exporter)
       # Synthetic callback-friendly mirrors on high ports to avoid conflicts
       # with real exporter containers above.
+      - "17777:7777"
       - "19100:9100"
+      - "19102:9102"
+      - "19104:9104"
+      - "19113:9113"
+      - "19114:9114"
       - "19115:9115"
+      - "19117:9117"
       - "19121:9121"
+      - "19128:9128"
+      - "19131:9131"
+      - "19150:9150"
+      - "19182:9182"
       - "19187:9187"
+      - "19219:9119"
       - "19221:9221"
+      - "19290:9290"
       - "19308:9308"
+      - "19399:9399"
+      - "19419:9419"
     restart: unless-stopped
 
 volumes:

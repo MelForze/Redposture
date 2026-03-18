@@ -157,12 +157,11 @@ def collect_scan_targets(targets: str | None, max_network_hosts: int = 4096) -> 
         if "://" not in item and "/" in item:
             try:
                 expanded = _expand_network_targets(item, max_hosts=max_network_hosts)
-            except ValueError:
-                expanded = []
-            if expanded:
-                for host in expanded:
-                    _append_target(host)
-                return
+            except ValueError as exc:
+                raise ValueError(f"invalid network target '{item}': {exc}") from exc
+            for host in expanded:
+                _append_target(host)
+            return
 
         host = normalize_scan_host(item)
         if not host:

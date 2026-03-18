@@ -9,6 +9,8 @@ from redposture_core.stage_proxmox import (
     _format_discovered_urls_detail_records,
     _format_record,
     _parse_proxy_config,
+    _ProxyConfig,
+    _socks5_open_tunnel,
 )
 
 
@@ -765,3 +767,72 @@ def test_format_discovered_urls_detail_records_for_discover_creds() -> None:
     assert any(line.endswith("[*] Discovered URL") for line in lines)
     assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/access") for line in lines)
     assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/nodes") for line in lines)
+
+
+def test_audit_proxmox_unexpected_http_marks_not_detected(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_request(*_args, **_kwargs):
+        return 500, b'{"errors":"internal"}', {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+    )
+
+    assert record["status"] == "fail"
+    assert record["is_proxmox"] is False
+    assert "unexpected HTTP 500" in str(record.get("error") or "")
+
+
+def test_socks5_open_tunnel_uses_socket_create_connection(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[tuple[str, int], float | None]] = []
+
+    class _DummySocket:
+        def __init__(self) -> None:
+            self._responses = [
+                b"\x05\x00",  # method selection (no auth)
+                b"\x05\x00\x00\x01",  # connect reply header (IPv4)
+                b"\x00\x00\x00\x00",  # bound addr
+                b"\x00\x00",  # bound port
+            ]
+
+        def settimeout(self, _timeout: float | None) -> None:
+            return
+
+        def sendall(self, _data: bytes) -> None:
+            return
+
+        def recv(self, _size: int) -> bytes:
+            if not self._responses:
+                return b""
+            return self._responses.pop(0)
+
+        def close(self) -> None:
+            return
+
+    def fake_create_connection(address: tuple[str, int], timeout: float | None = None):
+        calls.append((address, timeout))
+        return _DummySocket()
+
+    monkeypatch.setattr("redposture_core.stage_proxmox.socket.create_connection", fake_create_connection)
+
+    proxy = _ProxyConfig(
+        scheme="socks5",
+        host="::1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks5://[::1]:1080",
+    )
+    sock, error = _socks5_open_tunnel(proxy, "127.0.0.1", 8006, 1.5)
+
+    assert error is None
+    assert sock is not None
+    assert calls == [(("::1", 1080), 1.5)]

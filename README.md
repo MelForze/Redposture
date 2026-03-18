@@ -70,11 +70,34 @@ redposture exporters scan -t 127.0.0.1
 # Collect
 redposture exporters collect -t 127.0.0.1 --deep
 
+# Resume collect with checkpoint (skip already processed endpoint jobs)
+redposture exporters collect -t 127.0.0.1 --checkpoint-file /tmp/rp_collect.ckpt
+redposture exporters collect -t 127.0.0.1 --checkpoint-file /tmp/rp_collect.ckpt --resume
+
+# Throughput tuning
+redposture exporters collect -t 127.0.0.1 --max-inflight 512 --no-adaptive-collect
+
 # Trigger (listener mode)
 redposture exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal --with-listen
 
 # Trigger on custom exporter ports
 redposture exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 -p 19121,19308 --with-listen
+```
+
+Default exporter discovery/collect ports include:
+`7777,9100,9101,9102,9104,9113,9114,9115,9116,9117,9119,9121,9127,9128,9131,9150,9182,9187,9216,9221,9256,9290,9308,9342,9349,9399,9419,9427`.
+
+Note:
+- `snmp_exporter` default is `9117`; `clickhouse_exporter` is `9116`.
+- Canonical defaults include overlap pairs (`node_exporter/haproxy_exporter` on `9101`, `snmp_exporter/apache_exporter` on `9117`); scan classification is content-based, not port-only.
+- In the lab compose these conflict exporters are exposed on special ports to avoid collisions: `haproxy_exporter -> 19101`, `apache_exporter -> 19119`.
+
+```bash
+# Expanded lab matrix (standard + special + mirrors)
+redposture exporters scan -t 127.0.0.1 -p 7777,9100,9102,9104,9113,9114,9116,9117,9119,9121,9127,9128,9131,9150,9182,9187,9216,9221,9256,9290,9308,9342,9349,9399,9419,9427,19101,19119,17777,19100,19102,19104,19113,19114,19115,19117,19121,19128,19131,19150,19182,19187,19219,19221,19290,19308,19399,19419
+
+# Expanded collect with deep endpoints + raw responses
+redposture exporters collect -t 127.0.0.1 -p 7777,9100,9102,9104,9113,9114,9116,9117,9119,9121,9127,9128,9131,9150,9182,9187,9216,9221,9256,9290,9308,9342,9349,9399,9419,9427,19101,19119,17777,19100,19102,19104,19113,19114,19115,19117,19121,19128,19131,19150,19182,19187,19219,19221,19290,19308,19399,19419 --deep --save-responses-dir /tmp/rp_collect_raw
 ```
 
 ### Registry
