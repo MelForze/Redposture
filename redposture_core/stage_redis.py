@@ -149,7 +149,13 @@ def _check_provided_credentials(
     if password is None:
         return None, None
     if username:
-        return _auth_with_user_password(sock, username, password)
+        ok, err = _auth_with_user_password(sock, username, password)
+        if ok:
+            return True, None
+        error_text = str(err or "").lower()
+        if "wrong number of arguments" in error_text or "syntax" in error_text:
+            return _auth_with_password(sock, password)
+        return False, err
     return _auth_with_password(sock, password)
 
 
