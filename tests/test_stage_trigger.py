@@ -15,6 +15,7 @@ def _base_args(**overrides: object) -> argparse.Namespace:
         "timeout": 1.0,
         "workers": 4,
         "retries": 1,
+        "ports": None,
         "targets": "10.0.0.1",
         "hosts": None,
         "hosts_file": None,
@@ -94,6 +95,149 @@ def test_trigger_without_listen_does_not_start_listeners(monkeypatch: pytest.Mon
     rc = run_trigger_stage(_base_args(with_listen=False), AttemptLogger())
     assert rc == 0
     assert calls == ["scan"]
+
+
+def test_trigger_custom_ports_override_exporter_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_ports: list[int] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        exporters = kwargs.get("trigger_exporters")
+        assert isinstance(exporters, list)
+        for item in exporters:
+            assert isinstance(item, dict)
+            captured_ports.append(int(item.get("port", 0)))
+        return {
+            "detected_exporters": 0,
+            "attempted": 0,
+            "triggered": 0,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 0, "attempted": 0, "success": 0, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 0, "fail": 0}},
+        }
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "trigger_exporters": [
+                {
+                    "name": "redis_exporter",
+                    "port": 9121,
+                    "detect_path": "/metrics",
+                    "markers": ("redis_up",),
+                    "trigger_path": "/scrape",
+                    "target_fmt": "{our_host}:6379",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(
+        _base_args(with_listen=False, ports="19121,29121"),
+        AttemptLogger(),
+    )
+    assert rc == 0
+    assert captured_ports == [19121, 29121]
+
+
+def test_trigger_custom_single_port_override_exporter_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_ports: list[int] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        exporters = kwargs.get("trigger_exporters")
+        assert isinstance(exporters, list)
+        for item in exporters:
+            assert isinstance(item, dict)
+            captured_ports.append(int(item.get("port", 0)))
+        return {
+            "detected_exporters": 0,
+            "attempted": 0,
+            "triggered": 0,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 0, "attempted": 0, "success": 0, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 0, "fail": 0}},
+        }
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "trigger_exporters": [
+                {
+                    "name": "redis_exporter",
+                    "port": 9121,
+                    "detect_path": "/metrics",
+                    "markers": ("redis_up",),
+                    "trigger_path": "/scrape",
+                    "target_fmt": "{our_host}:6379",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(
+        _base_args(with_listen=False, ports="19121"),
+        AttemptLogger(),
+    )
+    assert rc == 0
+    assert captured_ports == [19121]
+
+
+def test_trigger_custom_ports_override_exporter_port_from_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_ports: list[int] = []
+    ports_file = tmp_path / "ports.txt"
+    ports_file.write_text("19121\n29121\n", encoding="utf-8")
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        exporters = kwargs.get("trigger_exporters")
+        assert isinstance(exporters, list)
+        for item in exporters:
+            assert isinstance(item, dict)
+            captured_ports.append(int(item.get("port", 0)))
+        return {
+            "detected_exporters": 0,
+            "attempted": 0,
+            "triggered": 0,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 0, "attempted": 0, "success": 0, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 0, "fail": 0}},
+        }
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "trigger_exporters": [
+                {
+                    "name": "redis_exporter",
+                    "port": 9121,
+                    "detect_path": "/metrics",
+                    "markers": ("redis_up",),
+                    "trigger_path": "/scrape",
+                    "target_fmt": "{our_host}:6379",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(
+        _base_args(with_listen=False, ports=str(ports_file)),
+        AttemptLogger(),
+    )
+    assert rc == 0
+    assert captured_ports == [19121, 29121]
+
+
+def test_trigger_rejects_invalid_ports_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {"trigger_exporters": []}
+
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", fake_load_profiles)
+    rc = run_trigger_stage(_base_args(with_listen=False, ports="bad-port"), AttemptLogger())
+    assert rc == 2
 
 
 def test_trigger_uses_both_callback_ip_and_dns(monkeypatch: pytest.MonkeyPatch) -> None:

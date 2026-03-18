@@ -16,7 +16,7 @@ from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import scan_exporters_and_trigger
 from .servers import RunningServer
-from .utils import collect_scan_targets, normalize_ip_literal, normalize_scan_host
+from .utils import collect_scan_ports, collect_scan_targets, normalize_ip_literal, normalize_scan_host
 
 _TRIGGER_EXPORTER_DISPLAY_NAMES = {
     "blackbox_exporter": "Blackbox Exporter",
@@ -328,6 +328,22 @@ def _filter_trigger_exporters(
     return filtered
 
 
+def _override_trigger_exporter_ports(
+    trigger_exporters: list[dict[str, Any]],
+    custom_ports: list[int],
+) -> list[dict[str, Any]]:
+    if not custom_ports:
+        return list(trigger_exporters)
+    ports = [int(port) for port in dict.fromkeys(custom_ports)]
+    overridden: list[dict[str, Any]] = []
+    for exporter in trigger_exporters:
+        for port in ports:
+            item = dict(exporter)
+            item["port"] = int(port)
+            overridden.append(item)
+    return overridden
+
+
 def _auto_adjust_listener_services_for_trigger_exporters(
     args: argparse.Namespace,
     selected_exporter_names: set[str],
@@ -629,6 +645,12 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.error("--check-credentials requires --with-listen")
         return 2
 
+    try:
+        custom_ports = collect_scan_ports(getattr(args, "ports", None))
+    except ValueError as exc:
+        console.error(f"failed to parse --ports: {exc}")
+        return 2
+
     targets = getattr(args, "targets", None) or getattr(args, "hosts", None)
     hosts_file = getattr(args, "hosts_file", None)
     if hosts_file:
@@ -701,6 +723,11 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.debug(
             "trigger exporters filter=" + ",".join(sorted(str(item.get("name") or "") for item in trigger_exporters))
         )
+
+    if custom_ports:
+        trigger_exporters = _override_trigger_exporter_ports(trigger_exporters, custom_ports)
+        console.debug("trigger custom ports=" + ",".join(str(int(port)) for port in dict.fromkeys(custom_ports)))
+
     if args.with_listen:
         trigger_exporters = _patch_trigger_exporters_for_with_listen(trigger_exporters, args)
         proxmox_tls_enabled = bool(getattr(args, "proxmox_tls", False))

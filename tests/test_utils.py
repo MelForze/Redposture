@@ -45,6 +45,18 @@ def test_collect_scan_ports_deduplicates_and_expands_ranges() -> None:
     assert ports == [9100, 9115, 9200, 9201, 9202]
 
 
+def test_collect_scan_ports_accepts_single_port() -> None:
+    ports = collect_scan_ports("9100")
+    assert ports == [9100]
+
+
+def test_collect_scan_ports_accepts_file_path(tmp_path: Path) -> None:
+    ports_file = tmp_path / "ports.txt"
+    ports_file.write_text("# list\n9100\n9115,9121\n9200-9201\n", encoding="utf-8")
+    ports = collect_scan_ports(str(ports_file))
+    assert ports == [9100, 9115, 9121, 9200, 9201]
+
+
 def test_collect_scan_ports_rejects_invalid_values() -> None:
     with pytest.raises(ValueError):
         collect_scan_ports("abc")

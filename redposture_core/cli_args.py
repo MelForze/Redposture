@@ -225,7 +225,7 @@ def _add_multi_ports_flag(parser: argparse.ArgumentParser | argparse._ArgumentGr
         dest="ports",
         default=None,
         metavar="ports",
-        help=argparse.SUPPRESS,
+        help=("Optional additional ports: single port, comma-separated list/range, or file path with port values."),
     )
 
 
@@ -405,7 +405,7 @@ def _configure_scan_parser(parser: argparse.ArgumentParser) -> None:
         dest="ports",
         default=None,
         metavar="ports",
-        help="Optional custom ports to probe (e.g. 9100,9115,9200-9210).",
+        help="Optional custom ports to probe: single port, comma-separated list/range, or file path.",
     )
 
 
@@ -417,6 +417,14 @@ def _configure_trigger_parser(parser: argparse.ArgumentParser) -> None:
     _add_log_flag(trigger_options)
     _add_scan_host_flags(trigger_options)
     _add_save_flag(trigger_options, "Optional output txt file for trigger/listener event logs.")
+    trigger_options.add_argument(
+        "-p",
+        "--ports",
+        dest="ports",
+        default=None,
+        metavar="ports",
+        help="Optional custom exporter ports: single port, comma-separated list/range, or file path.",
+    )
     trigger_options.add_argument(
         "--callback-ip",
         dest="callback_ip",
@@ -495,7 +503,7 @@ def _configure_collect_parser(parser: argparse.ArgumentParser) -> None:
         dest="ports",
         default=None,
         metavar="ports",
-        help="Optional custom ports to probe (e.g. 9100,9115,9200-9210).",
+        help="Optional custom ports to probe: single port, comma-separated list/range, or file path.",
     )
     parser.add_argument(
         "--save-responses-dir",
