@@ -107,25 +107,25 @@ def test_console_plain_suspends_and_resumes_active_progress(monkeypatch: pytest.
     bar.advance()
 
     events: list[str] = []
-    original_pause = bar.pause_for_output
-    original_resume = bar.resume_after_output
+    original_begin = bar.begin_output
+    original_end = bar.end_output
 
-    def wrapped_pause() -> None:
-        events.append("pause")
-        original_pause()
+    def wrapped_begin() -> bool:
+        events.append("begin")
+        return original_begin()
 
-    def wrapped_resume() -> None:
-        events.append("resume")
-        original_resume()
+    def wrapped_end() -> None:
+        events.append("end")
+        original_end()
 
-    monkeypatch.setattr(bar, "pause_for_output", wrapped_pause)
-    monkeypatch.setattr(bar, "resume_after_output", wrapped_resume)
+    monkeypatch.setattr(bar, "begin_output", wrapped_begin)
+    monkeypatch.setattr(bar, "end_output", wrapped_end)
 
     console = Console(debug=False)
     console.plain("SCAN\t127.0.0.1\t9100\t [*] Node Exporter", stream=stream)
     bar.close()
 
-    assert events[:2] == ["pause", "resume"]
+    assert events[:2] == ["begin", "end"]
     assert "SCAN\t127.0.0.1\t9100\t [*] Node Exporter" in stream.buffer
 
 

@@ -139,6 +139,74 @@ def test_trigger_credential_checks_postgres_passes_sql_command_none(monkeypatch:
     assert captured_kwargs[0].get("sql_command") is None
 
 
+def test_trigger_credential_checks_redis_hides_auth_error_details_without_debug(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class _DummyLogger:
+        def get_trigger_callback_events(self) -> list[dict[str, str]]:
+            return [
+                {
+                    "service": "redis",
+                    "username": "default",
+                    "password": "password",
+                    "remote_addr": "10.10.10.10:12345",
+                }
+            ]
+
+        def write_text_line(self, _line: str) -> None:
+            return
+
+    def fake_audit_redis_host(**_kwargs: object) -> dict[str, object]:
+        return {
+            "status": "auth_required",
+            "error": "ERR wrong number of arguments for 'auth' command",
+            "key_count": None,
+        }
+
+    monkeypatch.setattr("redposture_core.stage_redis._audit_redis_host", fake_audit_redis_host)
+
+    args = argparse.Namespace(timeout=1.0, retries=0, debug=False)
+    _run_trigger_credential_checks(args, _DummyLogger(), Console(debug=False))  # type: ignore[arg-type]
+
+    out = capsys.readouterr().out
+    assert "default:password auth failed" in out
+    assert "wrong number of arguments" not in out
+
+
+def test_trigger_credential_checks_redis_shows_auth_error_details_in_debug(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class _DummyLogger:
+        def get_trigger_callback_events(self) -> list[dict[str, str]]:
+            return [
+                {
+                    "service": "redis",
+                    "username": "default",
+                    "password": "password",
+                    "remote_addr": "10.10.10.10:12345",
+                }
+            ]
+
+        def write_text_line(self, _line: str) -> None:
+            return
+
+    def fake_audit_redis_host(**_kwargs: object) -> dict[str, object]:
+        return {
+            "status": "auth_required",
+            "error": "ERR wrong number of arguments for 'auth' command",
+            "key_count": None,
+        }
+
+    monkeypatch.setattr("redposture_core.stage_redis._audit_redis_host", fake_audit_redis_host)
+
+    args = argparse.Namespace(timeout=1.0, retries=0, debug=True)
+    _run_trigger_credential_checks(args, _DummyLogger(), Console(debug=True))  # type: ignore[arg-type]
+
+    out = capsys.readouterr().out
+    assert "default:password auth failed" in out
+    assert "wrong number of arguments" in out
+
+
 def test_trigger_custom_ports_override_exporter_port(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_ports: list[int] = []
 

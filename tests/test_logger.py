@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
+import redposture_core.logger as logger_module
 from redposture_core.logger import AttemptLogger
 
 
@@ -131,3 +133,27 @@ def test_logger_writes_full_unclipped_line_to_text_file(tmp_path: Path) -> None:
     saved = output_file.read_text(encoding="utf-8")
     assert long_startup in saved
     assert "[Postgres]" in saved
+
+
+def test_logger_suspends_progress_around_stdout_print(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    events: list[str] = []
+
+    @contextmanager
+    def fake_suspend(stream: object):  # type: ignore[no-untyped-def]
+        events.append(f"begin:{id(stream)}")
+        try:
+            yield
+        finally:
+            events.append(f"end:{id(stream)}")
+
+    monkeypatch.setattr(logger_module, "suspend_active_progress_for_output", fake_suspend)
+
+    logger = AttemptLogger()
+    logger.log("blackbox", ("10.0.0.1", 9115), method="GET", path="/probe")
+    capsys.readouterr()
+
+    assert len(events) == 2
+    assert events[0].startswith("begin:")
+    assert events[1].startswith("end:")

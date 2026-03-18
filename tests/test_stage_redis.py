@@ -48,6 +48,28 @@ def test_check_provided_credentials_without_password_returns_none() -> None:
     assert err is None
 
 
+def test_check_provided_credentials_with_username_falls_back_to_password_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_user_auth(*_args: object, **_kwargs: object) -> tuple[bool, str | None]:
+        calls.append("userpass")
+        return False, "ERR wrong number of arguments for 'auth' command"
+
+    def fake_password_auth(*_args: object, **_kwargs: object) -> tuple[bool, str | None]:
+        calls.append("password")
+        return True, None
+
+    monkeypatch.setattr(redis_stage, "_auth_with_user_password", fake_user_auth)
+    monkeypatch.setattr(redis_stage, "_auth_with_password", fake_password_auth)
+
+    ok, err = redis_stage._check_provided_credentials(sock=object(), username="default", password="redis")
+    assert ok is True
+    assert err is None
+    assert calls == ["userpass", "password"]
+
+
 def test_pairwise_ignores_last_odd_item() -> None:
     assert redis_stage._pairwise(["a", "1", "b"]) == [("a", "1")]
 
