@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from typing import TextIO
 
+from .progress import suspend_active_progress_for_output
+
 _COLORS = {
     "blue": "1;94",
     "green": "1;92",
@@ -35,14 +37,16 @@ class Console:
 
     def _line(self, prefix: str, message: str, color: str, stream: TextIO) -> None:
         mark = self._paint(prefix, color, stream)
-        print(f"{mark} {message}", file=stream, flush=True)
+        with suspend_active_progress_for_output(stream):
+            print(f"{mark} {message}", file=stream, flush=True)
 
     def plain(self, message: str, color: str | None = None, stream: TextIO | None = None) -> None:
         out = stream or sys.stdout
-        if color:
-            print(self._paint(message, color, out), file=out, flush=True)
-            return
-        print(message, file=out, flush=True)
+        with suspend_active_progress_for_output(out):
+            if color:
+                print(self._paint(message, color, out), file=out, flush=True)
+                return
+            print(message, file=out, flush=True)
 
     def render_tagged_payload_line(
         self,
@@ -71,7 +75,8 @@ class Console:
             + self._paint(f"\t{host}\t{port}\t", "white", out)
             + self._paint(payload, payload_color, out)
         )
-        print(rendered, file=out, flush=True)
+        with suspend_active_progress_for_output(out):
+            print(rendered, file=out, flush=True)
         return True
 
     def info(self, message: str) -> None:

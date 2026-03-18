@@ -533,6 +533,35 @@ def _configure_collect_parser(parser: argparse.ArgumentParser) -> None:
         metavar="seconds",
         help="Duration for /debug/pprof/trace?seconds=... when --deep is enabled.",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume collect run by skipping endpoint jobs already present in checkpoint file.",
+    )
+    parser.add_argument(
+        "--checkpoint-file",
+        dest="checkpoint_file",
+        default=None,
+        metavar="file",
+        help=(
+            "Checkpoint JSONL file for collect resume state. Default: <output>.checkpoint.jsonl (or save dir fallback)."
+        ),
+    )
+    parser.add_argument(
+        "--max-inflight",
+        dest="max_inflight",
+        type=_positive_int,
+        default=None,
+        metavar="count",
+        help="Maximum in-flight collect HTTP requests (default: adaptive from worker count).",
+    )
+    parser.add_argument(
+        "--adaptive-collect",
+        dest="adaptive_collect",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable adaptive preflight planning to reduce unnecessary collect requests.",
+    )
 
 
 def _configure_gitlab_parser(parser: argparse.ArgumentParser) -> None:

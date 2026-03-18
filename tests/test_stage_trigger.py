@@ -5,8 +5,13 @@ from pathlib import Path
 
 import pytest
 
+from redposture_core.console import Console
 from redposture_core.logger import AttemptLogger
-from redposture_core.stage_trigger import _patch_trigger_exporters_for_with_listen, run_trigger_stage
+from redposture_core.stage_trigger import (
+    _patch_trigger_exporters_for_with_listen,
+    _run_trigger_credential_checks,
+    run_trigger_stage,
+)
 
 
 def _base_args(**overrides: object) -> argparse.Namespace:
@@ -95,6 +100,43 @@ def test_trigger_without_listen_does_not_start_listeners(monkeypatch: pytest.Mon
     rc = run_trigger_stage(_base_args(with_listen=False), AttemptLogger())
     assert rc == 0
     assert calls == ["scan"]
+
+
+def test_trigger_credential_checks_postgres_passes_sql_command_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_kwargs: list[dict[str, object]] = []
+
+    class _DummyLogger:
+        def get_trigger_callback_events(self) -> list[dict[str, str]]:
+            return [
+                {
+                    "service": "postgres",
+                    "username": "postgres",
+                    "password": "postgres",
+                    "remote_addr": "10.10.10.10:12345",
+                }
+            ]
+
+        def write_text_line(self, _line: str) -> None:
+            return
+
+    def fake_audit_postgres_host(**kwargs: object) -> dict[str, object]:
+        captured_kwargs.append(dict(kwargs))
+        return {
+            "status": "auth_required",
+            "error": "password authentication failed",
+            "superuser": False,
+            "can_execute_commands": False,
+            "can_read_tables": False,
+            "table_count": 0,
+        }
+
+    monkeypatch.setattr("redposture_core.stage_postgres._audit_postgres_host", fake_audit_postgres_host)
+
+    args = argparse.Namespace(timeout=1.0, retries=0)
+    _run_trigger_credential_checks(args, _DummyLogger(), Console(debug=False))  # type: ignore[arg-type]
+
+    assert captured_kwargs
+    assert captured_kwargs[0].get("sql_command") is None
 
 
 def test_trigger_custom_ports_override_exporter_port(monkeypatch: pytest.MonkeyPatch) -> None:

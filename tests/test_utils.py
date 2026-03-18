@@ -40,6 +40,16 @@ def test_collect_scan_targets_expands_cidr() -> None:
     assert hosts == ["10.0.1.1", "10.0.1.2"]
 
 
+def test_collect_scan_targets_rejects_invalid_cidr() -> None:
+    with pytest.raises(ValueError, match="invalid network target"):
+        collect_scan_targets("10.0.0.0/999")
+
+
+def test_collect_scan_targets_rejects_non_network_slash_tokens() -> None:
+    with pytest.raises(ValueError, match="invalid network target"):
+        collect_scan_targets("not_a_host/24")
+
+
 def test_collect_scan_ports_deduplicates_and_expands_ranges() -> None:
     ports = collect_scan_ports("9100,9115,9200-9202,9115")
     assert ports == [9100, 9115, 9200, 9201, 9202]

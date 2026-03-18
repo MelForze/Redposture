@@ -26,18 +26,34 @@ from .progress import ProgressBar, iter_completed_with_progress
 from .utils import utc_now_iso
 
 _EXPORTER_DISPLAY_NAMES = {
+    "nats_exporter": "NATS Exporter",
+    "statsd_exporter": "StatsD Exporter",
+    "mysqld_exporter": "MySQLd Exporter",
     "blackbox_exporter": "Blackbox Exporter",
+    "elasticsearch_exporter": "Elasticsearch Exporter",
+    "nginx_exporter": "Nginx Exporter",
+    "haproxy_exporter": "HAProxy Exporter",
     "kafka_exporter": "Kafka Exporter",
     "node_exporter": "Node Exporter",
+    "memcached_exporter": "Memcached Exporter",
     "postgres_exporter": "Postgres Exporter",
     "redis_exporter": "Redis Exporter",
     "clickhouse_exporter": "ClickHouse Exporter",
+    "snmp_exporter": "SNMP Exporter",
+    "apache_exporter": "Apache Exporter",
+    "bind_exporter": "BIND Exporter",
     "mongodb_exporter": "MongoDB Exporter",
     "pgbouncer_exporter": "PgBouncer Exporter",
+    "ceph_exporter": "Ceph Exporter",
+    "varnish_exporter": "Varnish Exporter",
+    "windows_exporter": "Windows Exporter",
+    "ipmi_exporter": "IPMI Exporter",
     "gobgp_exporter": "GoBGP Exporter",
     "frr_exporter": "FRR Exporter",
     "named_process_exporter": "Named Process Exporter",
+    "sql_exporter": "SQL Exporter",
     "ping_exporter": "Ping Exporter",
+    "rabbitmq_exporter": "RabbitMQ Exporter",
     "proxmox_exporter": "Proxmox Exporter",
 }
 
@@ -149,7 +165,7 @@ class _HTTPConnectionPool:
             raw = response.read()
             reusable = not response.will_close
             return int(response.status), raw, response.getheader("Content-Type"), None
-        except BaseException as exc:
+        except Exception as exc:
             return None, b"", None, exc
         finally:
             self._release(host, port, conn, reusable)
@@ -528,6 +544,148 @@ def _scan_presence_task(
     )
 
 
+def _as_token_tuple(raw: Any) -> tuple[str, ...]:
+    if isinstance(raw, str):
+        value = raw.strip()
+        return (value,) if value else ()
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    result: list[str] = []
+    for item in raw:
+        token = str(item or "").strip()
+        if not token or token in result:
+            continue
+        result.append(token)
+    return tuple(result)
+
+
+def _score_metrics_candidate(exporter: dict[str, Any], body: str) -> dict[str, Any] | None:
+    exporter_name = str(exporter.get("name") or "").strip()
+    if not exporter_name:
+        return None
+
+    strong_markers = _as_token_tuple(exporter.get("strong_markers")) or _as_token_tuple(exporter.get("markers"))
+    weak_markers = tuple(
+        marker for marker in _as_token_tuple(exporter.get("weak_markers")) if marker not in strong_markers
+    )
+    negative_markers = _as_token_tuple(exporter.get("negative_markers"))
+
+    strong_hits = [marker for marker in strong_markers if marker in body]
+    weak_hits = [marker for marker in weak_markers if marker in body]
+    negative_hits = [marker for marker in negative_markers if marker in body]
+
+    score = (len(strong_hits) * 100) + (len(weak_hits) * 25) - (len(negative_hits) * 80)
+    if score <= 0:
+        return None
+
+    marker_hit = strong_hits[0] if strong_hits else (weak_hits[0] if weak_hits else None)
+    return {
+        "name": exporter_name,
+        "score": score,
+        "strong_count": len(strong_hits),
+        "weak_count": len(weak_hits),
+        "negative_count": len(negative_hits),
+        "marker_hit": marker_hit,
+    }
+
+
+def _needs_fingerprint_tiebreak(candidates: list[dict[str, Any]]) -> bool:
+    if not candidates:
+        return False
+
+    top = candidates[0]
+    top_score = int(top.get("score") or 0)
+    top_strong = int(top.get("strong_count") or 0)
+
+    if top_strong <= 0:
+        return True
+    if len(candidates) <= 1:
+        return False
+
+    second = candidates[1]
+    second_score = int(second.get("score") or 0)
+    if top_score == second_score:
+        return True
+    if (top_score - second_score) < 35:
+        return True
+    return False
+
+
+def _select_fingerprint_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not candidates:
+        return []
+    top_score = int(candidates[0].get("score") or 0)
+    return [item for item in candidates if (top_score - int(item.get("score") or 0)) < 35]
+
+
+def _fetch_fingerprint_bodies(host: str, port: int, timeout: float, retries: int) -> tuple[str, str]:
+    vars_result = http_get_details(f"http://{host}:{port}/debug/vars", timeout=timeout, retries=retries)
+    cmdline_result = http_get_details(
+        f"http://{host}:{port}/debug/pprof/cmdline?debug=1",
+        timeout=timeout,
+        retries=retries,
+    )
+    vars_body = str(vars_result.get("body") or "") if (vars_result.get("status") or 0) < 400 else ""
+    cmdline_body = str(cmdline_result.get("body") or "") if (cmdline_result.get("status") or 0) < 400 else ""
+    return vars_body, cmdline_body
+
+
+def _score_fingerprint_candidate(exporter: dict[str, Any], vars_body: str, cmdline_body: str) -> tuple[int, int]:
+    vars_tokens = _as_token_tuple(exporter.get("fingerprint_vars"))
+    cmdline_tokens = _as_token_tuple(exporter.get("fingerprint_cmdline"))
+
+    vars_hits = sum(1 for token in vars_tokens if token in vars_body)
+    cmdline_hits = sum(1 for token in cmdline_tokens if token in cmdline_body)
+    score = (vars_hits * 20) + (cmdline_hits * 25)
+    return score, vars_hits + cmdline_hits
+
+
+def _resolve_best_exporter_candidate(
+    *,
+    host: str,
+    port: int,
+    candidates: list[dict[str, Any]],
+    exporters_by_name: dict[str, dict[str, Any]],
+    timeout: float,
+    retries: int,
+) -> tuple[dict[str, Any] | None, str, str]:
+    if not candidates:
+        return None, "none", "no_markers"
+
+    if not _needs_fingerprint_tiebreak(candidates):
+        return candidates[0], "marker", "marker_unique"
+
+    shortlist = _select_fingerprint_candidates(candidates)
+    if not shortlist:
+        return None, "ambiguous", "ambiguous_empty_shortlist"
+
+    vars_body, cmdline_body = _fetch_fingerprint_bodies(host, port, timeout, retries)
+
+    ranked: list[tuple[int, int, int, dict[str, Any]]] = []
+    for candidate in shortlist:
+        exporter_name = str(candidate.get("name") or "")
+        exporter = exporters_by_name.get(exporter_name)
+        if exporter is None:
+            continue
+        fp_score, fp_hits = _score_fingerprint_candidate(exporter, vars_body, cmdline_body)
+        ranked.append((fp_score, fp_hits, int(candidate.get("score") or 0), candidate))
+
+    if not ranked:
+        return None, "ambiguous", "ambiguous_no_ranked_candidates"
+
+    ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    top_fp, _top_hits, _top_metric, top_candidate = ranked[0]
+    second_fp = ranked[1][0] if len(ranked) > 1 else -1
+
+    if top_fp <= 0:
+        # Precision-first: unresolved conflict stays unknown.
+        return None, "ambiguous", "ambiguous_no_fingerprint_hits"
+    if top_fp == second_fp:
+        return None, "ambiguous", "ambiguous_fingerprint_tie"
+
+    return top_candidate, "fingerprint", "fingerprint_unique"
+
+
 def _scan_presence_port_task(
     host: str,
     port: int,
@@ -560,26 +718,43 @@ def _scan_presence_port_task(
         }
         return record, None
 
-    best_exporter: str | None = None
-    best_marker: str | None = None
-    best_score: tuple[int, int] = (0, 0)
-
+    candidates: list[dict[str, Any]] = []
+    exporters_by_name: dict[str, dict[str, Any]] = {}
     for exporter in exporters:
-        exporter_name = str(exporter.get("name") or "")
-        markers = tuple(str(item) for item in exporter.get("markers", ()))
-        matched = [marker for marker in markers if marker and marker in body]
-        if not matched:
+        exporter_name = str(exporter.get("name") or "").strip()
+        if not exporter_name:
             continue
-        score = (len(matched), max(len(marker) for marker in matched))
-        if score > best_score:
-            best_score = score
-            best_exporter = exporter_name
-            best_marker = matched[0]
+        exporters_by_name.setdefault(exporter_name, exporter)
+        candidate = _score_metrics_candidate(exporter, body)
+        if candidate is None:
+            continue
+        candidates.append(candidate)
 
-    detected = best_exporter is not None
-    exporter_name = best_exporter or "unknown"
-    method = "marker" if detected else "none"
-    marker_hit = best_marker if detected else None
+    candidates.sort(
+        key=lambda item: (
+            int(item.get("score") or 0),
+            int(item.get("strong_count") or 0),
+            int(item.get("weak_count") or 0),
+        ),
+        reverse=True,
+    )
+    winner, method, resolution = _resolve_best_exporter_candidate(
+        host=host,
+        port=port,
+        candidates=candidates,
+        exporters_by_name=exporters_by_name,
+        timeout=timeout,
+        retries=retries,
+    )
+
+    detected = winner is not None
+    exporter_name = str((winner or {}).get("name") or "unknown")
+    if detected:
+        marker_hit = str(winner.get("marker_hit") or "")
+    elif candidates:
+        marker_hit = str(candidates[0].get("marker_hit") or "")
+    else:
+        marker_hit = None
 
     record = {
         "timestamp": utc_now_iso(),
@@ -591,6 +766,8 @@ def _scan_presence_port_task(
         "method": method,
         "status": status,
         "marker_hit": marker_hit,
+        "candidate_count": len(candidates),
+        "resolution": resolution,
         "elapsed_ms": result["elapsed_ms"],
         "content_type": result["content_type"],
         "error": result["error"],
@@ -654,32 +831,63 @@ def _plan_collect_endpoints_for_target(
     endpoints: tuple[str, ...],
     timeout: float,
     retries: int,
+    adaptive_collect: bool = True,
+    completed_endpoints: set[str] | None = None,
 ) -> tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]:
-    # Use pprof index as a cheap capability probe:
-    # if it returns HTTP >= 400, skip deeper pprof paths for this target.
-    probe_endpoint = "/debug/pprof/"
-    if probe_endpoint not in endpoints:
-        return endpoints, {}
+    def _is_hard_failure(result: tuple[dict[str, Any], bool]) -> bool:
+        record, ok = result
+        if ok:
+            return False
+        status = record.get("status")
+        if status is None:
+            return True
+        try:
+            return int(status) >= 400
+        except (TypeError, ValueError):
+            return True
 
-    probe_record, probe_ok = _collect_task(
-        host,
-        exporter_name,
-        port,
-        probe_endpoint,
-        timeout,
-        retries,
-    )
-    prefetched = {probe_endpoint: (probe_record, probe_ok)}
-    status = probe_record.get("status")
+    prefetched: dict[str, tuple[dict[str, Any], bool]] = {}
+    prefetch_candidates: list[str] = []
+    completed = completed_endpoints or set()
 
-    # Keep all pprof endpoints if probe is successful or inconclusive.
-    if status is None or probe_ok:
-        return endpoints, prefetched
+    # Adaptive preflight:
+    # - /debug/pprof/ controls deeper pprof expansion.
+    # - /metrics + /debug/vars give cheap liveness signals and allow skipping
+    #   deep endpoint fan-out on stale targets.
+    if "/debug/pprof/" in endpoints and "/debug/pprof/" not in completed:
+        prefetch_candidates.append("/debug/pprof/")
+    if adaptive_collect and "/metrics" in endpoints and "/debug/vars" in endpoints:
+        if "/metrics" not in completed:
+            prefetch_candidates.append("/metrics")
+        if "/debug/vars" not in completed:
+            prefetch_candidates.append("/debug/vars")
 
-    planned = tuple(
-        endpoint for endpoint in endpoints if endpoint == probe_endpoint or not _is_pprof_endpoint(endpoint)
-    )
-    return planned, prefetched
+    for endpoint in prefetch_candidates:
+        prefetched[endpoint] = _collect_task(
+            host,
+            exporter_name,
+            port,
+            endpoint,
+            timeout,
+            retries,
+        )
+
+    planned = list(endpoints)
+
+    pprof_probe = prefetched.get("/debug/pprof/")
+    if pprof_probe is not None and _is_hard_failure(pprof_probe):
+        planned = [endpoint for endpoint in planned if endpoint == "/debug/pprof/" or not _is_pprof_endpoint(endpoint)]
+
+    if adaptive_collect:
+        metrics_probe = prefetched.get("/metrics")
+        vars_probe = prefetched.get("/debug/vars")
+        pprof_hard = pprof_probe is not None and _is_hard_failure(pprof_probe)
+        metrics_hard = metrics_probe is not None and _is_hard_failure(metrics_probe)
+        vars_hard = vars_probe is not None and _is_hard_failure(vars_probe)
+        if metrics_hard and vars_hard and (pprof_probe is None or pprof_hard):
+            planned = [endpoint for endpoint in planned if endpoint in prefetched]
+
+    return tuple(planned), prefetched
 
 
 def _detect_trigger_exporter_task(
@@ -1083,6 +1291,12 @@ def collect_exporter_debug_data(
     output_mode: str = "w",
     index_mode: str = "w",
     emit_summary: bool = True,
+    adaptive_collect: bool = True,
+    max_inflight_requests: int | None = None,
+    resume_completed_jobs: set[tuple[str, str, int, str]] | None = None,
+    checkpoint_path: str | None = None,
+    checkpoint_mode: str = "a",
+    stats_sink: dict[str, int] | None = None,
 ) -> tuple[int, int]:
     exporters = list(collect_exporters or COLLECT_EXPORTERS)
     endpoints = tuple(collect_debug_endpoints or COLLECT_DEBUG_ENDPOINTS)
@@ -1091,6 +1305,7 @@ def collect_exporter_debug_data(
 
     out_fh: Any = None
     index_fh: Any = None
+    checkpoint_fh: Any = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, output_mode, encoding="utf-8")
@@ -1098,6 +1313,9 @@ def collect_exporter_debug_data(
         os.makedirs(save_responses_dir, exist_ok=True)
         index_path = os.path.join(save_responses_dir, "index.jsonl")
         index_fh = open(index_path, index_mode, encoding="utf-8")
+    if checkpoint_path:
+        os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
+        checkpoint_fh = open(checkpoint_path, checkpoint_mode, encoding="utf-8")
 
     try:
         enabled_exporters = {str(item.get("name") or "") for item in exporters}
@@ -1139,9 +1357,19 @@ def collect_exporter_debug_data(
         )
 
         max_workers = max(1, workers)
-        max_inflight = max(max_workers * 8, max_workers)
+        if max_inflight_requests is None:
+            max_inflight = max(max_workers * 16, max_workers)
+        else:
+            max_inflight = max(max_workers, int(max_inflight_requests))
+        completed_jobs = resume_completed_jobs or set()
+        completed_by_target: dict[tuple[str, str, int], set[str]] = {}
+        for host, exporter_name, port, endpoint in completed_jobs:
+            completed_by_target.setdefault((host, exporter_name, int(port)), set()).add(endpoint)
+        skipped_jobs = 0
         preflight_enabled = (
-            len(collect_targets) <= _COLLECT_PPROF_PREFLIGHT_MAX_TARGETS and "/debug/pprof/" in endpoints
+            adaptive_collect
+            and len(collect_targets) <= _COLLECT_PPROF_PREFLIGHT_MAX_TARGETS
+            and any(item in endpoints for item in ("/debug/pprof/", "/debug/vars", "/metrics"))
         )
 
         target_plans: dict[tuple[str, str, int], tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]] = {}
@@ -1208,6 +1436,18 @@ def collect_exporter_debug_data(
                     error=record["error"],
                     output=output_path,
                 )
+            if checkpoint_fh is not None:
+                checkpoint_payload = {
+                    "host": str(record.get("host") or ""),
+                    "exporter": str(record.get("exporter") or ""),
+                    "port": int(record.get("port") or 0),
+                    "endpoint": str(record.get("endpoint") or ""),
+                    "status": record.get("status"),
+                    "ok": bool(record.get("ok")),
+                    "timestamp": record.get("timestamp"),
+                }
+                checkpoint_fh.write(json.dumps(checkpoint_payload, ensure_ascii=False) + "\n")
+                checkpoint_fh.flush()
 
         pool = _HTTPConnectionPool(
             max_idle_total=max(max_workers * 16, _HTTP_POOL_MAX_IDLE_TOTAL),
@@ -1225,6 +1465,8 @@ def collect_exporter_debug_data(
                             endpoints,
                             timeout,
                             retries,
+                            adaptive_collect,
+                            completed_by_target.get((host, exporter_name, int(port))),
                         ): (host, exporter_name, port)
                         for host, exporter_name, port in collect_targets
                     }
@@ -1239,7 +1481,16 @@ def collect_exporter_debug_data(
             for host, exporter_name, port in collect_targets:
                 planned_endpoints, prefetched = target_plans.get((host, exporter_name, port), (endpoints, {}))
                 for endpoint in planned_endpoints:
+                    job_key = (host, exporter_name, int(port), endpoint)
+                    if job_key in completed_jobs:
+                        skipped_jobs += 1
+                        continue
                     jobs.append((host, exporter_name, port, endpoint, prefetched.get(endpoint)))
+
+            if stats_sink is not None:
+                stats_sink["targets"] = len(collect_targets)
+                stats_sink["scheduled_jobs"] = len(jobs)
+                stats_sink["skipped_jobs"] = skipped_jobs
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 job_index = 0
@@ -1300,5 +1551,7 @@ def collect_exporter_debug_data(
             out_fh.close()
         if index_fh is not None:
             index_fh.close()
+        if checkpoint_fh is not None:
+            checkpoint_fh.close()
 
     return total, success
