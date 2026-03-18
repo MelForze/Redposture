@@ -478,6 +478,7 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
             table_columns=[],
             dump_table_rows=False,
             execute_command=None,
+            sql_command=None,
         )
         status = str(record.get("status") or "fail")
         err = str(record.get("error") or "").strip()

@@ -17,6 +17,28 @@ def test_load_profiles_defaults() -> None:
     assert profiles["trigger_exporters"]
     blackbox = next(item for item in profiles["trigger_exporters"] if item["name"] == "blackbox_exporter")
     assert blackbox["target_fmt"] == "http://{our_host}"
+    discovery_names = {str(item.get("name") or "") for item in profiles["discovery_exporters"]}
+    collect_names = {str(item.get("name") or "") for item in profiles["collect_exporters"]}
+    for name in (
+        "nats_exporter",
+        "statsd_exporter",
+        "mysqld_exporter",
+        "haproxy_exporter",
+        "memcached_exporter",
+        "elasticsearch_exporter",
+        "nginx_exporter",
+        "apache_exporter",
+        "bind_exporter",
+        "ceph_exporter",
+        "varnish_exporter",
+        "rabbitmq_exporter",
+        "windows_exporter",
+        "ipmi_exporter",
+        "sql_exporter",
+        "snmp_exporter",
+    ):
+        assert name in discovery_names
+        assert name in collect_names
 
 
 def test_load_profiles_override_subset(tmp_path: Path) -> None:

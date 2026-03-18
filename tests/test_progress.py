@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from redposture_core.console import Console
 from redposture_core.progress import ProgressBar, _progress_enabled, iter_completed_with_progress
 
 
@@ -98,6 +99,34 @@ def test_progress_bar_pause_for_output_clears_current_row() -> None:
 
     assert len(stream.buffer) > len(before)
     bar.close()
+
+
+def test_console_plain_suspends_and_resumes_active_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    stream = _FakeStream(tty=True)
+    bar = ProgressBar("scan", total=2, enabled=True, stream=stream, leave=True)
+    bar.advance()
+
+    events: list[str] = []
+    original_pause = bar.pause_for_output
+    original_resume = bar.resume_after_output
+
+    def wrapped_pause() -> None:
+        events.append("pause")
+        original_pause()
+
+    def wrapped_resume() -> None:
+        events.append("resume")
+        original_resume()
+
+    monkeypatch.setattr(bar, "pause_for_output", wrapped_pause)
+    monkeypatch.setattr(bar, "resume_after_output", wrapped_resume)
+
+    console = Console(debug=False)
+    console.plain("SCAN\t127.0.0.1\t9100\t [*] Node Exporter", stream=stream)
+    bar.close()
+
+    assert events[:2] == ["pause", "resume"]
+    assert "SCAN\t127.0.0.1\t9100\t [*] Node Exporter" in stream.buffer
 
 
 def test_iter_completed_with_progress_returns_all_futures() -> None:

@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Iterator, Mapping
 from concurrent.futures import Future, as_completed
+from contextlib import contextmanager
 from typing import Any, TextIO
 
 _PROGRESS_BAR_WIDTH = 38
@@ -18,6 +19,8 @@ _ANSI_GREEN = "\033[32m"
 _ANSI_CYAN = "\033[36m"
 _ANSI_DIM = "\033[2m"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_ACTIVE_PROGRESS_LOCK = threading.Lock()
+_ACTIVE_PROGRESS_BY_STREAM: dict[int, ProgressBar] = {}
 
 
 def _progress_enabled(stream: TextIO, *, enabled: bool) -> bool:
@@ -56,6 +59,20 @@ class ProgressBar:
         self._started = time.monotonic()
         item_word = "target" if self._total == 1 else "targets"
         self._description = f"Running redposture against {self._total} {item_word}"
+        self._register_active_progress()
+
+    def _register_active_progress(self) -> None:
+        if not self._enabled:
+            return
+        with _ACTIVE_PROGRESS_LOCK:
+            _ACTIVE_PROGRESS_BY_STREAM[id(self._stream)] = self
+
+    def _unregister_active_progress(self) -> None:
+        with _ACTIVE_PROGRESS_LOCK:
+            key = id(self._stream)
+            current = _ACTIVE_PROGRESS_BY_STREAM.get(key)
+            if current is self:
+                _ACTIVE_PROGRESS_BY_STREAM.pop(key, None)
 
     def advance(self, step: int = 1) -> None:
         if not self._enabled:
@@ -71,6 +88,7 @@ class ProgressBar:
 
     def close(self) -> None:
         if not self._enabled:
+            self._unregister_active_progress()
             return
         with self._lock:
             if not self._leave:
@@ -78,15 +96,15 @@ class ProgressBar:
                     self._stream.write("\r" + (" " * self._last_len) + "\r")
                     self._stream.flush()
                 self._enabled = False
-                return
-            if self._done >= self._total and self._last_len > 0:
+            elif self._done >= self._total and self._last_len > 0:
                 self._stream.write("\n")
                 self._stream.flush()
                 self._enabled = False
-                return
-            self._done = self._total
-            self._render(final=True)
-            self._enabled = False
+            else:
+                self._done = self._total
+                self._render(final=True)
+                self._enabled = False
+        self._unregister_active_progress()
 
     def pause_for_output(self) -> None:
         """Temporarily clear the in-place progress row before normal log output."""
@@ -97,6 +115,15 @@ class ProgressBar:
                 return
             self._stream.write("\r" + (" " * self._last_len) + "\r")
             self._stream.flush()
+
+    def resume_after_output(self) -> None:
+        """Re-render in-place progress row after normal log output."""
+        if not self._enabled:
+            return
+        with self._lock:
+            if not self._leave and self._done >= self._total:
+                return
+            self._render()
 
     @staticmethod
     def _format_eta(seconds: float | None) -> str:
@@ -171,3 +198,23 @@ def iter_completed_with_progress(
             progress.advance()
     finally:
         progress.close()
+
+
+def _active_progress_for_stream(stream: TextIO) -> ProgressBar | None:
+    with _ACTIVE_PROGRESS_LOCK:
+        candidate = _ACTIVE_PROGRESS_BY_STREAM.get(id(stream))
+    if candidate is None or not candidate._enabled:
+        return None
+    return candidate
+
+
+@contextmanager
+def suspend_active_progress_for_output(stream: TextIO) -> Iterator[None]:
+    progress = _active_progress_for_stream(stream)
+    if progress is not None:
+        progress.pause_for_output()
+    try:
+        yield
+    finally:
+        if progress is not None:
+            progress.resume_after_output()

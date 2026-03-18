@@ -24,6 +24,51 @@ COLLECT_VALIDATE_FAIL_ON_CREDS = False
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
+def _resolve_collect_checkpoint_path(args: argparse.Namespace) -> str:
+    explicit = str(getattr(args, "checkpoint_file", "") or "").strip()
+    if explicit:
+        return explicit
+    output_path = str(getattr(args, "output", "") or "").strip()
+    if output_path:
+        return f"{output_path}.checkpoint.jsonl"
+    save_dir = str(getattr(args, "save_responses_dir", "") or "").strip()
+    if save_dir:
+        return os.path.join(save_dir, "collect.checkpoint.jsonl")
+    return ".redposture_collect.checkpoint.jsonl"
+
+
+def _load_collect_completed_jobs(path: str, *, console: Console | None = None) -> set[tuple[str, str, int, str]]:
+    completed: set[tuple[str, str, int, str]] = set()
+    if not path or not os.path.exists(path):
+        return completed
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                host = str(payload.get("host") or "").strip()
+                exporter = str(payload.get("exporter") or "").strip()
+                endpoint = str(payload.get("endpoint") or "").strip()
+                try:
+                    port = int(payload.get("port"))
+                except (TypeError, ValueError):
+                    continue
+                if not host or not exporter or not endpoint or port <= 0:
+                    continue
+                completed.add((host, exporter, port, endpoint))
+    except OSError as exc:
+        if console is not None:
+            console.warn(f"failed to load collect checkpoint '{path}': {exc}")
+    return completed
+
+
 def _materialize_collect_endpoint(template: str, pprof_seconds: int, trace_seconds: int) -> str:
     return (
         str(template)
@@ -100,8 +145,19 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     stream_to_stdout = not bool(args.output)
     save_responses_dir = getattr(args, "save_responses_dir", None)
     deep = bool(getattr(args, "deep", False))
+    resume_enabled = bool(getattr(args, "resume", False))
+    checkpoint_requested = bool(getattr(args, "checkpoint_file", None))
+    checkpoint_path: str | None = None
+    completed_jobs: set[tuple[str, str, int, str]] = set()
+    if resume_enabled or checkpoint_requested:
+        checkpoint_path = _resolve_collect_checkpoint_path(args)
+    if resume_enabled and checkpoint_path:
+        completed_jobs = _load_collect_completed_jobs(checkpoint_path, console=console)
     pprof_seconds = int(getattr(args, "pprof_seconds", 5))
     trace_seconds = int(getattr(args, "trace_seconds", 2))
+    adaptive_collect = bool(getattr(args, "adaptive_collect", True))
+    max_inflight_raw = getattr(args, "max_inflight", None)
+    max_inflight: int | None = int(max_inflight_raw) if max_inflight_raw is not None else None
     validator = ValidationRecordAccumulator(
         input_format=COLLECT_VALIDATE_INPUT_FORMAT,
         max_lines=COLLECT_VALIDATE_MAX_LINES,
@@ -167,17 +223,23 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.debug and stream_to_stdout and args.output_format == "txt":
         save_suffix = f" save_responses={save_responses_dir}" if save_responses_dir else ""
         ports_hint = f" ports={len(custom_ports)}(custom)" if custom_ports else ""
+        checkpoint_hint = f" checkpoint={checkpoint_path}" if checkpoint_path else ""
+        resume_hint = f" resume={resume_enabled}" if checkpoint_path else ""
         console.info(
             f"collect started: hosts={len(hosts)} timeout={args.timeout}s "
-            f"workers={args.workers} retries={args.retries} format=txt{ports_hint}{save_suffix}"
+            f"workers={args.workers} retries={args.retries} format=txt"
+            f"{ports_hint}{save_suffix}{resume_hint}{checkpoint_hint}"
         )
     if args.debug and not stream_to_stdout:
         save_suffix = f" save_responses={save_responses_dir}" if save_responses_dir else ""
         ports_hint = f" ports={len(custom_ports)}(custom)" if custom_ports else ""
+        checkpoint_hint = f" checkpoint={checkpoint_path}" if checkpoint_path else ""
+        resume_hint = f" resume={resume_enabled}" if checkpoint_path else ""
         console.info(
             f"collect started: hosts={len(hosts)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} "
-            f"format={args.output_format} output={args.output}{ports_hint}{save_suffix}"
+            f"format={args.output_format} output={args.output}"
+            f"{ports_hint}{save_suffix}{resume_hint}{checkpoint_hint}"
         )
 
     class _ValidationConsoleProxy:
@@ -260,6 +322,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     requests = 0
     success = 0
+    collect_stats: dict[str, int] = {}
     if scan_found > 0:
         try:
             requests, success = collect_exporter_debug_data(
@@ -276,7 +339,15 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 found_by_host=found_by_host,
                 save_responses_dir=save_responses_dir,
                 record_callback=validator.feed,
+                output_mode="a" if resume_enabled else "w",
+                index_mode="a" if resume_enabled else "w",
                 emit_summary=False,
+                adaptive_collect=adaptive_collect,
+                max_inflight_requests=max_inflight,
+                resume_completed_jobs=completed_jobs if resume_enabled else None,
+                checkpoint_path=checkpoint_path,
+                checkpoint_mode="a" if resume_enabled else "w",
+                stats_sink=collect_stats,
             )
         except OSError as exc:
             console.error(f"failed to process collect output: {exc}")
@@ -307,14 +378,21 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 pass
         if stream_to_stdout and args.output_format == "txt":
             save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
+            resume_suffix = (
+                f" resumed={collect_stats.get('skipped_jobs', 0)}" if (resume_enabled and checkpoint_path) else ""
+            )
             console.info(
-                f"collect complete: hosts={len(hosts)} checks={scan_checks} detected=0 requests=0 success=0{save_suffix}"
+                f"collect complete: hosts={len(hosts)} checks={scan_checks} "
+                f"detected=0 requests=0 success=0{save_suffix}{resume_suffix}"
             )
         if not stream_to_stdout:
             save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
+            resume_suffix = (
+                f" resumed={collect_stats.get('skipped_jobs', 0)}" if (resume_enabled and checkpoint_path) else ""
+            )
             console.info(
                 f"collect complete: hosts={len(hosts)} checks={scan_checks} detected=0 requests=0 success=0 "
-                f"format={args.output_format} output={args.output}{save_suffix}"
+                f"format={args.output_format} output={args.output}{save_suffix}{resume_suffix}"
             )
             if args.debug:
                 console.debug("debug mode enabled; detailed collect events emitted in text logs")
@@ -342,16 +420,22 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if stream_to_stdout:
         if args.output_format == "txt":
             save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
+            resume_suffix = (
+                f" resumed={collect_stats.get('skipped_jobs', 0)}" if (resume_enabled and checkpoint_path) else ""
+            )
             console.info(
                 f"collect complete: hosts={len(hosts)} checks={scan_checks} "
-                f"detected={scan_found} requests={requests} success={success}{save_suffix}"
+                f"detected={scan_found} requests={requests} success={success}{save_suffix}{resume_suffix}"
             )
     else:
         save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
+        resume_suffix = (
+            f" resumed={collect_stats.get('skipped_jobs', 0)}" if (resume_enabled and checkpoint_path) else ""
+        )
         console.info(
             f"collect complete: hosts={len(hosts)} checks={scan_checks} detected={scan_found} "
             f"requests={requests} success={success} "
-            f"format={args.output_format} output={args.output}{save_suffix}"
+            f"format={args.output_format} output={args.output}{save_suffix}{resume_suffix}"
         )
         if args.debug:
             console.debug("debug mode enabled; detailed collect events emitted in text logs")

@@ -124,3 +124,34 @@ def test_proxy_socket_patch_with_none_proxy_keeps_original() -> None:
 )
 def test_host_port_for_connect_formats_ipv4_and_ipv6(host: str, port: int, expected: str) -> None:
     assert np._host_port_for_connect(host, port) == expected
+
+
+def test_open_proxy_connection_uses_socket_create_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[tuple[str, int], float | None, tuple[str, int] | None]] = []
+
+    class _DummySocket:
+        def close(self) -> None:
+            return
+
+    def fake_create_connection(
+        address: tuple[str, int],
+        timeout: float | None = None,
+        source_address: tuple[str, int] | None = None,
+    ) -> _DummySocket:
+        calls.append((address, timeout, source_address))
+        return _DummySocket()
+
+    monkeypatch.setattr(np.socket, "create_connection", fake_create_connection)
+
+    proxy = np.ProxyConfig(
+        scheme="socks5",
+        host="::1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks5://[::1]:1080",
+    )
+    sock = np._open_proxy_connection(proxy, timeout=2.5, source_address=("0.0.0.0", 0))
+
+    assert isinstance(sock, _DummySocket)
+    assert calls == [(("::1", 1080), 2.5, ("0.0.0.0", 0))]

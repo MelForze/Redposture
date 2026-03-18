@@ -4,6 +4,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from redposture_core.scanner import collect_exporter_debug_data
 
 
@@ -87,6 +89,65 @@ def test_collect_txt_line_contains_display_name_and_full_url(monkeypatch) -> Non
     assert hit_lines
     assert "Node Exporter" in hit_lines[0]
     assert "url=http://10.0.0.1:9100/debug/vars" in hit_lines[0]
+
+
+@pytest.mark.parametrize(
+    ("exporter_name", "display_name", "port"),
+    [
+        ("nats_exporter", "NATS Exporter", 7777),
+        ("statsd_exporter", "StatsD Exporter", 9102),
+        ("mysqld_exporter", "MySQLd Exporter", 9104),
+        ("haproxy_exporter", "HAProxy Exporter", 9101),
+        ("memcached_exporter", "Memcached Exporter", 9150),
+        ("nginx_exporter", "Nginx Exporter", 9113),
+        ("elasticsearch_exporter", "Elasticsearch Exporter", 9114),
+        ("snmp_exporter", "SNMP Exporter", 9117),
+        ("apache_exporter", "Apache Exporter", 9117),
+        ("bind_exporter", "BIND Exporter", 9119),
+        ("ceph_exporter", "Ceph Exporter", 9128),
+        ("varnish_exporter", "Varnish Exporter", 9131),
+        ("windows_exporter", "Windows Exporter", 9182),
+        ("ipmi_exporter", "IPMI Exporter", 9290),
+        ("rabbitmq_exporter", "RabbitMQ Exporter", 9419),
+        ("sql_exporter", "SQL Exporter", 9399),
+    ],
+)
+def test_collect_txt_line_contains_display_name_for_new_exporters(
+    monkeypatch, exporter_name: str, display_name: str, port: int
+) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        return {
+            "status": 200,
+            "body": "ok",
+            "content_type": "text/plain",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    lines: list[str] = []
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="txt",
+        emit_line=lines.append,
+        workers=1,
+        retries=0,
+        collect_exporters=[{"name": exporter_name, "port": port}],
+        collect_debug_endpoints=["/debug/vars"],
+        found_by_host={"10.0.0.1": [{"exporter": exporter_name, "port": port}]},
+    )
+
+    assert total == 1
+    assert success == 1
+    hit_lines = [line for line in lines if "[+] " in line and line.startswith("COLLECT")]
+    assert hit_lines
+    assert display_name in hit_lines[0]
+    assert f"url=http://10.0.0.1:{port}/debug/vars" in hit_lines[0]
 
 
 def test_collect_can_save_raw_responses_and_index(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -273,3 +334,152 @@ def test_collect_disables_pprof_preflight_for_large_target_sets(monkeypatch) -> 
     assert total == 4
     assert success == 2
     assert sum(1 for url in called_urls if url.endswith("/debug/pprof/goroutine?debug=1")) == 2
+
+
+def test_collect_resume_skips_completed_jobs(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    called_urls: list[str] = []
+
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        _ = (timeout, retries)
+        called_urls.append(url)
+        return {
+            "status": 200,
+            "body": "ok",
+            "content_type": "text/plain",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    checkpoint = tmp_path / "collect.ckpt.jsonl"
+    completed = {("10.0.0.1", "node_exporter", 9100, "/debug/vars")}
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        emit_line=None,
+        workers=2,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/vars", "/metrics"],
+        found_by_host={"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+        resume_completed_jobs=completed,
+        checkpoint_path=str(checkpoint),
+        checkpoint_mode="w",
+    )
+
+    assert total == 1
+    assert success == 1
+    assert called_urls == ["http://10.0.0.1:9100/metrics"]
+    assert checkpoint.exists()
+
+
+def test_collect_writes_checkpoint_records(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        _ = (url, timeout, retries)
+        return {
+            "status": 200,
+            "body": "ok",
+            "content_type": "text/plain",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    checkpoint = tmp_path / "collect.ckpt.jsonl"
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        emit_line=None,
+        workers=1,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/vars"],
+        found_by_host={"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+        checkpoint_path=str(checkpoint),
+        checkpoint_mode="w",
+    )
+
+    assert total == 1
+    assert success == 1
+    payloads = [json.loads(line) for line in checkpoint.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(payloads) == 1
+    assert payloads[0]["host"] == "10.0.0.1"
+    assert payloads[0]["exporter"] == "node_exporter"
+    assert payloads[0]["port"] == 9100
+    assert payloads[0]["endpoint"] == "/debug/vars"
+
+
+def test_collect_adaptive_preflight_collapses_stale_targets(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    called_urls: list[str] = []
+
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        _ = (timeout, retries)
+        called_urls.append(url)
+        if url.endswith("/metrics"):
+            return {
+                "status": 503,
+                "body": "service unavailable",
+                "content_type": "text/plain",
+                "elapsed_ms": 1,
+                "truncated": False,
+                "error": None,
+            }
+        if url.endswith("/debug/vars"):
+            return {
+                "status": 404,
+                "body": "not found",
+                "content_type": "text/plain",
+                "elapsed_ms": 1,
+                "truncated": False,
+                "error": None,
+            }
+        if url.endswith("/debug/pprof/"):
+            return {
+                "status": 404,
+                "body": "not found",
+                "content_type": "text/plain",
+                "elapsed_ms": 1,
+                "truncated": False,
+                "error": None,
+            }
+        if "/debug/pprof/goroutine?debug=1" in url:
+            raise AssertionError("deep pprof endpoint must be skipped for stale targets")
+        return {
+            "status": 404,
+            "body": "not found",
+            "content_type": "text/plain",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        emit_line=None,
+        workers=1,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/metrics", "/debug/vars", "/debug/pprof/", "/debug/pprof/goroutine?debug=1"],
+        found_by_host={"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+        adaptive_collect=True,
+    )
+
+    assert total == 3
+    assert success == 0
+    assert all("/debug/pprof/goroutine?debug=1" not in item for item in called_urls)

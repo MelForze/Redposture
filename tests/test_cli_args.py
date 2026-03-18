@@ -1229,6 +1229,27 @@ def test_collect_save_responses_flag_is_parsed() -> None:
     assert args.save_responses_dir == "collect_raw"
 
 
+def test_collect_resume_and_checkpoint_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "exporters",
+            "collect",
+            "-t",
+            "10.0.0.1",
+            "--resume",
+            "--checkpoint-file",
+            "collect.ckpt.jsonl",
+            "--max-inflight",
+            "128",
+            "--no-adaptive-collect",
+        ]
+    )
+    assert args.resume is True
+    assert args.checkpoint_file == "collect.ckpt.jsonl"
+    assert args.max_inflight == 128
+    assert args.adaptive_collect is False
+
+
 def test_redis_rejects_profiles_file_flag() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args(["redis", "-t", "10.0.0.7", "--profiles-file", "profiles.json"])

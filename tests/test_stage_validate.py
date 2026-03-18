@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from redposture_core.stage_validate import run_validation, run_validation_records
 
 
@@ -168,3 +170,43 @@ def test_validate_jsonl_file_in_json_mode(tmp_path: Path) -> None:
 
     rc = run_validation(str(path), input_format="json", fail_on_creds=True)
     assert rc == 1
+
+
+@pytest.mark.parametrize(
+    ("exporter", "display"),
+    [
+        ("nats_exporter", "NATS Exporter"),
+        ("statsd_exporter", "StatsD Exporter"),
+        ("mysqld_exporter", "MySQLd Exporter"),
+        ("haproxy_exporter", "HAProxy Exporter"),
+        ("memcached_exporter", "Memcached Exporter"),
+        ("nginx_exporter", "Nginx Exporter"),
+        ("elasticsearch_exporter", "Elasticsearch Exporter"),
+        ("snmp_exporter", "SNMP Exporter"),
+        ("apache_exporter", "Apache Exporter"),
+        ("bind_exporter", "BIND Exporter"),
+        ("ceph_exporter", "Ceph Exporter"),
+        ("varnish_exporter", "Varnish Exporter"),
+        ("windows_exporter", "Windows Exporter"),
+        ("ipmi_exporter", "IPMI Exporter"),
+        ("rabbitmq_exporter", "RabbitMQ Exporter"),
+        ("sql_exporter", "SQL Exporter"),
+    ],
+)
+def test_validate_records_uses_display_name_for_new_exporters(
+    capsys: pytest.CaptureFixture[str], exporter: str, display: str
+) -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9999,
+            "exporter": exporter,
+            "endpoint": "/debug/vars",
+            "body": "password=TopSecret-2026\n",
+        }
+    ]
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert f"Dump Validate {display}" in output

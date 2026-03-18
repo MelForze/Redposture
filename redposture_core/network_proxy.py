@@ -91,12 +91,17 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
     return data
 
 
-def _new_tcp_socket(timeout: float | None, source_address: tuple[str, int] | None) -> socket.socket:
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.settimeout(timeout)
-    if source_address is not None:
-        sock.bind(source_address)
-    return sock
+def _open_proxy_connection(
+    proxy: ProxyConfig,
+    timeout: float | None,
+    source_address: tuple[str, int] | None,
+) -> socket.socket:
+    # Use system resolver/getaddrinfo via create_connection (IPv4 + IPv6).
+    return socket.create_connection(
+        (proxy.host, proxy.port),
+        timeout=timeout,
+        source_address=source_address,
+    )
 
 
 def _socks5_open_tunnel(
@@ -106,10 +111,8 @@ def _socks5_open_tunnel(
     timeout: float | None,
     source_address: tuple[str, int] | None,
 ) -> socket.socket:
-    sock = _new_tcp_socket(timeout, source_address)
+    sock = _open_proxy_connection(proxy, timeout, source_address)
     try:
-        sock.connect((proxy.host, proxy.port))
-
         methods = [0x00]
         if proxy.username is not None:
             methods.append(0x02)
@@ -186,10 +189,9 @@ def _http_open_tunnel(
     timeout: float | None,
     source_address: tuple[str, int] | None,
 ) -> socket.socket:
-    sock = _new_tcp_socket(timeout, source_address)
+    sock = _open_proxy_connection(proxy, timeout, source_address)
     transport: socket.socket | ssl.SSLSocket = sock
     try:
-        sock.connect((proxy.host, proxy.port))
         if proxy.scheme == "https":
             context = ssl.create_default_context()
             transport = context.wrap_socket(sock, server_hostname=proxy.host)
