@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 
@@ -483,3 +484,42 @@ def test_collect_adaptive_preflight_collapses_stale_targets(monkeypatch) -> None
     assert total == 3
     assert success == 0
     assert all("/debug/pprof/goroutine?debug=1" not in item for item in called_urls)
+
+
+def test_collect_record_callback_runs_in_postprocess_thread(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+        _ = (url, timeout, retries)
+        return {
+            "status": 200,
+            "body": "ok",
+            "content_type": "text/plain",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    callback_threads: list[str] = []
+
+    def callback(_record: dict[str, object]) -> None:
+        callback_threads.append(threading.current_thread().name)
+
+    total, success = collect_exporter_debug_data(
+        logger=None,
+        hosts=["10.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        emit_line=None,
+        workers=1,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/vars", "/metrics"],
+        found_by_host={"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+        record_callback=callback,
+    )
+
+    assert total == 2
+    assert success == 2
+    assert callback_threads == ["collect-postprocess", "collect-postprocess"]

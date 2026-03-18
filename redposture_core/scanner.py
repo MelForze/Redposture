@@ -6,6 +6,7 @@ import errno
 import http.client
 import json
 import os
+import queue
 import re
 import socket
 import threading
@@ -1306,6 +1307,39 @@ def collect_exporter_debug_data(
     out_fh: Any = None
     index_fh: Any = None
     checkpoint_fh: Any = None
+    postprocess_queue: queue.Queue[Any] | None = None
+    postprocess_thread: threading.Thread | None = None
+    postprocess_stop = object()
+    postprocess_errors: list[BaseException] = []
+    postprocess_errors_lock = threading.Lock()
+
+    def _record_postprocess_error(exc: BaseException) -> None:
+        with postprocess_errors_lock:
+            if not postprocess_errors:
+                postprocess_errors.append(exc)
+
+    def _raise_postprocess_error() -> None:
+        if not postprocess_errors:
+            return
+        err = postprocess_errors[0]
+        if isinstance(err, Exception):
+            raise err
+        raise RuntimeError(str(err))
+
+    def _finalize_postprocess() -> None:
+        nonlocal postprocess_queue, postprocess_thread
+        if postprocess_queue is None:
+            return
+        postprocess_queue.join()
+        _raise_postprocess_error()
+        postprocess_queue.put(postprocess_stop)
+        postprocess_queue.join()
+        if postprocess_thread is not None:
+            postprocess_thread.join()
+            postprocess_thread = None
+        postprocess_queue = None
+        _raise_postprocess_error()
+
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, output_mode, encoding="utf-8")
@@ -1316,6 +1350,34 @@ def collect_exporter_debug_data(
     if checkpoint_path:
         os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
         checkpoint_fh = open(checkpoint_path, checkpoint_mode, encoding="utf-8")
+    if record_callback is not None or index_fh is not None or checkpoint_fh is not None:
+        postprocess_queue = queue.Queue()
+
+        def _postprocess_worker() -> None:
+            while True:
+                payload = postprocess_queue.get()
+                try:
+                    if payload is postprocess_stop:
+                        return
+                    callback_record, index_payload, checkpoint_payload = payload
+                    if callback_record is not None and record_callback is not None:
+                        record_callback(callback_record)
+                    if index_payload is not None and index_fh is not None:
+                        index_fh.write(json.dumps(index_payload, ensure_ascii=False) + "\n")
+                    if checkpoint_payload is not None and checkpoint_fh is not None:
+                        checkpoint_fh.write(json.dumps(checkpoint_payload, ensure_ascii=False) + "\n")
+                        checkpoint_fh.flush()
+                except Exception as exc:
+                    _record_postprocess_error(exc)
+                finally:
+                    postprocess_queue.task_done()
+
+        postprocess_thread = threading.Thread(
+            target=_postprocess_worker,
+            name="collect-postprocess",
+            daemon=True,
+        )
+        postprocess_thread.start()
 
     try:
         enabled_exporters = {str(item.get("name") or "") for item in exporters}
@@ -1382,6 +1444,8 @@ def collect_exporter_debug_data(
         ) -> None:
             nonlocal total, success
             response_file, response_size = (None, 0)
+            index_payload: dict[str, Any] | None = None
+            checkpoint_payload: dict[str, Any] | None = None
             total += 1
             if ok:
                 success += 1
@@ -1404,7 +1468,6 @@ def collect_exporter_debug_data(
                         "response_file": response_file,
                         "response_size": response_size,
                     }
-                    index_fh.write(json.dumps(index_payload, ensure_ascii=False) + "\n")
             if records_sink is not None:
                 records_sink.append(
                     {
@@ -1419,8 +1482,29 @@ def collect_exporter_debug_data(
                         "body": str(record.get("body") or ""),
                     }
                 )
-            if record_callback is not None:
-                record_callback(record)
+            if checkpoint_fh is not None:
+                checkpoint_payload = {
+                    "host": str(record.get("host") or ""),
+                    "exporter": str(record.get("exporter") or ""),
+                    "port": int(record.get("port") or 0),
+                    "endpoint": str(record.get("endpoint") or ""),
+                    "status": record.get("status"),
+                    "ok": bool(record.get("ok")),
+                    "timestamp": record.get("timestamp"),
+                }
+            if postprocess_queue is not None:
+                postprocess_queue.put(
+                    (record if record_callback is not None else None, index_payload, checkpoint_payload)
+                )
+                _raise_postprocess_error()
+            else:
+                if record_callback is not None:
+                    record_callback(record)
+                if index_payload is not None and index_fh is not None:
+                    index_fh.write(json.dumps(index_payload, ensure_ascii=False) + "\n")
+                if checkpoint_payload is not None and checkpoint_fh is not None:
+                    checkpoint_fh.write(json.dumps(checkpoint_payload, ensure_ascii=False) + "\n")
+                    checkpoint_fh.flush()
             if pause_before_emit is not None and emit_line is not None:
                 pause_before_emit()
             _emit_line(out_fh, emit_line, _format_collect_record(record, output_format))
@@ -1436,18 +1520,6 @@ def collect_exporter_debug_data(
                     error=record["error"],
                     output=output_path,
                 )
-            if checkpoint_fh is not None:
-                checkpoint_payload = {
-                    "host": str(record.get("host") or ""),
-                    "exporter": str(record.get("exporter") or ""),
-                    "port": int(record.get("port") or 0),
-                    "endpoint": str(record.get("endpoint") or ""),
-                    "status": record.get("status"),
-                    "ok": bool(record.get("ok")),
-                    "timestamp": record.get("timestamp"),
-                }
-                checkpoint_fh.write(json.dumps(checkpoint_payload, ensure_ascii=False) + "\n")
-                checkpoint_fh.flush()
 
         pool = _HTTPConnectionPool(
             max_idle_total=max(max_workers * 16, _HTTP_POOL_MAX_IDLE_TOTAL),
@@ -1527,7 +1599,7 @@ def collect_exporter_debug_data(
                         if not pending:
                             continue
 
-                        done, _ = wait(tuple(pending), return_when=FIRST_COMPLETED)
+                        done, _ = wait(pending, return_when=FIRST_COMPLETED)
                         for future in done:
                             pending.pop(future, None)
                             record, ok = future.result()
@@ -1536,6 +1608,7 @@ def collect_exporter_debug_data(
                 finally:
                     collect_progress.close()
 
+        _finalize_postprocess()
         if emit_summary:
             summary = {
                 "timestamp": utc_now_iso(),
@@ -1547,6 +1620,11 @@ def collect_exporter_debug_data(
             }
             _emit_line(out_fh, emit_line, _format_collect_record(summary, output_format))
     finally:
+        if postprocess_queue is not None:
+            postprocess_queue.put(postprocess_stop)
+            postprocess_queue.join()
+        if postprocess_thread is not None:
+            postprocess_thread.join(timeout=1.0)
         if out_fh is not None:
             out_fh.close()
         if index_fh is not None:
