@@ -233,6 +233,86 @@ def test_trigger_with_optional_callback_dns_flag() -> None:
     assert args.callback_dns == "redposture.example.com"
 
 
+def test_trigger_ports_flag_is_parsed() -> None:
+    args = parse_args(
+        [
+            "exporters",
+            "trigger",
+            "-t",
+            "10.0.0.1",
+            "--callback-ip",
+            "10.0.0.2",
+            "--ports",
+            "9121,19121",
+        ]
+    )
+    assert args.ports == "9121,19121"
+
+
+def test_ports_file_is_accepted_across_all_modules(tmp_path) -> None:
+    ports_file = tmp_path / "ports.txt"
+    ports_file.write_text("9100\n9115\n", encoding="utf-8")
+    file_value = str(ports_file)
+
+    argv_variants = [
+        ["exporters", "scan", "-t", "10.0.0.1", "--ports", file_value],
+        ["exporters", "collect", "-t", "10.0.0.1", "--ports", file_value],
+        [
+            "exporters",
+            "trigger",
+            "-t",
+            "10.0.0.1",
+            "--callback-ip",
+            "10.0.0.2",
+            "--ports",
+            file_value,
+        ],
+        ["redis", "-t", "10.0.0.1", "--ports", file_value],
+        ["etcd", "-t", "10.0.0.1", "--ports", file_value],
+        ["kafka", "-t", "10.0.0.1", "--ports", file_value],
+        ["zookeeper", "-t", "10.0.0.1", "--ports", file_value],
+        ["grafana", "-t", "10.0.0.1", "--ports", file_value],
+        ["postgres", "-t", "10.0.0.1", "--ports", file_value],
+        ["clickhouse", "-t", "10.0.0.1", "--ports", file_value],
+        ["consul", "-t", "10.0.0.1", "--ports", file_value],
+        ["qdrant", "-t", "10.0.0.1", "--ports", file_value],
+        ["kubeapi", "-t", "10.0.0.1", "--ports", file_value],
+        ["gitlab", "-t", "10.0.0.1", "--ports", file_value],
+        ["registry", "-t", "10.0.0.1", "--ports", file_value],
+        ["proxmox", "-t", "10.0.0.1", "--pveapitoken", "monitor@pve!audit=token", "--ports", file_value],
+    ]
+
+    for argv in argv_variants:
+        args = parse_args(argv)
+        assert args.ports == file_value
+
+
+def test_port_file_is_normalized_to_ports_across_port_modules(tmp_path) -> None:
+    ports_file = tmp_path / "ports.txt"
+    ports_file.write_text("19000\n", encoding="utf-8")
+    file_value = str(ports_file)
+
+    argv_variants = [
+        ["gitlab", "-t", "10.0.0.1", "--port", file_value],
+        ["kubeapi", "-t", "10.0.0.1", "--port", file_value],
+        ["consul", "-t", "10.0.0.1", "--port", file_value],
+        ["qdrant", "-t", "10.0.0.1", "--port", file_value],
+        ["registry", "-t", "10.0.0.1", "--port", file_value],
+        ["grafana", "-t", "10.0.0.1", "--port", file_value],
+        ["proxmox", "-t", "10.0.0.1", "--pveapitoken", "monitor@pve!audit=token", "--port", file_value],
+        ["postgres", "-t", "10.0.0.1", "--port", file_value],
+        ["clickhouse", "-t", "10.0.0.1", "--port", file_value],
+        ["redis", "-t", "10.0.0.1", "--port", file_value],
+        ["etcd", "-t", "10.0.0.1", "--port", file_value],
+        ["kafka", "-t", "10.0.0.1", "--port", file_value],
+        ["zookeeper", "-t", "10.0.0.1", "--port", file_value],
+    ]
+
+    for argv in argv_variants:
+        args = parse_args(argv)
+        assert args.ports == file_value
+
+
 def test_redis_flags_are_parsed() -> None:
     args = parse_args(
         [

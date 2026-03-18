@@ -72,6 +72,9 @@ redposture exporters collect -t 127.0.0.1 --deep
 
 # Trigger (listener mode)
 redposture exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal --with-listen
+
+# Trigger on custom exporter ports
+redposture exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 -p 19121,19308 --with-listen
 ```
 
 ### Registry
