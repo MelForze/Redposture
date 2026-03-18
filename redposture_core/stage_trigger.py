@@ -389,6 +389,8 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
     from .stage_postgres import _caps_suffix as _postgres_caps_suffix
     from .stage_redis import _audit_redis_host
 
+    show_debug_details = bool(getattr(args, "debug", False))
+
     raw_events = logger.get_trigger_callback_events()
     check_events: list[dict[str, Any]] = []
     for event in raw_events:
@@ -448,7 +450,7 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
                 _render_trigger_check_row(console, host, str(port), "[+]", body, logger=logger)
             elif status == "auth_required":
                 body = f"{cred_display} auth failed"
-                if err:
+                if err and show_debug_details:
                     body += f" err={_clip_text(err, 80)}"
                 _render_trigger_check_row(console, host, str(port), "[-]", body, logger=logger)
             else:
@@ -492,7 +494,7 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
             _render_trigger_check_row(console, host, str(port), "[+]", body, logger=logger)
         elif status == "auth_required":
             body = f"Postgres credentials invalid ({cred_display})"
-            if err:
+            if err and show_debug_details:
                 body += f" err={_clip_text(err, 80)}"
             _render_trigger_check_row(console, host, str(port), "[-]", body, logger=logger)
         else:

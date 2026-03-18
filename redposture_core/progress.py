@@ -52,7 +52,7 @@ class ProgressBar:
         self._done = 0
         # Use stdout to avoid cross-stream progress/log interleaving artifacts.
         self._stream = stream or sys.stdout
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._last_len = 0
         self._enabled = _progress_enabled(self._stream, enabled=enabled) and self._total > 0
         self._leave = bool(leave)
@@ -111,19 +111,41 @@ class ProgressBar:
         if not self._enabled:
             return
         with self._lock:
-            if self._last_len <= 0:
-                return
-            self._stream.write("\r" + (" " * self._last_len) + "\r")
-            self._stream.flush()
+            self._pause_for_output_locked()
 
     def resume_after_output(self) -> None:
         """Re-render in-place progress row after normal log output."""
         if not self._enabled:
             return
         with self._lock:
-            if not self._leave and self._done >= self._total:
-                return
-            self._render()
+            self._resume_after_output_locked()
+
+    def begin_output(self) -> bool:
+        """Pause progress row and hold lock across external output writes."""
+        if not self._enabled:
+            return False
+        self._lock.acquire()
+        self._pause_for_output_locked()
+        return True
+
+    def end_output(self) -> None:
+        """Resume progress row and release lock after external output writes."""
+        try:
+            if self._enabled:
+                self._resume_after_output_locked()
+        finally:
+            self._lock.release()
+
+    def _pause_for_output_locked(self) -> None:
+        if self._last_len <= 0:
+            return
+        self._stream.write("\r" + (" " * self._last_len) + "\r")
+        self._stream.flush()
+
+    def _resume_after_output_locked(self) -> None:
+        if not self._leave and self._done >= self._total:
+            return
+        self._render()
 
     @staticmethod
     def _format_eta(seconds: float | None) -> str:
@@ -211,10 +233,9 @@ def _active_progress_for_stream(stream: TextIO) -> ProgressBar | None:
 @contextmanager
 def suspend_active_progress_for_output(stream: TextIO) -> Iterator[None]:
     progress = _active_progress_for_stream(stream)
-    if progress is not None:
-        progress.pause_for_output()
+    locked = progress.begin_output() if progress is not None else False
     try:
         yield
     finally:
-        if progress is not None:
-            progress.resume_after_output()
+        if progress is not None and locked:
+            progress.end_output()

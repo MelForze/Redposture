@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from typing import Any
 
+from .progress import suspend_active_progress_for_output
 from .utils import utc_now_iso
 
 _COLORS = {
@@ -195,7 +197,8 @@ class AttemptLogger:
                 return
             if self._trigger_callback_mode:
                 self._emit_trigger_callback_line(event)
-            print(_paint(line, color), flush=True)
+            with suspend_active_progress_for_output(sys.stdout):
+                print(_paint(line, color), flush=True)
             if self._text_fh is not None:
                 self._text_fh.write(line_full + "\n")
                 self._text_fh.flush()
@@ -291,7 +294,8 @@ class AttemptLogger:
             line_plain += " (CRED!)"
         else:
             line_plain += " (SSRF!)"
-        print(line, flush=True)
+        with suspend_active_progress_for_output(sys.stdout):
+            print(line, flush=True)
         self._write_text_line_locked(line_plain)
 
     def _is_trigger_callback_event(self, event: dict[str, Any]) -> bool:
