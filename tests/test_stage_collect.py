@@ -599,3 +599,107 @@ def test_collect_stage_passes_adaptive_and_max_inflight_flags(monkeypatch: pytes
     assert rc == 0
     assert captured["adaptive_collect"] is False
     assert captured["max_inflight_requests"] == 256
+
+
+def test_collect_stage_appends_connection_string_validate_hits_to_txt_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "collect_validate.txt"
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/pprof/cmdline?debug=1"],
+        }
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return 1, 1, {"10.0.0.1": [{"exporter": "elasticsearch_exporter", "port": 9114}]}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        target = Path(str(kwargs["output_path"]))
+        target.write_text(
+            "COLLECT\t10.0.0.1\t9114\t[+] Elasticsearch Exporter url=http://10.0.0.1:9114/debug/pprof/cmdline?debug=1\n",
+            encoding="utf-8",
+        )
+        record_callback = kwargs.get("record_callback")
+        if callable(record_callback):
+            record_callback(
+                {
+                    "host": "10.0.0.1",
+                    "port": 9114,
+                    "exporter": "elasticsearch_exporter",
+                    "endpoint": "/debug/pprof/cmdline?debug=1",
+                    "body": "--es.uri=https://elastic:password@elastic.mydomain.local\n",
+                }
+            )
+        return 1, 1
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+
+    rc = run_collect_stage(_base_args(output=str(output_path)), AttemptLogger())
+    assert rc == 0
+
+    contents = output_path.read_text(encoding="utf-8")
+    assert "cmd_connection_string_auth" in contents
+    assert "default_creds_known_pair" in contents
+    assert "--es.uri=https://elastic:password@elastic.mydomain.local" in contents
+
+
+def test_collect_stage_json_output_is_not_polluted_by_validate_txt_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "collect_validate.json"
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/pprof/cmdline?debug=1"],
+        }
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return 1, 1, {"10.0.0.1": [{"exporter": "elasticsearch_exporter", "port": 9114}]}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        target = Path(str(kwargs["output_path"]))
+        target.write_text(
+            json.dumps(
+                {
+                    "type": "record",
+                    "host": "10.0.0.1",
+                    "port": 9114,
+                    "exporter": "elasticsearch_exporter",
+                    "endpoint": "/debug/pprof/cmdline?debug=1",
+                    "body": "--es.uri=https://elastic:password@elastic.mydomain.local",
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        record_callback = kwargs.get("record_callback")
+        if callable(record_callback):
+            record_callback(
+                {
+                    "host": "10.0.0.1",
+                    "port": 9114,
+                    "exporter": "elasticsearch_exporter",
+                    "endpoint": "/debug/pprof/cmdline?debug=1",
+                    "body": "--es.uri=https://elastic:password@elastic.mydomain.local\n",
+                }
+            )
+        return 1, 1
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+
+    rc = run_collect_stage(_base_args(output=str(output_path), output_format="json"), AttemptLogger())
+    assert rc == 0
+
+    contents = output_path.read_text(encoding="utf-8")
+    assert '"exporter": "elasticsearch_exporter"' in contents
+    assert "VALIDATE" not in contents
