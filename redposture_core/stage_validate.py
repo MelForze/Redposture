@@ -30,6 +30,24 @@ _PEM_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 _AWS_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 _REDIS_PASS_RE = re.compile(r"(?i)\b(requirepass|masterauth)\s+([^\s]+)")
 _PORT_PREFIX_RE = re.compile(r"^(\d+)_")
+_VALIDATE_TEXT_HINT_TOKENS = (
+    "[cred]",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "access_key",
+    "secret_key",
+    "authorization",
+    "bearer",
+    "basic",
+    "requirepass",
+    "masterauth",
+    "private key",
+)
 
 _EXPORTER_DISPLAY_NAMES = {
     "nats_exporter": "NATS Exporter",
@@ -288,6 +306,20 @@ def _collect_json_hits(payload: Any, path: str = "") -> list[str]:
 def _detect_hits_in_text(line: str) -> list[str]:
     reasons: list[str] = []
     cleaned = line.strip()
+    if not cleaned:
+        return reasons
+    lower = cleaned.lower()
+    has_hint = any(token in lower for token in _VALIDATE_TEXT_HINT_TOKENS)
+    has_structured_hint = (
+        "://" in lower
+        or "eyj" in lower
+        or "akia" in lower
+        or "asia" in lower
+        or (cleaned.count(":") == 4 and " " not in cleaned and "\t" not in cleaned)
+    )
+    if not has_hint and not has_structured_hint:
+        return reasons
+
     line_upper = cleaned.upper()
     if "[CRED]" in line_upper:
         _maybe_add_reason(reasons, "cred_marker")
