@@ -17,18 +17,23 @@ from .console import Console
 _TEXT_KV_RE = re.compile(
     r"(?i)[\"']?((?:[A-Za-z_][A-Za-z0-9_.-]*)?(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|session[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token))[\"']?\s*[:=]\s*([^\s,;]+)"
 )
+_TEXT_GENERIC_KV_RE = re.compile(r"(?i)[\"']?([A-Za-z_][A-Za-z0-9_.-]*)[\"']?\s*[:=]\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)")
 _CMD_FLAG_SECRET_RE = re.compile(
     r"(?i)(?:^|\s)(?:--|-D|/)?((?:[A-Za-z_][A-Za-z0-9_.-]*)?(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|client[_-]?secret|session[_-]?token|id[_-]?token|auth[_-]?token|bearer[_-]?token|access[_-]?key|secret[_-]?key))\s*(?:=|\s)\s*(\"[^\"]+\"|'[^']+'|[^\s,;]+)"
 )
-_URL_CANDIDATE_RE = re.compile(
-    r"(?i)\b(?:https?|ftp|postgres(?:ql)?|mysql|mariadb|redis|mongodb(?:\+srv)?|amqp|kafka)://[^\s\"'<>]+"
+_CMD_FLAG_GENERIC_RE = re.compile(
+    r"(?i)(?:^|\s)(?:--|-D|/)([A-Za-z_][A-Za-z0-9_.-]*)\s*(?:=|:|\s)\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
+_URL_CANDIDATE_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{1,31}://[^\s\"'<>]+")
 _AUTH_BASIC_RE = re.compile(r"(?i)\bauthorization\s*[:=]\s*basic\s+([A-Za-z0-9+/=]{8,})")
 _AUTH_BEARER_RE = re.compile(r"(?i)\bauthorization\s*[:=]\s*bearer\s+([A-Za-z0-9._~+/-]{10,})")
 _JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b")
 _PEM_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 _AWS_ACCESS_KEY_RE = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 _REDIS_PASS_RE = re.compile(r"(?i)\b(requirepass|masterauth)\s+([^\s]+)")
+_MYSQL_STYLE_DSN_RE = re.compile(r"(?i)\b([A-Za-z0-9._-]+):([^@\s]+)@(?:tcp|unix)\([^)]+\)/(?:[^\s;]+)")
+_SEMI_DSN_PAIR_RE = re.compile(r"(?i)(?:^|;)\s*([A-Za-z][A-Za-z0-9_ .-]*)\s*=\s*(\"[^\"]*\"|'[^']*'|[^;]+)")
+_SPACE_DSN_PAIR_RE = re.compile(r"(?i)\b([A-Za-z][A-Za-z0-9_ .-]*)=(\"[^\"]*\"|'[^']*'|[^\s;]+)")
 _PORT_PREFIX_RE = re.compile(r"^(\d+)_")
 _VALIDATE_TEXT_HINT_TOKENS = (
     "[cred]",
@@ -47,6 +52,13 @@ _VALIDATE_TEXT_HINT_TOKENS = (
     "requirepass",
     "masterauth",
     "private key",
+    "data_source_name",
+    "dsn",
+    "jdbc:",
+    "uri=",
+    "url=",
+    "@tcp(",
+    "@unix(",
 )
 
 _EXPORTER_DISPLAY_NAMES = {
@@ -144,6 +156,56 @@ _USERNAME_KEY_TOKENS = (
 
 _USERNAME_EXCLUDE_TOKENS = ("useragent",)
 
+_CONNECTION_KEY_TOKENS = (
+    "uri",
+    "url",
+    "dsn",
+    "connstr",
+    "connection",
+    "connectionstring",
+    "datasourcename",
+    "targetdsn",
+    "scrapeuri",
+    "endpoint",
+    "address",
+    "addr",
+    "esuri",
+    "mongodburi",
+    "rabbiturl",
+    "sqlalchemyurl",
+    "jdbcurl",
+    "server",
+    "hostname",
+    "dbname",
+    "database",
+    "instance",
+    "service",
+    "socket",
+)
+
+_KNOWN_DEFAULT_CREDENTIAL_PAIRS = {
+    ("elastic", "password"),
+    ("postgres", "postgres"),
+    ("root", "root"),
+    ("guest", "guest"),
+    ("default", ""),
+    ("default", "default"),
+}
+
+_CONNECTION_CONTEXT_KEYS = {
+    "host",
+    "hostname",
+    "server",
+    "addr",
+    "address",
+    "port",
+    "database",
+    "dbname",
+    "service",
+    "socket",
+    "instance",
+}
+
 _NON_SECRET_LITERALS = {
     "-",
     "<empty>",
@@ -203,6 +265,13 @@ def _value_looks_secret(value: Any) -> bool:
     return True
 
 
+def _value_looks_identifier(value: Any) -> bool:
+    text = _clean_value_text(value)
+    if _is_empty_or_masked(text):
+        return False
+    return bool(text)
+
+
 def _key_looks_sensitive(key: str) -> bool:
     normalized = _normalize_key_token(key)
     if not normalized:
@@ -221,9 +290,32 @@ def _key_looks_username(key: str) -> bool:
     return normalized.endswith("user") or normalized.endswith("account")
 
 
+def _key_looks_connection(key: str) -> bool:
+    normalized = _normalize_key_token(key)
+    if not normalized:
+        return False
+    return any(token in normalized for token in _CONNECTION_KEY_TOKENS)
+
+
 def _maybe_add_reason(reasons: list[str], reason: str) -> None:
     if reason and reason not in reasons:
         reasons.append(reason)
+
+
+def _is_known_default_pair(username: Any, password: Any) -> bool:
+    user_text = _clean_value_text(username).lower()
+    password_text = _clean_value_text(password).lower()
+    if not user_text:
+        return False
+    return (user_text, password_text) in _KNOWN_DEFAULT_CREDENTIAL_PAIRS
+
+
+def _connection_reason(connection_context: str) -> str:
+    return "cmd_connection_string_auth" if connection_context == "cmd" else "connection_string_auth"
+
+
+def _connection_query_reason(connection_context: str) -> str:
+    return "cmd_connection_string_query_secret" if connection_context == "cmd" else "connection_string_query_secret"
 
 
 def _safe_decode_basic(value: str) -> str | None:
@@ -239,59 +331,226 @@ def _safe_decode_basic(value: str) -> str | None:
     return decoded if decoded else None
 
 
-def _detect_url_based_hits(text: str) -> list[str]:
+def _analyze_url_candidate(candidate: str, *, connection_context: str | None = None) -> list[str]:
     reasons: list[str] = []
-    for match in _URL_CANDIDATE_RE.finditer(text):
-        candidate = match.group(0)
-        try:
-            parsed = urlsplit(candidate)
-        except ValueError:
-            continue
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return reasons
 
-        username = parsed.username
-        password = parsed.password
-        if username and _value_looks_secret(password):
+    username = parsed.username
+    password = parsed.password or ""
+    if username and (_value_looks_secret(password) or _is_known_default_pair(username, password)):
+        if connection_context == "cmd":
+            _maybe_add_reason(reasons, _connection_reason("cmd"))
+        elif connection_context == "connection":
+            _maybe_add_reason(reasons, _connection_reason("connection"))
+        else:
             _maybe_add_reason(reasons, "url_basic_auth")
             _maybe_add_reason(reasons, "url_basic_auth_username")
+        if _is_known_default_pair(username, password):
+            _maybe_add_reason(reasons, "default_creds_known_pair")
 
-        if parsed.query:
-            try:
-                query_items = parse_qsl(parsed.query, keep_blank_values=True)
-            except ValueError:
-                query_items = []
-            found_secret_query = False
-            for key, value in query_items:
-                normalized = _normalize_key_token(key)
-                if any(token in normalized for token in _URL_SENSITIVE_QUERY_KEYS) and _value_looks_secret(value):
+    if parsed.query:
+        try:
+            query_items = parse_qsl(parsed.query, keep_blank_values=True)
+        except ValueError:
+            query_items = []
+        found_secret_query = False
+        query_user_values: list[str] = []
+        query_password_values: list[str] = []
+        for key, value in query_items:
+            normalized = _normalize_key_token(key)
+            if any(token in normalized for token in _URL_SENSITIVE_QUERY_KEYS) and _value_looks_secret(value):
+                if connection_context == "cmd":
+                    _maybe_add_reason(reasons, _connection_query_reason("cmd"))
+                elif connection_context == "connection":
+                    _maybe_add_reason(reasons, _connection_query_reason("connection"))
+                else:
                     _maybe_add_reason(reasons, f"url_query_{key.lower()}")
-                    found_secret_query = True
-            if found_secret_query:
-                for key, value in query_items:
-                    if _key_looks_username(key) and _value_looks_secret(value):
-                        _maybe_add_reason(reasons, f"url_query_{key.lower()}")
+                found_secret_query = True
+                query_password_values.append(value)
+            if _key_looks_username(key) and _value_looks_identifier(value):
+                query_user_values.append(value)
+        if found_secret_query:
+            for key, value in query_items:
+                if _key_looks_username(key) and _value_looks_secret(value):
+                    _maybe_add_reason(reasons, f"url_query_{key.lower()}")
+            for query_user in query_user_values:
+                for query_password in query_password_values:
+                    if _is_known_default_pair(query_user, query_password):
+                        _maybe_add_reason(reasons, "default_creds_known_pair")
+                        break
+    return reasons
+
+
+def _detect_url_based_hits(text: str, *, connection_context: str | None = None) -> list[str]:
+    reasons: list[str] = []
+    for match in _URL_CANDIDATE_RE.finditer(text):
+        for reason in _analyze_url_candidate(match.group(0), connection_context=connection_context):
+            _maybe_add_reason(reasons, reason)
+    return reasons
+
+
+def _kv_pairs_from_text(text: str, pattern: re.Pattern[str]) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for match in pattern.finditer(text):
+        key = str(match.group(1) or "").strip()
+        value = _clean_value_text(str(match.group(2) or ""))
+        if not key or not value:
+            continue
+        pairs.append((key, value))
+    return pairs
+
+
+def _detect_kv_connection_string_hits(text: str, *, connection_context: str) -> list[str]:
+    reasons: list[str] = []
+    semicolon_pairs = _kv_pairs_from_text(text, _SEMI_DSN_PAIR_RE)
+    space_pairs = _kv_pairs_from_text(text, _SPACE_DSN_PAIR_RE)
+    pairs = semicolon_pairs if len(semicolon_pairs) >= len(space_pairs) else space_pairs
+    if not pairs:
+        return reasons
+
+    usernames: list[str] = []
+    passwords: list[str] = []
+    has_connection_context = "://" in text or "jdbc:" in text.lower()
+
+    for key, value in pairs:
+        normalized = _normalize_key_token(key)
+        if normalized in _CONNECTION_CONTEXT_KEYS or _key_looks_connection(key):
+            has_connection_context = True
+        if _key_looks_username(key) and _value_looks_identifier(value):
+            usernames.append(value)
+        if _key_looks_sensitive(key) and (_value_looks_secret(value) or value == ""):
+            passwords.append(value)
+
+    if not has_connection_context or not usernames or not passwords:
+        return reasons
+
+    _maybe_add_reason(reasons, _connection_reason(connection_context))
+    for username in usernames:
+        for password in passwords:
+            if _is_known_default_pair(username, password):
+                _maybe_add_reason(reasons, "default_creds_known_pair")
+                return reasons
+    return reasons
+
+
+def _detect_mysql_style_dsn_hits(text: str, *, connection_context: str) -> list[str]:
+    reasons: list[str] = []
+    for match in _MYSQL_STYLE_DSN_RE.finditer(text):
+        username = _clean_value_text(match.group(1))
+        password = _clean_value_text(match.group(2))
+        if not username or not (_value_looks_secret(password) or _is_known_default_pair(username, password)):
+            continue
+        _maybe_add_reason(reasons, _connection_reason(connection_context))
+        if _is_known_default_pair(username, password):
+            _maybe_add_reason(reasons, "default_creds_known_pair")
+    return reasons
+
+
+def _detect_connection_value_hits(value: Any, *, from_flag: bool) -> list[str]:
+    cleaned = _clean_value_text(value)
+    if not cleaned:
+        return []
+    context = "cmd" if from_flag else "connection"
+    reasons = _detect_url_based_hits(cleaned, connection_context=context)
+    for reason in _detect_mysql_style_dsn_hits(cleaned, connection_context=context):
+        _maybe_add_reason(reasons, reason)
+    for reason in _detect_kv_connection_string_hits(cleaned, connection_context=context):
+        _maybe_add_reason(reasons, reason)
+    if reasons:
+        return reasons
+    if cleaned.lower().startswith("jdbc:"):
+        jdbc_inner = cleaned[5:]
+        for reason in _detect_url_based_hits(jdbc_inner, connection_context=context):
+            _maybe_add_reason(reasons, reason)
+        for reason in _detect_kv_connection_string_hits(jdbc_inner, connection_context=context):
+            _maybe_add_reason(reasons, reason)
+        return reasons
+    if "://" in cleaned:
+        return _analyze_url_candidate(cleaned, connection_context=context)
+    return []
+
+
+def _detect_connection_and_default_hits(cleaned: str) -> list[str]:
+    reasons: list[str] = []
+    usernames: list[str] = []
+    passwords: list[str] = []
+    has_connection_context = False
+
+    for reason in _detect_connection_value_hits(cleaned, from_flag=False):
+        _maybe_add_reason(reasons, reason)
+
+    for match in _TEXT_GENERIC_KV_RE.finditer(cleaned):
+        start = match.start(1)
+        if start > 0 and cleaned[start - 1] in {"-", "/"}:
+            continue
+        key = str(match.group(1) or "")
+        value = _clean_value_text(str(match.group(2) or ""))
+        if _key_looks_connection(key):
+            has_connection_context = True
+            for reason in _detect_connection_value_hits(value, from_flag=False):
+                _maybe_add_reason(reasons, reason)
+        if _key_looks_username(key) and _value_looks_secret(value):
+            usernames.append(value)
+        if _key_looks_sensitive(key) and (_value_looks_secret(value) or value == ""):
+            passwords.append(value)
+
+    for match in _CMD_FLAG_GENERIC_RE.finditer(cleaned):
+        key = str(match.group(1) or "")
+        value = _clean_value_text(str(match.group(2) or ""))
+        if _key_looks_connection(key):
+            has_connection_context = True
+            for reason in _detect_connection_value_hits(value, from_flag=True):
+                _maybe_add_reason(reasons, reason)
+        if _key_looks_username(key) and _value_looks_secret(value):
+            usernames.append(value)
+        if _key_looks_sensitive(key) and (_value_looks_secret(value) or value == ""):
+            passwords.append(value)
+
+    if has_connection_context and usernames and passwords:
+        _maybe_add_reason(reasons, "connection_string_auth")
+
+    for username in usernames:
+        for password in passwords:
+            if _is_known_default_pair(username, password):
+                _maybe_add_reason(reasons, "default_creds_known_pair")
+                return reasons
     return reasons
 
 
 def _collect_json_hits(payload: Any, path: str = "") -> list[str]:
     hits: list[str] = []
     if isinstance(payload, dict):
-        username_candidates: list[str] = []
+        username_candidates: list[tuple[str, Any]] = []
+        sensitive_candidates: list[tuple[str, Any]] = []
         found_sensitive_in_object = False
         for key, value in payload.items():
             key_text = str(key)
             sub_path = f"{path}.{key_text}" if path else key_text
             if _key_looks_sensitive(key_text) and _value_looks_secret(value):
                 _maybe_add_reason(hits, sub_path)
+                sensitive_candidates.append((sub_path, value))
                 found_sensitive_in_object = True
             if _key_looks_username(key_text) and _value_looks_secret(value):
-                username_candidates.append(sub_path)
+                username_candidates.append((sub_path, value))
             if isinstance(value, str):
-                for reason in _detect_hits_in_text(value):
+                if _key_looks_connection(key_text):
+                    reasons = _detect_connection_value_hits(value, from_flag=False)
+                else:
+                    reasons = _detect_hits_in_text(value)
+                for reason in reasons:
                     _maybe_add_reason(hits, f"{sub_path}:{reason}")
             hits.extend(_collect_json_hits(value, sub_path))
         if found_sensitive_in_object:
-            for username_path in username_candidates:
+            for username_path, _username_value in username_candidates:
                 _maybe_add_reason(hits, username_path)
+            for _username_path, username_value in username_candidates:
+                for sensitive_path, sensitive_value in sensitive_candidates:
+                    if _is_known_default_pair(username_value, sensitive_value):
+                        _maybe_add_reason(hits, f"{sensitive_path}:default_creds_known_pair")
+                        break
         return hits
     if isinstance(payload, list):
         for idx, value in enumerate(payload):
@@ -324,6 +583,10 @@ def _detect_hits_in_text(line: str) -> list[str]:
     if "[CRED]" in line_upper:
         _maybe_add_reason(reasons, "cred_marker")
 
+    connection_reasons = _detect_connection_and_default_hits(cleaned)
+    for reason in connection_reasons:
+        _maybe_add_reason(reasons, reason)
+
     for match in _TEXT_KV_RE.finditer(cleaned):
         key = str(match.group(1) or "").lower()
         value = _clean_value_text(str(match.group(2) or ""))
@@ -336,16 +599,19 @@ def _detect_hits_in_text(line: str) -> list[str]:
         if _value_looks_secret(value):
             _maybe_add_reason(reasons, f"flag_{key}")
 
-    for reason in _detect_url_based_hits(cleaned):
-        _maybe_add_reason(reasons, reason)
+    if not connection_reasons:
+        for reason in _detect_url_based_hits(cleaned):
+            _maybe_add_reason(reasons, reason)
 
     for match in _AUTH_BASIC_RE.finditer(cleaned):
         decoded = _safe_decode_basic(str(match.group(1) or ""))
         if not decoded or ":" not in decoded:
             continue
-        _, password = decoded.split(":", 1)
-        if _value_looks_secret(password):
+        username, password = decoded.split(":", 1)
+        if _value_looks_secret(password) or _is_known_default_pair(username, password):
             _maybe_add_reason(reasons, "authorization_basic")
+            if _is_known_default_pair(username, password):
+                _maybe_add_reason(reasons, "default_creds_known_pair")
 
     for match in _AUTH_BEARER_RE.finditer(cleaned):
         token = _clean_value_text(str(match.group(1) or ""))

@@ -200,6 +200,270 @@ def test_validate_records_detects_url_basic_auth_without_explicit_keys() -> None
     assert rc == 1
 
 
+def test_validate_records_detects_cmd_connection_string_for_elastic(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.10",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--es.uri=https://elastic:password@elastic.mydomain.local\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "cmd_connection_string_auth" in output
+    assert "default_creds_known_pair" in output
+
+
+def test_validate_records_detects_postgres_data_source_name_default_pair(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    records = [
+        {
+            "host": "10.0.0.11",
+            "port": 9187,
+            "exporter": "postgres_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "DATA_SOURCE_NAME=postgresql://postgres:postgres@db.local/app\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "connection_string_auth" in output
+    assert "default_creds_known_pair" in output
+
+
+def test_validate_records_detects_mongodb_uri_default_pair(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.12",
+            "port": 9216,
+            "exporter": "mongodb_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--mongodb.uri=mongodb://root:root@mongo.local/admin\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "cmd_connection_string_auth" in output
+    assert "default_creds_known_pair" in output
+
+
+def test_validate_records_detects_rabbit_url_default_pair(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.13",
+            "port": 9419,
+            "exporter": "rabbitmq_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--rabbit.url=http://guest:guest@rabbit.local:15672\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "cmd_connection_string_auth" in output
+    assert "default_creds_known_pair" in output
+
+
+def test_validate_records_detects_json_connection_string_field(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.14",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/vars",
+            "body": '{"es.uri":"https://elastic:password@elastic.mydomain.local"}\n',
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "es.uri:connection_string_auth" in output
+    assert "es.uri:default_creds_known_pair" in output
+
+
+def test_validate_records_detects_basic_auth_known_default_pair(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.15",
+            "port": 9419,
+            "exporter": "rabbitmq_exporter",
+            "endpoint": "/debug/vars",
+            "body": "Authorization: Basic Z3Vlc3Q6Z3Vlc3Q=\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "authorization_basic" in output
+    assert "default_creds_known_pair" in output
+
+
+def test_validate_records_ignores_non_secret_connection_string_without_auth() -> None:
+    records = [
+        {
+            "host": "10.0.0.16",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--es.uri=https://elastic.mydomain.local\n",
+        }
+    ]
+
+    rc = run_validation_records(records, fail_on_creds=True)
+    assert rc == 0
+
+
+def test_validate_records_does_not_flag_unknown_default_like_pair(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.17",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--es.uri=https://elastic:changeme@elastic.mydomain.local\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "cmd_connection_string_auth" in output
+    assert "default_creds_known_pair" not in output
+
+
+def test_validate_records_detects_sqlalchemy_connection_string(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.18",
+            "port": 9187,
+            "exporter": "postgres_exporter",
+            "endpoint": "/debug/vars",
+            "body": "sqlalchemy.url=postgresql+psycopg2://postgres:postgres@db.local/app\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "connection_string_auth" in output
+    assert "default_creds_known_pair" in output
+
+
+def test_validate_records_detects_jdbc_query_credentials(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.19",
+            "port": 9187,
+            "exporter": "postgres_exporter",
+            "endpoint": "/debug/vars",
+            "body": "jdbc:postgresql://db.local/app?user=postgres&password=postgres\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "connection_string_query_secret" in output
+    assert "default_creds_known_pair" in output
+
+
+def test_validate_records_detects_jdbc_sqlserver_semicolon_dsn(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.20",
+            "port": 9399,
+            "exporter": "sql_exporter",
+            "endpoint": "/debug/vars",
+            "body": "jdbc:sqlserver://sql.local:1433;user=sa;password=Sup3rS3cret!2026;databaseName=master\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "connection_string_auth" in output
+
+
+def test_validate_records_detects_semicolon_server_user_id_password_dsn(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    records = [
+        {
+            "host": "10.0.0.21",
+            "port": 9399,
+            "exporter": "sql_exporter",
+            "endpoint": "/debug/vars",
+            "body": "Server=tcp:sql.local,1433;User ID=sa;Password=Sup3rS3cret!2026;Database=master\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "connection_string_auth" in output
+
+
+def test_validate_records_detects_libpq_keyword_dsn(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.22",
+            "port": 9187,
+            "exporter": "postgres_exporter",
+            "endpoint": "/debug/vars",
+            "body": "host=db.local port=5432 dbname=app user=postgres password=postgres\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "connection_string_auth" in output
+    assert "default_creds_known_pair" in output
+
+
+def test_validate_records_detects_mysql_tcp_style_dsn(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.23",
+            "port": 9104,
+            "exporter": "mysqld_exporter",
+            "endpoint": "/debug/vars",
+            "body": "root:root@tcp(db.local:3306)/app\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "connection_string_auth" in output
+    assert "default_creds_known_pair" in output
+
+
 @pytest.mark.parametrize(
     ("exporter", "display"),
     [
