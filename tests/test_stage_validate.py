@@ -172,6 +172,34 @@ def test_validate_jsonl_file_in_json_mode(tmp_path: Path) -> None:
     assert rc == 1
 
 
+def test_validate_records_detects_pgpass_line_without_keywords() -> None:
+    records = [
+        {
+            "host": "10.0.0.8",
+            "port": 9187,
+            "exporter": "postgres_exporter",
+            "endpoint": "/debug/vars",
+            "body": "db.local:5432:appdb:metrics:Sup3rS3cret2026\n",
+        }
+    ]
+    rc = run_validation_records(records, fail_on_creds=True)
+    assert rc == 1
+
+
+def test_validate_records_detects_url_basic_auth_without_explicit_keys() -> None:
+    records = [
+        {
+            "host": "10.0.0.9",
+            "port": 9115,
+            "exporter": "blackbox_exporter",
+            "endpoint": "/debug/vars",
+            "body": "https://metrics_user:Sup3rS3cret!2026@metrics.internal/probe\n",
+        }
+    ]
+    rc = run_validation_records(records, fail_on_creds=True)
+    assert rc == 1
+
+
 @pytest.mark.parametrize(
     ("exporter", "display"),
     [

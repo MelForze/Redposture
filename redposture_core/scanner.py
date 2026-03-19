@@ -61,6 +61,11 @@ _EXPORTER_DISPLAY_NAMES = {
 _COLLECT_PPROF_PREFLIGHT_MAX_TARGETS = 1000
 _HTTP_POOL_MAX_IDLE_TOTAL = 512
 _HTTP_POOL_MAX_IDLE_PER_HOST = 4
+_WEAK_CANDIDATE_CONFIDENCE_SCORE = 50
+_PROMETHEUS_METRIC_LINE_RE = re.compile(
+    r"(?m)^[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[^{}\n]*\})?\s+"
+    r"(?:[+-]?(?:Inf|NaN|(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?))\s*$"
+)
 
 
 class _HTTPConnectionPool:
@@ -248,6 +253,14 @@ def _exporter_display_name(value: str) -> str:
 def _retry_delay(attempt_index: int) -> float:
     # 0.20, 0.40, 0.80, ... capped to 1.50 seconds.
     return min(1.50, 0.20 * (2**attempt_index))
+
+
+def _looks_like_prometheus_metrics(body: str) -> bool:
+    if not body:
+        return False
+    if "# HELP " in body or "# TYPE " in body:
+        return True
+    return _PROMETHEUS_METRIC_LINE_RE.search(body) is not None
 
 
 def _unwrap_network_error(exc: BaseException) -> BaseException:
@@ -510,7 +523,7 @@ def _scan_presence_task(
     markers = tuple(str(item) for item in exporter["markers"])
     marker_hit = next((marker for marker in markers if marker in body), None)
 
-    is_prometheus_like = ("# HELP " in body) or ("# TYPE " in body)
+    is_prometheus_like = _looks_like_prometheus_metrics(body)
     is_http_ok = status is not None and int(status) < 400
     detected = bool(is_http_ok and (marker_hit or is_prometheus_like))
     detection_method = "marker" if marker_hit else ("metrics" if detected else "none")
@@ -599,12 +612,17 @@ def _needs_fingerprint_tiebreak(candidates: list[dict[str, Any]]) -> bool:
     top_strong = int(top.get("strong_count") or 0)
 
     if top_strong <= 0:
+        if len(candidates) <= 1:
+            return top_score < _WEAK_CANDIDATE_CONFIDENCE_SCORE
         return True
     if len(candidates) <= 1:
         return False
 
     second = candidates[1]
     second_score = int(second.get("score") or 0)
+    second_strong = int(second.get("strong_count") or 0)
+    if top_strong > second_strong and top_score > second_score:
+        return False
     if top_score == second_score:
         return True
     if (top_score - second_score) < 35:
@@ -677,14 +695,87 @@ def _resolve_best_exporter_candidate(
     ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
     top_fp, _top_hits, _top_metric, top_candidate = ranked[0]
     second_fp = ranked[1][0] if len(ranked) > 1 else -1
+    runner_up = candidates[1] if len(candidates) > 1 else None
+    top_metric_score = int(top_candidate.get("score") or 0)
+    top_metric_strong = int(top_candidate.get("strong_count") or 0)
+    second_metric_score = int(runner_up.get("score") or 0) if runner_up is not None else -1
+    second_metric_strong = int(runner_up.get("strong_count") or 0) if runner_up is not None else -1
 
     if top_fp <= 0:
+        if top_metric_strong > second_metric_strong and top_metric_score > second_metric_score:
+            return top_candidate, "marker", "marker_fallback_no_fingerprint"
         # Precision-first: unresolved conflict stays unknown.
         return None, "ambiguous", "ambiguous_no_fingerprint_hits"
     if top_fp == second_fp:
+        if top_metric_strong > second_metric_strong and top_metric_score > second_metric_score:
+            return top_candidate, "marker", "marker_fallback_fp_tie"
         return None, "ambiguous", "ambiguous_fingerprint_tie"
 
     return top_candidate, "fingerprint", "fingerprint_unique"
+
+
+def _resolve_fingerprint_only_candidate(
+    *,
+    host: str,
+    port: int,
+    exporters: list[dict[str, Any]],
+    timeout: float,
+    retries: int,
+) -> tuple[dict[str, Any] | None, str, str]:
+    if not exporters:
+        return None, "none", "no_exporters"
+
+    vars_body, cmdline_body = _fetch_fingerprint_bodies(host, port, timeout, retries)
+    ranked: list[tuple[int, int, str]] = []
+    for exporter in exporters:
+        exporter_name = str(exporter.get("name") or "").strip()
+        if not exporter_name:
+            continue
+        fp_score, fp_hits = _score_fingerprint_candidate(exporter, vars_body, cmdline_body)
+        if fp_score <= 0:
+            continue
+        ranked.append((fp_score, fp_hits, exporter_name))
+
+    if not ranked:
+        return None, "none", "no_fingerprint_hits"
+
+    ranked.sort(reverse=True)
+    top_score, top_hits, top_name = ranked[0]
+    second = ranked[1] if len(ranked) > 1 else None
+    if second is not None and (top_score, top_hits) == second[:2]:
+        return None, "ambiguous", "ambiguous_fingerprint_only_tie"
+
+    return (
+        {
+            "name": top_name,
+            "score": 0,
+            "strong_count": 0,
+            "weak_count": 0,
+            "negative_count": 0,
+            "marker_hit": None,
+        },
+        "fingerprint",
+        "fingerprint_only",
+    )
+
+
+def _resolve_prometheus_port_fallback(exporters: list[dict[str, Any]]) -> dict[str, Any] | None:
+    unique_names: list[str] = []
+    for exporter in exporters:
+        exporter_name = str(exporter.get("name") or "").strip()
+        if not exporter_name or exporter_name in unique_names:
+            continue
+        unique_names.append(exporter_name)
+    if len(unique_names) != 1:
+        return None
+    return {
+        "name": unique_names[0],
+        "score": 0,
+        "strong_count": 0,
+        "weak_count": 0,
+        "negative_count": 0,
+        "marker_hit": None,
+    }
 
 
 def _scan_presence_port_task(
@@ -700,6 +791,7 @@ def _scan_presence_port_task(
     status = result["status"]
     body = str(result["body"] or "")
     is_http_ok = status is not None and int(status) < 400
+    is_prometheus_like = _looks_like_prometheus_metrics(body)
     if not is_http_ok:
         record = {
             "timestamp": utc_now_iso(),
@@ -739,14 +831,30 @@ def _scan_presence_port_task(
         ),
         reverse=True,
     )
-    winner, method, resolution = _resolve_best_exporter_candidate(
-        host=host,
-        port=port,
-        candidates=candidates,
-        exporters_by_name=exporters_by_name,
-        timeout=timeout,
-        retries=retries,
-    )
+    if candidates:
+        winner, method, resolution = _resolve_best_exporter_candidate(
+            host=host,
+            port=port,
+            candidates=candidates,
+            exporters_by_name=exporters_by_name,
+            timeout=timeout,
+            retries=retries,
+        )
+    elif is_prometheus_like:
+        winner, method, resolution = _resolve_fingerprint_only_candidate(
+            host=host,
+            port=port,
+            exporters=exporters,
+            timeout=timeout,
+            retries=retries,
+        )
+        if winner is None:
+            winner = _resolve_prometheus_port_fallback(exporters)
+            if winner is not None:
+                method = "metrics"
+                resolution = "prometheus_unique_port_fallback"
+    else:
+        winner, method, resolution = None, "none", "no_markers"
 
     detected = winner is not None
     exporter_name = str((winner or {}).get("name") or "unknown")
