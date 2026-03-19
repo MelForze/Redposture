@@ -251,7 +251,7 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         "--workers",
         dest="workers",
         type=_positive_int,
-        default=10,
+        default=50,
         metavar="count",
         help="Worker threads used for parallel network checks.",
     )

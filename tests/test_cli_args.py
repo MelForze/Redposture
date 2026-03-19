@@ -155,7 +155,7 @@ def test_trigger_rejects_old_selfcert_flag() -> None:
 
 def test_scan_workers_and_retries_defaults() -> None:
     args = parse_args(["exporters", "scan", "-t", "10.0.0.1"])
-    assert args.workers == 10
+    assert args.workers == 50
     assert args.retries == 3
 
 

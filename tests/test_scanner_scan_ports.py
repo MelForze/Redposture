@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from redposture_core.scanner import scan_exporter_presence
 
 
 def test_scan_exporter_presence_detects_known_exporter_on_custom_port(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         if ":19400/" in url:
             return {
                 "status": 200,
@@ -54,7 +56,7 @@ def test_scan_exporter_presence_detects_known_exporter_on_custom_port(monkeypatc
 
 
 def test_scan_exporter_presence_classifies_by_markers_not_expected_port(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         if ":9100/" in url:
             return {
                 "status": 200,
@@ -125,7 +127,7 @@ def test_scan_exporter_presence_classifies_by_markers_not_expected_port(monkeypa
 def test_scan_exporter_presence_detects_new_exporters_by_marker(
     monkeypatch, exporter_name: str, marker: str, port: int
 ) -> None:  # type: ignore[no-untyped-def]
-    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         if f":{port}/" in url:
             return {
                 "status": 200,
@@ -204,3 +206,80 @@ def test_scan_exporter_presence_detects_new_exporters_by_marker(
     assert len(hits) == 1
     assert hits[0]["exporter"] == exporter_name
     assert hits[0]["port"] == port
+
+
+def test_scan_exporter_presence_passes_body_limit_to_metrics_requests(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    requested_limits: list[object] = []
+
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
+        _ = (url, timeout, retries)
+        requested_limits.append(kwargs.get("max_bytes"))
+        return {
+            "status": 200,
+            "body": "# HELP redis_exporter_build_info info\nredis_exporter_build_info 1\n",
+            "content_type": "text/plain; version=0.0.4",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    checks, found, by_host = scan_exporter_presence(
+        hosts=["127.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        logger=None,
+        emit_line=None,
+        workers=1,
+        retries=0,
+        discovery_exporters=[{"name": "redis_exporter", "port": 9121, "markers": ("redis_exporter_build_info",)}],
+        custom_ports=[9121],
+    )
+
+    assert checks == 1
+    assert found == 1
+    assert by_host["127.0.0.1"][0]["exporter"] == "redis_exporter"
+    assert requested_limits == [256 * 1024]
+
+
+def test_scan_exporter_presence_handles_unexpected_task_exception(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
+        _ = (timeout, retries, kwargs)
+        if ":19410/" in url:
+            raise RuntimeError("boom")
+        return {
+            "status": 200,
+            "body": "# HELP postgres_exporter_build_info info\npostgres_exporter_build_info 1\n",
+            "content_type": "text/plain; version=0.0.4",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    lines: list[str] = []
+    checks, found, by_host = scan_exporter_presence(
+        hosts=["127.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        logger=None,
+        emit_line=lines.append,
+        workers=2,
+        retries=0,
+        discovery_exporters=[{"name": "postgres_exporter", "port": 9187, "markers": ("postgres_exporter_build_info",)}],
+        custom_ports=[19410, 19411],
+        show_progress=False,
+    )
+
+    assert checks == 2
+    assert found == 1
+    assert by_host["127.0.0.1"][0]["port"] == 19411
+
+    records = [json.loads(line) for line in lines if line.strip()]
+    failed = next(item for item in records if item.get("port") == 19410)
+    assert failed["detected"] is False
+    assert failed["error"] == "boom"

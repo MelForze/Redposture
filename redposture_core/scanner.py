@@ -61,6 +61,9 @@ _EXPORTER_DISPLAY_NAMES = {
 _COLLECT_PPROF_PREFLIGHT_MAX_TARGETS = 1000
 _HTTP_POOL_MAX_IDLE_TOTAL = 512
 _HTTP_POOL_MAX_IDLE_PER_HOST = 4
+_SCAN_MAX_INFLIGHT_FACTOR = 8
+_SCAN_RESPONSE_BODY_MAX_BYTES = 256 * 1024
+_SCAN_FINGERPRINT_BODY_MAX_BYTES = 128 * 1024
 _WEAK_CANDIDATE_CONFIDENCE_SCORE = 50
 _PROMETHEUS_METRIC_LINE_RE = re.compile(
     r"(?m)^[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[^{}\n]*\})?\s+"
@@ -154,7 +157,13 @@ class _HTTPConnectionPool:
             bucket.append(conn)
             self._idle_total += 1
 
-    def get(self, url: str, timeout: float) -> tuple[int | None, bytes, str | None, BaseException | None]:
+    def get(
+        self,
+        url: str,
+        timeout: float,
+        *,
+        max_bytes: int | None = None,
+    ) -> tuple[int | None, bytes, str | None, BaseException | None, bool]:
         host, port, path = self._target_from_url(url)
         conn = self._acquire(host, port, timeout)
         reusable = False
@@ -168,11 +177,18 @@ class _HTTPConnectionPool:
                 },
             )
             response = conn.getresponse()
-            raw = response.read()
+            truncated = False
+            if max_bytes is None:
+                raw = response.read()
+            else:
+                raw = response.read(max_bytes + 1)
+                truncated = len(raw) > max_bytes
+                if truncated:
+                    raw = raw[:max_bytes]
             reusable = not response.will_close
-            return int(response.status), raw, response.getheader("Content-Type"), None
+            return int(response.status), raw, response.getheader("Content-Type"), None, truncated
         except Exception as exc:
-            return None, b"", None, exc
+            return None, b"", None, exc, False
         finally:
             self._release(host, port, conn, reusable)
 
@@ -271,6 +287,27 @@ def _unwrap_network_error(exc: BaseException) -> BaseException:
     return exc
 
 
+def _pool_get_compat(
+    pool: Any,
+    url: str,
+    timeout: float,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[int | None, bytes, str | None, BaseException | None, bool]:
+    try:
+        result = pool.get(url, timeout, max_bytes=max_bytes)
+    except TypeError:
+        result = pool.get(url, timeout)
+
+    if isinstance(result, tuple) and len(result) == 4:
+        status, raw, content_type, error = result
+        return status, raw, content_type, error, False
+    if isinstance(result, tuple) and len(result) == 5:
+        status, raw, content_type, error, truncated = result
+        return status, raw, content_type, error, bool(truncated)
+    raise ValueError("invalid pooled HTTP response tuple")
+
+
 def _should_retry_http_exception(exc: BaseException) -> bool:
     root = _unwrap_network_error(exc)
     if isinstance(root, (TimeoutError, socket.timeout)):
@@ -333,7 +370,7 @@ def http_get_text(url: str, timeout: float, retries: int = 1) -> tuple[int, str]
     if pool is not None:
         attempts = max(1, retries + 1)
         for attempt in range(attempts):
-            status, raw, _content_type, error = pool.get(url, timeout)
+            status, raw, _content_type, error, _truncated = _pool_get_compat(pool, url, timeout)
             if error is None:
                 body = raw.decode("utf-8", errors="replace")
                 return int(status or 0), body
@@ -363,13 +400,18 @@ def http_get_text(url: str, timeout: float, retries: int = 1) -> tuple[int, str]
     raise RuntimeError("unreachable")
 
 
-def http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, Any]:
+def http_get_details(url: str, timeout: float, retries: int = 1, *, max_bytes: int | None = None) -> dict[str, Any]:
     pool = _ACTIVE_HTTP_POOL
     if pool is not None:
         attempts = max(1, retries + 1)
         for attempt in range(attempts):
             started = time.monotonic()
-            status, raw, content_type, error = pool.get(url, timeout)
+            status, raw, content_type, error, truncated = _pool_get_compat(
+                pool,
+                url,
+                timeout,
+                max_bytes=max_bytes,
+            )
             elapsed_ms = int((time.monotonic() - started) * 1000)
             if error is None:
                 body = raw.decode("utf-8", errors="replace")
@@ -378,7 +420,7 @@ def http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, An
                     "body": body,
                     "content_type": content_type,
                     "elapsed_ms": elapsed_ms,
-                    "truncated": False,
+                    "truncated": truncated,
                     "error": None,
                 }
             should_retry = _should_retry_http_exception(error) or isinstance(
@@ -403,7 +445,14 @@ def http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, An
         started = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as response:
-                raw = response.read()
+                truncated = False
+                if max_bytes is None:
+                    raw = response.read()
+                else:
+                    raw = response.read(max_bytes + 1)
+                    truncated = len(raw) > max_bytes
+                    if truncated:
+                        raw = raw[:max_bytes]
                 elapsed_ms = int((time.monotonic() - started) * 1000)
                 body = raw.decode("utf-8", errors="replace")
                 return {
@@ -411,11 +460,18 @@ def http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, An
                     "body": body,
                     "content_type": response.headers.get("Content-Type"),
                     "elapsed_ms": elapsed_ms,
-                    "truncated": False,
+                    "truncated": truncated,
                     "error": None,
                 }
         except urllib.error.HTTPError as exc:
-            raw = exc.read()
+            truncated = False
+            if max_bytes is None:
+                raw = exc.read()
+            else:
+                raw = exc.read(max_bytes + 1)
+                truncated = len(raw) > max_bytes
+                if truncated:
+                    raw = raw[:max_bytes]
             elapsed_ms = int((time.monotonic() - started) * 1000)
             body = raw.decode("utf-8", errors="replace")
             return {
@@ -423,7 +479,7 @@ def http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, An
                 "body": body,
                 "content_type": exc.headers.get("Content-Type") if exc.headers else None,
                 "elapsed_ms": elapsed_ms,
-                "truncated": False,
+                "truncated": truncated,
                 "error": None,
             }
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
@@ -507,6 +563,25 @@ def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) 
         emit_line(line)
 
 
+def _build_scan_error_record(host: str, port: int, error: BaseException) -> dict[str, Any]:
+    return {
+        "timestamp": utc_now_iso(),
+        "host": host,
+        "exporter": "unknown",
+        "port": port,
+        "url": f"http://{host}:{port}/metrics",
+        "detected": False,
+        "method": "none",
+        "status": None,
+        "marker_hit": None,
+        "elapsed_ms": 0,
+        "content_type": None,
+        "error": str(error),
+        "truncated": False,
+        "body": "",
+    }
+
+
 def _scan_presence_task(
     host: str,
     exporter: dict[str, Any],
@@ -516,7 +591,7 @@ def _scan_presence_task(
     exporter_name = str(exporter["name"])
     port = int(exporter["port"])
     url = f"http://{host}:{port}/metrics"
-    result = http_get_details(url, timeout=timeout, retries=retries)
+    result = http_get_details(url, timeout=timeout, retries=retries, max_bytes=_SCAN_RESPONSE_BODY_MAX_BYTES)
 
     status = result["status"]
     body = str(result["body"] or "")
@@ -638,11 +713,17 @@ def _select_fingerprint_candidates(candidates: list[dict[str, Any]]) -> list[dic
 
 
 def _fetch_fingerprint_bodies(host: str, port: int, timeout: float, retries: int) -> tuple[str, str]:
-    vars_result = http_get_details(f"http://{host}:{port}/debug/vars", timeout=timeout, retries=retries)
+    vars_result = http_get_details(
+        f"http://{host}:{port}/debug/vars",
+        timeout=timeout,
+        retries=retries,
+        max_bytes=_SCAN_FINGERPRINT_BODY_MAX_BYTES,
+    )
     cmdline_result = http_get_details(
         f"http://{host}:{port}/debug/pprof/cmdline?debug=1",
         timeout=timeout,
         retries=retries,
+        max_bytes=_SCAN_FINGERPRINT_BODY_MAX_BYTES,
     )
     vars_body = str(vars_result.get("body") or "") if (vars_result.get("status") or 0) < 400 else ""
     cmdline_body = str(cmdline_result.get("body") or "") if (cmdline_result.get("status") or 0) < 400 else ""
@@ -786,7 +867,7 @@ def _scan_presence_port_task(
     retries: int,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     url = f"http://{host}:{port}/metrics"
-    result = http_get_details(url, timeout=timeout, retries=retries)
+    result = http_get_details(url, timeout=timeout, retries=retries, max_bytes=_SCAN_RESPONSE_BODY_MAX_BYTES)
 
     status = result["status"]
     body = str(result["body"] or "")
@@ -1322,6 +1403,9 @@ def scan_exporter_presence(
     total_checks = 0
     total_found = 0
     found_by_host: dict[str, list[dict[str, Any]]] = {host: [] for host in hosts}
+    work_items = [(host, port) for host in hosts for port in ports]
+    max_workers = max(1, workers)
+    max_inflight = max(max_workers, max_workers * _SCAN_MAX_INFLIGHT_FACTOR)
 
     out_fh: Any = None
     if output_path:
@@ -1329,38 +1413,51 @@ def scan_exporter_presence(
         out_fh = open(output_path, "w", encoding="utf-8")
 
     try:
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            future_map = {
-                executor.submit(_scan_presence_port_task, host, port, exporters, timeout, retries): (host, port)
-                for host in hosts
-                for port in ports
-            }
+        progress = ProgressBar("SCAN", len(work_items), enabled=show_progress, leave=progress_leave)
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                pending: dict[Future[Any], tuple[str, int]] = {}
+                work_queue: deque[tuple[str, int]] = deque(work_items)
 
-            for future in iter_completed_with_progress(
-                future_map,
-                label="SCAN",
-                enabled=show_progress,
-                leave=progress_leave,
-            ):
-                record, hit = future.result()
-                total_checks += 1
-                if hit is not None:
-                    total_found += 1
-                    found_by_host[str(record["host"])].append(hit)
+                while work_queue or pending:
+                    while work_queue and len(pending) < max_inflight:
+                        host, port = work_queue.popleft()
+                        future = executor.submit(_scan_presence_port_task, host, port, exporters, timeout, retries)
+                        pending[future] = (host, port)
 
-                _emit_line(out_fh, emit_line, _format_scan_record(record, output_format))
+                    if not pending:
+                        continue
 
-                if logger is not None:
-                    logger.log(
-                        "scan",
-                        (str(record["host"]), int(record["port"])),
-                        exporter=str(record["exporter"]),
-                        detected=bool(record["detected"]),
-                        method=str(record["method"]),
-                        status=record["status"],
-                        error=record["error"],
-                        output=output_path,
-                    )
+                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        host, port = pending.pop(future)
+                        try:
+                            record, hit = future.result()
+                        except Exception as exc:
+                            record, hit = _build_scan_error_record(host, port, exc), None
+
+                        total_checks += 1
+                        if hit is not None:
+                            total_found += 1
+                            found_by_host[str(record["host"])].append(hit)
+
+                        progress.pause_for_output()
+                        _emit_line(out_fh, emit_line, _format_scan_record(record, output_format))
+                        progress.advance()
+
+                        if logger is not None:
+                            logger.log(
+                                "scan",
+                                (str(record["host"]), int(record["port"])),
+                                exporter=str(record["exporter"]),
+                                detected=bool(record["detected"]),
+                                method=str(record["method"]),
+                                status=record["status"],
+                                error=record["error"],
+                                output=output_path,
+                            )
+        finally:
+            progress.close()
 
         if emit_summary:
             summary = {
