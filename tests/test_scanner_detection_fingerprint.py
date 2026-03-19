@@ -6,7 +6,7 @@ from redposture_core.scanner import scan_exporter_presence
 def test_scan_uses_metrics_only_for_clear_winner(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     called_urls: list[str] = []
 
-    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         _ = (timeout, retries)
         called_urls.append(url)
         if "/debug/vars" in url or "/debug/pprof/cmdline" in url:
@@ -68,7 +68,7 @@ def test_scan_uses_metrics_only_for_clear_winner(monkeypatch) -> None:  # type: 
 def test_scan_uses_fingerprint_tiebreak_for_conflicting_markers(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     called_urls: list[str] = []
 
-    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         _ = (timeout, retries)
         called_urls.append(url)
         if url.endswith("/metrics"):
@@ -157,7 +157,7 @@ def test_scan_uses_fingerprint_tiebreak_for_conflicting_markers(monkeypatch) -> 
 
 
 def test_scan_returns_unknown_for_unresolved_conflict(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         _ = (timeout, retries)
         if url.endswith("/metrics"):
             return {
@@ -224,7 +224,7 @@ def test_scan_returns_unknown_for_unresolved_conflict(monkeypatch) -> None:  # t
 def test_scan_uses_marker_fallback_when_top_candidate_has_stronger_metrics(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     called_urls: list[str] = []
 
-    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         _ = (timeout, retries)
         called_urls.append(url)
         if url.endswith("/metrics"):
@@ -298,7 +298,7 @@ def test_scan_uses_marker_fallback_when_top_candidate_has_stronger_metrics(monke
 def test_scan_detects_single_weak_candidate_without_fingerprint_endpoints(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     called_urls: list[str] = []
 
-    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         _ = (timeout, retries)
         called_urls.append(url)
         if "/debug/vars" in url or "/debug/pprof/cmdline" in url:
@@ -352,7 +352,7 @@ def test_scan_uses_fingerprint_only_when_metrics_are_generic_but_cmdline_identif
 ) -> None:  # type: ignore[no-untyped-def]
     called_urls: list[str] = []
 
-    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         _ = (timeout, retries)
         called_urls.append(url)
         if url.endswith("/metrics"):
@@ -434,7 +434,7 @@ def test_scan_uses_fingerprint_only_when_metrics_are_generic_but_cmdline_identif
 
 
 def test_scan_uses_unique_port_fallback_for_generic_prometheus_metrics(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         _ = (timeout, retries)
         if url.endswith("/metrics"):
             return {
