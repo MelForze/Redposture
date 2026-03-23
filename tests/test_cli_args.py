@@ -33,6 +33,55 @@ def _command_help(command: str) -> str:
     return command_parser.format_help()
 
 
+def _help_option_line_index(help_text: str, option_line: str) -> int:
+    return help_text.find(f"\n  {option_line}")
+
+
+def test_postgres_help_groups_and_orders_flags() -> None:
+    help_text = _command_help("postgres")
+
+    auth_group_idx = help_text.find("\nDatabase / Auth:\n")
+    discovery_group_idx = help_text.find("\nDiscovery / Dump:\n")
+    exec_group_idx = help_text.find("\nExecute / Shell:\n")
+    assert auth_group_idx != -1
+    assert discovery_group_idx != -1
+    assert exec_group_idx != -1
+    assert auth_group_idx < discovery_group_idx < exec_group_idx
+
+    targets_idx = _help_option_line_index(help_text, "-t, --targets targets")
+    port_idx = _help_option_line_index(help_text, "--port port")
+    ports_idx = _help_option_line_index(help_text, "--ports ports")
+    output_idx = _help_option_line_index(help_text, "-o, --output file")
+    format_idx = _help_option_line_index(help_text, "-f, --format {json,txt}")
+    log_idx = _help_option_line_index(help_text, "-log, --log file")
+    debug_idx = _help_option_line_index(help_text, "--debug")
+    assert -1 not in {targets_idx, port_idx, ports_idx, output_idx, format_idx, log_idx, debug_idx}
+    assert targets_idx < port_idx < ports_idx < output_idx < format_idx < log_idx < debug_idx
+
+    username_idx = _help_option_line_index(help_text, "-u, --username name")
+    password_idx = _help_option_line_index(help_text, "-p, --password value")
+    defcreds_idx = _help_option_line_index(help_text, "--defcreds")
+    assert -1 not in {username_idx, password_idx, defcreds_idx}
+    assert username_idx < password_idx < defcreds_idx
+
+    show_databases_idx = _help_option_line_index(help_text, "--show-databases")
+    database_idx = _help_option_line_index(help_text, "--database name")
+    show_tables_idx = _help_option_line_index(help_text, "--show-tables")
+    table_idx = _help_option_line_index(help_text, "--table name")
+    show_columns_idx = _help_option_line_index(help_text, "--show-columns")
+    column_idx = _help_option_line_index(help_text, "--column name")
+    dump_idx = _help_option_line_index(help_text, "--dump")
+    assert -1 not in {show_databases_idx, show_tables_idx, table_idx, show_columns_idx, column_idx, dump_idx}
+    assert show_databases_idx < database_idx < show_tables_idx < table_idx < show_columns_idx < column_idx < dump_idx
+
+    execute_idx = _help_option_line_index(help_text, "-x, --execute")
+    sql_cmd_idx = _help_option_line_index(help_text, "--sql-cmd query")
+    os_shell_idx = _help_option_line_index(help_text, "--os-shell")
+    sql_shell_idx = _help_option_line_index(help_text, "--sql-shell")
+    assert -1 not in {execute_idx, sql_cmd_idx, os_shell_idx, sql_shell_idx}
+    assert execute_idx < os_shell_idx < sql_shell_idx < sql_cmd_idx
+
+
 def test_postgres_help_orders_show_columns_column_dump() -> None:
     help_text = _command_help("postgres")
     show_columns_idx = help_text.find("--show-columns")
@@ -42,6 +91,24 @@ def test_postgres_help_orders_show_columns_column_dump() -> None:
     assert column_idx != -1
     assert dump_idx != -1
     assert show_columns_idx < column_idx < dump_idx
+
+
+def test_postgres_help_shows_defaults_only_for_selected_flags() -> None:
+    help_text = _command_help("postgres")
+
+    assert "Network timeout in seconds. (default: 1.0)" in help_text
+    assert "Worker threads used for parallel network checks." in help_text
+    assert "(default: 50)" in help_text
+    assert "Retry attempts for network requests (with exponential" in help_text
+    assert "backoff). (default: 3)" in help_text
+    assert "Postgres audit output format for stdout/file." in help_text
+    assert "(default: txt)" in help_text
+
+    assert "Optional Postgres username for credential check. (default:" not in help_text
+    assert "Optional Postgres password for credential check. (default:" not in help_text
+    assert "Try default Postgres credentials postgres:postgres when auth is required. (default:" not in help_text
+    assert "Show readable table names in output after successful access/auth. (default:" not in help_text
+    assert "Interactive SQL mode (single target). (default:" not in help_text
 
 
 def test_clickhouse_help_orders_show_columns_column_dump() -> None:
@@ -1344,7 +1411,7 @@ def test_postgres_short_user_password_flags_are_parsed() -> None:
             "postgres",
             "-p",
             "postgres",
-            "-d",
+            "--database",
             "appdb",
             "--table",
             "public.users",
@@ -1394,6 +1461,18 @@ def test_postgres_debug_flag_is_long_only() -> None:
 
     args = parse_args(["postgres", "-t", "10.0.0.7", "--debug"])
     assert args.debug is True
+
+
+def test_postgres_rejects_short_database_flag() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["postgres", "-t", "10.0.0.7", "-d", "appdb"])
+    assert exc.value.code == 2
+
+
+def test_postgres_rejects_save_alias() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["postgres", "-t", "10.0.0.7", "--save", "postgres_audit.jsonl"])
+    assert exc.value.code == 2
 
 
 def test_clickhouse_flags_are_parsed() -> None:

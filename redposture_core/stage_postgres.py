@@ -904,6 +904,171 @@ def _pg_query_table_columns(
     return display_name, columns, None
 
 
+def _merge_query_error(current: str | None, new_error: str | None) -> str | None:
+    if not new_error:
+        return current
+    if not current:
+        return new_error
+    return f"{current}; {new_error}"
+
+
+def _pg_display_table_name(database_name: str | None, table_name: str) -> str:
+    clean_database = str(database_name or "").strip()
+    clean_table = str(table_name or "").strip()
+    if clean_database and clean_table:
+        return f"{clean_database}.{clean_table}"
+    return clean_table or "<unknown>"
+
+
+def _pg_collect_database_artifacts(
+    sock: socket.socket,
+    *,
+    database_name: str,
+    include_database_prefix: bool,
+    show_tables: bool,
+    show_columns: bool,
+    table_targets: list[str],
+    table_columns: list[str],
+    dump_table_rows: bool,
+) -> tuple[list[str] | None, list[dict[str, Any]], list[dict[str, Any]], int | None, str | None]:
+    query_error: str | None = None
+    raw_table_names: list[str] | None = None
+    table_names: list[str] | None = None
+
+    if show_tables or (dump_table_rows and not table_targets):
+        raw_table_names, table_error = _pg_query_readable_tables(sock)
+        query_error = _merge_query_error(query_error, table_error)
+        if show_tables and isinstance(raw_table_names, list):
+            if include_database_prefix:
+                table_names = [_pg_display_table_name(database_name, table_name) for table_name in raw_table_names]
+            else:
+                table_names = [str(table_name) for table_name in raw_table_names]
+
+    readable_tables = len(raw_table_names) if isinstance(raw_table_names, list) else None
+    table_columns_info: list[dict[str, Any]] = []
+    table_dumps: list[dict[str, Any]] = []
+    dump_targets: list[str] = table_targets if table_targets else (raw_table_names or [])
+    table_columns_map: dict[str, list[str]] = {}
+
+    should_collect_table_columns = bool(table_targets) and (show_columns or not dump_table_rows)
+    if should_collect_table_columns:
+        for table_name in table_targets:
+            columns_table, columns_rows, columns_error = _pg_query_table_columns(
+                sock,
+                table_name,
+                only_columns=table_columns if table_columns else None,
+            )
+            display_table = (
+                _pg_display_table_name(database_name, str(columns_table))
+                if include_database_prefix
+                else str(columns_table)
+            )
+            table_columns_info.append(
+                {
+                    "database": database_name,
+                    "table": display_table,
+                    "columns": columns_rows,
+                    "error": columns_error,
+                }
+            )
+            if isinstance(columns_rows, list) and columns_rows:
+                normalized_columns = [str(column) for column in columns_rows]
+                table_columns_map[table_name] = normalized_columns
+                table_columns_map[str(columns_table)] = normalized_columns
+
+    if dump_table_rows:
+        selected_dump_columns = [str(column) for column in table_columns] if table_columns else None
+        for table_name in dump_targets:
+            dump_columns = selected_dump_columns
+            if not dump_columns:
+                cached_columns = table_columns_map.get(table_name)
+                if cached_columns:
+                    dump_columns = list(cached_columns)
+                else:
+                    columns_table, columns_rows, columns_error = _pg_query_table_columns(sock, table_name)
+                    if columns_error:
+                        query_error = _merge_query_error(query_error, columns_error)
+                    if isinstance(columns_rows, list) and columns_rows:
+                        dump_columns = [str(column) for column in columns_rows]
+                        table_columns_map[table_name] = list(dump_columns)
+                        table_columns_map[str(columns_table)] = list(dump_columns)
+            dump_table, dump_rows, dump_error = _pg_query_table_rows(
+                sock,
+                table_name,
+                columns=table_columns if table_columns else None,
+            )
+            table_dumps.append(
+                {
+                    "database": database_name,
+                    "table": (
+                        _pg_display_table_name(database_name, str(dump_table))
+                        if include_database_prefix
+                        else str(dump_table)
+                    ),
+                    "columns": dump_columns,
+                    "rows": dump_rows,
+                    "error": dump_error,
+                }
+            )
+
+    return table_names, table_columns_info, table_dumps, readable_tables, query_error
+
+
+def _pg_collect_database_artifacts_remote(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    username: str,
+    password: str | None,
+    database_name: str,
+    *,
+    include_database_prefix: bool,
+    show_tables: bool,
+    show_columns: bool,
+    table_targets: list[str],
+    table_columns: list[str],
+    dump_table_rows: bool,
+) -> tuple[list[str] | None, list[dict[str, Any]], list[dict[str, Any]], int | None, str | None]:
+    attempts = max(1, retries + 1)
+    last_error: str | None = None
+    for attempt in range(attempts):
+        sock: socket.socket | None = None
+        try:
+            sock = socket.create_connection((host, port), timeout=timeout)
+            sock.settimeout(timeout)
+            _pg_startup_and_auth(sock, username=username, password=password, database=database_name)
+            result = _pg_collect_database_artifacts(
+                sock,
+                database_name=database_name,
+                include_database_prefix=include_database_prefix,
+                show_tables=show_tables,
+                show_columns=show_columns,
+                table_targets=table_targets,
+                table_columns=table_columns,
+                dump_table_rows=dump_table_rows,
+            )
+            try:
+                _pg_send_terminate(sock)
+            except Exception:
+                pass
+            return result
+        except _PgAuditError as exc:
+            return None, [], [], None, str(exc)
+        except (OSError, ValueError, ConnectionError) as exc:
+            last_error = str(exc)
+            if attempt >= attempts - 1:
+                break
+            time.sleep(_retry_delay(attempt))
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+    return None, [], [], None, last_error or "connection failed"
+
+
 def _audit_postgres_host(
     host: str,
     port: int,
@@ -912,7 +1077,7 @@ def _audit_postgres_host(
     username: str | None,
     password: str | None,
     defcreds: bool,
-    database: str,
+    database: str | None,
     show_databases: bool,
     show_tables: bool,
     show_columns: bool,
@@ -942,11 +1107,14 @@ def _audit_postgres_host(
             with socket.create_connection((host, port), timeout=timeout) as sock:
                 sock.settimeout(timeout)
 
+                target_database = str(database or "").strip() or None
+                startup_database = target_database or "postgres"
+
                 session = _pg_startup_and_auth(
                     sock,
                     username=effective_username,
                     password=effective_password,
-                    database=database,
+                    database=startup_database,
                 )
 
                 superuser, can_execute_commands, can_read_tables, readable_tables, query_error = (
@@ -956,70 +1124,98 @@ def _audit_postgres_host(
                 database_count = len(database_names_all) if isinstance(database_names_all, list) else None
                 database_names = database_names_all if show_databases and isinstance(database_names_all, list) else None
                 if show_databases and databases_error:
-                    if query_error:
-                        query_error = f"{query_error}; {databases_error}"
-                    else:
-                        query_error = databases_error
-                table_names: list[str] | None = None
-                if (show_tables or (dump_table_rows and not table_targets)) and can_read_tables is True:
-                    table_names, table_error = _pg_query_readable_tables(sock)
-                    if table_error:
-                        if query_error:
-                            query_error = f"{query_error}; {table_error}"
-                        else:
-                            query_error = table_error
+                    query_error = _merge_query_error(query_error, databases_error)
 
+                inspect_all_databases = (
+                    target_database is None and not table_targets and (show_tables or dump_table_rows)
+                )
+                if inspect_all_databases and isinstance(database_names_all, list) and database_names_all:
+                    inspection_databases = list(database_names_all)
+                    if startup_database not in inspection_databases:
+                        inspection_databases.insert(0, startup_database)
+                else:
+                    inspection_databases = [str(target_database or startup_database)]
+
+                deduped_inspection_databases: list[str] = []
+                seen_inspection_databases: set[str] = set()
+                for database_name in inspection_databases:
+                    candidate = str(database_name or "").strip()
+                    if not candidate or candidate in seen_inspection_databases:
+                        continue
+                    seen_inspection_databases.add(candidate)
+                    deduped_inspection_databases.append(candidate)
+                inspection_databases = deduped_inspection_databases or [startup_database]
+                include_database_prefix = len(inspection_databases) > 1
+
+                table_names: list[str] | None = None
                 table_columns_info: list[dict[str, Any]] = []
                 table_dumps: list[dict[str, Any]] = []
-                dump_targets: list[str] = table_targets if table_targets else (table_names or [])
-                table_columns_map: dict[str, list[str]] = {}
-                should_collect_table_columns = bool(table_targets) and (show_columns or not dump_table_rows)
-                if should_collect_table_columns:
-                    for table_name in table_targets:
-                        columns_table, columns_rows, columns_error = _pg_query_table_columns(
-                            sock,
-                            table_name,
-                            only_columns=table_columns if table_columns else None,
-                        )
-                        table_columns_info.append(
-                            {
-                                "table": columns_table,
-                                "columns": columns_rows,
-                                "error": columns_error,
-                            }
-                        )
-                        if isinstance(columns_rows, list) and columns_rows:
-                            normalized_columns = [str(column) for column in columns_rows]
-                            table_columns_map[table_name] = normalized_columns
-                            table_columns_map[str(columns_table)] = normalized_columns
+                aggregated_readable_tables = 0
+                aggregated_readable_known = False
+                used_current_session = False
 
-                if dump_table_rows:
-                    selected_dump_columns = [str(column) for column in table_columns] if table_columns else None
-                    for table_name in dump_targets:
-                        dump_columns = selected_dump_columns
-                        if not dump_columns:
-                            cached_columns = table_columns_map.get(table_name)
-                            if cached_columns:
-                                dump_columns = list(cached_columns)
-                            else:
-                                columns_table, columns_rows, _columns_error = _pg_query_table_columns(sock, table_name)
-                                if isinstance(columns_rows, list) and columns_rows:
-                                    dump_columns = [str(column) for column in columns_rows]
-                                    table_columns_map[table_name] = list(dump_columns)
-                                    table_columns_map[str(columns_table)] = list(dump_columns)
-                        dump_table, dump_rows, dump_error = _pg_query_table_rows(
+                for inspection_database in inspection_databases:
+                    if inspection_database == startup_database and not used_current_session:
+                        (
+                            database_table_names,
+                            database_columns_info,
+                            database_table_dumps,
+                            database_readable_tables,
+                            database_query_error,
+                        ) = _pg_collect_database_artifacts(
                             sock,
-                            table_name,
-                            columns=table_columns if table_columns else None,
+                            database_name=inspection_database,
+                            include_database_prefix=include_database_prefix,
+                            show_tables=show_tables,
+                            show_columns=show_columns,
+                            table_targets=table_targets,
+                            table_columns=table_columns,
+                            dump_table_rows=dump_table_rows,
                         )
-                        table_dumps.append(
-                            {
-                                "table": dump_table,
-                                "columns": dump_columns,
-                                "rows": dump_rows,
-                                "error": dump_error,
-                            }
+                        used_current_session = True
+                    else:
+                        (
+                            database_table_names,
+                            database_columns_info,
+                            database_table_dumps,
+                            database_readable_tables,
+                            database_query_error,
+                        ) = _pg_collect_database_artifacts_remote(
+                            host,
+                            port,
+                            timeout,
+                            retries,
+                            effective_username,
+                            effective_password,
+                            inspection_database,
+                            include_database_prefix=include_database_prefix,
+                            show_tables=show_tables,
+                            show_columns=show_columns,
+                            table_targets=table_targets,
+                            table_columns=table_columns,
+                            dump_table_rows=dump_table_rows,
                         )
+
+                    query_error = _merge_query_error(query_error, database_query_error)
+                    if isinstance(database_table_names, list):
+                        if table_names is None:
+                            table_names = []
+                        table_names.extend(database_table_names)
+                    if isinstance(database_columns_info, list) and database_columns_info:
+                        table_columns_info.extend(database_columns_info)
+                    if isinstance(database_table_dumps, list) and database_table_dumps:
+                        table_dumps.extend(database_table_dumps)
+                    if isinstance(database_readable_tables, int):
+                        aggregated_readable_tables += database_readable_tables
+                        aggregated_readable_known = True
+
+                if aggregated_readable_known:
+                    readable_tables = aggregated_readable_tables
+                    can_read_tables = aggregated_readable_tables > 0
+
+                dump_targets = (
+                    [str(item.get("table") or "") for item in table_dumps] if dump_table_rows else table_targets
+                )
 
                 execute_attempted = False
                 execute_ok: bool | None = None
@@ -1059,7 +1255,8 @@ def _audit_postgres_host(
                     "timestamp": utc_now_iso(),
                     "host": host,
                     "port": port,
-                    "database": database,
+                    "database": target_database or startup_database,
+                    "auth_database": startup_database,
                     "is_postgres": True,
                     "status": status,
                     "auth_required": session.auth_required,
@@ -1100,11 +1297,14 @@ def _audit_postgres_host(
                 }
 
         except _PgAuditError as exc:
+            target_database = str(database or "").strip() or None
+            startup_database = target_database or "postgres"
             return {
                 "timestamp": utc_now_iso(),
                 "host": host,
                 "port": port,
-                "database": database,
+                "database": target_database or startup_database,
+                "auth_database": startup_database,
                 "is_postgres": bool(exc.detected),
                 "status": "auth_required" if exc.detected and exc.auth_required else "fail",
                 "auth_required": exc.auth_required,
@@ -1154,7 +1354,8 @@ def _audit_postgres_host(
         "timestamp": utc_now_iso(),
         "host": host,
         "port": port,
-        "database": database,
+        "database": (str(database or "").strip() or None) or "postgres",
+        "auth_database": (str(database or "").strip() or None) or "postgres",
         "is_postgres": False,
         "status": "fail",
         "auth_required": None,
@@ -1332,7 +1533,7 @@ def _format_table_columns_detail_records(record: dict[str, Any], output_format: 
                         "service": "postgres",
                         "host": record.get("host"),
                         "port": record.get("port"),
-                        "database": record.get("database"),
+                        "database": item.get("database") or record.get("database"),
                         "table": str(item.get("table") or ""),
                         "columns": [str(column) for column in item.get("columns") or []],
                         "error": str(item.get("error")) if item.get("error") else None,
@@ -1388,7 +1589,7 @@ def _format_table_dump_detail_records(record: dict[str, Any], output_format: str
                         "service": "postgres",
                         "host": record.get("host"),
                         "port": record.get("port"),
-                        "database": record.get("database"),
+                        "database": item.get("database") or record.get("database"),
                         "table": table_name,
                         "columns": [str(col) for col in item.get("columns") or selected_columns or []],
                         "rows": [str(row) for row in item.get("rows") or []],
@@ -1666,7 +1867,7 @@ def audit_postgres_targets(
     username: str | None,
     password: str | None,
     defcreds: bool,
-    database: str,
+    database: str | None,
     show_databases: bool,
     show_tables: bool,
     show_columns: bool,
@@ -1985,7 +2186,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 retries=args.retries,
                 username=shell_username,
                 password=shell_password,
-                database=args.database,
+                database=args.database or "postgres",
                 command=command,
             )
             shell_record = dict(record)
@@ -2093,7 +2294,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 retries=args.retries,
                 username=shell_username,
                 password=shell_password,
-                database=args.database,
+                database=args.database or "postgres",
                 query=query,
             )
             shell_record = dict(record)
@@ -2125,7 +2326,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode = "detect-only"
         console.info(
             f"postgres audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
-            f"workers={args.workers} retries={args.retries} mode={mode} database={args.database} format=txt"
+            f"workers={args.workers} retries={args.retries} mode={mode} database={args.database or 'auto'} format=txt"
         )
     if args.debug and not stream_to_stdout:
         if args.password is not None:
@@ -2136,7 +2337,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode = "detect-only"
         console.info(
             f"postgres audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
-            f"workers={args.workers} retries={args.retries} mode={mode} database={args.database} "
+            f"workers={args.workers} retries={args.retries} mode={mode} database={args.database or 'auto'} "
             f"format={args.output_format} output={args.output}"
         )
 
