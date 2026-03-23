@@ -394,6 +394,137 @@ def test_defcreds_is_reported_when_anonymous_access_is_allowed(monkeypatch) -> N
     assert record["status"] == "weak_default_creds"
 
 
+def test_show_tables_without_database_walks_all_accessible_databases(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    remote_calls: list[str] = []
+
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._collect_postgres_privileges",
+        lambda *_args, **_kwargs: (False, False, False, None, None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_databases",
+        lambda *_args, **_kwargs: (["postgres", "appdb"], None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_collect_database_artifacts",
+        lambda _sock, **_kwargs: (["postgres.public.users"], [], [], 1, None),
+    )
+
+    def fake_remote(
+        _host: str,
+        _port: int,
+        _timeout: float,
+        _retries: int,
+        _username: str,
+        _password: str | None,
+        database_name: str,
+        **_kwargs,
+    ):
+        remote_calls.append(database_name)
+        return (["appdb.audit.events"], [], [], 1, None)
+
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_collect_database_artifacts_remote", fake_remote)
+
+    record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=True,
+        database=None,
+        show_databases=False,
+        show_tables=True,
+        show_columns=False,
+        table_targets=[],
+        table_columns=[],
+        dump_table_rows=False,
+        execute_command=None,
+        sql_command=None,
+    )
+
+    assert remote_calls == ["appdb"]
+    assert record["table_names"] == ["postgres.public.users", "appdb.audit.events"]
+    assert record["can_read_tables"] is True
+    assert record["readable_tables"] == 2
+
+
+def test_database_limits_table_enumeration_to_selected_database(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    current_calls: list[str] = []
+    remote_calls: list[str] = []
+
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._collect_postgres_privileges",
+        lambda *_args, **_kwargs: (False, False, False, None, None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_databases",
+        lambda *_args, **_kwargs: (["postgres", "appdb", "analytics"], None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
+
+    def fake_current(_sock, *, database_name: str, **_kwargs):
+        current_calls.append(database_name)
+        return (["public.accounts"], [], [], 1, None)
+
+    def fake_remote(
+        _host: str,
+        _port: int,
+        _timeout: float,
+        _retries: int,
+        _username: str,
+        _password: str | None,
+        database_name: str,
+        **_kwargs,
+    ):
+        remote_calls.append(database_name)
+        return ([f"{database_name}.public.accounts"], [], [], 1, None)
+
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_collect_database_artifacts", fake_current)
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_collect_database_artifacts_remote", fake_remote)
+
+    record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=True,
+        database="appdb",
+        show_databases=False,
+        show_tables=True,
+        show_columns=False,
+        table_targets=[],
+        table_columns=[],
+        dump_table_rows=False,
+        execute_command=None,
+        sql_command=None,
+    )
+
+    assert current_calls == ["appdb"]
+    assert remote_calls == []
+    assert record["table_names"] == ["public.accounts"]
+    assert record["database"] == "appdb"
+    assert record["auth_database"] == "appdb"
+
+
 def test_scram_client_final_avoids_zip_strict_for_py39_compat(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def forbidden_zip(*_args, **_kwargs):
         raise AssertionError("zip() should not be used in SCRAM proof generation")
