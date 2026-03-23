@@ -41,6 +41,13 @@ class _NoColorArgumentParser(argparse.ArgumentParser):
         super().__init__(*args, **kwargs)
 
 
+class _PostgresHelpFormatter(argparse.HelpFormatter):
+    def _format_action_invocation(self, action: argparse.Action) -> str:
+        if getattr(action, "_hide_metavar_in_help", False):
+            return ", ".join(action.option_strings)
+        return super()._format_action_invocation(action)
+
+
 def _package_version() -> str:
     # Prefer version from local source tree when running from repository checkout.
     local_version = _local_package_version()
@@ -127,6 +134,18 @@ def _mirror_group_actions(group: object, *actions: argparse.Action) -> None:
             group_actions.append(action)
 
 
+def _append_selected_defaults(parser: argparse.ArgumentParser, *dests: str) -> None:
+    selected = set(dests)
+    for action in parser._actions:
+        if action.dest not in selected:
+            continue
+        if not isinstance(action.help, str) or action.help == argparse.SUPPRESS:
+            continue
+        if "%(default)" in action.help or "(default:" in action.help:
+            continue
+        action.help = f"{action.help} (default: %(default)s)"
+
+
 def _add_listener_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "-s",
@@ -207,11 +226,17 @@ def _add_log_flag(parser: argparse.ArgumentParser | argparse._ArgumentGroup) -> 
     )
 
 
-def _add_save_flag(parser: argparse.ArgumentParser | argparse._ArgumentGroup, help_text: str) -> None:
+def _add_save_flag(
+    parser: argparse.ArgumentParser | argparse._ArgumentGroup,
+    help_text: str,
+    *,
+    include_save_alias: bool = True,
+) -> None:
+    option_strings = ["-o", "--output"]
+    if include_save_alias:
+        option_strings.append("--save")
     parser.add_argument(
-        "-o",
-        "--output",
-        "--save",
+        *option_strings,
         dest="output",
         default=None,
         metavar="file",
@@ -1424,10 +1449,8 @@ def build_parser() -> argparse.ArgumentParser:
     postgres_parser = subparsers.add_parser(
         COMMAND_POSTGRES,
         help="Audit Postgres auth exposure and risky privileges.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        formatter_class=_PostgresHelpFormatter,
     )
-    _add_output_flags(postgres_parser, short=False)
-    _add_log_flag(postgres_parser)
     _add_scan_host_flags(postgres_parser, include_profiles=False)
     postgres_parser.add_argument(
         "--port",
@@ -1438,97 +1461,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Postgres port spec: single port, list/range, or file (examples: 5432, 5432,15432, ./ports.txt).",
     )
     _add_multi_ports_flag(postgres_parser)
-    postgres_parser.add_argument(
-        "-d",
-        "--database",
-        dest="database",
-        default="postgres",
-        metavar="name",
-        help="Database name used for authentication and privilege checks.",
+    _add_save_flag(
+        postgres_parser,
+        "Optional output file path. If omitted, results are printed to stdout.",
+        include_save_alias=False,
     )
-    postgres_parser.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Optional Postgres username for credential check.",
-    )
-    postgres_parser.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Optional Postgres password for credential check.",
-    )
-    postgres_parser.add_argument(
-        "--defcreds",
-        action="store_true",
-        help="Try default Postgres credentials postgres:postgres when auth is required.",
-    )
-    postgres_parser.add_argument(
-        "--show-databases",
-        action="store_true",
-        help="Show available database names in output after successful access/auth.",
-    )
-    postgres_parser.add_argument(
-        "--show-tables",
-        action="store_true",
-        help="Show readable table names in output after successful access/auth.",
-    )
-    postgres_parser.add_argument(
-        "--table",
-        dest="tables",
-        action="append",
-        default=None,
-        metavar="name",
-        help="Target table (schema.table or table). Can be used multiple times or with comma-separated values.",
-    )
-    postgres_parser.add_argument(
-        "--show-columns",
-        action="store_true",
-        help="Show column names for --table target(s).",
-    )
-    postgres_parser.add_argument(
-        "--column",
-        dest="columns",
-        action="append",
-        default=None,
-        metavar="name",
-        help="Column filter for --show-columns/--dump (repeatable, comma-separated is also supported). Applies to all --table targets.",
-    )
-    postgres_parser.add_argument(
-        "--dump",
-        action="store_true",
-        help="Dump table rows. With --table dumps selected table(s); without --table dumps all readable tables.",
-    )
-    postgres_parser.add_argument(
-        "-x",
-        "--execute",
-        dest="execute",
-        default=None,
-        metavar="command",
-        help="Try executing OS command via Postgres COPY FROM PROGRAM and print output.",
-    )
-    postgres_parser.add_argument(
-        "--sql-cmd",
-        dest="sql_cmd",
-        default=None,
-        metavar="query",
-        help="Execute SQL query after successful connection/auth and print result rows.",
-    )
-    postgres_parser.add_argument(
-        "--os-shell",
-        action="store_true",
-        help="Interactive command mode via Postgres COPY FROM PROGRAM (single target).",
-    )
-    postgres_parser.add_argument(
-        "--sql-shell",
-        action="store_true",
-        help="Interactive SQL mode (single target).",
-    )
-    _add_save_flag(postgres_parser, "Optional output file path. If omitted, results are printed to stdout.")
     postgres_parser.add_argument(
         "-f",
         "--format",
@@ -1537,6 +1474,107 @@ def build_parser() -> argparse.ArgumentParser:
         default="txt",
         help="Postgres audit output format for stdout/file.",
     )
+    _add_log_flag(postgres_parser)
+    _add_output_flags(postgres_parser, short=False)
+
+    postgres_auth = postgres_parser.add_argument_group("Database / Auth")
+    postgres_discovery = postgres_parser.add_argument_group("Discovery / Dump")
+    postgres_exec = postgres_parser.add_argument_group("Execute / Shell")
+
+    postgres_auth.add_argument(
+        "-u",
+        "--username",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Optional Postgres username for credential check.",
+    )
+    postgres_auth.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Optional Postgres password for credential check.",
+    )
+    postgres_auth.add_argument(
+        "--defcreds",
+        action="store_true",
+        help="Try default Postgres credentials postgres:postgres when auth is required.",
+    )
+    postgres_discovery.add_argument(
+        "--show-databases",
+        action="store_true",
+        help="Show available database names in output after successful access/auth.",
+    )
+    postgres_discovery.add_argument(
+        "--database",
+        dest="database",
+        default=None,
+        metavar="name",
+        help=(
+            "Target database for table/dump/SQL operations. "
+            "When omitted, --show-tables and --dump without --table walk all accessible databases."
+        ),
+    )
+    postgres_discovery.add_argument(
+        "--show-tables",
+        action="store_true",
+        help="Show readable table names in output after successful access/auth.",
+    )
+    postgres_discovery.add_argument(
+        "--table",
+        dest="tables",
+        action="append",
+        default=None,
+        metavar="name",
+        help="Target table (schema.table or table). Can be used multiple times or with comma-separated values.",
+    )
+    postgres_discovery.add_argument(
+        "--show-columns",
+        action="store_true",
+        help="Show column names for --table target(s).",
+    )
+    postgres_discovery.add_argument(
+        "--column",
+        dest="columns",
+        action="append",
+        default=None,
+        metavar="name",
+        help="Column filter for --show-columns/--dump (repeatable, comma-separated is also supported). Applies to all --table targets.",
+    )
+    postgres_discovery.add_argument(
+        "--dump",
+        action="store_true",
+        help="Dump table rows. With --table dumps selected table(s); without --table dumps all readable tables.",
+    )
+    postgres_execute_action = postgres_exec.add_argument(
+        "-x",
+        "--execute",
+        dest="execute",
+        default=None,
+        metavar="command",
+        help="Try executing OS command via Postgres COPY FROM PROGRAM and print output.",
+    )
+    postgres_execute_action._hide_metavar_in_help = True
+    postgres_exec.add_argument(
+        "--os-shell",
+        action="store_true",
+        help="Interactive command mode via Postgres COPY FROM PROGRAM (single target).",
+    )
+    postgres_exec.add_argument(
+        "--sql-shell",
+        action="store_true",
+        help="Interactive SQL mode (single target).",
+    )
+    postgres_exec.add_argument(
+        "--sql-cmd",
+        dest="sql_cmd",
+        default=None,
+        metavar="query",
+        help="Execute SQL query after successful connection/auth and print result rows.",
+    )
+    _append_selected_defaults(postgres_parser, "timeout", "workers", "retries", "port", "output_format")
 
     clickhouse_parser = subparsers.add_parser(
         COMMAND_CLICKHOUSE,
