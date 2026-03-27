@@ -1,0 +1,36 @@
+[
+  {
+    "host": "10.20.30.40",
+    "port": 9187,
+    "status": "open_no_auth",
+    "service": "postgres_exporter",
+    "source_type": "collect",
+    "endpoint": "/debug/pprof/cmdline?debug=1",
+    "url": "http://10.20.30.40:9187/debug/pprof/cmdline?debug=1",
+    "ok": true,
+    "tool_version": "3.5.0"
+  },
+  {
+    "host": "10.20.30.41",
+    "port": 9121,
+    "status": "open_no_auth",
+    "service": "redis_exporter",
+    "source_type": "trigger",
+    "callback_target": "10.99.0.10",
+    "trigger_url": "http://10.20.30.41:9121/scrape?target=redis://10.99.0.10:6379",
+    "probe_success": true,
+    "tool_version": "3.5.0"
+  },
+  {
+    "host": "10.20.30.42",
+    "port": 9100,
+    "status": "open_no_auth",
+    "service": "node_exporter",
+    "source_type": "collect",
+    "endpoint": "/debug/vars",
+    "url": "http://10.20.30.42:9100/debug/vars",
+    "ok": false,
+    "error": "timeout",
+    "tool_version": "3.5.0"
+  }
+]

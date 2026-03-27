@@ -1210,6 +1210,22 @@ def _trigger_detected_exporter_task(
                 trigger_ok = trigger_ok and probe_success
 
             if trigger_ok:
+                if emit_trigger_event is not None:
+                    emit_trigger_event(
+                        {
+                            "phase": "callback_result",
+                            "host": host,
+                            "exporter": exporter_name,
+                            "exporter_port": port,
+                            "callback_target": callback_target,
+                            "callback_port": callback_port,
+                            "target": target,
+                            "trigger_url": trigger_url,
+                            "status": trigger_status,
+                            "probe_success": probe_success,
+                            "success": True,
+                        }
+                    )
                 result["success"] += 1
                 result["by_callback"][callback_target]["success"] += 1
                 if logger is not None:
@@ -1224,11 +1240,28 @@ def _trigger_detected_exporter_task(
                         probe_success=probe_success,
                     )
             else:
+                error_text = f"status={trigger_status}"
+                if probe_success is False:
+                    error_text = "probe_success=0"
+                if emit_trigger_event is not None:
+                    emit_trigger_event(
+                        {
+                            "phase": "callback_result",
+                            "host": host,
+                            "exporter": exporter_name,
+                            "exporter_port": port,
+                            "callback_target": callback_target,
+                            "callback_port": callback_port,
+                            "target": target,
+                            "trigger_url": trigger_url,
+                            "status": trigger_status,
+                            "probe_success": probe_success,
+                            "success": False,
+                            "error": error_text,
+                        }
+                    )
                 result["by_callback"][callback_target]["fail"] += 1
                 if logger is not None:
-                    error_text = f"status={trigger_status}"
-                    if probe_success is False:
-                        error_text = "probe_success=0"
                     logger.log(
                         "scanner",
                         (host, port),
@@ -1241,6 +1274,21 @@ def _trigger_detected_exporter_task(
                         probe_success=probe_success,
                     )
         except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            if emit_trigger_event is not None:
+                emit_trigger_event(
+                    {
+                        "phase": "callback_result",
+                        "host": host,
+                        "exporter": exporter_name,
+                        "exporter_port": port,
+                        "callback_target": callback_target,
+                        "callback_port": callback_port,
+                        "target": target,
+                        "trigger_url": trigger_url,
+                        "success": False,
+                        "error": str(exc),
+                    }
+                )
             result["by_callback"][callback_target]["fail"] += 1
             if logger is not None:
                 logger.log(

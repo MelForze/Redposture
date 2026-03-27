@@ -1,11 +1,36 @@
 from __future__ import annotations
 
+import argparse
 import base64
+import struct
 
+import pytest
+
+from redposture_core import stage_postgres as postgres
 from redposture_core.stage_postgres import (
     _audit_postgres_host,
     _caps_suffix,
+    _format_databases_detail_records,
+    _format_execute_detail_records,
+    _format_record,
+    _format_sql_detail_records,
+    _format_table_columns_detail_records,
     _format_table_dump_detail_records,
+    _format_table_row_count_detail_records,
+    _format_tables_detail_records,
+    _merge_query_error,
+    _parse_bool,
+    _pg_display_table_name,
+    _pg_group_table_targets,
+    _pg_normalize_column_names,
+    _pg_normalize_table_name,
+    _pg_parse_data_row,
+    _pg_parse_error,
+    _pg_parse_parameter_status,
+    _pg_parse_table_reference,
+    _pg_quote_ident,
+    _pg_quote_literal,
+    _PgAuditError,
     _PgSession,
     _scram_client_final,
     _scram_client_first,
@@ -25,6 +50,434 @@ class _DummySocket:
 
     def close(self) -> None:
         return
+
+
+class _ProtocolSocket(_DummySocket):
+    def __init__(self, payload: bytes = b"") -> None:
+        self.payload = payload
+        self.sent: list[bytes] = []
+        self._timeout = 1.0
+
+    def recv(self, size: int) -> bytes:
+        if not self.payload:
+            return b""
+        chunk = self.payload[:size]
+        self.payload = self.payload[size:]
+        return chunk
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.append(data)
+
+    def gettimeout(self) -> float:
+        return self._timeout
+
+
+class _ConsoleCapture:
+    instances: list[_ConsoleCapture] = []
+
+    def __init__(self, debug: bool = False) -> None:
+        self.debug = debug
+        self.messages: list[tuple[str, str]] = []
+        type(self).instances.append(self)
+
+    def error(self, message: str) -> None:
+        self.messages.append(("error", message))
+
+    def warn(self, message: str) -> None:
+        self.messages.append(("warn", message))
+
+    def info(self, message: str) -> None:
+        self.messages.append(("info", message))
+
+    def success(self, message: str) -> None:
+        self.messages.append(("success", message))
+
+    def plain(self, message: str, color: str | None = None) -> None:
+        _ = color
+        self.messages.append(("plain", message))
+
+    def render_tagged_payload_line(self, line: str, tag: str, payload_color: str | None = None) -> bool:
+        _ = (line, tag, payload_color)
+        return False
+
+
+def _postgres_args(**overrides: object) -> argparse.Namespace:
+    data: dict[str, object] = {
+        "debug": False,
+        "timeout": 1.0,
+        "retries": 0,
+        "username": None,
+        "password": None,
+        "ports": None,
+        "port": 5432,
+        "targets": "127.0.0.1",
+        "hosts": None,
+        "hosts_file": None,
+        "output": None,
+        "output_format": "txt",
+        "execute": None,
+        "sql_cmd": None,
+        "database": None,
+        "tables": [],
+        "columns": [],
+        "rows": False,
+        "dump": None,
+        "show_columns": False,
+        "show_databases": False,
+        "show_tables": False,
+        "os_shell": False,
+        "sql_shell": False,
+        "defcreds": False,
+        "workers": 1,
+    }
+    data.update(overrides)
+    return argparse.Namespace(**data)
+
+
+def test_postgres_parsing_helpers_cover_error_status_and_data_rows() -> None:
+    sqlstate, message = _pg_parse_error(b"SERROR\x00C28000\x00Mpermission denied\x00\x00")
+    assert sqlstate == "28000"
+    assert message == "permission denied"
+
+    key, value = _pg_parse_parameter_status(b"server_version\x0016.3\x00")
+    assert (key, value) == ("server_version", "16.3")
+    assert _pg_parse_parameter_status(b"broken") == (None, None)
+
+    payload = struct.pack(">h", 2) + struct.pack(">i", 3) + b"foo" + struct.pack(">i", -1)
+    assert _pg_parse_data_row(payload) == ["foo", None]
+
+
+def test_postgres_name_and_value_helpers_cover_valid_and_invalid_inputs() -> None:
+    assert _parse_bool("yes") is True
+    assert _parse_bool("off") is False
+    assert _parse_bool("maybe") is None
+
+    assert _pg_quote_literal("o'hai") == "'o''hai'"
+    assert _pg_quote_ident('bad"name') == '"bad""name"'
+
+    assert _pg_normalize_table_name("public.users") == ('"public"."users"', "public.users", None)
+    assert _pg_normalize_table_name("bad-name") == (None, None, "unsupported table identifier: bad-name")
+
+    assert _pg_parse_table_reference("appdb.public.users") == ("appdb", "public.users", None)
+    assert _pg_parse_table_reference("public.users") == (None, "public.users", None)
+    assert _pg_parse_table_reference("bad-name") == (None, None, "unsupported table identifier: bad-name")
+
+    assert _pg_normalize_column_names(["id,email", "email", "created_at"]) == (
+        ["id", "email", "created_at"],
+        None,
+    )
+    assert _pg_normalize_column_names(["bad-name"]) == ([], "unsupported column identifier: bad-name")
+
+    assert _merge_query_error(None, "first") == "first"
+    assert _merge_query_error("first", "second") == "first; second"
+    assert _pg_display_table_name("appdb", "public.users") == "appdb.public.users"
+    assert _pg_display_table_name(None, "public.users") == "public.users"
+
+
+def test_postgres_protocol_helpers_and_startup_auth_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert postgres._clip("abcdef", 3) == "abc"
+    assert postgres._retry_delay(10) == 1.5
+    assert postgres._is_timeout_error("operation timed out") is True
+    assert postgres._is_connection_timeout_fail_record({"status": "fail", "error": "connection timeout"}) is True
+    assert postgres._is_connection_refused_fail_record({"status": "fail", "error": "connection refused"}) is True
+    assert postgres._parse_sasl_mechanisms(b"SCRAM-SHA-256\x00PLAIN\x00\x00") == ["SCRAM-SHA-256", "PLAIN"]
+
+    with pytest.raises(ConnectionError, match="unexpected EOF"):
+        postgres._recv_exact(_ProtocolSocket(b""), 1)
+
+    read_sock = _ProtocolSocket(b"R" + struct.pack(">i", 8) + b"pong")
+    assert postgres._pg_read_message(read_sock) == (b"R", b"pong")
+
+    with pytest.raises(ValueError, match="invalid postgres message length"):
+        postgres._pg_read_message(_ProtocolSocket(b"R" + struct.pack(">i", 3)))
+
+    send_sock = _ProtocolSocket()
+    postgres._pg_send_message(send_sock, b"Q", b"AB")
+    postgres._pg_send_startup(send_sock, "alice", "appdb")
+    postgres._pg_send_password(send_sock, "secret")
+    postgres._pg_send_sasl_initial(send_sock, "SCRAM-SHA-256", "n,,n=alice,r=nonce")
+    postgres._pg_send_sasl_response(send_sock, "c=biws,r=nonce")
+    postgres._pg_send_query(send_sock, "select 1")
+    postgres._pg_send_terminate(send_sock)
+    assert send_sock.sent[0] == b"Q" + struct.pack(">i", 6) + b"AB"
+    assert b"user\x00alice\x00database\x00appdb\x00" in send_sock.sent[1]
+    assert send_sock.sent[2].endswith(b"secret\x00")
+    assert send_sock.sent[3].startswith(b"p")
+    assert send_sock.sent[4].startswith(b"p")
+    assert send_sock.sent[5].endswith(b"select 1\x00")
+    assert send_sock.sent[6] == b"X" + struct.pack(">i", 4)
+
+    sends: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        postgres, "_pg_send_startup", lambda _sock, username, database: sends.append((username, database))
+    )
+    monkeypatch.setattr(postgres, "_pg_send_password", lambda _sock, password: sends.append(("password", password)))
+    monkeypatch.setattr(
+        postgres,
+        "_pg_send_sasl_initial",
+        lambda _sock, mechanism, initial_response: sends.append((mechanism, initial_response)),
+    )
+    monkeypatch.setattr(
+        postgres, "_pg_send_sasl_response", lambda _sock, response: sends.append(("scram-final", response))
+    )
+
+    messages = iter(
+        [
+            (b"R", struct.pack(">i", 3)),
+            (b"S", b"server_version\x0016.1\x00"),
+            (b"Z", b"I"),
+        ]
+    )
+    monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(messages))
+    session = postgres._pg_startup_and_auth(_ProtocolSocket(), "alice", "secret", "appdb")
+    assert session == postgres._PgSession(auth_required=True, auth_method="cleartext", server_version="16.1")
+    assert ("password", "secret") in sends
+
+    md5_messages = iter([(b"R", struct.pack(">i", 5) + b"salt")])
+    monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(md5_messages))
+    with pytest.raises(_PgAuditError, match="md5 authentication required") as excinfo:
+        postgres._pg_startup_and_auth(_ProtocolSocket(), "alice", None, "postgres")
+    assert excinfo.value.auth_required is True
+    assert excinfo.value.auth_method == "md5"
+
+    scram_messages = iter([(b"R", struct.pack(">i", 10) + b"PLAIN\x00\x00")])
+    monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(scram_messages))
+    with pytest.raises(_PgAuditError, match="unsupported SASL mechanisms"):
+        postgres._pg_startup_and_auth(_ProtocolSocket(), "alice", "secret", "postgres")
+
+    error_messages = iter([(b"E", b"C28P01\x00Mpassword authentication failed\x00\x00")])
+    monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(error_messages))
+    with pytest.raises(_PgAuditError, match="password authentication failed") as error_info:
+        postgres._pg_startup_and_auth(_ProtocolSocket(), "alice", "secret", "postgres")
+    assert error_info.value.sqlstate == "28P01"
+    assert error_info.value.auth_required is True
+
+
+def test_collect_postgres_privileges_and_query_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    bool_results = iter([(True, None), (False, None)])
+    monkeypatch.setattr(postgres, "_pg_query_scalar_bool", lambda *_args, **_kwargs: next(bool_results))
+    monkeypatch.setattr(postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: (2, None))
+    assert postgres._collect_postgres_privileges(object()) == (True, True, True, 2, None)
+
+    bool_results = iter([(None, "superuser denied"), (None, "program denied")])
+    monkeypatch.setattr(postgres, "_pg_query_scalar_bool", lambda *_args, **_kwargs: next(bool_results))
+    monkeypatch.setattr(postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: (None, "read denied"))
+    assert postgres._collect_postgres_privileges(object()) == (
+        None,
+        None,
+        None,
+        None,
+        "superuser denied; program denied; read denied",
+    )
+
+    monkeypatch.setattr(
+        postgres,
+        "_pg_query_rows",
+        lambda *_args, **_kwargs: (
+            [["public", "users"], ["public", ""], ["audit", "events"]],
+            None,
+        ),
+    )
+    assert postgres._pg_query_readable_tables(object()) == (["public.users", "audit.events"], None)
+
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: ([["postgres"], [None], ["appdb"]], None))
+    assert postgres._pg_query_databases(object()) == (["postgres", "appdb"], None)
+    assert postgres._pg_query_accessible_databases(object()) == (["postgres", "appdb"], None)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_message"),
+    [
+        ({"timeout": 0}, "--timeout must be > 0"),
+        ({"retries": -1}, "--retries must be >= 0"),
+        ({"username": "alice", "password": None}, "--password is required when --username is set"),
+        ({"ports": "bad"}, "failed to parse --port"),
+        ({"targets": None, "hosts": None}, "postgres requires -t/--targets"),
+        ({"tables": ["bad-name"]}, "unsupported table identifier: bad-name"),
+        ({"columns": ["bad-name"]}, "unsupported column identifier: bad-name"),
+        ({"show_columns": True}, "--show-columns requires --table"),
+        ({"execute": "id", "sql_cmd": "select 1"}, "--execute cannot be combined with --sql-cmd"),
+        ({"os_shell": True, "sql_shell": True}, "--os-shell cannot be combined with --sql-shell"),
+    ],
+)
+def test_run_postgres_stage_validation_errors(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object], expected_message: str
+) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(postgres, "Console", _ConsoleCapture)
+    rc = postgres.run_postgres_stage(_postgres_args(**overrides), logger=object())  # type: ignore[arg-type]
+    assert rc == 2
+    assert any(
+        expected_message in message for level, message in _ConsoleCapture.instances[-1].messages if level == "error"
+    )
+
+
+def test_run_postgres_stage_shell_modes_and_main_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(postgres, "Console", _ConsoleCapture)
+    monkeypatch.setattr(postgres, "collect_scan_ports", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(postgres, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+
+    base_record = {
+        "timestamp": "2026-03-27T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 5432,
+        "database": "postgres",
+        "auth_database": "postgres",
+        "is_postgres": True,
+        "status": "valid_credentials",
+        "auth_required": True,
+        "auth_method": "cleartext",
+        "effective_username": "postgres",
+        "can_execute_commands": True,
+        "show_databases": False,
+        "database_names": [],
+        "database_count": 0,
+        "show_tables": False,
+        "show_row_counts": False,
+        "show_columns": False,
+        "table_names": [],
+        "table_targets": [],
+        "table_columns": [],
+        "table_row_counts": [],
+        "table_columns_info": [],
+        "table_dumps": [],
+        "execute_command": None,
+        "execute_attempted": False,
+        "execute_ok": None,
+        "execute_output": None,
+        "execute_error": None,
+        "sql_command": None,
+        "sql_attempted": False,
+        "sql_ok": None,
+        "sql_output": None,
+        "sql_error": None,
+        "server_version": "16.0",
+        "superuser": False,
+        "can_read_tables": False,
+        "readable_tables": 0,
+        "elapsed_ms": 1,
+        "error": None,
+    }
+
+    monkeypatch.setattr(postgres, "_audit_postgres_host", lambda **_kwargs: dict(base_record))
+    monkeypatch.setattr(postgres, "_format_detect_record", lambda *_args, **_kwargs: "DETECT")
+    monkeypatch.setattr(postgres, "_format_record", lambda *_args, **_kwargs: "SUMMARY")
+    monkeypatch.setattr(postgres, "_format_databases_detail_records", lambda *_args, **_kwargs: ["DBS"])
+    monkeypatch.setattr(postgres, "_format_tables_detail_records", lambda *_args, **_kwargs: ["TABLES"])
+    monkeypatch.setattr(postgres, "_format_table_columns_detail_records", lambda *_args, **_kwargs: ["COLS"])
+    monkeypatch.setattr(postgres, "_format_table_row_count_detail_records", lambda *_args, **_kwargs: ["ROWS"])
+    monkeypatch.setattr(postgres, "_format_table_dump_detail_records", lambda *_args, **_kwargs: ["DUMP"])
+    monkeypatch.setattr(
+        postgres,
+        "_format_execute_detail_records",
+        lambda record, *_args, **_kwargs: [f"EXEC:{record['execute_command']}"],
+    )
+    monkeypatch.setattr(
+        postgres, "_format_sql_detail_records", lambda record, *_args, **_kwargs: [f"SQL:{record['sql_command']}"]
+    )
+
+    executed_commands: list[str] = []
+    monkeypatch.setattr(
+        postgres,
+        "_pg_execute_remote_command",
+        lambda **kwargs: (executed_commands.append(str(kwargs["command"])) or ["uid=1000"], None),
+    )
+    sql_queries: list[str] = []
+    monkeypatch.setattr(
+        postgres,
+        "_pg_execute_sql_query",
+        lambda **kwargs: (sql_queries.append(str(kwargs["query"])) or ["1"], None),
+    )
+    shell_inputs = iter(["id", "exit", "select 1", "quit"])
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(shell_inputs))
+
+    rc = postgres.run_postgres_stage(_postgres_args(os_shell=True), logger=object())  # type: ignore[arg-type]
+    assert rc == 0
+    assert executed_commands == ["id"]
+
+    rc = postgres.run_postgres_stage(_postgres_args(sql_shell=True), logger=object())  # type: ignore[arg-type]
+    assert rc == 0
+    assert sql_queries == ["select 1"]
+
+    captured: list[dict[str, object]] = []
+
+    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs)
+        kwargs["emit_line"]("POSTGRES\t127.0.0.1\t5432\t[*] Postgres Database")
+        return 1, 0, 0, 1, 0, 0
+
+    monkeypatch.setattr(postgres, "audit_postgres_targets", fake_audit_targets)
+    rc = postgres.run_postgres_stage(
+        _postgres_args(debug=True, output_format="txt", execute=None, sql_cmd=None),
+        logger=object(),  # type: ignore[arg-type]
+    )
+    assert rc == 0
+    assert captured and captured[0]["suppress_timeout_status_lines"] is False
+
+
+def test_run_postgres_stage_additional_output_and_error_paths(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(postgres, "Console", _ConsoleCapture)
+    monkeypatch.setattr(postgres, "collect_scan_ports", lambda *_args, **_kwargs: [5432, 15432])
+    monkeypatch.setattr(
+        postgres,
+        "collect_scan_targets",
+        lambda targets: ["127.0.0.1", "127.0.0.2"] if "hosts.txt" in str(targets) else ["127.0.0.1"],
+    )
+
+    captured: list[dict[str, object]] = []
+
+    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs)
+        kwargs["emit_line"]('{"type":"detect"}')
+        return 1, 0, 0, 0, 1, 0
+
+    monkeypatch.setattr(postgres, "audit_postgres_targets", fake_audit_targets)
+    rc = postgres.run_postgres_stage(
+        _postgres_args(
+            debug=True,
+            output_format="json",
+            output="postgres.json",
+            password="secret",
+            targets=None,
+            hosts_file="hosts.txt",
+            tables=["public.users,public.users", "public.audit"],
+            dump=5,
+            rows=True,
+        ),
+        logger=object(),  # type: ignore[arg-type]
+    )
+    assert rc == 0
+    assert len(captured) == 2
+    assert captured[0]["username"] == "postgres"
+    assert captured[0]["table_targets"] == ["public.users", "public.audit"]
+    assert captured[0]["dump_row_limit"] == 5
+    assert captured[0]["show_row_counts"] is True
+    assert '"type":"detect"' in capsys.readouterr().out
+
+    monkeypatch.setattr(
+        postgres, "audit_postgres_targets", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+    )
+    rc = postgres.run_postgres_stage(_postgres_args(output="postgres.json"), logger=object())  # type: ignore[arg-type]
+    assert rc == 2
+    assert any(
+        "failed to process postgres output: disk full" in msg
+        for level, msg in _ConsoleCapture.instances[-1].messages
+        if level == "error"
+    )
+
+    monkeypatch.setattr(postgres, "collect_scan_ports", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(postgres, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1", "127.0.0.2"])
+    rc = postgres.run_postgres_stage(_postgres_args(os_shell=True), logger=object())  # type: ignore[arg-type]
+    assert rc == 2
+    assert any(
+        "--os-shell requires exactly one target host" in msg
+        for level, msg in _ConsoleCapture.instances[-1].messages
+        if level == "error"
+    )
 
 
 def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -82,10 +535,13 @@ def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # ty
         database="postgres",
         show_databases=False,
         show_tables=False,
+        show_row_counts=False,
         show_columns=False,
         table_targets=[],
+        table_targets_by_database={},
         table_columns=[],
         dump_table_rows=True,
+        dump_row_limit=None,
         execute_command=None,
         sql_command=None,
     )
@@ -154,10 +610,13 @@ def test_dump_with_table_and_columns_uses_only_selected(monkeypatch) -> None:  #
         database="postgres",
         show_databases=False,
         show_tables=False,
+        show_row_counts=False,
         show_columns=False,
         table_targets=["public.users"],
+        table_targets_by_database={},
         table_columns=["id"],
         dump_table_rows=True,
+        dump_row_limit=None,
         execute_command=None,
         sql_command=None,
     )
@@ -224,10 +683,13 @@ def test_show_columns_with_dump_prints_columns_and_dump(monkeypatch) -> None:  #
         database="postgres",
         show_databases=False,
         show_tables=False,
+        show_row_counts=False,
         show_columns=True,
         table_targets=["public.users"],
+        table_targets_by_database={},
         table_columns=["id"],
         dump_table_rows=True,
+        dump_row_limit=None,
         execute_command=None,
         sql_command=None,
     )
@@ -324,10 +786,13 @@ def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(m
         database="postgres",
         show_databases=False,
         show_tables=False,
+        show_row_counts=False,
         show_columns=False,
         table_targets=[],
+        table_targets_by_database={},
         table_columns=[],
         dump_table_rows=False,
+        dump_row_limit=None,
         execute_command=None,
         sql_command=None,
         output_path=None,
@@ -382,10 +847,13 @@ def test_defcreds_is_reported_when_anonymous_access_is_allowed(monkeypatch) -> N
         database="postgres",
         show_databases=False,
         show_tables=False,
+        show_row_counts=False,
         show_columns=False,
         table_targets=[],
+        table_targets_by_database={},
         table_columns=[],
         dump_table_rows=False,
+        dump_row_limit=None,
         execute_command=None,
         sql_command=None,
     )
@@ -410,12 +878,23 @@ def test_show_tables_without_database_walks_all_accessible_databases(monkeypatch
     )
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_query_databases",
+        lambda *_args, **_kwargs: (["postgres", "appdb", "analytics"], None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_accessible_databases",
         lambda *_args, **_kwargs: (["postgres", "appdb"], None),
     )
     monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_collect_database_artifacts",
-        lambda _sock, **_kwargs: (["postgres.public.users"], [], [], 1, None),
+        lambda _sock, **_kwargs: (
+            ["postgres.public.users"],
+            [],
+            [{"database": "postgres", "table": "postgres.public.users", "row_count": 42, "error": None}],
+            [],
+            1,
+            None,
+        ),
     )
 
     def fake_remote(
@@ -429,7 +908,14 @@ def test_show_tables_without_database_walks_all_accessible_databases(monkeypatch
         **_kwargs,
     ):
         remote_calls.append(database_name)
-        return (["appdb.audit.events"], [], [], 1, None)
+        return (
+            ["appdb.audit.events"],
+            [],
+            [{"database": "appdb", "table": "appdb.audit.events", "row_count": 7, "error": None}],
+            [],
+            1,
+            None,
+        )
 
     monkeypatch.setattr("redposture_core.stage_postgres._pg_collect_database_artifacts_remote", fake_remote)
 
@@ -444,16 +930,26 @@ def test_show_tables_without_database_walks_all_accessible_databases(monkeypatch
         database=None,
         show_databases=False,
         show_tables=True,
+        show_row_counts=False,
         show_columns=False,
         table_targets=[],
+        table_targets_by_database={},
         table_columns=[],
         dump_table_rows=False,
+        dump_row_limit=None,
         execute_command=None,
         sql_command=None,
     )
 
     assert remote_calls == ["appdb"]
+    assert record["database_count"] == 3
     assert record["table_names"] == ["postgres.public.users", "appdb.audit.events"]
+    assert record["table_row_counts"] == [
+        {"database": "postgres", "table": "postgres.public.users", "row_count": 42, "error": None},
+        {"database": "appdb", "table": "appdb.audit.events", "row_count": 7, "error": None},
+    ]
+    assert record["show_tables"] is True
+    assert record["show_row_counts"] is False
     assert record["can_read_tables"] is True
     assert record["readable_tables"] == 2
 
@@ -477,11 +973,15 @@ def test_database_limits_table_enumeration_to_selected_database(monkeypatch) -> 
         "redposture_core.stage_postgres._pg_query_databases",
         lambda *_args, **_kwargs: (["postgres", "appdb", "analytics"], None),
     )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_accessible_databases",
+        lambda *_args, **_kwargs: (["postgres", "appdb"], None),
+    )
     monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
 
     def fake_current(_sock, *, database_name: str, **_kwargs):
         current_calls.append(database_name)
-        return (["public.accounts"], [], [], 1, None)
+        return (["public.accounts"], [], [], [], 1, None)
 
     def fake_remote(
         _host: str,
@@ -494,7 +994,7 @@ def test_database_limits_table_enumeration_to_selected_database(monkeypatch) -> 
         **_kwargs,
     ):
         remote_calls.append(database_name)
-        return ([f"{database_name}.public.accounts"], [], [], 1, None)
+        return ([f"{database_name}.public.accounts"], [], [], [], 1, None)
 
     monkeypatch.setattr("redposture_core.stage_postgres._pg_collect_database_artifacts", fake_current)
     monkeypatch.setattr("redposture_core.stage_postgres._pg_collect_database_artifacts_remote", fake_remote)
@@ -510,10 +1010,13 @@ def test_database_limits_table_enumeration_to_selected_database(monkeypatch) -> 
         database="appdb",
         show_databases=False,
         show_tables=True,
+        show_row_counts=False,
         show_columns=False,
         table_targets=[],
+        table_targets_by_database={},
         table_columns=[],
         dump_table_rows=False,
+        dump_row_limit=None,
         execute_command=None,
         sql_command=None,
     )
@@ -523,6 +1026,339 @@ def test_database_limits_table_enumeration_to_selected_database(monkeypatch) -> 
     assert record["table_names"] == ["public.accounts"]
     assert record["database"] == "appdb"
     assert record["auth_database"] == "appdb"
+
+
+def test_group_table_targets_accepts_database_schema_table() -> None:
+    normalized_targets, grouped, error = _pg_group_table_targets(
+        ["appdb.public.users", "public.sessions", "appdb.public.users"],
+        None,
+    )
+
+    assert error is None
+    assert normalized_targets == ["appdb.public.users", "public.sessions"]
+    assert grouped == {"appdb": ["public.users"], None: ["public.sessions"]}
+
+
+def test_table_rows_detail_txt_renders_row_counts() -> None:
+    record = {
+        "timestamp": "2026-03-11T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 5432,
+        "show_row_counts": True,
+        "table_row_counts": [
+            {"table": "public.users", "row_count": 42, "error": None},
+            {"table": "public.audit", "row_count": None, "error": "permission denied"},
+        ],
+    }
+
+    lines = _format_table_row_count_detail_records(record, "txt")
+
+    assert any("[*] Table Rows" in line for line in lines)
+    assert any("public.users (rows:42)" in line for line in lines)
+    assert any("public.audit <error:permission denied>" in line for line in lines)
+
+
+def test_show_tables_txt_renders_inline_row_counts() -> None:
+    record = {
+        "timestamp": "2026-03-11T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 5432,
+        "show_tables": True,
+        "table_names": ["appdb.public.users", "appdb.public.audit", "appdb.public.events"],
+        "table_row_counts": [
+            {"table": "appdb.public.users", "row_count": 42, "error": None},
+            {"table": "appdb.public.audit", "row_count": None, "error": "permission denied"},
+            {"table": "appdb.public.events", "row_count": None, "error": None},
+        ],
+    }
+
+    lines = _format_tables_detail_records(record, "txt")
+
+    assert any("[*] Dump Tables" in line for line in lines)
+    assert any("appdb.public.users (Rows:42)" in line for line in lines)
+    assert any("appdb.public.audit <error:permission denied>" in line for line in lines)
+    assert any("appdb.public.events (Rows:unknown)" in line for line in lines)
+
+
+def test_rows_flag_enables_show_tables_and_inline_counts(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._collect_postgres_privileges",
+        lambda *_args, **_kwargs: (False, False, True, 1, None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_databases", lambda *_args, **_kwargs: ([], None))
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_accessible_databases",
+        lambda *_args, **_kwargs: (["postgres"], None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_readable_tables",
+        lambda *_args, **_kwargs: (["public.users"], None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_table_row_count",
+        lambda _sock, table_name, **_kwargs: (table_name, 42, None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
+
+    record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=True,
+        database=None,
+        show_databases=False,
+        show_tables=False,
+        show_row_counts=True,
+        show_columns=False,
+        table_targets=[],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=False,
+        dump_row_limit=None,
+        execute_command=None,
+        sql_command=None,
+    )
+
+    assert record["show_tables"] is True
+    assert record["show_row_counts"] is True
+    assert record["table_names"] == ["public.users"]
+    assert record["table_row_counts"] == [
+        {"database": "postgres", "table": "public.users", "row_count": 42, "error": None}
+    ]
+    lines = _format_tables_detail_records(record, "txt")
+    assert any("public.users (Rows:42)" in line for line in lines)
+    assert _format_table_row_count_detail_records(record, "txt") == []
+
+
+def test_show_databases_keeps_full_inventory_while_table_walk_uses_only_accessible_databases(
+    monkeypatch,
+) -> None:  # type: ignore[no-untyped-def]
+    remote_calls: list[str] = []
+
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._collect_postgres_privileges",
+        lambda *_args, **_kwargs: (False, False, True, 1, None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_databases",
+        lambda *_args, **_kwargs: (["postgres", "appdb", "offline_db"], None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_accessible_databases",
+        lambda *_args, **_kwargs: (["postgres", "appdb"], None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_collect_database_artifacts",
+        lambda _sock, **_kwargs: (
+            ["postgres.public.users"],
+            [],
+            [{"database": "postgres", "table": "postgres.public.users", "row_count": 1, "error": None}],
+            [],
+            1,
+            None,
+        ),
+    )
+
+    def fake_remote(
+        _host: str,
+        _port: int,
+        _timeout: float,
+        _retries: int,
+        _username: str,
+        _password: str | None,
+        database_name: str,
+        **_kwargs,
+    ):
+        remote_calls.append(database_name)
+        return (
+            [f"{database_name}.public.audit"],
+            [],
+            [{"database": database_name, "table": f"{database_name}.public.audit", "row_count": 2, "error": None}],
+            [],
+            1,
+            None,
+        )
+
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_collect_database_artifacts_remote", fake_remote)
+
+    record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=True,
+        database=None,
+        show_databases=True,
+        show_tables=True,
+        show_row_counts=False,
+        show_columns=False,
+        table_targets=[],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=False,
+        dump_row_limit=None,
+        execute_command=None,
+        sql_command=None,
+    )
+
+    assert record["database_names"] == ["postgres", "appdb", "offline_db"]
+    assert remote_calls == ["appdb"]
+
+
+def test_dump_with_limit_passes_limit_to_query(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    seen_limits: list[int | None] = []
+
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._collect_postgres_privileges",
+        lambda *_args, **_kwargs: (False, False, True, 1, None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_databases", lambda *_args, **_kwargs: ([], None))
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_readable_tables",
+        lambda *_args, **_kwargs: (["public.users"], None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_table_columns",
+        lambda _sock, table_name, **_kwargs: (table_name, ["id"], None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
+
+    def fake_query_table_rows(
+        _sock: object,
+        table_name: str,
+        *,
+        columns: list[str] | None = None,
+        max_rows: int | None = None,
+    ) -> tuple[str, list[str] | None, str | None]:
+        _ = columns
+        seen_limits.append(max_rows)
+        return table_name, ['{"id":1}'], None
+
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_table_rows", fake_query_table_rows)
+
+    record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=True,
+        database="postgres",
+        show_databases=False,
+        show_tables=False,
+        show_row_counts=False,
+        show_columns=False,
+        table_targets=[],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=True,
+        dump_row_limit=5,
+        execute_command=None,
+        sql_command=None,
+    )
+
+    assert seen_limits == [5]
+    assert record["dump_row_limit"] == 5
+
+
+def test_database_prefixed_table_target_routes_to_matching_database(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    current_calls: list[str] = []
+    remote_calls: list[tuple[str, list[str]]] = []
+
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._collect_postgres_privileges",
+        lambda *_args, **_kwargs: (False, False, True, 1, None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_databases",
+        lambda *_args, **_kwargs: (["postgres", "appdb"], None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
+
+    def fake_current(_sock, *, database_name: str, table_targets: list[str], **_kwargs):
+        current_calls.append(database_name)
+        return ([], [], [], [], 0, None)
+
+    def fake_remote(
+        _host: str,
+        _port: int,
+        _timeout: float,
+        _retries: int,
+        _username: str,
+        _password: str | None,
+        database_name: str,
+        *,
+        table_targets: list[str],
+        **_kwargs,
+    ):
+        remote_calls.append((database_name, table_targets))
+        return ([], [], [], [], 0, None)
+
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_collect_database_artifacts", fake_current)
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_collect_database_artifacts_remote", fake_remote)
+
+    _, grouped, error = _pg_group_table_targets(["appdb.public.users"], None)
+    assert error is None
+
+    _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=True,
+        database=None,
+        show_databases=False,
+        show_tables=False,
+        show_row_counts=False,
+        show_columns=False,
+        table_targets=["appdb.public.users"],
+        table_targets_by_database=grouped,
+        table_columns=[],
+        dump_table_rows=True,
+        dump_row_limit=None,
+        execute_command=None,
+        sql_command=None,
+    )
+
+    assert current_calls == []
+    assert remote_calls == [("appdb", ["public.users"])]
 
 
 def test_scram_client_final_avoids_zip_strict_for_py39_compat(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -540,3 +1376,266 @@ def test_scram_client_final_avoids_zip_strict_for_py39_compat(monkeypatch) -> No
     assert final_message.startswith("c=biws,r=")
     assert ",p=" in final_message
     assert isinstance(server_signature, str) and server_signature != ""
+
+
+def test_audit_postgres_handles_pg_audit_error_paths(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+
+    def fake_auth_required(*_args, **_kwargs):
+        raise _PgAuditError("password authentication failed", detected=True, auth_required=True, auth_method="md5")
+
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_startup_and_auth", fake_auth_required)
+
+    record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username="postgres",
+        password="wrong",
+        defcreds=False,
+        database="postgres",
+        show_databases=False,
+        show_tables=False,
+        show_row_counts=False,
+        show_columns=False,
+        table_targets=[],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=False,
+        dump_row_limit=None,
+        execute_command=None,
+        sql_command=None,
+    )
+
+    assert record["status"] == "auth_required"
+    assert record["is_postgres"] is True
+    assert record["auth_method"] == "md5"
+    assert record["provided_credentials"] is True
+
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(_PgAuditError("not postgres", detected=False)),
+    )
+    fail_record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=False,
+        database="postgres",
+        show_databases=False,
+        show_tables=False,
+        show_row_counts=False,
+        show_columns=False,
+        table_targets=[],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=False,
+        dump_row_limit=None,
+        execute_command=None,
+        sql_command=None,
+    )
+    assert fail_record["status"] == "fail"
+    assert fail_record["is_postgres"] is False
+    assert fail_record["error"] == "not postgres"
+
+
+def test_audit_postgres_collects_execute_and_sql_outputs(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._collect_postgres_privileges",
+        lambda *_args, **_kwargs: (True, True, True, 2, None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_databases", lambda *_args, **_kwargs: ([], None))
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_try_execute_command",
+        lambda *_args, **_kwargs: (["uid=1000(postgres)"], None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_try_query_sql",
+        lambda *_args, **_kwargs: (["1 | hello"], None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
+
+    record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=True,
+        database="postgres",
+        show_databases=False,
+        show_tables=False,
+        show_row_counts=False,
+        show_columns=False,
+        table_targets=[],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=False,
+        dump_row_limit=None,
+        execute_command="id",
+        sql_command="select 1, 'hello'",
+    )
+
+    assert record["status"] == "weak_default_creds"
+    assert record["execute_attempted"] is True
+    assert record["execute_ok"] is True
+    assert record["execute_output"] == ["uid=1000(postgres)"]
+    assert record["sql_attempted"] is True
+    assert record["sql_ok"] is True
+    assert record["sql_output"] == ["1 | hello"]
+
+
+def test_postgres_detail_and_status_renderers_cover_text_and_json_paths() -> None:
+    record = {
+        "timestamp": "2026-03-27T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 5432,
+        "database": "postgres",
+        "show_databases": True,
+        "database_names": ["appdb", "postgres"],
+        "table_columns_info": [
+            {"table": "public.users", "columns": ["id", "email"], "error": None},
+            {"table": "public.audit", "columns": None, "error": "permission denied"},
+        ],
+        "execute_command": "id",
+        "execute_ok": False,
+        "execute_output": None,
+        "execute_error": "permission denied",
+        "sql_command": "select 1",
+        "sql_ok": True,
+        "sql_output": ["1"],
+        "sql_error": None,
+        "status": "valid_credentials",
+        "effective_username": "postgres",
+        "provided_password": "",
+        "superuser": True,
+        "can_execute_commands": True,
+        "can_read_tables": True,
+        "readable_tables": 2,
+        "database_count": 2,
+    }
+
+    db_lines = _format_databases_detail_records(record, "txt")
+    assert any("[*] Dump Databases" in line for line in db_lines)
+    assert any("appdb" in line for line in db_lines)
+    assert any('"type": "databases_dump"' in line for line in _format_databases_detail_records(record, "json"))
+
+    column_lines = _format_table_columns_detail_records(record, "txt")
+    assert any("[*] Table Columns public.users" in line for line in column_lines)
+    assert any("<error:permission denied>" in line for line in column_lines)
+
+    execute_lines = _format_execute_detail_records(record, "txt")
+    assert any("command=id" in line for line in execute_lines)
+    assert any("<error:permission denied>" in line for line in execute_lines)
+    assert any('"type": "execute_dump"' in line for line in _format_execute_detail_records(record, "json"))
+
+    sql_lines = _format_sql_detail_records(record, "txt")
+    assert any("query=select 1" in line for line in sql_lines)
+    assert any(" 1" in line or line.endswith("\t1") for line in sql_lines)
+    assert any('"type": "sql_dump"' in line for line in _format_sql_detail_records(record, "json"))
+
+    status_line = _format_record(record, "txt")
+    assert "[+] postgres:<empty>" in status_line
+
+
+def test_audit_postgres_targets_emits_detect_status_and_all_detail_sections(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **_kwargs):
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "database": "postgres",
+            "is_postgres": True,
+            "status": "valid_credentials",
+            "auth_required": True,
+            "auth_method": "cleartext",
+            "provided_credentials": True,
+            "provided_username": "postgres",
+            "provided_password": "postgres",
+            "defcreds_enabled": False,
+            "effective_username": "postgres",
+            "show_databases": True,
+            "database_names": ["appdb"],
+            "database_count": 1,
+            "show_tables": True,
+            "show_row_counts": False,
+            "show_columns": True,
+            "table_names": ["appdb.public.users"],
+            "table_targets": [],
+            "table_columns": [],
+            "table_row_counts": [{"table": "appdb.public.users", "row_count": 42, "error": None}],
+            "table_dump_enabled": True,
+            "dump_row_limit": 2,
+            "table_columns_info": [{"table": "appdb.public.users", "columns": ["id"], "error": None}],
+            "table_dumps": [{"table": "appdb.public.users", "columns": ["id"], "rows": ['{"id":1}'], "error": None}],
+            "execute_command": "id",
+            "execute_attempted": True,
+            "execute_ok": True,
+            "execute_output": ["uid=1000"],
+            "execute_error": None,
+            "sql_command": "select 1",
+            "sql_attempted": True,
+            "sql_ok": True,
+            "sql_output": ["1"],
+            "sql_error": None,
+            "server_version": "16.0",
+            "superuser": True,
+            "can_execute_commands": True,
+            "can_read_tables": True,
+            "readable_tables": 1,
+            "elapsed_ms": 5,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.stage_postgres._audit_postgres_host", fake_audit)
+
+    lines: list[str] = []
+    total, open_no_auth, weak, valid, auth_required, failed = audit_postgres_targets(
+        hosts=["127.0.0.1"],
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username="postgres",
+        password="postgres",
+        defcreds=False,
+        database="postgres",
+        show_databases=True,
+        show_tables=True,
+        show_row_counts=False,
+        show_columns=True,
+        table_targets=[],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=True,
+        dump_row_limit=2,
+        execute_command="id",
+        sql_command="select 1",
+        output_path=None,
+        output_format="txt",
+        emit_line=lines.append,
+        suppress_timeout_status_lines=False,
+    )
+
+    assert (total, open_no_auth, weak, valid, auth_required, failed) == (1, 0, 0, 1, 0, 0)
+    assert any("[*] Postgres Database" in line for line in lines)
+    assert any("[*] Dump Databases" in line for line in lines)
+    assert any("[*] Dump Tables" in line for line in lines)
+    assert any("[*] Table Columns appdb.public.users" in line for line in lines)
+    assert any("[*] Dump Table appdb.public.users" in line for line in lines)
+    assert any("[*] Execute Command" in line for line in lines)
+    assert any("[*] SQL Query" in line for line in lines)

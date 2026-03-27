@@ -3158,19 +3158,18 @@ def audit_consul_targets(
                 )
                 if not suppress_timeout_detect_line:
                     _emit_line(out_fh, emit_line, _detect_line(record_out, output_format))
-                line = _summary_line(record_out)
-                suppress_anonymous_summary = (
-                    output_format == "txt"
-                    and bool(str(record_out.get("auth_mode") or "").strip())
-                    and record_out.get("auth_valid") is True
-                )
-                if line and not suppress_anonymous_summary:
-                    _emit_line(out_fh, emit_line, f"{_cx_prefix(record_out)} {line}")
-                auth_line = _auth_summary_line(record_out)
-                if auth_line:
-                    _emit_line(out_fh, emit_line, f"{_cx_prefix(record_out)} {auth_line}")
-                for detail in _detail_lines(record_out, output_format, debug=(logger is not None)):
-                    _emit_line(out_fh, emit_line, detail)
+                if output_format == "txt":
+                    line = _summary_line(record_out)
+                    suppress_anonymous_summary = (
+                        bool(str(record_out.get("auth_mode") or "").strip()) and record_out.get("auth_valid") is True
+                    )
+                    if line and not suppress_anonymous_summary:
+                        _emit_line(out_fh, emit_line, f"{_cx_prefix(record_out)} {line}")
+                    auth_line = _auth_summary_line(record_out)
+                    if auth_line:
+                        _emit_line(out_fh, emit_line, f"{_cx_prefix(record_out)} {auth_line}")
+                    for detail in _detail_lines(record_out, output_format, debug=(logger is not None)):
+                        _emit_line(out_fh, emit_line, detail)
 
                 if logger is not None:
                     anon_scopes = record.get("anonymous_scopes", {})

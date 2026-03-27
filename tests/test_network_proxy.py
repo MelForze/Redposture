@@ -155,3 +155,147 @@ def test_open_proxy_connection_uses_socket_create_connection(monkeypatch: pytest
 
     assert isinstance(sock, _DummySocket)
     assert calls == [(("::1", 1080), 2.5, ("0.0.0.0", 0))]
+
+
+def test_resolve_timeout_handles_default_invalid_and_negative(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(np.socket, "getdefaulttimeout", lambda: 9.5)
+    assert np._resolve_timeout(np._SOCKET_DEFAULT_TIMEOUT) == 9.5
+    assert np._resolve_timeout("bad") == 9.5
+    assert np._resolve_timeout(-1) == 0.0
+    assert np._resolve_timeout(1.25) == 1.25
+
+
+class _FakeSocket:
+    def __init__(self, replies: list[bytes]) -> None:
+        self._replies = list(replies)
+        self.sent: list[bytes] = []
+        self.closed = False
+
+    def recv(self, _size: int) -> bytes:
+        if not self._replies:
+            return b""
+        return self._replies.pop(0)
+
+    def sendall(self, payload: bytes) -> None:
+        self.sent.append(payload)
+
+    def close(self) -> None:
+        self.closed = True
+
+    def settimeout(self, _timeout: float | None) -> None:
+        return
+
+
+def test_recv_exact_reads_all_requested_bytes() -> None:
+    sock = _FakeSocket([b"ab", b"cd"])
+    assert np._recv_exact(sock, 4) == b"abcd"
+
+    with pytest.raises(OSError, match="closed unexpectedly"):
+        np._recv_exact(_FakeSocket([b"ab"]), 4)
+
+
+def test_socks5_open_tunnel_with_auth_and_remote_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    sock = _FakeSocket(
+        [
+            b"\x05\x02",  # choose username/password auth
+            b"\x01\x00",  # auth success
+            b"\x05\x00\x00\x03",  # connect success, domain bind address
+            b"\x01",
+            b"a",
+            b"\x1f\x90",
+        ]
+    )
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
+
+    proxy = np.ProxyConfig(
+        scheme="socks5h",
+        host="127.0.0.1",
+        port=1080,
+        username="user",
+        password="pass",
+        raw_url="socks5h://user:pass@127.0.0.1:1080",
+    )
+    returned = np._socks5_open_tunnel(proxy, "example.com", 443, timeout=1.0, source_address=None)
+
+    assert returned is sock
+    assert sock.sent[0] == b"\x05\x02\x00\x02"
+    assert sock.sent[1] == b"\x01\x04user\x04pass"
+    assert sock.sent[2].startswith(b"\x05\x01\x00\x03")
+    assert sock.closed is False
+
+
+def test_socks5_open_tunnel_closes_socket_on_negotiation_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    sock = _FakeSocket([b"\x05\xff"])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
+
+    proxy = np.ProxyConfig(
+        scheme="socks5",
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks5://127.0.0.1:1080",
+    )
+    with pytest.raises(OSError, match="authentication method negotiation failed"):
+        np._socks5_open_tunnel(proxy, "127.0.0.1", 80, timeout=1.0, source_address=None)
+
+    assert sock.closed is True
+
+
+def test_http_open_tunnel_sends_connect_and_proxy_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    sock = _FakeSocket([])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
+
+    class _FakeHTTPResponse:
+        def __init__(self, transport: _FakeSocket) -> None:
+            self.transport = transport
+            self.status = 200
+
+        def begin(self) -> None:
+            return
+
+    monkeypatch.setattr(np.http.client, "HTTPResponse", _FakeHTTPResponse)
+
+    proxy = np.ProxyConfig(
+        scheme="http",
+        host="proxy.local",
+        port=8080,
+        username="alice",
+        password="secret",
+        raw_url="http://alice:secret@proxy.local:8080",
+    )
+    returned = np._http_open_tunnel(proxy, "example.com", 443, timeout=2.0, source_address=None)
+
+    assert returned is sock
+    request = sock.sent[0].decode("utf-8")
+    assert "CONNECT example.com:443 HTTP/1.1" in request
+    assert "Host: example.com:443" in request
+    assert "Proxy-Authorization: Basic YWxpY2U6c2VjcmV0" in request
+
+
+def test_http_open_tunnel_closes_socket_on_non_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    sock = _FakeSocket([])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
+
+    class _FakeHTTPResponse:
+        def __init__(self, transport: _FakeSocket) -> None:
+            self.transport = transport
+            self.status = 407
+
+        def begin(self) -> None:
+            return
+
+    monkeypatch.setattr(np.http.client, "HTTPResponse", _FakeHTTPResponse)
+
+    proxy = np.ProxyConfig(
+        scheme="http",
+        host="proxy.local",
+        port=8080,
+        username=None,
+        password=None,
+        raw_url="http://proxy.local:8080",
+    )
+    with pytest.raises(OSError, match="status=407"):
+        np._http_open_tunnel(proxy, "example.com", 443, timeout=2.0, source_address=None)
+
+    assert sock.closed is True

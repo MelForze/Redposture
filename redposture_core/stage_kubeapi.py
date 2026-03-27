@@ -1605,16 +1605,16 @@ def audit_kubeapi_targets(
                 )
                 if not suppress_timeout_detect_line:
                     _emit_line(out_fh, emit_line, _format_detect_record(record_for_output, output_format))
-                status_line = _status_summary_line(record_for_output)
-                suppress_auth_required_status_line = (
-                    output_format == "txt"
-                    and bool(record_for_output.get("is_kubeapi"))
-                    and str(record_for_output.get("status") or "") == "auth_required"
-                )
-                if status_line and not suppress_auth_required_status_line:
-                    _emit_line(out_fh, emit_line, f"{_kxc_prefix(record_for_output)} {status_line}")
-                for detail in _format_detail_records(record_for_output, output_format):
-                    _emit_line(out_fh, emit_line, detail)
+                if output_format == "txt":
+                    status_line = _status_summary_line(record_for_output)
+                    suppress_auth_required_status_line = (
+                        bool(record_for_output.get("is_kubeapi"))
+                        and str(record_for_output.get("status") or "") == "auth_required"
+                    )
+                    if status_line and not suppress_auth_required_status_line:
+                        _emit_line(out_fh, emit_line, f"{_kxc_prefix(record_for_output)} {status_line}")
+                    for detail in _format_detail_records(record_for_output, output_format):
+                        _emit_line(out_fh, emit_line, detail)
 
                 if logger is not None:
                     logger.log(

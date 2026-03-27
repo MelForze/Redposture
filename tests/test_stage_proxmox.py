@@ -5,17 +5,90 @@ import json
 
 from redposture_core.stage_proxmox import (
     _audit_proxmox_host,
+    _classify_auth_failure,
+    _clean_value_text,
+    _collect_nodes,
+    _collect_permission_tokens,
+    _collect_storage_ids,
+    _collect_user_ids,
+    _collect_vmids,
+    _collect_volids,
+    _decode_base64_text,
+    _derive_permission_caps,
+    _extract_error_message,
     _format_add_user_detail_records,
     _format_discovered_urls_detail_records,
+    _format_findings_detail_records,
+    _format_nodes_detail_records,
     _format_record,
+    _format_users_detail_records,
+    _is_invalid_token_message,
+    _is_permission_denied_message,
+    _key_looks_sensitive,
+    _looks_like_cloud_init_secret_blob,
     _parse_proxy_config,
     _ProxyConfig,
     _socks5_open_tunnel,
+    _value_looks_secret,
+    audit_proxmox_targets,
 )
 
 
 def _json_payload(data):
     return json.dumps({"data": data}, ensure_ascii=False).encode("utf-8")
+
+
+def test_proxmox_error_and_permission_helpers_cover_nested_payloads() -> None:
+    payload = json.dumps(
+        {"errors": {"token": "invalid token", "perm": "permission check failed"}}, ensure_ascii=False
+    ).encode("utf-8")
+    assert _extract_error_message(payload) == "invalid token; permission check failed"
+    assert _is_invalid_token_message("invalid api token") is True
+    assert _is_permission_denied_message("permission check failed") is True
+    assert _classify_auth_failure(401, "invalid token") == "auth_failed"
+    assert _classify_auth_failure(403, "permission check failed") == "insufficient_privileges"
+
+
+def test_proxmox_collection_and_secret_helpers_cover_common_paths() -> None:
+    nodes_payload = _json_payload([{"node": "pve1"}, {"node": "pve1"}, {"node": "pve2"}])
+    assert _collect_nodes(nodes_payload) == ["pve1", "pve2"]
+    assert _collect_vmids(_json_payload([{"vmid": 100}, {"vmid": 100}, {"vmid": 101}])) == ["100", "101"]
+    assert _collect_storage_ids(_json_payload([{"storage": "local"}, {"storage": "local-lvm"}])) == [
+        "local",
+        "local-lvm",
+    ]
+    assert _collect_volids(_json_payload([{"volid": "local:iso/a.iso"}, {"volid": "local:backup/b.vma"}])) == [
+        "local:iso/a.iso",
+        "local:backup/b.vma",
+    ]
+    assert _collect_user_ids(_json_payload([{"userid": "root@pam"}, {"user": "audit@pve"}])) == [
+        "root@pam",
+        "audit@pve",
+    ]
+
+    permission_tokens: set[str] = set()
+    _collect_permission_tokens(
+        {"/": {"Sys.Audit": 1, "User.Modify": True, "nested": ["VM.Backup", {"Permissions.Modify": 1}]}},
+        permission_tokens,
+    )
+    assert permission_tokens == {"Sys.Audit", "User.Modify", "VM.Backup", "Permissions.Modify"}
+    assert _derive_permission_caps(permission_tokens) == {
+        "adduser": True,
+        "read": True,
+        "modify": False,
+        "backup": True,
+    }
+
+    assert _clean_value_text('  "Secret123!"  ') == "Secret123!"
+    assert _value_looks_secret("SuperSecret2026!") is True
+    assert _value_looks_secret("***") is False
+    assert _key_looks_sensitive("db_password") is True
+    assert _key_looks_sensitive("CSRFPreventionToken") is False
+
+    cloud_init = "#cloud-config\nchpasswd:\n  list: |\n    root:SuperSecret2026!\n"
+    encoded = base64.b64encode(cloud_init.encode("utf-8")).decode("ascii")
+    assert _decode_base64_text(encoded) == cloud_init
+    assert _looks_like_cloud_init_secret_blob(cloud_init) is True
 
 
 def test_audit_proxmox_collects_credential_hits(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -767,6 +840,172 @@ def test_format_discovered_urls_detail_records_for_discover_creds() -> None:
     assert any(line.endswith("[*] Discovered URL") for line in lines)
     assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/access") for line in lines)
     assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/nodes") for line in lines)
+
+
+def test_proxmox_detail_renderers_cover_findings_nodes_users_text_and_json() -> None:
+    record = {
+        "timestamp": "2026-03-27T00:00:00Z",
+        "host": "10.10.10.10",
+        "port": 8006,
+        "findings": [
+            {"endpoint": "/nodes/pve1/syslog", "reason": "text_password", "path": "$text", "sample": "password=secret"}
+        ],
+        "show_nodes": True,
+        "nodes": ["pve1"],
+        "nodes_error": None,
+        "show_users": True,
+        "users": None,
+        "users_error": "permission denied",
+    }
+
+    finding_lines = _format_findings_detail_records(record, "txt")
+    assert any("credential candidate reason=text_password" in line for line in finding_lines)
+    assert any('"type": "credential_hit"' in line for line in _format_findings_detail_records(record, "json"))
+
+    node_lines = _format_nodes_detail_records(record, "txt")
+    assert any("[*] Nodes" in line for line in node_lines)
+    assert any(line.endswith("pve1") for line in node_lines)
+    assert any('"type": "nodes_dump"' in line for line in _format_nodes_detail_records(record, "json"))
+
+    user_lines = _format_users_detail_records(record, "txt")
+    assert any("<error:permission denied>" in line for line in user_lines)
+    assert any('"type": "users_dump"' in line for line in _format_users_detail_records(record, "json"))
+
+
+def test_format_record_covers_auth_and_fail_statuses() -> None:
+    assert "token valid but insufficient privileges" in _format_record(
+        {"host": "127.0.0.1", "port": 8006, "status": "insufficient_privileges"}, "txt"
+    )
+    assert "invalid pve api token" in _format_record(
+        {"host": "127.0.0.1", "port": 8006, "status": "auth_failed"}, "txt"
+    )
+    assert "connection failed err=boom" in _format_record(
+        {"host": "127.0.0.1", "port": 8006, "status": "fail", "error": "boom"}, "txt"
+    )
+
+
+def test_audit_proxmox_targets_streams_discovery_and_suppresses_duplicate_status(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_audit(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        pve_api_token: str,
+        use_https: bool,
+        insecure: bool,
+        proxy,
+        *,
+        discover_creds: bool,
+        show_nodes: bool,
+        show_users: bool,
+        add_user: str | None,
+        on_discovered_url=None,
+        on_status_ready=None,
+        on_credential_finding=None,
+    ):
+        _ = (timeout, retries, pve_api_token, insecure, proxy, show_nodes, show_users, add_user)
+        record = {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": port,
+            "is_proxmox": True,
+            "status": "token_ok",
+            "use_https": use_https,
+            "discover_creds": discover_creds,
+            "endpoint_results": [{"path": "/access"}, {"path": "/access"}],
+            "findings": [
+                {"endpoint": "/access", "reason": "text_password", "path": "$text", "sample": "password=secret"}
+            ],
+            "checked_endpoints": 1,
+            "successful_endpoints": 1,
+            "credential_hits": 1,
+            "cap_adduser": False,
+            "cap_modify": False,
+            "cap_backup": False,
+            "cap_read": True,
+            "show_nodes": False,
+            "show_users": False,
+            "add_user": None,
+        }
+        if on_status_ready is not None:
+            on_status_ready(record)
+        if on_discovered_url is not None:
+            on_discovered_url("/access")
+        if on_credential_finding is not None:
+            on_credential_finding(record["findings"][0])
+        return record
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._audit_proxmox_host", fake_audit)
+
+    lines: list[str] = []
+    total, token_ok, insufficient, auth_failed, fail, credential_hits = audit_proxmox_targets(
+        hosts=["127.0.0.1"],
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+        show_nodes=False,
+        show_users=False,
+        add_user=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=lines.append,
+        suppress_fail_status_lines=False,
+    )
+
+    assert (total, token_ok, insufficient, auth_failed, fail, credential_hits) == (1, 1, 0, 0, 0, 1)
+    assert sum(1 for line in lines if "Proxmox API" in line) == 1
+    assert sum(1 for line in lines if "Discovered Credentials" in line) == 1
+    assert any("/api2/json/access" in line for line in lines)
+    assert any("credential candidate reason=text_password" in line for line in lines)
+
+
+def test_audit_proxmox_targets_can_suppress_fail_status_lines(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **_kwargs):
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 8006,
+            "is_proxmox": False,
+            "status": "fail",
+            "discover_creds": False,
+            "show_nodes": False,
+            "show_users": False,
+            "add_user": None,
+            "credential_hits": 0,
+            "error": "connection refused (service is not listening on target port)",
+        }
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._audit_proxmox_host", fake_audit)
+
+    lines: list[str] = []
+    total, token_ok, insufficient, auth_failed, fail, credential_hits = audit_proxmox_targets(
+        hosts=["127.0.0.1"],
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=False,
+        show_nodes=False,
+        show_users=False,
+        add_user=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=lines.append,
+        suppress_fail_status_lines=True,
+    )
+
+    assert (total, token_ok, insufficient, auth_failed, fail, credential_hits) == (1, 0, 0, 0, 1, 0)
+    assert lines == []
 
 
 def test_audit_proxmox_unexpected_http_marks_not_detected(monkeypatch) -> None:  # type: ignore[no-untyped-def]

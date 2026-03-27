@@ -15,6 +15,7 @@ env/
 .tox/
 .nox/
 .coverage
+.coverage.*
 htmlcov/
 
 # Editors/OS
@@ -28,6 +29,7 @@ dist/
 *.egg-info/
 
 # Local outputs
+.redposture/
 *.jsonl
 *.log
 result
