@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from redposture_core.cli_args import (
@@ -188,8 +190,14 @@ def _command_help(command: str) -> str:
     return command_parser.format_help()
 
 
-def _help_option_line_index(help_text: str, option_line: str) -> int:
-    return help_text.find(f"\n  {option_line}")
+def _help_option_line_index(help_text: str, option_fragment: str) -> int:
+    options_idx = help_text.find("\noptions:\n")
+    search_text = help_text[options_idx:] if options_idx != -1 else help_text
+    token = re.escape(option_fragment)
+    match = re.search(rf"(?m)^\s{{2,}}.*(?<![A-Za-z0-9_-]){token}(?![A-Za-z0-9_-])", search_text)
+    if not match:
+        return -1
+    return options_idx + match.start() if options_idx != -1 else match.start()
 
 
 def test_postgres_help_groups_and_orders_flags() -> None:
@@ -203,18 +211,18 @@ def test_postgres_help_groups_and_orders_flags() -> None:
     assert exec_group_idx != -1
     assert auth_group_idx < discovery_group_idx < exec_group_idx
 
-    targets_idx = _help_option_line_index(help_text, "-t, --targets targets")
-    port_idx = _help_option_line_index(help_text, "--port port")
-    ports_idx = _help_option_line_index(help_text, "--ports ports")
-    output_idx = _help_option_line_index(help_text, "-o, --output file")
-    format_idx = _help_option_line_index(help_text, "-f, --format {json,txt}")
-    log_idx = _help_option_line_index(help_text, "-log, --log file")
+    targets_idx = _help_option_line_index(help_text, "--targets")
+    port_idx = _help_option_line_index(help_text, "--port")
+    ports_idx = _help_option_line_index(help_text, "--ports")
+    output_idx = _help_option_line_index(help_text, "--output")
+    format_idx = _help_option_line_index(help_text, "--format")
+    log_idx = _help_option_line_index(help_text, "--log")
     debug_idx = _help_option_line_index(help_text, "--debug")
     assert -1 not in {targets_idx, port_idx, ports_idx, output_idx, format_idx, log_idx, debug_idx}
     assert targets_idx < port_idx < ports_idx < output_idx < format_idx < log_idx < debug_idx
 
-    username_idx = _help_option_line_index(help_text, "-u, --username name")
-    password_idx = _help_option_line_index(help_text, "-p, --password value")
+    username_idx = _help_option_line_index(help_text, "--username")
+    password_idx = _help_option_line_index(help_text, "--password")
     defcreds_idx = _help_option_line_index(help_text, "--defcreds")
     assert -1 not in {username_idx, password_idx, defcreds_idx}
     assert username_idx < password_idx < defcreds_idx
@@ -225,11 +233,11 @@ def test_postgres_help_groups_and_orders_flags() -> None:
     table_idx = _help_option_line_index(help_text, "--table name")
     show_columns_idx = _help_option_line_index(help_text, "--show-columns")
     column_idx = _help_option_line_index(help_text, "--column name")
-    dump_idx = _help_option_line_index(help_text, "--dump")
+    dump_idx = _help_option_line_index(help_text, "--dump [count]")
     assert -1 not in {show_databases_idx, show_tables_idx, table_idx, show_columns_idx, column_idx, dump_idx}
     assert show_databases_idx < database_idx < show_tables_idx < table_idx < show_columns_idx < column_idx < dump_idx
 
-    execute_idx = _help_option_line_index(help_text, "-x, --execute")
+    execute_idx = _help_option_line_index(help_text, "--execute")
     sql_cmd_idx = _help_option_line_index(help_text, "--sql-cmd query")
     os_shell_idx = _help_option_line_index(help_text, "--os-shell")
     sql_shell_idx = _help_option_line_index(help_text, "--sql-shell")
