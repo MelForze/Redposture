@@ -643,7 +643,32 @@ def _pg_query_readable_tables(sock: socket.socket) -> tuple[list[str] | None, st
 def _pg_query_databases(sock: socket.socket) -> tuple[list[str] | None, str | None]:
     rows, error = _pg_query_rows(
         sock,
-        ("SELECT datname FROM pg_database WHERE datallowconn = true AND datistemplate = false ORDER BY datname"),
+        ("SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname"),
+    )
+    if error:
+        return None, error
+
+    databases: list[str] = []
+    for row in rows:
+        if not row:
+            continue
+        name = str(row[0] or "").strip()
+        if name:
+            databases.append(name)
+    return databases, None
+
+
+def _pg_query_accessible_databases(sock: socket.socket) -> tuple[list[str] | None, str | None]:
+    rows, error = _pg_query_rows(
+        sock,
+        (
+            "SELECT datname "
+            "FROM pg_database "
+            "WHERE datistemplate = false "
+            "AND datallowconn = true "
+            "AND has_database_privilege(datname, 'CONNECT') "
+            "ORDER BY datname"
+        ),
     )
     if error:
         return None, error
@@ -683,6 +708,58 @@ def _pg_normalize_table_name(raw_name: str) -> tuple[str | None, str | None, str
     display = ".".join(parts)
     sql_ident = ".".join(_pg_quote_ident(part) for part in parts)
     return sql_ident, display, None
+
+
+def _pg_parse_table_reference(raw_name: str) -> tuple[str | None, str | None, str | None]:
+    candidate = (raw_name or "").strip()
+    if not candidate:
+        return None, None, "empty table name"
+
+    parts = [part.strip() for part in candidate.split(".")]
+    if len(parts) not in {1, 2, 3}:
+        return None, None, f"invalid table format: {candidate}"
+    if any(not part for part in parts):
+        return None, None, f"invalid table format: {candidate}"
+    for part in parts:
+        if not _PG_IDENT_RE.fullmatch(part):
+            return None, None, f"unsupported table identifier: {candidate}"
+
+    if len(parts) == 3:
+        return parts[0], ".".join(parts[1:]), None
+    return None, ".".join(parts), None
+
+
+def _pg_group_table_targets(
+    table_targets: list[str],
+    selected_database: str | None,
+) -> tuple[list[str], dict[str | None, list[str]], str | None]:
+    grouped: dict[str | None, list[str]] = {}
+    normalized_targets: list[str] = []
+    seen_normalized_targets: set[str] = set()
+
+    clean_selected_database = str(selected_database or "").strip() or None
+    for raw_target in table_targets:
+        database_name, local_table_name, error = _pg_parse_table_reference(raw_target)
+        if error or local_table_name is None:
+            return [], {}, error or f"invalid table target: {raw_target}"
+        if clean_selected_database and database_name and database_name != clean_selected_database:
+            return (
+                [],
+                {},
+                f"--table database prefix '{database_name}' conflicts with --database {clean_selected_database}",
+            )
+
+        bucket_key = database_name or clean_selected_database
+        bucket = grouped.setdefault(bucket_key, [])
+        if local_table_name not in bucket:
+            bucket.append(local_table_name)
+
+        normalized_target = f"{database_name}.{local_table_name}" if database_name else local_table_name
+        if normalized_target not in seen_normalized_targets:
+            seen_normalized_targets.add(normalized_target)
+            normalized_targets.append(normalized_target)
+
+    return normalized_targets, grouped, None
 
 
 def _pg_normalize_column_names(raw_values: list[str]) -> tuple[list[str], str | None]:
@@ -836,19 +913,22 @@ def _pg_query_table_rows(
     table_name: str,
     *,
     columns: list[str] | None = None,
-    max_rows: int = 100,
+    max_rows: int | None = None,
 ) -> tuple[str, list[str] | None, str | None]:
     sql_ident, display_name, normalize_error = _pg_normalize_table_name(table_name)
     if normalize_error or sql_ident is None or display_name is None:
         return (table_name or "").strip() or "<invalid>", None, normalize_error or "invalid table name"
 
-    limit = max(1, int(max_rows))
     if columns:
         select_list = ", ".join(_pg_quote_ident(column) for column in columns)
     else:
         select_list = "*"
+    limit_clause = ""
+    if max_rows is not None:
+        limit_clause = f" LIMIT {max(1, int(max_rows))}"
     rows, error = _pg_query_rows(
-        sock, f"SELECT row_to_json(t)::text FROM (SELECT {select_list} FROM {sql_ident} LIMIT {limit}) AS t"
+        sock,
+        f"SELECT row_to_json(t)::text FROM (SELECT {select_list} FROM {sql_ident}{limit_clause}) AS t",
     )
     if error:
         return display_name, None, error
@@ -859,6 +939,20 @@ def _pg_query_table_rows(
             continue
         values.append(_pg_text(row[0]))
     return display_name, values, None
+
+
+def _pg_query_table_row_count(
+    sock: socket.socket,
+    table_name: str,
+) -> tuple[str, int | None, str | None]:
+    sql_ident, display_name, normalize_error = _pg_normalize_table_name(table_name)
+    if normalize_error or sql_ident is None or display_name is None:
+        return (table_name or "").strip() or "<invalid>", None, normalize_error or "invalid table name"
+
+    count_value, error = _pg_query_scalar_int(sock, f"SELECT COUNT(*) FROM {sql_ident}")
+    if error:
+        return display_name, None, error
+    return display_name, count_value, None
 
 
 def _pg_query_table_columns(
@@ -926,16 +1020,18 @@ def _pg_collect_database_artifacts(
     database_name: str,
     include_database_prefix: bool,
     show_tables: bool,
+    show_row_counts: bool,
     show_columns: bool,
     table_targets: list[str],
     table_columns: list[str],
     dump_table_rows: bool,
-) -> tuple[list[str] | None, list[dict[str, Any]], list[dict[str, Any]], int | None, str | None]:
+    dump_row_limit: int | None,
+) -> tuple[list[str] | None, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int | None, str | None]:
     query_error: str | None = None
     raw_table_names: list[str] | None = None
     table_names: list[str] | None = None
 
-    if show_tables or (dump_table_rows and not table_targets):
+    if show_tables or show_row_counts or (dump_table_rows and not table_targets):
         raw_table_names, table_error = _pg_query_readable_tables(sock)
         query_error = _merge_query_error(query_error, table_error)
         if show_tables and isinstance(raw_table_names, list):
@@ -946,9 +1042,11 @@ def _pg_collect_database_artifacts(
 
     readable_tables = len(raw_table_names) if isinstance(raw_table_names, list) else None
     table_columns_info: list[dict[str, Any]] = []
+    table_row_counts: list[dict[str, Any]] = []
     table_dumps: list[dict[str, Any]] = []
     dump_targets: list[str] = table_targets if table_targets else (raw_table_names or [])
     table_columns_map: dict[str, list[str]] = {}
+    row_count_targets: list[str] = table_targets if table_targets else (raw_table_names or [])
 
     should_collect_table_columns = bool(table_targets) and (show_columns or not dump_table_rows)
     if should_collect_table_columns:
@@ -976,6 +1074,22 @@ def _pg_collect_database_artifacts(
                 table_columns_map[table_name] = normalized_columns
                 table_columns_map[str(columns_table)] = normalized_columns
 
+    if show_row_counts:
+        for table_name in row_count_targets:
+            count_table, row_count, row_count_error = _pg_query_table_row_count(sock, table_name)
+            table_row_counts.append(
+                {
+                    "database": database_name,
+                    "table": (
+                        _pg_display_table_name(database_name, str(count_table))
+                        if include_database_prefix
+                        else str(count_table)
+                    ),
+                    "row_count": row_count,
+                    "error": row_count_error,
+                }
+            )
+
     if dump_table_rows:
         selected_dump_columns = [str(column) for column in table_columns] if table_columns else None
         for table_name in dump_targets:
@@ -996,6 +1110,7 @@ def _pg_collect_database_artifacts(
                 sock,
                 table_name,
                 columns=table_columns if table_columns else None,
+                max_rows=dump_row_limit,
             )
             table_dumps.append(
                 {
@@ -1011,7 +1126,7 @@ def _pg_collect_database_artifacts(
                 }
             )
 
-    return table_names, table_columns_info, table_dumps, readable_tables, query_error
+    return table_names, table_columns_info, table_row_counts, table_dumps, readable_tables, query_error
 
 
 def _pg_collect_database_artifacts_remote(
@@ -1025,11 +1140,13 @@ def _pg_collect_database_artifacts_remote(
     *,
     include_database_prefix: bool,
     show_tables: bool,
+    show_row_counts: bool,
     show_columns: bool,
     table_targets: list[str],
     table_columns: list[str],
     dump_table_rows: bool,
-) -> tuple[list[str] | None, list[dict[str, Any]], list[dict[str, Any]], int | None, str | None]:
+    dump_row_limit: int | None,
+) -> tuple[list[str] | None, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int | None, str | None]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
     for attempt in range(attempts):
@@ -1043,10 +1160,12 @@ def _pg_collect_database_artifacts_remote(
                 database_name=database_name,
                 include_database_prefix=include_database_prefix,
                 show_tables=show_tables,
+                show_row_counts=show_row_counts,
                 show_columns=show_columns,
                 table_targets=table_targets,
                 table_columns=table_columns,
                 dump_table_rows=dump_table_rows,
+                dump_row_limit=dump_row_limit,
             )
             try:
                 _pg_send_terminate(sock)
@@ -1054,7 +1173,7 @@ def _pg_collect_database_artifacts_remote(
                 pass
             return result
         except _PgAuditError as exc:
-            return None, [], [], None, str(exc)
+            return None, [], [], [], None, str(exc)
         except (OSError, ValueError, ConnectionError) as exc:
             last_error = str(exc)
             if attempt >= attempts - 1:
@@ -1066,7 +1185,7 @@ def _pg_collect_database_artifacts_remote(
                     sock.close()
                 except OSError:
                     pass
-    return None, [], [], None, last_error or "connection failed"
+    return None, [], [], [], None, last_error or "connection failed"
 
 
 def _audit_postgres_host(
@@ -1080,15 +1199,22 @@ def _audit_postgres_host(
     database: str | None,
     show_databases: bool,
     show_tables: bool,
+    show_row_counts: bool,
     show_columns: bool,
     table_targets: list[str],
+    table_targets_by_database: dict[str | None, list[str]],
     table_columns: list[str],
     dump_table_rows: bool,
+    dump_row_limit: int | None,
     execute_command: str | None,
     sql_command: str | None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
+    show_tables_requested = bool(show_tables)
+    show_row_counts_requested = bool(show_row_counts)
+    effective_show_tables = show_tables_requested or show_row_counts_requested
+    effective_show_row_counts = show_row_counts_requested or show_tables_requested
 
     provided_credentials = password is not None or username is not None
     if provided_credentials:
@@ -1109,6 +1235,9 @@ def _audit_postgres_host(
 
                 target_database = str(database or "").strip() or None
                 startup_database = target_database or "postgres"
+                effective_table_targets_by_database = dict(table_targets_by_database)
+                if table_targets and not effective_table_targets_by_database:
+                    effective_table_targets_by_database = {target_database: list(table_targets)}
 
                 session = _pg_startup_and_auth(
                     sock,
@@ -1121,18 +1250,33 @@ def _audit_postgres_host(
                     _collect_postgres_privileges(sock)
                 )
                 database_names_all, databases_error = _pg_query_databases(sock)
+                accessible_database_names: list[str] | None = None
+                accessible_databases_error: str | None = None
                 database_count = len(database_names_all) if isinstance(database_names_all, list) else None
                 database_names = database_names_all if show_databases and isinstance(database_names_all, list) else None
                 if show_databases and databases_error:
                     query_error = _merge_query_error(query_error, databases_error)
 
                 inspect_all_databases = (
-                    target_database is None and not table_targets and (show_tables or dump_table_rows)
+                    target_database is None and not table_targets and (effective_show_tables or dump_table_rows)
                 )
-                if inspect_all_databases and isinstance(database_names_all, list) and database_names_all:
-                    inspection_databases = list(database_names_all)
+                if inspect_all_databases:
+                    accessible_database_names, accessible_databases_error = _pg_query_accessible_databases(sock)
+                prefixed_target_databases = [key for key in effective_table_targets_by_database if key]
+                if prefixed_target_databases:
+                    inspection_databases = list(prefixed_target_databases)
+                    if None in effective_table_targets_by_database:
+                        inspection_databases.insert(0, startup_database)
+                elif (
+                    inspect_all_databases and isinstance(accessible_database_names, list) and accessible_database_names
+                ):
+                    inspection_databases = list(accessible_database_names)
                     if startup_database not in inspection_databases:
                         inspection_databases.insert(0, startup_database)
+                elif inspect_all_databases:
+                    inspection_databases = [startup_database]
+                    if accessible_databases_error:
+                        query_error = _merge_query_error(query_error, accessible_databases_error)
                 else:
                     inspection_databases = [str(target_database or startup_database)]
 
@@ -1149,16 +1293,23 @@ def _audit_postgres_host(
 
                 table_names: list[str] | None = None
                 table_columns_info: list[dict[str, Any]] = []
+                table_row_counts: list[dict[str, Any]] = []
                 table_dumps: list[dict[str, Any]] = []
                 aggregated_readable_tables = 0
                 aggregated_readable_known = False
                 used_current_session = False
 
                 for inspection_database in inspection_databases:
+                    database_table_targets = list(effective_table_targets_by_database.get(inspection_database, []))
+                    if inspection_database == startup_database:
+                        for local_table_target in effective_table_targets_by_database.get(None, []):
+                            if local_table_target not in database_table_targets:
+                                database_table_targets.append(local_table_target)
                     if inspection_database == startup_database and not used_current_session:
                         (
                             database_table_names,
                             database_columns_info,
+                            database_table_row_counts,
                             database_table_dumps,
                             database_readable_tables,
                             database_query_error,
@@ -1166,17 +1317,20 @@ def _audit_postgres_host(
                             sock,
                             database_name=inspection_database,
                             include_database_prefix=include_database_prefix,
-                            show_tables=show_tables,
+                            show_tables=effective_show_tables,
+                            show_row_counts=effective_show_row_counts,
                             show_columns=show_columns,
-                            table_targets=table_targets,
+                            table_targets=database_table_targets,
                             table_columns=table_columns,
                             dump_table_rows=dump_table_rows,
+                            dump_row_limit=dump_row_limit,
                         )
                         used_current_session = True
                     else:
                         (
                             database_table_names,
                             database_columns_info,
+                            database_table_row_counts,
                             database_table_dumps,
                             database_readable_tables,
                             database_query_error,
@@ -1189,11 +1343,13 @@ def _audit_postgres_host(
                             effective_password,
                             inspection_database,
                             include_database_prefix=include_database_prefix,
-                            show_tables=show_tables,
+                            show_tables=effective_show_tables,
+                            show_row_counts=effective_show_row_counts,
                             show_columns=show_columns,
-                            table_targets=table_targets,
+                            table_targets=database_table_targets,
                             table_columns=table_columns,
                             dump_table_rows=dump_table_rows,
+                            dump_row_limit=dump_row_limit,
                         )
 
                     query_error = _merge_query_error(query_error, database_query_error)
@@ -1203,6 +1359,8 @@ def _audit_postgres_host(
                         table_names.extend(database_table_names)
                     if isinstance(database_columns_info, list) and database_columns_info:
                         table_columns_info.extend(database_columns_info)
+                    if isinstance(database_table_row_counts, list) and database_table_row_counts:
+                        table_row_counts.extend(database_table_row_counts)
                     if isinstance(database_table_dumps, list) and database_table_dumps:
                         table_dumps.extend(database_table_dumps)
                     if isinstance(database_readable_tables, int):
@@ -1269,12 +1427,15 @@ def _audit_postgres_host(
                     "show_databases": show_databases,
                     "database_names": database_names,
                     "database_count": database_count,
-                    "show_tables": show_tables,
+                    "show_tables": effective_show_tables,
+                    "show_row_counts": show_row_counts_requested,
                     "show_columns": show_columns,
                     "table_names": table_names,
                     "table_targets": dump_targets if dump_table_rows and not table_targets else table_targets,
                     "table_columns": table_columns,
+                    "table_row_counts": table_row_counts,
                     "table_dump_enabled": dump_table_rows,
+                    "dump_row_limit": dump_row_limit,
                     "table_columns_info": table_columns_info,
                     "table_dumps": table_dumps,
                     "execute_command": execute_command,
@@ -1317,12 +1478,15 @@ def _audit_postgres_host(
                 "show_databases": show_databases,
                 "database_names": None,
                 "database_count": None,
-                "show_tables": show_tables,
+                "show_tables": effective_show_tables,
+                "show_row_counts": show_row_counts_requested,
                 "show_columns": show_columns,
                 "table_names": None,
                 "table_targets": table_targets,
                 "table_columns": table_columns,
+                "table_row_counts": [],
                 "table_dump_enabled": dump_table_rows,
+                "dump_row_limit": dump_row_limit,
                 "table_columns_info": [],
                 "table_dumps": [],
                 "execute_command": execute_command,
@@ -1368,12 +1532,15 @@ def _audit_postgres_host(
         "show_databases": show_databases,
         "database_names": None,
         "database_count": None,
-        "show_tables": show_tables,
+        "show_tables": effective_show_tables,
+        "show_row_counts": show_row_counts_requested,
         "show_columns": show_columns,
         "table_names": None,
         "table_targets": table_targets,
         "table_columns": table_columns,
+        "table_row_counts": [],
         "table_dump_enabled": dump_table_rows,
+        "dump_row_limit": dump_row_limit,
         "table_columns_info": [],
         "table_dumps": [],
         "execute_command": execute_command,
@@ -1477,9 +1644,29 @@ def _format_tables_detail_records(record: dict[str, Any], output_format: str) ->
         ]
 
     prefix = _nxc_prefix(record)
+    row_counts_by_table: dict[str, dict[str, Any]] = {}
+    table_row_counts = record.get("table_row_counts")
+    if isinstance(table_row_counts, list):
+        for item in table_row_counts:
+            if not isinstance(item, dict):
+                continue
+            table_name = str(item.get("table") or "").strip()
+            if table_name and table_name not in row_counts_by_table:
+                row_counts_by_table[table_name] = item
     lines = [f"{prefix} [*] Dump Tables"]
     for table_name in table_names:
-        lines.append(f"{prefix} {str(table_name)}")
+        rendered_name = str(table_name)
+        row_item = row_counts_by_table.get(rendered_name)
+        if row_item is None:
+            lines.append(f"{prefix} {rendered_name}")
+            continue
+        row_error = row_item.get("error")
+        if row_error:
+            lines.append(f"{prefix} {rendered_name} <error:{_pg_text(row_error)}>")
+            continue
+        row_count = row_item.get("row_count")
+        row_count_text = str(row_count) if isinstance(row_count, int) else "unknown"
+        lines.append(f"{prefix} {rendered_name} (Rows:{row_count_text})")
     return lines
 
 
@@ -1563,6 +1750,55 @@ def _format_table_columns_detail_records(record: dict[str, Any], output_format: 
     return lines
 
 
+def _format_table_row_count_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if not record.get("show_row_counts"):
+        return []
+    if output_format == "txt" and record.get("show_tables"):
+        return []
+
+    table_row_counts = record.get("table_row_counts")
+    if not isinstance(table_row_counts, list) or not table_row_counts:
+        return []
+
+    if output_format == "json":
+        lines: list[str] = []
+        for item in table_row_counts:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                json.dumps(
+                    {
+                        "timestamp": record.get("timestamp"),
+                        "type": "table_rows",
+                        "service": "postgres",
+                        "host": record.get("host"),
+                        "port": record.get("port"),
+                        "database": item.get("database") or record.get("database"),
+                        "table": str(item.get("table") or ""),
+                        "row_count": item.get("row_count"),
+                        "error": str(item.get("error")) if item.get("error") else None,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        return lines
+
+    prefix = _nxc_prefix(record)
+    lines = [f"{prefix} [*] Table Rows"]
+    for item in table_row_counts:
+        if not isinstance(item, dict):
+            continue
+        table_name = str(item.get("table") or "").strip() or "<unknown>"
+        row_error = item.get("error")
+        if row_error:
+            lines.append(f"{prefix} {table_name} <error:{_pg_text(row_error)}>")
+            continue
+        row_count = item.get("row_count")
+        row_count_text = str(row_count) if isinstance(row_count, int) else "unknown"
+        lines.append(f"{prefix} {table_name} (rows:{row_count_text})")
+    return lines
+
+
 def _format_table_dump_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
     if not record.get("table_dump_enabled"):
         return []
@@ -1574,6 +1810,7 @@ def _format_table_dump_detail_records(record: dict[str, Any], output_format: str
         [str(item) for item in table_columns] if isinstance(table_columns, list) and table_columns else []
     )
     columns_label = ",".join(selected_columns)
+    dump_row_limit = record.get("dump_row_limit")
 
     if output_format == "json":
         lines: list[str] = []
@@ -1592,6 +1829,7 @@ def _format_table_dump_detail_records(record: dict[str, Any], output_format: str
                         "database": item.get("database") or record.get("database"),
                         "table": table_name,
                         "columns": [str(col) for col in item.get("columns") or selected_columns or []],
+                        "row_limit": dump_row_limit,
                         "rows": [str(row) for row in item.get("rows") or []],
                         "error": str(item.get("error")) if item.get("error") else None,
                     },
@@ -1608,10 +1846,15 @@ def _format_table_dump_detail_records(record: dict[str, Any], output_format: str
         table_name = str(item.get("table") or "").strip() or "<unknown>"
         item_columns = [str(col) for col in item.get("columns") or []]
         header_columns = item_columns or [str(col) for col in selected_columns or []]
+        header_parts: list[str] = []
         if columns_label:
-            lines.append(f"{prefix} [*] Dump Table {table_name} (columns:{columns_label})")
+            header_parts.append(f"columns:{columns_label}")
         elif item_columns:
-            lines.append(f"{prefix} [*] Dump Table {table_name} (columns:auto)")
+            header_parts.append("columns:auto")
+        if isinstance(dump_row_limit, int):
+            header_parts.append(f"limit:{dump_row_limit}")
+        if header_parts:
+            lines.append(f"{prefix} [*] Dump Table {table_name} ({' '.join(header_parts)})")
         else:
             lines.append(f"{prefix} [*] Dump Table {table_name}")
         if header_columns:
@@ -1870,10 +2113,13 @@ def audit_postgres_targets(
     database: str | None,
     show_databases: bool,
     show_tables: bool,
+    show_row_counts: bool,
     show_columns: bool,
     table_targets: list[str],
+    table_targets_by_database: dict[str | None, list[str]],
     table_columns: list[str],
     dump_table_rows: bool,
+    dump_row_limit: int | None,
     execute_command: str | None,
     sql_command: str | None,
     output_path: str | None,
@@ -1910,10 +2156,13 @@ def audit_postgres_targets(
                     database,
                     show_databases,
                     show_tables,
+                    show_row_counts,
                     show_columns,
                     table_targets,
+                    table_targets_by_database,
                     table_columns,
                     dump_table_rows,
+                    dump_row_limit,
                     execute_command,
                     sql_command,
                 ): host
@@ -1959,6 +2208,8 @@ def audit_postgres_targets(
                     _emit_line(out_fh, emit_line, table_line)
                 for table_columns_line in _format_table_columns_detail_records(record, output_format):
                     _emit_line(out_fh, emit_line, table_columns_line)
+                for table_rows_line in _format_table_row_count_detail_records(record, output_format):
+                    _emit_line(out_fh, emit_line, table_rows_line)
                 for table_dump_line in _format_table_dump_detail_records(record, output_format):
                     _emit_line(out_fh, emit_line, table_dump_line)
                 for execute_line in _format_execute_detail_records(record, output_format):
@@ -2051,6 +2302,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     execute_command = str(getattr(args, "execute", "") or "").strip() or None
     sql_command = str(getattr(args, "sql_cmd", "") or "").strip() or None
+    selected_database = str(getattr(args, "database", "") or "").strip() or None
     table_targets_raw = list(getattr(args, "tables", []) or [])
     table_targets: list[str] = []
     seen_table_targets: set[str] = set()
@@ -2063,12 +2315,22 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 continue
             seen_table_targets.add(table_name)
             table_targets.append(table_name)
+    table_targets, table_targets_by_database, table_targets_error = _pg_group_table_targets(
+        table_targets,
+        selected_database,
+    )
+    if table_targets_error:
+        console.error(table_targets_error)
+        return 2
     table_columns_raw = list(getattr(args, "columns", []) or [])
     table_columns, columns_error = _pg_normalize_column_names(table_columns_raw)
     if columns_error:
         console.error(columns_error)
         return 2
-    dump_table_rows = bool(getattr(args, "dump", False))
+    show_row_counts = bool(getattr(args, "rows", False))
+    dump_value = getattr(args, "dump", None)
+    dump_table_rows = dump_value is not None
+    dump_row_limit = dump_value if isinstance(dump_value, int) and dump_value > 0 else None
     show_columns = bool(getattr(args, "show_columns", False))
     os_shell_mode = bool(getattr(args, "os_shell", False))
     sql_shell_mode = bool(getattr(args, "sql_shell", False))
@@ -2122,13 +2384,16 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             username=effective_username,
             password=args.password,
             defcreds=args.defcreds,
-            database=args.database,
+            database=selected_database,
             show_databases=args.show_databases,
             show_tables=args.show_tables,
+            show_row_counts=show_row_counts,
             show_columns=show_columns,
             table_targets=table_targets,
+            table_targets_by_database=table_targets_by_database,
             table_columns=table_columns,
             dump_table_rows=dump_table_rows,
+            dump_row_limit=dump_row_limit,
             execute_command=None,
             sql_command=None,
         )
@@ -2141,6 +2406,8 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             emit_line(table_line)
         for table_columns_line in _format_table_columns_detail_records(record, "txt"):
             emit_line(table_columns_line)
+        for table_rows_line in _format_table_row_count_detail_records(record, "txt"):
+            emit_line(table_rows_line)
         for table_dump_line in _format_table_dump_detail_records(record, "txt"):
             emit_line(table_dump_line)
 
@@ -2186,7 +2453,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 retries=args.retries,
                 username=shell_username,
                 password=shell_password,
-                database=args.database or "postgres",
+                database=selected_database or "postgres",
                 command=command,
             )
             shell_record = dict(record)
@@ -2233,13 +2500,16 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             username=effective_username,
             password=args.password,
             defcreds=args.defcreds,
-            database=args.database,
+            database=selected_database,
             show_databases=args.show_databases,
             show_tables=args.show_tables,
+            show_row_counts=show_row_counts,
             show_columns=show_columns,
             table_targets=table_targets,
+            table_targets_by_database=table_targets_by_database,
             table_columns=table_columns,
             dump_table_rows=dump_table_rows,
+            dump_row_limit=dump_row_limit,
             execute_command=None,
             sql_command=None,
         )
@@ -2252,6 +2522,8 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             emit_line(table_line)
         for table_columns_line in _format_table_columns_detail_records(record, "txt"):
             emit_line(table_columns_line)
+        for table_rows_line in _format_table_row_count_detail_records(record, "txt"):
+            emit_line(table_rows_line)
         for table_dump_line in _format_table_dump_detail_records(record, "txt"):
             emit_line(table_dump_line)
 
@@ -2294,7 +2566,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 retries=args.retries,
                 username=shell_username,
                 password=shell_password,
-                database=args.database or "postgres",
+                database=selected_database or "postgres",
                 query=query,
             )
             shell_record = dict(record)
@@ -2358,13 +2630,16 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 username=effective_username,
                 password=args.password,
                 defcreds=args.defcreds,
-                database=args.database,
+                database=selected_database,
                 show_databases=args.show_databases,
                 show_tables=args.show_tables,
+                show_row_counts=show_row_counts,
                 show_columns=show_columns,
                 table_targets=table_targets,
+                table_targets_by_database=table_targets_by_database,
                 table_columns=table_columns,
                 dump_table_rows=dump_table_rows,
+                dump_row_limit=dump_row_limit,
                 execute_command=execute_command,
                 sql_command=sql_command,
                 output_path=args.output,

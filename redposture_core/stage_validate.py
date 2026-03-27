@@ -1092,6 +1092,15 @@ def run_validation_records(
     )
 
 
+def scan_validation_hits(
+    body: str,
+    *,
+    input_format: str = "auto",
+) -> tuple[int, list[dict[str, str | int]]]:
+    """Return line count and validation hits for a body without rendering output."""
+    return _scan_body_hits(body, input_format)
+
+
 class ValidationRecordAccumulator:
     """Streaming credential-hit accumulator for in-memory validation records."""
 

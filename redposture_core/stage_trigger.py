@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 import threading
@@ -16,7 +17,7 @@ from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import scan_exporters_and_trigger
 from .servers import RunningServer
-from .utils import collect_scan_ports, collect_scan_targets, normalize_ip_literal, normalize_scan_host
+from .utils import collect_scan_ports, collect_scan_targets, normalize_ip_literal, normalize_scan_host, utc_now_iso
 
 _TRIGGER_EXPORTER_DISPLAY_NAMES = {
     "blackbox_exporter": "Blackbox Exporter",
@@ -52,6 +53,53 @@ def _clip_text(value: str, width: int) -> str:
     if width <= 3:
         return value[:width]
     return value[: width - 3] + "..."
+
+
+def _safe_int(value: object) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_text(value: object) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _json_record_from_trigger_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    if str(event.get("phase") or "").strip().lower() != "callback_result":
+        return None
+    success = bool(event.get("success"))
+    record: dict[str, Any] = {
+        "timestamp": utc_now_iso(),
+        "source_type": "trigger",
+        "host": _as_text(event.get("host")),
+        "exporter": _as_text(event.get("exporter")) or "exporter",
+        "port": _safe_int(event.get("exporter_port")),
+        "listen_port": _safe_int(event.get("callback_port")),
+        "callback_target": _as_text(event.get("callback_target")),
+        "trigger_url": _as_text(event.get("trigger_url")),
+        "target": _as_text(event.get("target")),
+        "success": success,
+        "probe_success": event.get("probe_success"),
+        "status": "trigger_success" if success else "trigger_error",
+        "http_status": _safe_int(event.get("status")),
+        "error": _as_text(event.get("error")),
+    }
+    return {key: value for key, value in record.items() if value is not None}
+
+
+def _write_trigger_json_records(output_path: str | None, records: list[dict[str, Any]]) -> None:
+    payload = "\n".join(json.dumps(item, ensure_ascii=False) for item in records)
+    if payload:
+        payload += "\n"
+    if output_path:
+        with open(output_path, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        return
+    if payload:
+        print(payload, end="", flush=True)
 
 
 def _trigger_plain_row(stage_tag: str, target: str, port: str, marker: str, body: str) -> str:
@@ -513,6 +561,7 @@ def _run_trigger_requests(
     trigger_exporters: list[dict[str, Any]],
     show_trigger_info: bool,
     log_trigger_attempts: bool,
+    record_sink: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     callbacks = ",".join(callback_targets)
     if show_trigger_info:
@@ -524,6 +573,10 @@ def _run_trigger_requests(
     emitted_scan_rows: set[tuple[str, str, str]] = set()
 
     def _emit_trigger_event(event: dict[str, Any]) -> None:
+        if record_sink is not None:
+            json_record = _json_record_from_trigger_event(event)
+            if json_record is not None:
+                record_sink.append(json_record)
         phase = str(event.get("phase") or "")
         if phase == "detect_hit":
             scan_target = str(event.get("host") or "-")
@@ -560,7 +613,7 @@ def _run_trigger_requests(
         retries=args.retries,
         trigger_exporters=trigger_exporters,
         log_trigger_events_only=not args.debug,
-        emit_trigger_event=_emit_trigger_event if args.with_listen else None,
+        emit_trigger_event=_emit_trigger_event if (args.with_listen or record_sink is not None) else None,
     )
     attempted = int(summary.get("attempted", 0))
     display_success = int(summary.get("triggered", 0))
@@ -637,6 +690,10 @@ def _run_trigger_requests(
 
 def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     console = Console(debug=args.debug)
+    listen_seconds = getattr(args, "listen_seconds", None)
+    output_format = str(getattr(args, "output_format", "txt") or "txt").strip().lower()
+    output_path = getattr(args, "output", None)
+    stream_to_stdout = not bool(output_path)
 
     if args.timeout <= 0:
         console.error("--timeout must be > 0")
@@ -644,8 +701,14 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.retries < 0:
         console.error("--retries must be >= 0")
         return 2
+    if listen_seconds is not None and listen_seconds < 0:
+        console.error("--listen-seconds must be >= 0")
+        return 2
     if getattr(args, "check_credentials", False) and not getattr(args, "with_listen", False):
         console.error("--check-credentials requires --with-listen")
+        return 2
+    if output_format == "json" and getattr(args, "with_listen", False) and stream_to_stdout:
+        console.error("--format json with --with-listen requires --output")
         return 2
 
     try:
@@ -702,13 +765,13 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.error("trigger requires --callback-ip and/or --callback-dns")
         return 2
 
-    output_path = getattr(args, "output", None)
     if output_path:
-        try:
-            logger.set_text_output(output_path)
-        except OSError as exc:
-            console.error(f"failed to open trigger output file: {exc}")
-            return 2
+        if output_format == "txt":
+            try:
+                logger.set_text_output(output_path)
+            except OSError as exc:
+                console.error(f"failed to open trigger output file: {exc}")
+                return 2
         console.info(f"trigger output file: {output_path}")
 
     trigger_exporters = _filter_trigger_exporters(profiles["trigger_exporters"], selected_trigger_exporters)
@@ -754,6 +817,9 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 else:
                     console.debug(f"trigger exporter={item.get('name')} target_fmt={item.get('target_fmt')}")
 
+    trigger_records: list[dict[str, Any]] = []
+    show_trigger_info = output_format == "txt" or not stream_to_stdout
+
     if not args.with_listen:
         _run_trigger_requests(
             args,
@@ -762,9 +828,16 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             hosts,
             callback_targets,
             trigger_exporters,
-            show_trigger_info=True,
-            log_trigger_attempts=True,
+            show_trigger_info=show_trigger_info,
+            log_trigger_attempts=output_format == "txt" or not stream_to_stdout,
+            record_sink=trigger_records if output_format == "json" else None,
         )
+        if output_format == "json":
+            try:
+                _write_trigger_json_records(output_path, trigger_records)
+            except OSError as exc:
+                console.error(f"failed to write trigger output: {exc}")
+                return 1
         return 0
 
     running: list[RunningServer] = []
@@ -783,11 +856,28 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             hosts,
             callback_targets,
             trigger_exporters,
-            show_trigger_info=True,
+            show_trigger_info=show_trigger_info,
             log_trigger_attempts=False,
+            record_sink=trigger_records if output_format == "json" else None,
         )
         if getattr(args, "check_credentials", False):
             _run_trigger_credential_checks(args, logger, console)
+        if output_format == "json":
+            try:
+                _write_trigger_json_records(output_path, trigger_records)
+            except OSError as exc:
+                console.error(f"failed to write trigger output: {exc}")
+                return 1
+        if listen_seconds is not None:
+            console.info(f"listeners are up; waiting for incoming events ({listen_seconds:.1f}s)")
+            deadline = time.monotonic() + float(listen_seconds)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                time.sleep(min(1.0, remaining))
+            console.info("listen window elapsed; stopping listeners...")
+            return 0
         console.info("listeners are up; waiting for incoming events (Ctrl+C to stop)")
         while True:
             time.sleep(1)

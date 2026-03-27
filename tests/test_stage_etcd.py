@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from redposture_core.stage_etcd import (
+    _audit_etcd_host,
     _body_indicates_auth_required,
     _count_v2_keys,
     _count_v2_nodes,
@@ -14,6 +15,7 @@ from redposture_core.stage_etcd import (
     _join_api_versions,
     _major_version,
     _normalize_etcd_key,
+    audit_etcd_targets,
 )
 
 
@@ -130,3 +132,232 @@ def test_is_suppressed_fail_record_for_timeout_and_refused() -> None:
     assert _is_suppressed_fail_record({"status": "fail", "error": "connection timeout"}) is True
     assert _is_suppressed_fail_record({"status": "fail", "error": "connection refused (service)"}) is True
     assert _is_suppressed_fail_record({"status": "fail", "error": "dns lookup failed"}) is False
+
+
+def test_audit_etcd_host_open_v2_collects_keys_and_query(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_json_request(
+        host: str,
+        port: int,
+        method: str,
+        path: str,
+        timeout: float,
+        *,
+        payload: dict[str, object] | None = None,
+    ) -> tuple[int, str]:
+        _ = (host, port, method, timeout, payload)
+        if path == "/version":
+            return 200, '{"etcdserver":"2.3.8"}'
+        if path == "/v2/keys?recursive=true":
+            return 200, '{"node":{"dir":true,"nodes":[{"key":"/b","value":"2"},{"key":"/a","value":"1"}]}}'
+        if path == "/v2/keys/a":
+            return 200, '{"node":{"key":"/a","value":"1"}}'
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_http_json_request)
+
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=True,
+        dump_keys=True,
+        query_key="/a",
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert record["api_versions"] == "v2"
+    assert record["key_count"] == 2
+    assert record["keys"] == ["/a", "/b"]
+    assert record["key_values"] == ["/a:1", "/b:2"]
+    assert record["query_key_value"] == "/a:1"
+
+
+def test_audit_etcd_host_v3_auth_required_and_unknown_auth(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    auth_required_calls: list[str] = []
+
+    def fake_auth_required(
+        host: str,
+        port: int,
+        method: str,
+        path: str,
+        timeout: float,
+        *,
+        payload: dict[str, object] | None = None,
+    ) -> tuple[int, str]:
+        _ = (host, port, method, timeout, payload)
+        auth_required_calls.append(path)
+        if path == "/version":
+            return 200, '{"etcdserver":"3.5.11"}'
+        if path == "/v2/keys?recursive=true":
+            return 404, ""
+        if path == "/v3/auth/status":
+            return 200, '{"enabled": true}'
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_auth_required)
+    auth_record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+    assert auth_record["status"] == "auth_required"
+    assert auth_record["api_versions"] == "v3"
+    assert auth_record["auth_required"] is True
+    assert "/v3/auth/status" in auth_required_calls
+
+    def fake_unknown(
+        host: str,
+        port: int,
+        method: str,
+        path: str,
+        timeout: float,
+        *,
+        payload: dict[str, object] | None = None,
+    ) -> tuple[int, str]:
+        _ = (host, port, method, timeout, payload)
+        if path == "/version":
+            return 200, '{"etcdserver":"3.5.11"}'
+        if path == "/v2/keys?recursive=true":
+            return 404, ""
+        if path == "/v3/auth/status":
+            return 500, "oops"
+        if path == "/v3/kv/range":
+            return 500, "oops"
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_unknown)
+    unknown_record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+    assert unknown_record["status"] == "unknown_auth"
+    assert unknown_record["auth_required"] is None
+    assert "/v3/kv/range returned status 500" in str(unknown_record["error"])
+
+
+def test_audit_etcd_host_marks_non_etcd_and_retries_failures(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_not_etcd(
+        host: str,
+        port: int,
+        method: str,
+        path: str,
+        timeout: float,
+        *,
+        payload: dict[str, object] | None = None,
+    ) -> tuple[int, str]:
+        _ = (host, port, method, timeout, payload)
+        if path == "/version":
+            return 404, ""
+        if path == "/v2/keys?recursive=true":
+            return 404, ""
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_not_etcd)
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+    assert record["status"] == "fail"
+    assert record["is_etcd"] is False
+    assert record["error"] == "service is not etcd"
+
+    attempts = {"count": 0}
+
+    def fake_fail(
+        host: str,
+        port: int,
+        method: str,
+        path: str,
+        timeout: float,
+        *,
+        payload: dict[str, object] | None = None,
+    ) -> tuple[int, str]:
+        _ = (host, port, method, path, timeout, payload)
+        attempts["count"] += 1
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_fail)
+    monkeypatch.setattr("redposture_core.stage_etcd._retry_delay", lambda _attempt: 0.0)
+    failed_record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=1,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+    assert attempts["count"] == 2
+    assert failed_record["status"] == "fail"
+    assert failed_record["error"] == "connection timeout"
+
+
+def test_audit_etcd_targets_emits_detect_status_and_key_lines(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_audit(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        show_keys: bool,
+        dump_keys: bool,
+        query_key: str | None,
+    ) -> dict[str, object]:
+        _ = (host, port, timeout, retries, show_keys, dump_keys, query_key)
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 2379,
+            "is_etcd": True,
+            "status": "open_no_auth",
+            "api_versions": "v2",
+            "server_version": "2.3.8",
+            "auth_required": False,
+            "key_count": 2,
+            "show_keys": True,
+            "dump_keys": True,
+            "query_key": "/a",
+            "keys": ["/a", "/b"],
+            "key_values": ["/a:1", "/b:2"],
+            "query_key_value": "/a:1",
+            "elapsed_ms": 5,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.stage_etcd._audit_etcd_host", fake_audit)
+
+    lines: list[str] = []
+    total, open_no_auth, auth_required, failed = audit_etcd_targets(
+        hosts=["127.0.0.1"],
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        show_keys=True,
+        dump_keys=True,
+        query_key="/a",
+        output_path=None,
+        output_format="txt",
+        emit_line=lines.append,
+        suppress_connection_refused_status_lines=False,
+    )
+
+    assert (total, open_no_auth, auth_required, failed) == (1, 1, 0, 0)
+    assert any("[*] etcd Database" in line for line in lines)
+    assert any("[+] anonymous access" in line for line in lines)
+    assert any("[*] Show Keys" in line for line in lines)
+    assert any("[*] Dump Keys" in line for line in lines)

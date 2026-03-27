@@ -1,8 +1,37 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from redposture_core import stage_redis as redis_stage
+
+
+class _DummySocket:
+    def __enter__(self) -> _DummySocket:
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        return False
+
+    def settimeout(self, timeout: float) -> None:
+        _ = timeout
+
+
+class _ReadSocket(_DummySocket):
+    def __init__(self, payload: bytes = b"") -> None:
+        self.payload = payload
+        self.sent: list[bytes] = []
+
+    def recv(self, size: int) -> bytes:
+        if not self.payload:
+            return b""
+        chunk = self.payload[:size]
+        self.payload = self.payload[size:]
+        return chunk
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.append(data)
 
 
 def test_encode_resp_array_builds_valid_payload() -> None:
@@ -170,3 +199,275 @@ def test_is_connection_timeout_fail_record_detection() -> None:
     assert redis_stage._is_connection_timeout_fail_record({"status": "fail", "error": "connection timeout"})
     assert redis_stage._is_connection_timeout_fail_record({"status": "fail", "error": "socket timed out"})
     assert not redis_stage._is_connection_timeout_fail_record({"status": "open_no_auth", "error": "connection timeout"})
+
+
+def test_audit_redis_host_open_access_reads_keys_and_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_redis.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(redis_stage, "_send_cmd", lambda *_args, **_kwargs: ("simple", "PONG"))
+    monkeypatch.setattr(redis_stage, "_count_redis_keys", lambda *_args, **_kwargs: (2, None))
+    monkeypatch.setattr(redis_stage, "_scan_redis_keys", lambda *_args, **_kwargs: (["b", "a"], None))
+    monkeypatch.setattr(
+        redis_stage,
+        "_dump_redis_key_value",
+        lambda _sock, key_name: ({"a": "1", "b": "2"}[key_name], None),
+    )
+
+    record = redis_stage._audit_redis_host(
+        "127.0.0.1",
+        6379,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=True,
+        dump_keys=True,
+        query_key="a",
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert record["key_count"] == 2
+    assert record["keys"] == ["b", "a"]
+    assert record["key_values"] == ["a:1", "b:2"]
+    assert record["query_key_value"] == "a:1"
+
+
+def test_audit_redis_host_handles_default_and_provided_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_redis.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(
+        redis_stage, "_send_cmd", lambda *_args, **_kwargs: ("error", "NOAUTH Authentication required.")
+    )
+    monkeypatch.setattr(redis_stage, "_count_redis_keys", lambda *_args, **_kwargs: (1, None))
+    monkeypatch.setattr(redis_stage, "_scan_redis_keys", lambda *_args, **_kwargs: (["session"], None))
+
+    monkeypatch.setattr(redis_stage, "_check_default_credentials", lambda *_args, **_kwargs: (True, None))
+    weak = redis_stage._audit_redis_host(
+        "127.0.0.1",
+        6379,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        defcreds=True,
+        show_keys=True,
+        dump_keys=False,
+        query_key=None,
+    )
+    assert weak["status"] == "weak_default_creds"
+    assert weak["default_credentials_attempted"] is True
+
+    monkeypatch.setattr(redis_stage, "_check_default_credentials", lambda *_args, **_kwargs: (False, "denied"))
+    monkeypatch.setattr(redis_stage, "_check_provided_credentials", lambda *_args, **_kwargs: (True, None))
+    valid = redis_stage._audit_redis_host(
+        "127.0.0.1",
+        6379,
+        1.0,
+        0,
+        username="admin",
+        password="secret",
+        defcreds=True,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+    assert valid["status"] == "valid_credentials"
+    assert valid["provided_credentials_ok"] is True
+
+
+def test_audit_redis_host_handles_unexpected_ping_and_retries_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_redis.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(redis_stage, "_send_cmd", lambda *_args, **_kwargs: ("bulk", "??"))
+    record = redis_stage._audit_redis_host(
+        "127.0.0.1",
+        6379,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+    assert record["status"] == "fail"
+    assert "unexpected PING response" in str(record["error"])
+
+    monkeypatch.setattr(
+        "redposture_core.stage_redis.socket.create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("connection refused")),
+    )
+    monkeypatch.setattr(redis_stage, "_retry_delay", lambda _attempt: 0.0)
+    failed = redis_stage._audit_redis_host(
+        "127.0.0.1",
+        6379,
+        1.0,
+        1,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+    assert failed["status"] == "fail"
+    assert "connection refused" in str(failed["error"])
+
+
+def test_resp_readers_and_send_cmd_cover_types() -> None:
+    simple = redis_stage._read_resp(_ReadSocket(b"+PONG\r\n"))
+    error = redis_stage._read_resp(_ReadSocket(b"-NOAUTH Authentication required.\r\n"))
+    integer = redis_stage._read_resp(_ReadSocket(b":2\r\n"))
+    bulk = redis_stage._read_resp(_ReadSocket(b"$5\r\nhello\r\n"))
+    null_bulk = redis_stage._read_resp(_ReadSocket(b"$-1\r\n"))
+    array = redis_stage._read_resp(_ReadSocket(b"*2\r\n$3\r\none\r\n$3\r\ntwo\r\n"))
+
+    assert simple == ("simple", "PONG")
+    assert error == ("error", "NOAUTH Authentication required.")
+    assert integer == ("integer", 2)
+    assert bulk == ("bulk", "hello")
+    assert null_bulk == ("null", None)
+    assert array == ("array", ["one", "two"])
+
+    sock = _ReadSocket(b"+OK\r\n")
+    resp_type, resp_value = redis_stage._send_cmd(sock, "PING")
+    assert resp_type == "simple"
+    assert resp_value == "OK"
+    assert sock.sent == [b"*1\r\n$4\r\nPING\r\n"]
+
+
+def test_count_scan_and_dump_key_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_send_cmd(_sock: object, *parts: str):  # type: ignore[no-untyped-def]
+        if parts == ("DBSIZE",):
+            return "integer", 3
+        if parts == ("SCAN", "0", "COUNT", "500"):
+            return "array", ["1", ["b", "a"]]
+        if parts == ("SCAN", "1", "COUNT", "500"):
+            return "array", ["0", ["a", "c"]]
+        if parts == ("TYPE", "string-key"):
+            return "bulk", "string"
+        if parts == ("GET", "string-key"):
+            return "bulk", "value"
+        if parts == ("TYPE", "hash-key"):
+            return "bulk", "hash"
+        if parts == ("HGETALL", "hash-key"):
+            return "array", ["field", "v1"]
+        if parts == ("TYPE", "list-key"):
+            return "bulk", "list"
+        if parts == ("LRANGE", "list-key", "0", "-1"):
+            return "array", ["a", "b"]
+        if parts == ("TYPE", "set-key"):
+            return "bulk", "set"
+        if parts == ("SMEMBERS", "set-key"):
+            return "array", ["b", "a"]
+        if parts == ("TYPE", "zset-key"):
+            return "bulk", "zset"
+        if parts == ("ZRANGE", "zset-key", "0", "-1", "WITHSCORES"):
+            return "array", ["m1", "1.0"]
+        if parts == ("TYPE", "stream-key"):
+            return "bulk", "stream"
+        if parts == ("XLEN", "stream-key"):
+            return "integer", 7
+        pytest.fail(f"unexpected command: {parts}")
+
+    monkeypatch.setattr(redis_stage, "_send_cmd", fake_send_cmd)
+
+    key_count, count_error = redis_stage._count_redis_keys(object())
+    assert (key_count, count_error) == (3, None)
+
+    keys, scan_error = redis_stage._scan_redis_keys(object())
+    assert scan_error is None
+    assert keys == ["b", "a", "c"]
+
+    assert redis_stage._dump_redis_key_value(object(), "string-key") == ("value", None)
+    assert redis_stage._dump_redis_key_value(object(), "hash-key") == ("field=v1", None)
+    assert redis_stage._dump_redis_key_value(object(), "list-key") == ("a,b", None)
+    assert redis_stage._dump_redis_key_value(object(), "set-key") == ("a,b", None)
+    assert redis_stage._dump_redis_key_value(object(), "zset-key") == ("m1=1.0", None)
+    assert redis_stage._dump_redis_key_value(object(), "stream-key") == ("stream_len=7", None)
+
+
+def test_audit_redis_targets_json_output_and_suppression(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    records = iter(
+        [
+            {
+                "timestamp": "2026-03-27T00:00:00Z",
+                "host": "127.0.0.1",
+                "port": 6379,
+                "is_redis": True,
+                "status": "auth_required",
+                "auth_required": True,
+                "default_credentials": False,
+                "provided_credentials": False,
+                "provided_username": None,
+                "provided_password": None,
+                "provided_credentials_ok": None,
+                "defcreds_enabled": False,
+                "default_credentials_attempted": False,
+                "show_keys": False,
+                "dump_keys": False,
+                "query_key": None,
+                "key_count": None,
+                "keys": None,
+                "key_values": None,
+                "query_key_value": None,
+                "elapsed_ms": 1,
+                "error": None,
+            },
+            {
+                "timestamp": "2026-03-27T00:00:01Z",
+                "host": "127.0.0.2",
+                "port": 6379,
+                "is_redis": False,
+                "status": "fail",
+                "error": "connection timeout",
+                "auth_required": None,
+                "default_credentials": None,
+                "provided_credentials": False,
+                "provided_username": None,
+                "provided_password": None,
+                "provided_credentials_ok": None,
+                "defcreds_enabled": False,
+                "default_credentials_attempted": False,
+                "show_keys": False,
+                "dump_keys": False,
+                "query_key": None,
+                "key_count": None,
+                "keys": None,
+                "key_values": None,
+                "query_key_value": None,
+                "elapsed_ms": None,
+            },
+        ]
+    )
+    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))  # type: ignore[no-untyped-def]
+
+    output_path = tmp_path / "redis.json"
+    emitted: list[str] = []
+    totals = redis_stage.audit_redis_targets(
+        hosts=["127.0.0.1", "127.0.0.2"],
+        port=6379,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+        output_path=str(output_path),
+        output_format="json",
+        emit_line=emitted.append,
+        suppress_timeout_status_lines=True,
+    )
+    assert totals == (2, 0, 0, 0, 1, 1)
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    payloads = [json.loads(line) for line in lines]
+    assert any(item.get("type") == "detect" for item in payloads)
+    assert any(item.get("status") == "auth_required" for item in payloads)

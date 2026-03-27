@@ -5,7 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from redposture_core.profiles import load_profiles
+from redposture_core.profiles import (
+    _as_port,
+    _as_str_list,
+    _validate_collect_endpoints,
+    _validate_collect_exporters,
+    _validate_discovery_exporters,
+    _validate_trigger_exporters,
+    load_profiles,
+)
 
 
 def test_load_profiles_defaults() -> None:
@@ -73,4 +81,78 @@ def test_load_profiles_rejects_unknown_keys(tmp_path: Path) -> None:
     profiles_file.write_text(json.dumps({"unknown": []}), encoding="utf-8")
 
     with pytest.raises(ValueError):
+        load_profiles(str(profiles_file))
+
+
+def test_port_and_string_list_validators_cover_edge_cases() -> None:
+    assert _as_port("5432", "ctx") == 5432
+    with pytest.raises(ValueError, match="must be an integer"):
+        _as_port("nope", "ctx")
+    with pytest.raises(ValueError, match="must be in range 1..65535"):
+        _as_port(70000, "ctx")
+
+    assert _as_str_list(["a", "b"], "ctx") == ("a", "b")
+    with pytest.raises(ValueError, match="must be a non-empty list"):
+        _as_str_list([], "ctx")
+    with pytest.raises(ValueError, match=r"ctx\[1\]: must be a non-empty string"):
+        _as_str_list(["a", ""], "ctx")
+
+
+def test_trigger_discovery_collect_validators_reject_invalid_shapes() -> None:
+    with pytest.raises(ValueError, match="trigger_exporters: must be a list"):
+        _validate_trigger_exporters({})
+    with pytest.raises(ValueError, match="trigger_exporters\\[0\\]: name is required"):
+        _validate_trigger_exporters(
+            [
+                {
+                    "port": 9100,
+                    "detect_path": "/metrics",
+                    "markers": ["up"],
+                    "trigger_path": "/probe",
+                    "target_fmt": "{our_host}",
+                }
+            ]
+        )
+    with pytest.raises(ValueError, match="trigger_exporters\\[0\\]: detect_path is required"):
+        _validate_trigger_exporters(
+            [{"name": "x", "port": 9100, "markers": ["up"], "trigger_path": "/probe", "target_fmt": "{our_host}"}]
+        )
+    with pytest.raises(ValueError, match="trigger_exporters\\[0\\].markers\\[0\\]: must be a non-empty string"):
+        _validate_trigger_exporters(
+            [
+                {
+                    "name": "x",
+                    "port": 9100,
+                    "detect_path": "/metrics",
+                    "markers": [""],
+                    "trigger_path": "/probe",
+                    "target_fmt": "{our_host}",
+                }
+            ]
+        )
+
+    with pytest.raises(ValueError, match="discovery_exporters: must be a list"):
+        _validate_discovery_exporters({})
+    with pytest.raises(ValueError, match="discovery_exporters\\[0\\]: name is required"):
+        _validate_discovery_exporters([{"port": 9100, "markers": ["up"]}])
+    with pytest.raises(ValueError, match="collect_exporters: must be a list"):
+        _validate_collect_exporters({})
+    with pytest.raises(ValueError, match="collect_exporters\\[0\\]: name is required"):
+        _validate_collect_exporters([{"port": 9100}])
+
+
+def test_collect_endpoint_validator_rejects_invalid_entries() -> None:
+    assert _validate_collect_endpoints(["/debug/vars"]) == ("/debug/vars",)
+
+    with pytest.raises(ValueError, match="must be a non-empty list"):
+        _validate_collect_endpoints([])
+    with pytest.raises(ValueError, match="must be a string starting with '/'"):
+        _validate_collect_endpoints(["debug/vars"])
+
+
+def test_load_profiles_rejects_non_object_json(tmp_path: Path) -> None:
+    profiles_file = tmp_path / "profiles.json"
+    profiles_file.write_text(json.dumps(["bad"]), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="profiles file must be a JSON object"):
         load_profiles(str(profiles_file))

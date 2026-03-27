@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pytest
@@ -26,9 +27,11 @@ def _base_args(**overrides: object) -> argparse.Namespace:
         "hosts_file": None,
         "profiles_file": None,
         "output": None,
+        "output_format": "txt",
         "callback_ip": "10.0.0.2",
         "callback_dns": None,
         "with_listen": False,
+        "listen_seconds": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -100,6 +103,45 @@ def test_trigger_without_listen_does_not_start_listeners(monkeypatch: pytest.Mon
     rc = run_trigger_stage(_base_args(with_listen=False), AttemptLogger())
     assert rc == 0
     assert calls == ["scan"]
+
+
+def test_trigger_with_listen_seconds_auto_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    monotonic_values = iter([10.0, 10.2, 10.7])
+    sleep_calls: list[float] = []
+
+    def fake_start_listeners(*_args: object, **_kwargs: object) -> tuple[list[object], None]:
+        calls.append("start")
+        return [], None
+
+    def fake_scan(*_args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append("scan")
+        return {
+            "detected_exporters": 1,
+            "attempted": 1,
+            "triggered": 1,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 1, "attempted": 1, "success": 1, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 1, "fail": 0}},
+        }
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {"trigger_exporters": []}
+
+    def fake_stop_listeners(*_args: object, **_kwargs: object) -> None:
+        calls.append("stop")
+
+    monkeypatch.setattr("redposture_core.stage_trigger.start_listeners_for_trigger", fake_start_listeners)
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_trigger.stop_started_listeners", fake_stop_listeners)
+    monkeypatch.setattr("redposture_core.stage_trigger.time.monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr("redposture_core.stage_trigger.time.sleep", lambda seconds: sleep_calls.append(seconds))
+
+    rc = run_trigger_stage(_base_args(with_listen=True, listen_seconds=0.5), AttemptLogger())
+    assert rc == 0
+    assert calls == ["start", "scan", "stop"]
+    assert sleep_calls == [pytest.approx(0.3)]
 
 
 def test_trigger_credential_checks_postgres_passes_sql_command_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -438,6 +480,70 @@ def test_trigger_output_file_contains_full_unclipped_event(tmp_path: Path, monke
     saved = output_path.read_text(encoding="utf-8")
     assert long_startup in saved
     assert "[Postgres]" in saved
+
+
+def test_trigger_json_output_writes_structured_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output_path = tmp_path / "trigger.json"
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        emit = kwargs.get("emit_trigger_event")
+        assert callable(emit)
+        emit(
+            {
+                "phase": "callback_result",
+                "host": "10.0.0.1",
+                "exporter": "redis_exporter",
+                "exporter_port": 9121,
+                "callback_target": "10.0.0.2",
+                "callback_port": 6379,
+                "target": "redis://10.0.0.2:6379",
+                "trigger_url": "http://10.0.0.1:9121/scrape?target=redis://10.0.0.2:6379",
+                "status": 200,
+                "probe_success": True,
+                "success": True,
+            }
+        )
+        return {
+            "detected_exporters": 1,
+            "attempted": 1,
+            "triggered": 1,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 1, "attempted": 1, "success": 1, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 1, "fail": 0}},
+        }
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {"trigger_exporters": []}
+
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(
+        _base_args(with_listen=False, output=str(output_path), output_format="json"),
+        AttemptLogger(),
+    )
+    assert rc == 0
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    payload = json.loads(lines[0])
+    assert payload["source_type"] == "trigger"
+    assert payload["host"] == "10.0.0.1"
+    assert payload["callback_target"] == "10.0.0.2"
+    assert payload["listen_port"] == 6379
+    assert payload["status"] == "trigger_success"
+    assert payload["probe_success"] is True
+
+
+def test_trigger_json_with_listen_requires_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {"trigger_exporters": []}
+
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", fake_load_profiles)
+    rc = run_trigger_stage(
+        _base_args(with_listen=True, output=None, output_format="json"),
+        AttemptLogger(),
+    )
+    assert rc == 2
 
 
 def test_trigger_without_listen_enables_attempt_logging(monkeypatch: pytest.MonkeyPatch) -> None:
