@@ -7,7 +7,7 @@ import json
 import os
 import re
 import sys
-from typing import TextIO
+from typing import Any, TextIO
 
 from .console import Console
 from .constants import COLLECT_DEEP_ENDPOINT_TEMPLATES
@@ -106,6 +106,80 @@ def _build_collect_endpoints(
     return tuple(result)
 
 
+def _normalize_collect_exporter_token(value: str) -> str:
+    return str(value).strip().lower().replace("-", "_")
+
+
+def _collect_exporter_alias_map(
+    collect_exporters: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    for exporter in collect_exporters:
+        canonical = _normalize_collect_exporter_token(str(exporter.get("name") or ""))
+        if not canonical:
+            continue
+        aliases[canonical] = canonical
+        if canonical.endswith("_exporter"):
+            short = canonical[: -len("_exporter")]
+            if short:
+                aliases.setdefault(short, canonical)
+    return aliases
+
+
+def _parse_collect_exporter_filter(
+    raw: str | None,
+    collect_exporters: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> set[str]:
+    if raw is None:
+        return set()
+    alias_map = _collect_exporter_alias_map(collect_exporters)
+    selected: set[str] = set()
+    unknown: set[str] = set()
+    for part in str(raw).split(","):
+        token = _normalize_collect_exporter_token(part)
+        if not token:
+            continue
+        mapped = alias_map.get(token)
+        if mapped is None:
+            unknown.add(token)
+            continue
+        selected.add(mapped)
+    if unknown:
+        supported_short = sorted(
+            {name[: -len("_exporter")] if name.endswith("_exporter") else name for name in alias_map.values()}
+        )
+        raise ValueError(
+            "unsupported collect exporters: "
+            + ", ".join(sorted(unknown))
+            + " (supported: "
+            + ",".join(supported_short)
+            + ")"
+        )
+    return selected
+
+
+def _filter_collect_exporter_profiles(
+    *,
+    discovery_exporters: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    collect_exporters: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    selected_exporter_names: set[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not selected_exporter_names:
+        return list(discovery_exporters), list(collect_exporters)
+
+    filtered_discovery = [
+        item
+        for item in discovery_exporters
+        if _normalize_collect_exporter_token(str(item.get("name") or "")) in selected_exporter_names
+    ]
+    filtered_collect = [
+        item
+        for item in collect_exporters
+        if _normalize_collect_exporter_token(str(item.get("name") or "")) in selected_exporter_names
+    ]
+    return filtered_discovery, filtered_collect
+
+
 def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     console = Console(debug=args.debug)
 
@@ -137,6 +211,19 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     except ValueError as exc:
         console.error(f"failed to parse --ports: {exc}")
         return 2
+    try:
+        selected_collect_exporters = _parse_collect_exporter_filter(
+            getattr(args, "collect_exporters_filter", None),
+            profiles["collect_exporters"],
+        )
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
+    discovery_exporters, collect_exporters = _filter_collect_exporter_profiles(
+        discovery_exporters=profiles["discovery_exporters"],
+        collect_exporters=profiles["collect_exporters"],
+        selected_exporter_names=selected_collect_exporters,
+    )
 
     if not hosts:
         console.error("collect requires -t/--targets")
@@ -171,6 +258,9 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.debug:
         mode = "deep" if deep else "default"
         console.debug(f"collect endpoints mode={mode} count={len(collect_endpoints)}")
+        if selected_collect_exporters:
+            selected_sorted = ",".join(sorted(selected_collect_exporters))
+            console.debug(f"collect exporters filter={selected_sorted}")
 
     def _split_tabbed_tag(left: str) -> tuple[str, str]:
         parts = left.split("\t", 1)
@@ -294,6 +384,23 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             self._output_fh.close()
             self._output_fh = None
 
+    def _finish_validation() -> int:
+        validate_console = _ValidationConsoleProxy(
+            console,
+            suppress_summary=True,
+            output_path=args.output if args.output_format == "txt" else None,
+        )
+        try:
+            return validator.finish(
+                show=COLLECT_VALIDATE_SHOW,
+                fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
+                debug=bool(args.debug),
+                console=validate_console,
+                source="stream",
+            )
+        finally:
+            validate_console.close()
+
     try:
         scan_checks, scan_found, found_by_host = scan_exporter_presence(
             hosts=hosts,
@@ -304,7 +411,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             emit_line=emit_line if args.output_format == "txt" else None,
             workers=args.workers,
             retries=args.retries,
-            discovery_exporters=profiles["discovery_exporters"],
+            discovery_exporters=discovery_exporters,
             custom_ports=custom_ports or None,
             emit_summary=False,
             show_progress=True,
@@ -334,7 +441,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 emit_line=emit_line,
                 workers=args.workers,
                 retries=args.retries,
-                collect_exporters=profiles["collect_exporters"],
+                collect_exporters=collect_exporters,
                 collect_debug_endpoints=collect_endpoints,
                 found_by_host=found_by_host,
                 save_responses_dir=save_responses_dir,
@@ -396,21 +503,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             )
             if args.debug:
                 console.debug("debug mode enabled; detailed collect events emitted in text logs")
-        validate_console = _ValidationConsoleProxy(
-            console,
-            suppress_summary=True,
-            output_path=args.output if args.output_format == "txt" else None,
-        )
-        try:
-            validate_rc = validator.finish(
-                show=COLLECT_VALIDATE_SHOW,
-                fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
-                debug=bool(args.debug),
-                console=validate_console,
-                source="stream",
-            )
-        finally:
-            validate_console.close()
+        validate_rc = _finish_validation()
         if validate_rc == 2:
             return 2
         if validate_rc == 1:
@@ -439,21 +532,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         )
         if args.debug:
             console.debug("debug mode enabled; detailed collect events emitted in text logs")
-    validate_console = _ValidationConsoleProxy(
-        console,
-        suppress_summary=True,
-        output_path=args.output if args.output_format == "txt" else None,
-    )
-    try:
-        validate_rc = validator.finish(
-            show=COLLECT_VALIDATE_SHOW,
-            fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
-            debug=bool(args.debug),
-            console=validate_console,
-            source="stream",
-        )
-    finally:
-        validate_console.close()
+    validate_rc = _finish_validation()
     if validate_rc == 2:
         return 2
     if validate_rc == 1:
