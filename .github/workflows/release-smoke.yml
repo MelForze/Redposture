@@ -33,11 +33,10 @@ jobs:
 
       - name: CLI smoke
         run: |
-          tmp_db="$(mktemp -u /tmp/redposture-release-smoke.XXXXXX.sqlite3)"
           redposture --version
           redposture --help > /dev/null
           redposture registry -h > /dev/null
-          redposture db -h > /dev/null
-          redposture db show -h > /dev/null
-          redposture db init --db-url "sqlite:///${tmp_db}" > /dev/null
-          redposture db show --db-url "sqlite:///${tmp_db}" > /dev/null
+          if redposture db -h > /dev/null 2>&1; then
+            echo "db command must be unavailable in v4"
+            exit 1
+          fi

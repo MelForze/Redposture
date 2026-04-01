@@ -13,7 +13,6 @@ from .cli_args import (
     COMMAND_CLICKHOUSE,
     COMMAND_COLLECT,
     COMMAND_CONSUL,
-    COMMAND_DB,
     COMMAND_ETCD,
     COMMAND_EXPORTERS,
     COMMAND_GITLAB,
@@ -50,98 +49,6 @@ from .stage_scan import run_scan_stage
 from .stage_selfcert import run_selfcert_stage
 from .stage_trigger import run_trigger_stage
 from .stage_zookeeper import run_zookeeper_stage
-
-
-def _should_auto_init_runtime_db(args: Any) -> bool:
-    command = getattr(args, "command", None)
-    if command in {None, COMMAND_SELFCERT, COMMAND_DB}:
-        return False
-    return True
-
-
-def _try_auto_init_runtime_db(args: Any) -> None:
-    if not _should_auto_init_runtime_db(args):
-        return
-    try:
-        from .db.config import resolve_database_settings
-        from .db.services import initialize_runtime_database
-
-        db_url = resolve_database_settings().db_url
-        initialize_runtime_database(db_url)
-    except Exception as exc:
-        if getattr(args, "debug", False):
-            print(f"[warn] db auto-init failed: {exc}", file=sys.stderr)
-
-
-def _module_name_for_auto_ingest(args: Any) -> str | None:
-    command = getattr(args, "command", None)
-    if command in {
-        COMMAND_REDIS,
-        COMMAND_REGISTRY,
-        COMMAND_GRAFANA,
-        COMMAND_GITLAB,
-        COMMAND_CONSUL,
-        COMMAND_QDRANT,
-        COMMAND_KUBEAPI,
-        COMMAND_KAFKA,
-        COMMAND_POSTGRES,
-        COMMAND_CLICKHOUSE,
-        COMMAND_ETCD,
-        COMMAND_PROXMOX,
-        COMMAND_ZOOKEEPER,
-    }:
-        return str(command)
-    if command == COMMAND_EXPORTERS:
-        action = getattr(args, "exporters_action", None)
-        if action in {COMMAND_SCAN, COMMAND_TRIGGER, COMMAND_COLLECT}:
-            return COMMAND_EXPORTERS
-    if command in {COMMAND_SCAN, COMMAND_TRIGGER, COMMAND_COLLECT}:
-        return COMMAND_EXPORTERS
-    return None
-
-
-def _should_auto_ingest_output(args: Any) -> bool:
-    if getattr(args, "command", None) in {COMMAND_DB, COMMAND_SELFCERT, None}:
-        return False
-    if str(getattr(args, "output_format", "") or "").strip().lower() != "json":
-        return False
-    if _module_name_for_auto_ingest(args) is None:
-        return False
-    output_path = str(getattr(args, "output", "") or "").strip()
-    return bool(output_path)
-
-
-def _try_auto_ingest_output(args: Any) -> None:
-    if not _should_auto_ingest_output(args):
-        return
-
-    output_path = str(getattr(args, "output", "") or "").strip()
-    if not output_path or not os.path.exists(output_path):
-        print("[warn] db auto-ingest skipped: JSON output file was not created", file=sys.stderr)
-        return
-
-    module_name = _module_name_for_auto_ingest(args)
-    if module_name is None:
-        return
-
-    try:
-        from .db.config import resolve_database_settings
-        from .db.services import DatabaseService, IngestService, initialize_runtime_database
-
-        db_url = resolve_database_settings().db_url
-        initialize_runtime_database(db_url)
-        db = DatabaseService(db_url)
-        try:
-            ingest_service = IngestService(db.session_factory)
-            ingest_service.ingest_file(
-                workspace_slug=None,
-                module_name=module_name,
-                json_file=output_path,
-            )
-        finally:
-            db.close()
-    except Exception as exc:
-        print(f"[warn] db auto-ingest failed for {module_name}: {exc}", file=sys.stderr)
 
 
 class _TeeStream:
@@ -210,11 +117,6 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
             return run_collect_stage(args, logger)
         print(f"[error] unsupported exporters action: {action}", file=sys.stderr)
         return 2
-
-    if args.command == COMMAND_DB:
-        from .db.cli import run_db_command
-
-        return run_db_command(args)
 
     if args.command == COMMAND_SCAN:
         return run_scan_stage(args, logger)
@@ -287,18 +189,10 @@ def main(argv: list[str] | None = None) -> int:
             if log_path:
                 try:
                     with _tee_console_output(log_path):
-                        _try_auto_init_runtime_db(args)
-                        rc = _run_command(args, logger)
-                        if rc == 0:
-                            _try_auto_ingest_output(args)
-                        return rc
+                        return _run_command(args, logger)
                 except OSError as exc:
                     print(f"[error] failed to open --log file '{log_path}': {exc}", file=sys.stderr)
                     return 2
-            _try_auto_init_runtime_db(args)
-            rc = _run_command(args, logger)
-            if rc == 0:
-                _try_auto_ingest_output(args)
-            return rc
+            return _run_command(args, logger)
     finally:
         logger.close()

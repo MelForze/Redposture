@@ -8,6 +8,11 @@ RedPosture is a Python security CLI for:
 
 Use only on systems you own or are explicitly authorized to assess.
 
+## Breaking Changes (v4.0.0)
+
+- The built-in DB subsystem was removed in `v4.0.0`.
+- `redposture db ...` commands are no longer available.
+
 ## Install
 
 Recommended (`pipx`):

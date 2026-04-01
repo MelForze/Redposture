@@ -5,7 +5,6 @@ import re
 import pytest
 
 from redposture_core.cli_args import (
-    COMMAND_DB,
     COMMAND_EXPORTERS,
     COMMAND_QDRANT,
     COMMAND_SELFCERT,
@@ -20,152 +19,10 @@ def test_parse_args_without_args_shows_help_and_exits_cleanly() -> None:
     assert exc.value.code == 0
 
 
-def test_db_command_is_parsed_by_argparse() -> None:
-    args = parse_args(["db", "show", "module", "grafana", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.command == COMMAND_DB
-    assert args.db_action == "show"
-    assert args.db_show_action == "grafana"
-    assert args.db_url == "sqlite:///tmp/test.db"
-    assert args.module_name == "grafana"
-
-
-def test_db_module_alias_is_still_parsed() -> None:
-    args = parse_args(["db", "show", "grafana", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.command == COMMAND_DB
-    assert args.db_action == "show"
-    assert args.db_show_action == "grafana"
-    assert args.module_name == "grafana"
-    assert args.db_handler_name == "show_module_dashboard"
-
-
-def test_db_module_summary_subview_is_parsed() -> None:
-    args = parse_args(["db", "show", "grafana", "summary", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.command == COMMAND_DB
-    assert args.db_action == "show"
-    assert args.db_show_action == "grafana"
-    assert args.db_show_module_action == "summary"
-    assert args.module_name == "grafana"
-    assert args.db_handler_name == "show_module_summary"
-
-    args = parse_args(["db", "show", "grafana", "--summary", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.db_show_module_action == "summary"
-    assert args.db_handler_name == "show_module_summary"
-
-
-def test_db_module_hosts_and_endpoints_flags_are_parsed() -> None:
-    args = parse_args(["db", "show", "grafana", "--hosts", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.command == COMMAND_DB
-    assert args.db_action == "show"
-    assert args.db_show_action == "grafana"
-    assert args.module_name == "grafana"
-    assert args.db_show_module_action == "hosts"
-    assert args.db_handler_name == "show_hosts"
-
-    args = parse_args(["db", "show", "grafana", "--host", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.command == COMMAND_DB
-    assert args.db_action == "show"
-    assert args.db_show_action == "grafana"
-    assert args.module_name == "grafana"
-    assert args.db_show_module_action == "hosts"
-    assert args.db_handler_name == "show_hosts"
-
-    args = parse_args(["db", "show", "grafana", "--endpoints", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.command == COMMAND_DB
-    assert args.db_action == "show"
-    assert args.db_show_action == "grafana"
-    assert args.module_name == "grafana"
-    assert args.db_show_module_action == "endpoints"
-    assert args.db_handler_name == "show_endpoints"
-
-    args = parse_args(["db", "show", "grafana", "--findings", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.db_show_module_action == "findings"
-    assert args.db_handler_name == "show_findings"
-
-    args = parse_args(["db", "show", "grafana", "--runs", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.db_show_module_action == "runs"
-    assert args.db_handler_name == "show_runs"
-
-    args = parse_args(["db", "show", "grafana", "--artifacts", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.db_show_module_action == "artifacts"
-    assert args.db_handler_name == "show_artifacts"
-
-    args = parse_args(["db", "show", "exporters", "--collect", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.db_show_action == "exporters"
-    assert args.module_name == "exporters"
-    assert args.db_handler_name == "show_module_dashboard"
-    assert args.exporters_collect_only is True
-    assert args.exporters_trigger_only is False
-    assert args.exporters_host_filter is None
-
-    args = parse_args(["db", "show", "exporters", "--trigger", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.exporters_collect_only is False
-    assert args.exporters_trigger_only is True
-
-    args = parse_args(["db", "show", "exporters", "--list-host", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.db_show_module_action == "hosts"
-    assert args.db_handler_name == "show_hosts"
-    assert args.exporters_host_filter is None
-
-    args = parse_args(["db", "show", "exporters", "--host", "10.10.10.10", "--db-url", "sqlite:///tmp/test.db"])
-    assert args.db_show_action == "exporters"
-    assert args.module_name == "exporters"
-    assert args.db_handler_name == "show_module_dashboard"
-    assert args.db_show_module_action is None
-    assert args.exporters_host_filter == "10.10.10.10"
-
-
-def test_db_show_exporters_host_filter_rejects_section_flags() -> None:
+def test_db_command_is_not_available() -> None:
     with pytest.raises(SystemExit) as exc:
-        parse_args(["db", "show", "exporters", "--host", "10.10.10.10", "--hosts"])
+        parse_args(["db", "show"])
     assert exc.value.code == 2
-
-    with pytest.raises(SystemExit) as exc:
-        parse_args(["db", "show", "exporters", "--host", "10.10.10.10", "--findings"])
-    assert exc.value.code == 2
-
-
-def test_db_help_and_module_filters_are_present(capsys) -> None:
-    with pytest.raises(SystemExit) as exc:
-        parse_args(["db", "show", "findings", "-h"])
-    assert exc.value.code == 0
-    help_text = capsys.readouterr().out
-    assert "--module" in help_text
-    assert "--protocol" in help_text
-    assert "--module-name" not in help_text
-
-    with pytest.raises(SystemExit) as exc:
-        parse_args(["db", "show", "exporters", "-h"])
-    assert exc.value.code == 0
-    exporters_help = capsys.readouterr().out
-    assert "usage: redposture.py db show exporters " in exporters_help
-    assert "--hosts" in exporters_help
-    assert "--list-host" in exporters_help
-    assert "--host value" in exporters_help
-    assert "--findings" in exporters_help
-    assert "--summary" in exporters_help
-    assert "--collect" in exporters_help
-    assert "--trigger" in exporters_help
-    assert "Modules:" not in exporters_help
-    assert "Sections:" not in exporters_help
-    assert "--workspace" not in exporters_help
-    assert "db show exporters --list-host" in exporters_help
-    assert "db show exporters --host 10.10.10.10" in exporters_help
-
-    with pytest.raises(SystemExit) as exc:
-        parse_args(["db", "show", "grafana", "-h"])
-    assert exc.value.code == 0
-    grafana_help = capsys.readouterr().out
-    assert "usage: redposture.py db show grafana " in grafana_help
-    assert "--hosts" in grafana_help
-    assert "--findings" in grafana_help
-    assert "--summary" in grafana_help
-    assert "--list-host" not in grafana_help
-    assert "--host value" not in grafana_help
-    assert "--collect" not in grafana_help
-    assert "--trigger" not in grafana_help
-    assert "Modules:" not in grafana_help
-    assert "Sections:" not in grafana_help
-    assert "--workspace" not in grafana_help
 
 
 def test_help_color_is_disabled_when_supported() -> None:

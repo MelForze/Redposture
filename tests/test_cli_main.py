@@ -9,7 +9,6 @@ from redposture_core.cli_args import (
     COMMAND_CLICKHOUSE,
     COMMAND_COLLECT,
     COMMAND_CONSUL,
-    COMMAND_DB,
     COMMAND_ETCD,
     COMMAND_EXPORTERS,
     COMMAND_GITLAB,
@@ -26,75 +25,6 @@ from redposture_core.cli_args import (
     COMMAND_TRIGGER,
     COMMAND_ZOOKEEPER,
 )
-
-
-def test_should_auto_init_runtime_db_skips_db_and_selfcert() -> None:
-    assert cli._should_auto_init_runtime_db(SimpleNamespace(command=None)) is False
-    assert cli._should_auto_init_runtime_db(SimpleNamespace(command=COMMAND_DB)) is False
-    assert cli._should_auto_init_runtime_db(SimpleNamespace(command=COMMAND_SELFCERT)) is False
-    assert cli._should_auto_init_runtime_db(SimpleNamespace(command=COMMAND_GRAFANA)) is True
-
-
-@pytest.mark.parametrize(
-    ("command", "action", "expected"),
-    [
-        (COMMAND_GRAFANA, None, COMMAND_GRAFANA),
-        (COMMAND_REDIS, None, COMMAND_REDIS),
-        (COMMAND_SCAN, None, COMMAND_EXPORTERS),
-        (COMMAND_TRIGGER, None, COMMAND_EXPORTERS),
-        (COMMAND_COLLECT, None, COMMAND_EXPORTERS),
-        (COMMAND_EXPORTERS, COMMAND_SCAN, COMMAND_EXPORTERS),
-        (COMMAND_EXPORTERS, COMMAND_TRIGGER, COMMAND_EXPORTERS),
-        (COMMAND_EXPORTERS, COMMAND_COLLECT, COMMAND_EXPORTERS),
-        (COMMAND_EXPORTERS, "weird", None),
-        (COMMAND_DB, None, None),
-    ],
-)
-def test_module_name_for_auto_ingest_variants(command: str, action: str | None, expected: str | None) -> None:
-    args = SimpleNamespace(command=command, exporters_action=action)
-    assert cli._module_name_for_auto_ingest(args) == expected
-
-
-def test_should_auto_ingest_output_requires_known_json_file() -> None:
-    args = SimpleNamespace(command=COMMAND_GRAFANA, output_format="json", output="/tmp/out.json")
-    assert cli._should_auto_ingest_output(args) is True
-
-    args.output_format = "txt"
-    assert cli._should_auto_ingest_output(args) is False
-
-    args.output_format = "json"
-    args.output = ""
-    assert cli._should_auto_ingest_output(args) is False
-
-    args.command = COMMAND_DB
-    args.output = "/tmp/out.json"
-    assert cli._should_auto_ingest_output(args) is False
-
-
-def test_try_auto_init_runtime_db_warns_only_in_debug(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    monkeypatch.setattr(
-        "redposture_core.db.config.resolve_database_settings", lambda: SimpleNamespace(db_url="sqlite:///tmp/test.db")
-    )
-    monkeypatch.setattr(
-        "redposture_core.db.services.initialize_runtime_database",
-        lambda _db_url: (_ for _ in ()).throw(RuntimeError("boom")),
-    )
-
-    cli._try_auto_init_runtime_db(SimpleNamespace(command=COMMAND_GRAFANA, debug=False))
-    assert capsys.readouterr().err == ""
-
-    cli._try_auto_init_runtime_db(SimpleNamespace(command=COMMAND_GRAFANA, debug=True))
-    assert "[warn] db auto-init failed: boom" in capsys.readouterr().err
-
-
-def test_try_auto_ingest_output_warns_when_json_file_is_missing(capsys) -> None:
-    args = SimpleNamespace(
-        command=COMMAND_GRAFANA,
-        output_format="json",
-        output="/tmp/redposture-missing-output.json",
-    )
-    cli._try_auto_ingest_output(args)
-    assert "db auto-ingest skipped: JSON output file was not created" in capsys.readouterr().err
 
 
 def test_tee_console_output_mirrors_stdout_and_stderr(tmp_path, capsys) -> None:
@@ -147,13 +77,8 @@ def test_run_command_dispatches_to_stage_functions(
     assert calls == [patch_target]
 
 
-def test_run_command_dispatches_to_db_and_selfcert(monkeypatch: pytest.MonkeyPatch) -> None:
-    import redposture_core.db.cli as db_cli
-
-    monkeypatch.setattr(db_cli, "run_db_command", lambda args: 11)
+def test_run_command_dispatches_to_selfcert(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "run_selfcert_stage", lambda args: 13)
-
-    assert cli._run_command(SimpleNamespace(command=COMMAND_DB), logger=object()) == 11
     assert cli._run_command(SimpleNamespace(command=COMMAND_SELFCERT), logger=object()) == 13
 
 
@@ -180,20 +105,17 @@ def test_main_ignores_proxy_parsing_for_proxmox(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
     monkeypatch.setattr(cli, "parse_proxy_config", lambda _raw: (_ for _ in ()).throw(AssertionError("unexpected")))
     monkeypatch.setattr(cli, "_run_command", lambda *_args, **_kwargs: calls.append("run") or 0)
-    monkeypatch.setattr(cli, "_try_auto_init_runtime_db", lambda _args: calls.append("init"))
-    monkeypatch.setattr(cli, "_try_auto_ingest_output", lambda _args: calls.append("ingest"))
 
     assert cli.main(["proxmox", "-t", "127.0.0.1"]) == 0
-    assert calls == ["init", "run", "ingest"]
+    assert calls == ["run"]
 
 
-def test_main_tees_output_and_auto_ingests_on_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_main_tees_output_and_runs_command_on_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     log_path = tmp_path / "run.log"
     args = SimpleNamespace(command=COMMAND_GRAFANA, log=str(log_path), proxy="", debug=False)
     calls: list[str] = []
 
     monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
-    monkeypatch.setattr(cli, "_try_auto_init_runtime_db", lambda _args: calls.append("init"))
 
     def _fake_run_command(_args, _logger) -> int:
         print("runtime stdout")
@@ -202,10 +124,9 @@ def test_main_tees_output_and_auto_ingests_on_success(monkeypatch: pytest.Monkey
         return 0
 
     monkeypatch.setattr(cli, "_run_command", _fake_run_command)
-    monkeypatch.setattr(cli, "_try_auto_ingest_output", lambda _args: calls.append("ingest"))
 
     assert cli.main(["grafana", "-t", "127.0.0.1"]) == 0
-    assert calls == ["init", "run", "ingest"]
+    assert calls == ["run"]
     logged = log_path.read_text(encoding="utf-8")
     assert "runtime stdout" in logged
     assert "runtime stderr" in logged

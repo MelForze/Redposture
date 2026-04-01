@@ -5,8 +5,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 
 OUT_DIR="${1:-/tmp/redposture_lab_matrix_$(date +%Y%m%d_%H%M%S)}"
-DB_PATH="${OUT_DIR}/redposture-lab.db"
-DB_URL="${REDPOSTURE_DB_URL:-sqlite:///${DB_PATH}}"
 STATUS_FILE="${OUT_DIR}/matrix-status.tsv"
 VERIFY_SCRIPT="${ROOT_DIR}/scripts/verify_db_postrun.py"
 COMPOSE_FILE="${ROOT_DIR}/docker-compose.lab.yml"
@@ -23,8 +21,6 @@ EXPORTER_PORTS="7777,9100,9102,9104,9113,9114,9116,9117,9119,9121,9127,9128,9131
 mkdir -p "${OUT_DIR}"
 mkdir -p "${OUT_DIR}/logs"
 mkdir -p "${OUT_DIR}/json"
-
-export REDPOSTURE_DB_URL="${DB_URL}"
 
 compose() {
   docker compose -f "${COMPOSE_FILE}" "$@"
@@ -116,7 +112,13 @@ run_text_case() {
 set -e
 printf "module\tlabel\texit_code\tjson_path\tlog_path\n" > "${STATUS_FILE}"
 
-compose up -d --build
+set +e
+compose up -d --build --wait --wait-timeout 120
+compose_rc=$?
+set -e
+if [ "${compose_rc}" -ne 0 ]; then
+  echo "[warn] compose up returned ${compose_rc}; continuing with explicit health gate" >&2
+fi
 wait_healthy_compose
 HAS_KUBE_TOKENS=1
 HAS_CONSUL_TOKENS=1
@@ -139,8 +141,6 @@ if [ "${HAS_KUBE_TOKENS}" -eq 1 ]; then
 else
   echo "[warn] kubeapi tokens are unavailable; token kubeapi runs will be skipped" >&2
 fi
-
-"${PYTHON_BIN}" redposture.py db init --db-url "${DB_URL}" >"${OUT_DIR}/logs/db_init.log" 2>&1
 
 run_case exporters exporters_scan exporters scan -t 127.0.0.1 -p "${EXPORTER_PORTS}"
 run_case exporters exporters_collect exporters collect -t 127.0.0.1 -p "${EXPORTER_PORTS}" --deep --save-responses-dir "${OUT_DIR}/collect_raw"
@@ -196,9 +196,8 @@ run_case zookeeper zookeeper_default zookeeper -t 127.0.0.1 --show-znodes --dump
 run_case proxmox proxmox_audit proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
 run_case proxmox proxmox_admin proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover-creds --nodes --users
 
-"${PYTHON_BIN}" "${VERIFY_SCRIPT}" --db-url "${DB_URL}" --status-file "${STATUS_FILE}" --out-dir "${OUT_DIR}"
+"${PYTHON_BIN}" "${VERIFY_SCRIPT}" --status-file "${STATUS_FILE}" --out-dir "${OUT_DIR}"
 
 echo
 echo "Matrix complete."
-echo "DB_URL=${DB_URL}"
 echo "OUT_DIR=${OUT_DIR}"
