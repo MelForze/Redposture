@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "3.5.0"
+version = "4.0.0"
 description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper auditing"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -28,12 +28,8 @@ classifiers = [
   "Topic :: System :: Networking",
 ]
 dependencies = [
-  "alembic>=1.14.0",
   "clickhouse-connect>=0.8.0",
   "clickhouse-driver>=0.2.9",
-  "pydantic>=2.10.0",
-  "SQLAlchemy>=2.0.36",
-  "typer>=0.12.5",
 ]
 
 [project.urls]
@@ -54,8 +50,6 @@ dev = [
 [tool.hatch.build.targets.sdist]
 include = [
   "/redposture_core",
-  "/alembic",
-  "/alembic.ini",
   "/README.md",
   "/LICENSE",
   "/redposture.py",
@@ -63,10 +57,6 @@ include = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["redposture_core"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"alembic" = "alembic"
-"alembic.ini" = "alembic.ini"
 
 [tool.pytest.ini_options]
 addopts = "-q"
