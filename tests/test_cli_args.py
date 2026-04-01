@@ -1723,6 +1723,11 @@ def test_collect_rejects_removed_validate_flags() -> None:
     assert exc.value.code == 2
 
 
+def test_collect_exporters_filter_is_parsed() -> None:
+    args = parse_args(["exporters", "collect", "-t", "10.0.0.1", "--exporters", "redis,postgres_exporter"])
+    assert args.collect_exporters_filter == "redis,postgres_exporter"
+
+
 def test_direct_scan_trigger_collect_are_rejected() -> None:
     for argv in (
         ["scan", "-t", "10.0.0.1"],

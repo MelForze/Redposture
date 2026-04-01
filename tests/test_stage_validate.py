@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -76,7 +77,7 @@ def test_validate_records_reports_sasl_username_when_paired_with_password(capsys
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -211,7 +212,7 @@ def test_validate_records_detects_cmd_connection_string_for_elastic(capsys: pyte
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -232,7 +233,7 @@ def test_validate_records_detects_postgres_data_source_name_default_pair(
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -251,7 +252,7 @@ def test_validate_records_detects_mongodb_uri_default_pair(capsys: pytest.Captur
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -270,7 +271,7 @@ def test_validate_records_detects_rabbit_url_default_pair(capsys: pytest.Capture
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -289,7 +290,7 @@ def test_validate_records_detects_json_connection_string_field(capsys: pytest.Ca
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -308,7 +309,7 @@ def test_validate_records_detects_basic_auth_known_default_pair(capsys: pytest.C
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -342,7 +343,7 @@ def test_validate_records_does_not_flag_unknown_default_like_pair(capsys: pytest
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -361,7 +362,7 @@ def test_validate_records_detects_sqlalchemy_connection_string(capsys: pytest.Ca
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -380,7 +381,7 @@ def test_validate_records_detects_jdbc_query_credentials(capsys: pytest.CaptureF
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -399,7 +400,7 @@ def test_validate_records_detects_jdbc_sqlserver_semicolon_dsn(capsys: pytest.Ca
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -419,7 +420,7 @@ def test_validate_records_detects_semicolon_server_user_id_password_dsn(
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -437,7 +438,7 @@ def test_validate_records_detects_libpq_keyword_dsn(capsys: pytest.CaptureFixtur
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -456,7 +457,7 @@ def test_validate_records_detects_mysql_tcp_style_dsn(capsys: pytest.CaptureFixt
         }
     ]
 
-    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
     assert rc == 0
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
@@ -502,3 +503,151 @@ def test_validate_records_uses_display_name_for_new_exporters(
     captured = capsys.readouterr()
     output = f"{captured.out}\n{captured.err}"
     assert f"Dump Validate {display}" in output
+
+
+def test_validate_records_suppresses_metric_query_sql_noise() -> None:
+    records = [
+        {
+            "host": "10.46.128.105",
+            "port": 9187,
+            "exporter": "postgres_exporter",
+            "endpoint": "/metrics",
+            "body": (
+                'ccp_io_cpu_pg_stat_statements_calls{datname="vacancy",'
+                'query="SELECT usename, passwd FROM pg_shadow WHERE usename=$1",'
+                'queryid="7208025334231650648",rolname="username",'
+                'server="/var/run/postgresql/:5432",toplevel="true"} 4.5813332e+07\n'
+            ),
+        }
+    ]
+    rc = run_validation_records(records, fail_on_creds=True)
+    assert rc == 0
+
+
+def test_validate_records_keeps_metric_query_with_explicit_secret_assignment() -> None:
+    records = [
+        {
+            "host": "10.46.128.106",
+            "port": 9187,
+            "exporter": "postgres_exporter",
+            "endpoint": "/metrics",
+            "body": (
+                'ccp_stmt{query="SELECT 1 /* password=Sup3rS3cret-2026 */",'
+                'datname="app",server="/var/run/postgresql/:5432"} 1\n'
+            ),
+        }
+    ]
+    rc = run_validation_records(records, fail_on_creds=True)
+    assert rc == 1
+
+
+def test_validate_records_renders_human_reason_and_hides_signals_without_debug(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": (
+                "/usr/local/bin/kafka_exporter --kafka.server=kafka-1.internal:9093 "
+                "--sasl.username=metrics_collector --sasl.password=Kfka-M0nitor-2026\n"
+            ),
+        }
+    ]
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    assert "Endpoint: /debug/pprof/cmdline?debug=1" in plain_output
+    assert "Reason:" in plain_output
+    assert "conn creds" in plain_output
+    assert "Signals:" not in plain_output
+
+
+def test_validate_records_renders_signals_in_debug(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": (
+                "/usr/local/bin/kafka_exporter --kafka.server=kafka-1.internal:9093 "
+                "--sasl.username=metrics_collector --sasl.password=Kfka-M0nitor-2026\n"
+            ),
+        }
+    ]
+    rc = run_validation_records(records, show=True, fail_on_creds=False, debug=True)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    plain_output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    assert "Signals:" in plain_output
+    assert "connection_string_auth" in plain_output
+
+
+def test_validate_records_evidence_contains_hit_highlight(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.1",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--sasl.password=Kfka-M0nitor-2026\n",
+        }
+    ]
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "Leak:" in output
+    assert "[HIT]" not in output
+    assert "[/HIT]" not in output
+
+
+def test_validate_records_evidence_does_not_append_more_suffix(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.2",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/vars",
+            "body": "password=Sup3rS3cret token=AbCdEf1234567890\n",
+        }
+    ]
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert re.search(r"\(\+\d+ more\)", output) is None
+
+
+def test_validate_records_groups_duplicates_with_count_and_unique_summary(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    records = [
+        {
+            "host": "10.0.0.9",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--sasl.password=FirstSecret-2026\n",
+        },
+        {
+            "host": "10.0.0.9",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--sasl.password=SecondSecret-2026\n",
+        },
+    ]
+    rc = run_validation_records(records, show=True, fail_on_creds=False)
+    assert rc == 0
+    captured = capsys.readouterr()
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", f"{captured.out}\n{captured.err}")
+    assert "Count: 2" in plain
+    assert "SecondSecret-2026" in plain
+    assert "credential_hits=2 unique_hits=1" in plain
