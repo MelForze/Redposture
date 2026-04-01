@@ -30,6 +30,7 @@ def _base_args(**overrides: object) -> argparse.Namespace:
         "checkpoint_file": None,
         "max_inflight": None,
         "adaptive_collect": True,
+        "collect_exporters_filter": None,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -427,6 +428,61 @@ def test_collect_stage_runs_validation_always(monkeypatch: pytest.MonkeyPatch) -
     assert captured["source"] == "stream"
 
 
+def test_collect_stage_filters_exporters_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [
+                {"name": "redis_exporter", "port": 9121},
+                {"name": "postgres_exporter", "port": 9187},
+            ],
+            "collect_exporters": [
+                {"name": "redis_exporter", "port": 9121},
+                {"name": "postgres_exporter", "port": 9187},
+            ],
+            "collect_debug_endpoints": ["/debug/vars"],
+        }
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        discovery = list(kwargs.get("discovery_exporters") or [])
+        captured["discovery_names"] = [str(item.get("name")) for item in discovery]
+        return 1, 1, {"10.0.0.1": [{"exporter": "redis_exporter", "port": 9121}]}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        collect = list(kwargs.get("collect_exporters") or [])
+        captured["collect_names"] = [str(item.get("name")) for item in collect]
+        return 1, 1
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+
+    rc = run_collect_stage(_base_args(collect_exporters_filter="redis"), AttemptLogger())
+    assert rc == 0
+    assert captured["discovery_names"] == ["redis_exporter"]
+    assert captured["collect_names"] == ["redis_exporter"]
+
+
+def test_collect_stage_rejects_unknown_exporter_filter(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [{"name": "redis_exporter", "port": 9121}],
+            "collect_exporters": [{"name": "redis_exporter", "port": 9121}],
+            "collect_debug_endpoints": ["/debug/vars"],
+        }
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+
+    rc = run_collect_stage(_base_args(collect_exporters_filter="redis,unknown"), AttemptLogger())
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "unsupported collect exporters: unknown" in (captured.out + captured.err)
+
+
 def test_collect_stage_builds_deep_endpoints_with_custom_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -643,9 +699,14 @@ def test_collect_stage_appends_connection_string_validate_hits_to_txt_output(
     assert rc == 0
 
     contents = output_path.read_text(encoding="utf-8")
-    assert "cmd_connection_string_auth" in contents
-    assert "default_creds_known_pair" in contents
-    assert "--es.uri=https://elastic:password@elastic.mydomain.local" in contents
+    assert "Endpoint: /debug/pprof/cmdline?debug=1" in contents
+    assert "Reason:" in contents
+    assert "conn creds" in contents
+    assert "Signals:" not in contents
+    assert "Leak:" in contents
+    assert "[HIT]" not in contents
+    assert "[/HIT]" not in contents
+    assert "es.uri=https://elastic:password@" in contents
 
 
 def test_collect_stage_json_output_is_not_polluted_by_validate_txt_rows(

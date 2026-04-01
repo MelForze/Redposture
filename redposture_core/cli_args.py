@@ -603,6 +603,17 @@ def _configure_collect_parser(parser: argparse.ArgumentParser) -> None:
         default=True,
         help="Enable adaptive preflight planning to reduce unnecessary collect requests.",
     )
+    parser.add_argument(
+        "-e",
+        "--exporters",
+        dest="collect_exporters_filter",
+        default=None,
+        metavar="names",
+        help=(
+            "Comma-separated exporter filter for collect "
+            "(aliases: redis,postgres,kafka or full names like redis_exporter)."
+        ),
+    )
 
 
 def _configure_gitlab_parser(parser: argparse.ArgumentParser) -> None:
