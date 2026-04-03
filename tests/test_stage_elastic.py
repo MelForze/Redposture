@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gzip
 import json
+import zlib
 from types import SimpleNamespace
 
 import pytest
@@ -10,7 +12,9 @@ from redposture_core.stage_elastic import (
     _audit_elastic_host,
     _build_discover_query_string,
     _check_privileges,
+    _classify_detect_probe,
     _elastic_headers,
+    _evaluate_detect_decision,
     _extract_cat_endpoints,
     _extract_cat_plugins,
     _extract_discover_total,
@@ -42,6 +46,28 @@ def test_detect_and_discover_helpers() -> None:
     looks_like, version = _looks_like_elastic_root(200, payload, {"X-Elastic-Product": "Elasticsearch"})
     assert looks_like is True
     assert version == "8.12.1"
+
+    prefixed_payload = (
+        b"HTTP/1.1 200 Connection established\r\n\r\n"
+        b'{"name":"elk-01","cluster_name":"elastic-cluster","version":{"number":"8.17.3"},"tagline":"You Know, for Search"}'
+    )
+    looks_like, version = _looks_like_elastic_root(200, prefixed_payload, {})
+    assert looks_like is True
+    assert version == "8.17.3"
+
+    gzipped_payload = gzip.compress(
+        b'{"name":"elk-01","cluster_name":"elastic-cluster","version":{"number":"8.17.3"},"tagline":"You Know, for Search"}'
+    )
+    looks_like, version = _looks_like_elastic_root(200, gzipped_payload, {"Content-Encoding": "gzip"})
+    assert looks_like is True
+    assert version == "8.17.3"
+
+    deflated_payload = zlib.compress(
+        b'{"name":"elk-01","cluster_name":"elastic-cluster","version":{"number":"8.17.3"},"tagline":"You Know, for Search"}'
+    )
+    looks_like, version = _looks_like_elastic_root(200, deflated_payload, {"Content-Encoding": "deflate"})
+    assert looks_like is True
+    assert version == "8.17.3"
 
     assert (
         _normalize_access_level(can_read=True, can_write=False, can_manage=False, can_manage_security=False)
@@ -84,6 +110,62 @@ def test_detect_and_discover_helpers() -> None:
             "description": "ICU analysis plugin",
         }
     ]
+
+    assert elastic_stage._extract_version_hint(b'{"nodes":{"n1":{"version":"8.17.3"}}}') == "8.17.3"
+
+
+def test_classify_detect_probe_rejects_opensearch_markers() -> None:
+    payload = (
+        b'{"name":"os-01","cluster_name":"opensearch-cluster","version":{"number":"2.14.0","distribution":"opensearch"},'
+        b'"tagline":"The OpenSearch Project: https://opensearch.org/"}'
+    )
+    classified = _classify_detect_probe("/", 200, payload, {}, None)
+    assert classified["signal_kind"] == "hard_negative"
+    assert "vendor_opensearch_tagline" in classified["signals"]
+
+
+def test_detect_decision_policy_matrix() -> None:
+    hard_positive = {
+        "path": "/",
+        "signal_kind": "hard_positive",
+        "signals": ["header_x_elastic_product"],
+        "version": "8.17.3",
+    }
+    hard_negative = {
+        "path": "/",
+        "signal_kind": "hard_negative",
+        "signals": ["vendor_opensearch_tagline"],
+        "version": None,
+    }
+    soft_cluster = {
+        "path": "/_cluster/health",
+        "signal_kind": "soft_positive",
+        "signals": ["cluster_health_shape"],
+        "version": None,
+    }
+    soft_cat = {
+        "path": "/_cat/health",
+        "signal_kind": "soft_positive",
+        "signals": ["cat_health_text_shape"],
+        "version": None,
+    }
+    neutral = {"path": "/", "signal_kind": "neutral", "signals": [], "version": None}
+
+    decision = _evaluate_detect_decision([hard_positive, hard_negative])
+    assert decision["detected"] is True
+    assert decision["confidence"] == "medium"
+
+    decision = _evaluate_detect_decision([soft_cluster, soft_cat])
+    assert decision["detected"] is True
+    assert decision["confidence"] == "medium"
+
+    decision = _evaluate_detect_decision([hard_negative])
+    assert decision["detected"] is False
+    assert decision["confidence"] == "low"
+
+    decision = _evaluate_detect_decision([neutral])
+    assert decision["detected"] is True
+    assert decision["confidence"] == "low"
 
 
 def test_request_with_tls_fallback_switches_to_http(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -484,6 +566,181 @@ def test_audit_elastic_host_status_matrix(monkeypatch: pytest.MonkeyPatch) -> No
     assert record["auth_required"] is True
 
 
+def test_audit_elastic_host_runs_extended_detect_pass_on_ambiguous_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_with_tls_fallback",
+        lambda *_args, **_kwargs: (
+            200,
+            b"{}",
+            {"Content-Type": "application/json"},
+            None,
+            "https",
+            True,
+            False,
+        ),
+    )
+
+    calls: list[tuple[str, float]] = []
+
+    def fake_detect_probe(
+        host: str,
+        port: int,
+        path: str,
+        timeout: float,
+        *,
+        preferred_scheme: str,
+        ca_file: str | None,
+    ) -> tuple[int, bytes, dict[str, str], str | None, str]:
+        _ = (host, port, preferred_scheme, ca_file)
+        calls.append((path, timeout))
+        if len(calls) <= 4:
+            return 404, b"{}", {"Content-Type": "application/json"}, None, "https"
+        if path == "/_cluster/health":
+            return 200, b'{"cluster_name":"elastic-cluster","status":"yellow"}', {}, None, "https"
+        if path == "/_cat/health":
+            return 200, b"cluster status node.total node.data\nelastic-cluster yellow 1 1", {}, None, "https"
+        return 404, b"{}", {"Content-Type": "application/json"}, None, "https"
+
+    monkeypatch.setattr(elastic_stage, "_request_detect_probe", fake_detect_probe)
+
+    record = _audit_elastic_host(
+        "127.0.0.1",
+        9200,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        api_token=None,
+        ca_file=None,
+        show_endpoints=False,
+        show_plugins=False,
+        show_cluster=False,
+        show_users=False,
+        discover=False,
+    )
+
+    assert record["is_elastic"] is True
+    assert record["status"] == "open_no_auth"
+    assert record["detect_confidence"] == "medium"
+    assert isinstance(record["detect_probe_trace"], list)
+    assert len(record["detect_probe_trace"]) == 9
+    assert 2.5 in [timeout for _path, timeout in calls]
+
+
+def test_audit_elastic_host_skips_extended_detect_pass_on_high_confidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_with_tls_fallback",
+        lambda *_args, **_kwargs: (
+            200,
+            b'{"name":"elk-01","cluster_name":"elastic-cluster","version":{"number":"8.17.3"},"tagline":"You Know, for Search"}',
+            {"X-Elastic-Product": "Elasticsearch"},
+            None,
+            "https",
+            True,
+            False,
+        ),
+    )
+
+    calls: list[tuple[str, float]] = []
+
+    def fake_detect_probe(
+        host: str,
+        port: int,
+        path: str,
+        timeout: float,
+        *,
+        preferred_scheme: str,
+        ca_file: str | None,
+    ) -> tuple[int, bytes, dict[str, str], str | None, str]:
+        _ = (host, port, preferred_scheme, ca_file)
+        calls.append((path, timeout))
+        return 404, b"{}", {"Content-Type": "application/json"}, None, "https"
+
+    monkeypatch.setattr(elastic_stage, "_request_detect_probe", fake_detect_probe)
+
+    record = _audit_elastic_host(
+        "127.0.0.1",
+        9200,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        api_token=None,
+        ca_file=None,
+        show_endpoints=False,
+        show_plugins=False,
+        show_cluster=False,
+        show_users=False,
+        discover=False,
+    )
+
+    assert record["is_elastic"] is True
+    assert record["detect_confidence"] == "high"
+    assert len(calls) == 4
+    assert all(timeout == 1.0 for _path, timeout in calls)
+
+
+def test_audit_elastic_host_rechecks_http_when_https_looks_non_elastic(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_with_tls_fallback",
+        lambda *_args, **_kwargs: (200, b"<html>proxy</html>", {}, None, "https", True, False),
+    )
+
+    def fake_request(
+        host: str,
+        port: int,
+        path: str,
+        timeout: float,
+        *,
+        use_https: bool,
+        insecure: bool,
+        ca_file: str | None,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        data: bytes | None = None,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        _ = (host, port, path, timeout, insecure, ca_file, method, headers, data)
+        if use_https:
+            return 200, b"<html>proxy</html>", {}, None
+        return (
+            200,
+            b'{"name":"elk-01","cluster_name":"elastic-cluster","version":{"number":"8.17.3"},"tagline":"You Know, for Search"}',
+            {"X-Elastic-Product": "Elasticsearch"},
+            None,
+        )
+
+    monkeypatch.setattr(elastic_stage, "_elastic_request", fake_request)
+
+    record = _audit_elastic_host(
+        "127.0.0.1",
+        9200,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        api_token=None,
+        ca_file=None,
+        show_endpoints=False,
+        show_plugins=False,
+        show_cluster=False,
+        show_users=False,
+        discover=False,
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert record["is_elastic"] is True
+    assert record["scheme"] == "http"
+    assert record["tls_auto_plain"] is True
+    assert record["server_version"] == "8.17.3"
+
+
 def test_audit_elastic_host_resolves_version_with_authenticated_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         elastic_stage,
@@ -523,6 +780,190 @@ def test_audit_elastic_host_resolves_version_with_authenticated_probe(monkeypatc
     assert record["server_version"] == "8.13.4"
     assert record["api_key_probe_status"] == "ok"
     assert record["api_key_probe_error"] is None
+
+
+def test_audit_elastic_host_auth_required_resolves_version_without_auth_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_with_tls_fallback",
+        lambda *_args, **_kwargs: (
+            401,
+            b'{"error":{"type":"security_exception","reason":"missing authentication credentials"}}',
+            {"X-Elastic-Product": "Elasticsearch"},
+            None,
+            "https",
+            True,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        elastic_stage, "_request_detect_probe", lambda *_args, **_kwargs: (401, b"{}", {}, None, "https")
+    )
+    monkeypatch.setattr(
+        elastic_stage, "_resolve_server_version_without_auth", lambda *_args, **_kwargs: ("8.17.3", None)
+    )
+
+    record = _audit_elastic_host(
+        "127.0.0.1",
+        9200,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        api_token=None,
+        ca_file=None,
+        show_endpoints=False,
+        show_plugins=False,
+        show_cluster=False,
+        show_users=False,
+        discover=False,
+    )
+
+    assert record["status"] == "auth_required"
+    assert record["server_version"] == "8.17.3"
+
+
+def test_audit_elastic_host_uses_root_status_for_auth_required_and_hides_version_probe_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_with_tls_fallback",
+        lambda *_args, **_kwargs: (
+            200,
+            b'{"name":"elk-01","cluster_name":"elastic-cluster"}',
+            {"Content-Type": "application/json"},
+            None,
+            "https",
+            True,
+            False,
+        ),
+    )
+
+    def fake_detect_probe(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        *,
+        preferred_scheme: str,
+        ca_file: str | None,
+    ) -> tuple[int, bytes, dict[str, str], str | None, str]:
+        _ = (preferred_scheme, ca_file)
+        if path == "/_security/_authenticate":
+            return (
+                401,
+                b'{"error":{"type":"security_exception","reason":"missing authentication credentials"}}',
+                {"Content-Type": "application/json"},
+                None,
+                "https",
+            )
+        return 404, b"{}", {"Content-Type": "application/json"}, None, "https"
+
+    monkeypatch.setattr(elastic_stage, "_request_detect_probe", fake_detect_probe)
+    monkeypatch.setattr(elastic_stage, "_resolve_server_version_without_auth", lambda *_args, **_kwargs: (None, "x"))
+
+    record = _audit_elastic_host(
+        "127.0.0.1",
+        9200,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        api_token=None,
+        ca_file=None,
+        show_endpoints=False,
+        show_plugins=False,
+        show_cluster=False,
+        show_users=False,
+        discover=False,
+    )
+
+    assert record["is_elastic"] is True
+    assert record["status"] == "open_no_auth"
+    assert record["auth_required"] is False
+    assert record["error"] in {None, ""}
+
+
+def test_resolve_server_version_without_auth_prefers_root_tls_fallback_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_with_tls_fallback",
+        lambda *_args, **_kwargs: (
+            200,
+            b'{"name":"elk-01","cluster_name":"elastic-cluster","version":{"number":"8.17.3"},"tagline":"You Know, for Search"}',
+            {"Content-Type": "application/json"},
+            None,
+            "https",
+            True,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_detect_probe",
+        lambda *_args, **_kwargs: (0, b"", {}, "should_not_be_used", "https"),
+    )
+
+    version, error = elastic_stage._resolve_server_version_without_auth(
+        "127.0.0.1",
+        9200,
+        1.0,
+        preferred_scheme="https",
+        ca_file=None,
+    )
+
+    assert version == "8.17.3"
+    assert error is None
+
+
+def test_resolve_server_version_without_auth_uses_cat_nodes_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_with_tls_fallback",
+        lambda *_args, **_kwargs: (
+            401,
+            b'{"error":"missing authentication credentials"}',
+            {},
+            None,
+            "https",
+            True,
+            False,
+        ),
+    )
+
+    def fake_detect_probe(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        *,
+        preferred_scheme: str,
+        ca_file: str | None,
+    ) -> tuple[int, bytes, dict[str, str], str | None, str]:
+        _ = (preferred_scheme, ca_file)
+        if path == "/_cat/nodes?format=json&h=version":
+            return 200, b'[{"version":"8.17.3"}]', {"Content-Type": "application/json"}, None, "https"
+        return 401, b'{"error":"missing authentication credentials"}', {}, None, "https"
+
+    monkeypatch.setattr(elastic_stage, "_request_detect_probe", fake_detect_probe)
+
+    version, error = elastic_stage._resolve_server_version_without_auth(
+        "127.0.0.1",
+        9200,
+        1.0,
+        preferred_scheme="https",
+        ca_file=None,
+    )
+
+    assert version == "8.17.3"
+    assert error is None
 
 
 def test_audit_elastic_host_with_auth_and_features(monkeypatch: pytest.MonkeyPatch) -> None:
