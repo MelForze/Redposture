@@ -1601,7 +1601,7 @@ def audit_kubeapi_targets(
                 suppress_timeout_detect_line = (
                     suppress_timeout_status_lines
                     and output_format == "txt"
-                    and _is_connection_timeout_fail_record(record_for_output)
+                    and str(record_for_output.get("status") or "") == "fail"
                 )
                 if not suppress_timeout_detect_line:
                     _emit_line(out_fh, emit_line, _format_detect_record(record_for_output, output_format))

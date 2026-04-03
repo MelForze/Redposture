@@ -1165,7 +1165,7 @@ def audit_grafana_targets(
                 suppress_timeout_status_line = (
                     suppress_timeout_status_lines
                     and output_format == "txt"
-                    and _is_connection_timeout_fail_record(record)
+                    and status == "fail"
                 )
                 if (
                     not suppress_status_when_auth_attempts_present
