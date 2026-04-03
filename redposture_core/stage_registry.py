@@ -2508,7 +2508,7 @@ def audit_registry_targets(
                     suppress_timeout_status_line = (
                         suppress_timeout_status_lines
                         and output_format == "txt"
-                        and _is_connection_timeout_fail_record(record)
+                        and state == "fail"
                     )
                     if not suppress_timeout_status_line:
                         output_lines.append(_format_record(record, output_format))

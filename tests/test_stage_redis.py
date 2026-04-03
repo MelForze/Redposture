@@ -565,7 +565,7 @@ def test_audit_redis_targets_suppresses_connection_refused_status_line_only(
 
 
 @pytest.mark.parametrize("debug", [False, True])
-def test_run_redis_stage_always_enables_connection_refused_suppression(
+def test_run_redis_stage_connection_refused_suppression_matches_debug(
     monkeypatch: pytest.MonkeyPatch, debug: bool
 ) -> None:
     captured: dict[str, object] = {}
@@ -602,4 +602,4 @@ def test_run_redis_stage_always_enables_connection_refused_suppression(
 
     rc = redis_stage.run_redis_stage(args, _DummyLogger())
     assert rc == 0
-    assert captured.get("suppress_connection_refused_status_lines") is True
+    assert captured.get("suppress_connection_refused_status_lines") is (not debug)

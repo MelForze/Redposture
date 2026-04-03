@@ -124,12 +124,12 @@ def _is_root_query_err_124_error(value: Any) -> bool:
 
 
 def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and (
-        _is_connection_refused_error(record.get("error"))
-        or _is_connection_timeout_error(record.get("error"))
-        or _is_unexpected_eof_error(record.get("error"))
-        or _is_root_query_err_124_error(record.get("error"))
-    )
+    if str(record.get("status") or "") != "fail":
+        return False
+    err = str(record.get("error") or "").strip().lower()
+    if bool(record.get("provided_credentials")) and err.startswith("authentication failed"):
+        return False
+    return True
 
 
 def _zk_error_name(code: int) -> str:

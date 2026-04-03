@@ -100,9 +100,7 @@ def _is_connection_timeout_error(value: Any) -> bool:
 
 
 def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and (
-        _is_connection_refused_error(record.get("error")) or _is_connection_timeout_error(record.get("error"))
-    )
+    return str(record.get("status") or "") == "fail"
 
 
 def _kafka_error_name(code: int) -> str:

@@ -193,10 +193,7 @@ def _is_connection_timeout_error(value: Any) -> bool:
 
 
 def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
-    if str(record.get("status") or "") != "fail":
-        return False
-    err = record.get("error")
-    return _is_connection_refused_error(err) or _is_connection_timeout_error(err)
+    return str(record.get("status") or "") == "fail"
 
 
 def _ssl_context(*, use_https: bool, insecure: bool) -> ssl.SSLContext | None:

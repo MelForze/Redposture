@@ -2198,7 +2198,7 @@ def audit_postgres_targets(
                 suppress_timeout_status_line = (
                     suppress_timeout_status_lines
                     and output_format == "txt"
-                    and (_is_connection_timeout_fail_record(record) or _is_connection_refused_fail_record(record))
+                    and status == "fail"
                 )
                 if not suppress_auth_required_status_line and not suppress_timeout_status_line:
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))

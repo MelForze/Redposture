@@ -128,10 +128,11 @@ def test_format_keys_detail_records_builds_text_sections() -> None:
     assert any("[*] Dump Keys" in line for line in lines)
 
 
-def test_is_suppressed_fail_record_for_timeout_and_refused() -> None:
+def test_is_suppressed_fail_record_for_any_fail_status() -> None:
     assert _is_suppressed_fail_record({"status": "fail", "error": "connection timeout"}) is True
     assert _is_suppressed_fail_record({"status": "fail", "error": "connection refused (service)"}) is True
-    assert _is_suppressed_fail_record({"status": "fail", "error": "dns lookup failed"}) is False
+    assert _is_suppressed_fail_record({"status": "fail", "error": "dns lookup failed"}) is True
+    assert _is_suppressed_fail_record({"status": "auth_required", "error": "dns lookup failed"}) is False
 
 
 def test_audit_etcd_host_open_v2_collects_keys_and_query(monkeypatch) -> None:  # type: ignore[no-untyped-def]
