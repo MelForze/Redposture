@@ -13,6 +13,7 @@ from .cli_args import (
     COMMAND_CLICKHOUSE,
     COMMAND_COLLECT,
     COMMAND_CONSUL,
+    COMMAND_ELASTIC,
     COMMAND_ETCD,
     COMMAND_EXPORTERS,
     COMMAND_GITLAB,
@@ -35,6 +36,7 @@ from .network_proxy import parse_proxy_config, proxy_socket_context
 from .stage_clickhouse import run_clickhouse_stage
 from .stage_collect import run_collect_stage
 from .stage_consul import run_consul_stage
+from .stage_elastic import run_elastic_stage
 from .stage_etcd import run_etcd_stage
 from .stage_gitlab import run_gitlab_stage
 from .stage_grafana import run_grafana_stage
@@ -141,6 +143,9 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
 
     if args.command == COMMAND_CONSUL:
         return run_consul_stage(args, logger)
+
+    if args.command == COMMAND_ELASTIC:
+        return run_elastic_stage(args, logger)
 
     if args.command == COMMAND_QDRANT:
         return run_qdrant_stage(args, logger)

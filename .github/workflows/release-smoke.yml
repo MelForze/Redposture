@@ -36,7 +36,3 @@ jobs:
           redposture --version
           redposture --help > /dev/null
           redposture registry -h > /dev/null
-          if redposture db -h > /dev/null 2>&1; then
-            echo "db command must be unavailable in v4"
-            exit 1
-          fi

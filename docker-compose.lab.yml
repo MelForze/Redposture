@@ -1203,6 +1203,47 @@ services:
 
         echo "[qdrant-seed] done"
 
+  elastic-open:
+    image: python:3.12-alpine
+    container_name: redposture-lab-elastic-open
+    command: ["python", "/mock/elastic_api_mock.py"]
+    environment:
+      ELASTIC_AUTH_REQUIRED: "0"
+      ELASTIC_CLUSTER_NAME: "redposture-elastic-open"
+    volumes:
+      - ./docker/elastic/elastic_api_mock.py:/mock/elastic_api_mock.py:ro
+    ports:
+      - "19200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9200/ >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
+  elastic-auth:
+    image: python:3.12-alpine
+    container_name: redposture-lab-elastic-auth
+    command: ["python", "/mock/elastic_api_mock.py"]
+    environment:
+      ELASTIC_AUTH_REQUIRED: "1"
+      ELASTIC_BASIC_USER: "elastic"
+      ELASTIC_BASIC_PASSWORD: "ElasticRead!2026"
+      ELASTIC_API_KEY: "ZXM6bGFiLXRva2Vu"
+      ELASTIC_CLUSTER_NAME: "redposture-elastic-auth"
+    volumes:
+      - ./docker/elastic/elastic_api_mock.py:/mock/elastic_api_mock.py:ro
+    ports:
+      - "19201:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9200/ >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+
   consul:
     build:
       context: .

@@ -27,6 +27,7 @@ COMMAND_QDRANT = "qdrant"
 COMMAND_KUBEAPI = "kubeapi"
 COMMAND_KAFKA = "kafka"
 COMMAND_ZOOKEEPER = "zookeeper"
+COMMAND_ELASTIC = "elastic"
 COMMAND_SELFCERT = "selfcert"
 COMMAND_EXPORTERS = "exporters"
 
@@ -1054,12 +1055,100 @@ def _configure_qdrant_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _configure_elastic_parser(parser: argparse.ArgumentParser) -> None:
+    common = parser.add_argument_group("Common")
+    auth = parser.add_argument_group("Auth")
+    discovery = parser.add_argument_group("Discovery / API")
+
+    _add_output_flags(common)  # type: ignore[arg-type]
+    _add_log_flag(common)
+    _add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
+    common.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=9200,
+        metavar="port",
+        help="Elasticsearch port spec: single port, list/range, or file (examples: 9200, 9200,19200, ./ports.txt).",
+    )
+    _add_multi_ports_flag(common)
+    common.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Skip TLS certificate verification for HTTPS requests.",
+    )
+    common.add_argument(
+        "--ca-file",
+        dest="ca_file",
+        default=None,
+        metavar="path",
+        help="Custom CA certificate file for HTTPS verification.",
+    )
+    _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
+    common.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="Elastic audit output format for stdout/file.",
+    )
+
+    auth.add_argument(
+        "-u",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Basic auth username.",
+    )
+    auth.add_argument(
+        "-p",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Basic auth password.",
+    )
+    auth.add_argument(
+        "--apitoken",
+        dest="apitoken",
+        default=None,
+        metavar="value",
+        help="API key token sent as Authorization: ApiKey <value>.",
+    )
+
+    discovery.add_argument(
+        "--endpoints",
+        action="store_true",
+        help="List available _cat endpoints from /_cat?help.",
+    )
+    discovery.add_argument(
+        "--plugins",
+        action="store_true",
+        help="List installed plugins from GET /_cat/plugins.",
+    )
+    discovery.add_argument(
+        "--cluster",
+        action="store_true",
+        help="Show cluster health and nodes.",
+    )
+    discovery.add_argument(
+        "--user",
+        action="store_true",
+        help="Show security users via /_security/user.",
+    )
+    discovery.add_argument(
+        "--discover",
+        action="store_true",
+        help="Search all indices for potential secret leaks using query_string.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _NoColorArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
-            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/ClickHouse/etcd/Proxmox/Qdrant/Consul/Registry/Grafana/GitLab/Kubernetes API/Kafka/ZooKeeper auditing. "
-            "Use one module command: exporters, registry, grafana, proxmox, gitlab, consul, kubeapi, postgres, clickhouse, redis, etcd, qdrant, kafka, zookeeper. "
+            "Python3 security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/ClickHouse/etcd/Proxmox/Qdrant/Consul/Registry/Grafana/GitLab/Kubernetes API/Kafka/ZooKeeper/Elasticsearch auditing. "
+            "Use one module command: exporters, registry, grafana, proxmox, gitlab, consul, kubeapi, postgres, clickhouse, redis, etcd, qdrant, kafka, zookeeper, elastic. "
             "Listener mode is available inside trigger via --with-listen."
         ),
     )
@@ -1861,6 +1950,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _configure_qdrant_parser(qdrant_parser)
 
+    elastic_parser = subparsers.add_parser(
+        COMMAND_ELASTIC,
+        help="Audit Elasticsearch exposure, auth, cluster/users endpoints, and secret discovery.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Elastic module detects Elasticsearch API exposure, supports Basic/API key auth checks, "
+            "collects _cat endpoints, cluster health/nodes, security users, and performs indexed "
+            "query_string discovery for potential secret leaks."
+        ),
+    )
+    _configure_elastic_parser(elastic_parser)
+
     kafka_parser = subparsers.add_parser(
         COMMAND_KAFKA,
         help="Audit Kafka broker auth exposure and topic visibility.",
@@ -1987,7 +2088,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=_positive_int,
         default=2000,
         metavar="count",
-        help="Maximum znodes to enumerate per target.",
+        help="Maximum znodes to include in --show-znodes/--dump output per target (znode count remains full).",
     )
     _add_save_flag(zookeeper_parser, "Optional output file path. If omitted, results are printed to stdout.")
     zookeeper_parser.add_argument(
@@ -2037,7 +2138,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if raw_argv[0].startswith("-"):
         parser.error(
             "module command is required: exporters, registry, grafana, gitlab, consul, kubeapi, postgres, "
-            "clickhouse, redis, etcd, proxmox, qdrant, kafka, zookeeper, or --selfcert"
+            "clickhouse, redis, etcd, proxmox, qdrant, kafka, zookeeper, elastic, or --selfcert"
         )
 
     return parser.parse_args(raw_argv)

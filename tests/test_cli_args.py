@@ -5,6 +5,7 @@ import re
 import pytest
 
 from redposture_core.cli_args import (
+    COMMAND_ELASTIC,
     COMMAND_EXPORTERS,
     COMMAND_QDRANT,
     COMMAND_SELFCERT,
@@ -111,6 +112,16 @@ def test_postgres_help_orders_show_columns_column_dump() -> None:
     assert column_idx != -1
     assert dump_idx != -1
     assert show_columns_idx < column_idx < dump_idx
+
+
+def test_elastic_help_sections_are_present() -> None:
+    help_text = _command_help("elastic")
+    assert "\nCommon:\n" in help_text
+    assert "\nAuth:\n" in help_text
+    assert "\nDiscovery / API:\n" in help_text
+    assert "--apitoken value" in help_text
+    assert "--plugins" in help_text
+    assert "--user" in help_text
 
 
 def test_postgres_rows_and_dump_limit_flags_are_parsed() -> None:
@@ -409,6 +420,7 @@ def test_ports_file_is_accepted_across_all_modules(tmp_path) -> None:
         ["etcd", "-t", "10.0.0.1", "--ports", file_value],
         ["kafka", "-t", "10.0.0.1", "--ports", file_value],
         ["zookeeper", "-t", "10.0.0.1", "--ports", file_value],
+        ["elastic", "-t", "10.0.0.1", "--ports", file_value],
         ["grafana", "-t", "10.0.0.1", "--ports", file_value],
         ["postgres", "-t", "10.0.0.1", "--ports", file_value],
         ["clickhouse", "-t", "10.0.0.1", "--ports", file_value],
@@ -444,6 +456,7 @@ def test_port_file_is_normalized_to_ports_across_port_modules(tmp_path) -> None:
         ["etcd", "-t", "10.0.0.1", "--port", file_value],
         ["kafka", "-t", "10.0.0.1", "--port", file_value],
         ["zookeeper", "-t", "10.0.0.1", "--port", file_value],
+        ["elastic", "-t", "10.0.0.1", "--port", file_value],
     ]
 
     for argv in argv_variants:
@@ -1279,6 +1292,69 @@ def test_zookeeper_rejects_profiles_file_flag() -> None:
 def test_zookeeper_dump_legacy_alias_is_parsed() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args(["zookeeper", "-t", "10.0.0.9", "--dump-znodes"])
+    assert exc.value.code == 2
+
+
+def test_elastic_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "elastic",
+            "-t",
+            "10.0.0.71,10.0.0.72",
+            "--timeout",
+            "1.3",
+            "-w",
+            "9",
+            "-r",
+            "1",
+            "--port",
+            "19200",
+            "--ports",
+            "9200,19200",
+            "--insecure",
+            "--ca-file",
+            "./elastic-ca.pem",
+            "-u",
+            "elastic",
+            "-p",
+            "ElasticRead!2026",
+            "--apitoken",
+            "ZXM6bGFiLXRva2Vu",
+            "--endpoints",
+            "--plugins",
+            "--cluster",
+            "--user",
+            "--discover",
+            "-f",
+            "json",
+            "-o",
+            "elastic_audit.jsonl",
+        ]
+    )
+    assert args.command == COMMAND_ELASTIC
+    assert args.targets == "10.0.0.71,10.0.0.72"
+    assert args.timeout == 1.3
+    assert args.workers == 9
+    assert args.retries == 1
+    assert args.port == 19200
+    assert args.ports == "9200,19200"
+    assert args.insecure is True
+    assert args.ca_file == "./elastic-ca.pem"
+    assert args.username == "elastic"
+    assert args.password == "ElasticRead!2026"
+    assert args.apitoken == "ZXM6bGFiLXRva2Vu"
+    assert args.endpoints is True
+    assert args.plugins is True
+    assert args.cluster is True
+    assert args.user is True
+    assert args.discover is True
+    assert args.output_format == "json"
+    assert args.output == "elastic_audit.jsonl"
+
+
+def test_elastic_rejects_profiles_file_flag() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["elastic", "-t", "10.0.0.71", "--profiles-file", "profiles.json"])
     assert exc.value.code == 2
 
 

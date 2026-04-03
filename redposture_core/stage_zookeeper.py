@@ -22,6 +22,8 @@ from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 _ZK_PROTOCOL_VERSION = 0
 _ZK_PASSWD_DEFAULT = b"\x00" * 16
+_ZK_OP_CREATE = 1
+_ZK_OP_DELETE = 2
 _ZK_OP_GET_DATA = 4
 _ZK_OP_GET_CHILDREN2 = 12
 _ZK_OP_CLOSE_SESSION = -11
@@ -30,8 +32,11 @@ _ZK_ERR_OK = 0
 _ZK_ERR_NONODE = -101
 _ZK_ERR_NOAUTH = -102
 _ZK_ERR_RETRYABLE_ROOT_QUERY = -124
+_ZK_ERR_NODEEXISTS = -110
 _ZK_MAX_FRAME = 64 * 1024 * 1024
 _ZK_SYSTEM_PREFIX = "/zookeeper"
+_ZK_ACL_ALL_PERMS = 0x1F
+_ZK_CREATE_EPHEMERAL = 1
 _CONNECTION_REFUSED_PREFIX = "connection refused"
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _UNEXPECTED_EOF_PREFIX = "unexpected eof"
@@ -208,6 +213,16 @@ def _decode_zk_buffer(data: bytes, offset: int = 0) -> tuple[bytes | None, int]:
     if end > len(data):
         raise ValueError("truncated ZooKeeper buffer payload")
     return data[offset:end], end
+
+
+def _encode_acl_world_anyone_all() -> bytes:
+    # ACL vector with one entry: world:anyone + all permissions.
+    return (
+        struct.pack(">i", 1)
+        + struct.pack(">i", _ZK_ACL_ALL_PERMS)
+        + _encode_zk_string("world")
+        + _encode_zk_string("anyone")
+    )
 
 
 def _parse_children_vector(payload: bytes, offset: int = 0) -> tuple[list[str], int]:
@@ -399,25 +414,61 @@ class _ZkClient:
             stat, _ = _parse_stat(response_payload, offset)
         return data, err, stat
 
+    def create(self, path: str, data: bytes = b"", flags: int = _ZK_CREATE_EPHEMERAL) -> int:
+        payload = (
+            _encode_zk_string(path)
+            + struct.pack(">i", len(data))
+            + data
+            + _encode_acl_world_anyone_all()
+            + struct.pack(">i", int(flags))
+        )
+        err, _response_payload = self._request(_ZK_OP_CREATE, payload)
+        return int(err)
 
-def _enumerate_znodes(client: _ZkClient, max_znodes: int) -> tuple[list[str], bool, str | None]:
+    def delete(self, path: str, version: int = -1) -> int:
+        payload = _encode_zk_string(path) + struct.pack(">i", int(version))
+        err, _response_payload = self._request(_ZK_OP_DELETE, payload)
+        return int(err)
+
+
+def _enumerate_znodes(
+    client: _ZkClient, max_znodes: int
+) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
     queue = ["/"]
     visited = {"/"}
-    nodes: list[str] = []
-    truncated = False
+    listed_nodes: list[str] = []
+    listed_meta: dict[str, dict[str, Any]] = {}
+    total_count = 0
 
     while queue:
         parent = queue.pop(0)
         children, err, _stat = client.get_children2(parent)
+        parent_meta = listed_meta.get(parent)
         if err == _ZK_ERR_NONODE:
+            if parent_meta is not None:
+                parent_meta["error"] = "not found"
             continue
         if err == _ZK_ERR_NOAUTH:
             # Parent exists, but subtree is not readable without auth.
+            if parent_meta is not None:
+                parent_meta["error"] = "Access Denied"
             continue
         if err != _ZK_ERR_OK:
-            return nodes, truncated, f"getChildren failed for {parent}: {_zk_error_name(err)}"
+            if parent_meta is not None:
+                parent_meta["error"] = _zk_error_name(err)
+            return (
+                listed_nodes,
+                total_count,
+                total_count > len(listed_nodes),
+                listed_meta,
+                (f"getChildren failed for {parent}: {_zk_error_name(err)}"),
+            )
         if children is None:
             continue
+        if parent_meta is not None:
+            parent_meta["children"] = int(len(children))
+            parent_meta["bytes"] = int((_stat or {}).get("data_length") or 0)
+            parent_meta["error"] = None
 
         for child in children:
             full_path = _join_znode_path(parent, child)
@@ -426,13 +477,67 @@ def _enumerate_znodes(client: _ZkClient, max_znodes: int) -> tuple[list[str], bo
             if full_path in visited:
                 continue
             visited.add(full_path)
-            nodes.append(full_path)
-            if len(nodes) >= max_znodes:
-                truncated = True
-                return nodes, truncated, None
+            total_count += 1
+            if len(listed_nodes) < max_znodes:
+                listed_nodes.append(full_path)
+                listed_meta[full_path] = {"path": full_path, "children": None, "bytes": None, "error": None}
             queue.append(full_path)
 
-    return nodes, truncated, None
+    truncated = total_count > len(listed_nodes)
+    return listed_nodes, total_count, truncated, listed_meta, None
+
+
+def _probe_znode_create_delete(client: _ZkClient, host: str, port: int) -> tuple[bool | None, bool | None, str | None]:
+    base_name = f"/redposture_probe_{host.replace('.', '_')}_{port}_{int(time.time() * 1000)}"
+    try:
+        for index in range(3):
+            probe_path = base_name if index == 0 else f"{base_name}_{index}"
+            create_err = int(client.create(probe_path))
+            if create_err == _ZK_ERR_NODEEXISTS:
+                continue
+            if create_err != _ZK_ERR_OK:
+                return False, False, _zk_error_name(create_err)
+
+            delete_err = int(client.delete(probe_path, -1))
+            if delete_err == _ZK_ERR_OK:
+                return True, True, None
+            return True, False, _zk_error_name(delete_err)
+    except AttributeError:
+        return None, None, "capability probe unsupported"
+    except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+        return None, None, _friendly_error_from_exception(exc)
+
+    return False, False, "NODEEXISTS"
+
+
+def _znode_detail_entry(path: str, meta: dict[str, Any] | None) -> dict[str, Any]:
+    state = "unknown"
+    children_value: int | None = None
+    bytes_value: int | None = None
+    error_value: str | None = None
+
+    if isinstance(meta, dict):
+        raw_error = str(meta.get("error") or "").strip()
+        if raw_error:
+            error_value = raw_error
+            state = "denied" if raw_error.lower() == "access denied" else "error"
+        else:
+            raw_children = meta.get("children")
+            raw_bytes = meta.get("bytes")
+            if isinstance(raw_children, int):
+                children_value = raw_children
+            if isinstance(raw_bytes, int):
+                bytes_value = raw_bytes
+            if children_value is not None and bytes_value is not None:
+                state = "empty" if children_value == 0 and bytes_value == 0 else "readable"
+
+    return {
+        "path": path,
+        "state": state,
+        "children": children_value,
+        "bytes": bytes_value,
+        "error": error_value,
+    }
 
 
 def _audit_zookeeper_host(
@@ -519,11 +624,15 @@ def _audit_zookeeper_host(
                         "max_znodes": max_znodes,
                         "znode_count": None,
                         "znodes": None,
+                        "znode_details": None,
                         "znode_values": None,
                         "znodes_truncated": False,
                         "query_znode_value": None,
                         "query_znode_dump": None,
                         "query_znode_dump_error": None,
+                        "can_create_znode": None,
+                        "can_delete_znode": None,
+                        "znode_capability_error": None,
                         "elapsed_ms": int((time.monotonic() - started) * 1000),
                         "error": auth_error_text,
                     }
@@ -548,11 +657,15 @@ def _audit_zookeeper_host(
                         "max_znodes": max_znodes,
                         "znode_count": None,
                         "znodes": None,
+                        "znode_details": None,
                         "znode_values": None,
                         "znodes_truncated": False,
                         "query_znode_value": None,
                         "query_znode_dump": None,
-                        "query_znode_dump_error": "authentication required",
+                        "query_znode_dump_error": "Access Denied",
+                        "can_create_znode": None,
+                        "can_delete_znode": None,
+                        "znode_capability_error": None,
                         "elapsed_ms": int((time.monotonic() - started) * 1000),
                         "error": auth_error_text or "authentication failed",
                     }
@@ -575,13 +688,15 @@ def _audit_zookeeper_host(
                     "max_znodes": max_znodes,
                     "znode_count": None,
                     "znodes": None,
+                    "znode_details": None,
                     "znode_values": None,
                     "znodes_truncated": False,
                     "query_znode_value": None,
                     "query_znode_dump": None,
-                    "query_znode_dump_error": (
-                        "access denied" if (provided_credentials and auth_applied_ok) else "authentication required"
-                    ),
+                    "query_znode_dump_error": "Access Denied",
+                    "can_create_znode": None,
+                    "can_delete_znode": None,
+                    "znode_capability_error": None,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": auth_error,
                 }
@@ -610,27 +725,31 @@ def _audit_zookeeper_host(
                     "max_znodes": max_znodes,
                     "znode_count": None,
                     "znodes": None,
+                    "znode_details": None,
                     "znode_values": None,
                     "znodes_truncated": False,
                     "query_znode_value": None,
                     "query_znode_dump": None,
                     "query_znode_dump_error": None,
+                    "can_create_znode": None,
+                    "can_delete_znode": None,
+                    "znode_capability_error": None,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": f"root query failed: {_zk_error_name(root_err)}",
                 }
 
-            noauth_detail_text = (
-                "access denied" if (provided_credentials and auth_applied_ok) else "authentication required"
-            )
+            noauth_detail_text = "Access Denied"
 
-            znodes, truncated, enum_error = _enumerate_znodes(client, max_znodes)
+            listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(client, max_znodes)
             if enum_error:
                 last_error = enum_error
+            sorted_znodes = sorted(listed_znodes)
+            znode_details = [_znode_detail_entry(path, listed_meta.get(path)) for path in sorted_znodes]
 
             znode_values: list[str] | None = None
             if dump and not query_znode:
                 znode_values = []
-                for path in znodes:
+                for path in sorted_znodes:
                     value_bytes, value_err, _value_stat = client.get_data(path)
                     if value_err == _ZK_ERR_OK:
                         znode_values.append(f"{path}:{_format_znode_data(value_bytes)}")
@@ -674,7 +793,6 @@ def _audit_zookeeper_host(
                         query_znode_dump_error = _zk_error_name(q_err)
 
             root_count = len(root_children or [])
-            total_count = len(znodes)
             if total_count == 0 and root_count > 0:
                 total_count = root_count
 
@@ -685,6 +803,14 @@ def _audit_zookeeper_host(
                 auth_required_value = False
             else:
                 auth_required_value = None
+
+            can_create_znode: bool | None = None
+            can_delete_znode: bool | None = None
+            znode_capability_error: str | None = None
+            if not invalid_provided_credentials:
+                can_create_znode, can_delete_znode, znode_capability_error = _probe_znode_create_delete(
+                    client, host, port
+                )
 
             return {
                 "timestamp": utc_now_iso(),
@@ -708,12 +834,16 @@ def _audit_zookeeper_host(
                 "query_znode": query_znode,
                 "max_znodes": max_znodes,
                 "znode_count": total_count,
-                "znodes": sorted(znodes),
+                "znodes": sorted_znodes,
+                "znode_details": znode_details,
                 "znode_values": znode_values,
                 "znodes_truncated": truncated,
                 "query_znode_value": query_znode_value,
                 "query_znode_dump": query_znode_dump,
                 "query_znode_dump_error": query_znode_dump_error,
+                "can_create_znode": can_create_znode,
+                "can_delete_znode": can_delete_znode,
+                "znode_capability_error": znode_capability_error,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "error": last_error if not invalid_provided_credentials else (auth_error or "authentication failed"),
             }
@@ -743,11 +873,15 @@ def _audit_zookeeper_host(
         "max_znodes": max_znodes,
         "znode_count": None,
         "znodes": None,
+        "znode_details": None,
         "znode_values": None,
         "znodes_truncated": False,
         "query_znode_value": None,
         "query_znode_dump": None,
         "query_znode_dump_error": None,
+        "can_create_znode": None,
+        "can_delete_znode": None,
+        "znode_capability_error": None,
         "elapsed_ms": None,
         "error": last_error or "connection failed",
     }
@@ -761,11 +895,8 @@ def _nxc_prefix(record: dict[str, Any]) -> str:
 
 def _with_optional_znodes(record: dict[str, Any], message: str) -> str:
     znode_count = record.get("znode_count")
-    truncated = bool(record.get("znodes_truncated"))
     if not isinstance(znode_count, int):
         return f"{message} (znodes:-)"
-    if truncated:
-        return f"{message} (znodes:{znode_count}+)"
     return f"{message} (znodes:{znode_count})"
 
 
@@ -776,6 +907,14 @@ def _credentials_label(record: dict[str, Any]) -> str:
         "<empty>" if provided_password == "" else str(provided_password) if provided_password is not None else "<none>"
     )
     return f"{username}:{password_text}"
+
+
+def _znode_caps_suffix(record: dict[str, Any]) -> str:
+    create_cap = record.get("can_create_znode")
+    delete_cap = record.get("can_delete_znode")
+    create_text = "True" if create_cap is True else "False" if create_cap is False else "unknown"
+    delete_text = "True" if delete_cap is True else "False" if delete_cap is False else "unknown"
+    return f"(create:{create_text}) (delete:{delete_text})"
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
@@ -811,13 +950,13 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        return _with_optional_znodes(record, f"{prefix} [+] anonymous access")
+        return _with_optional_znodes(record, f"{prefix} [+] anonymous access {_znode_caps_suffix(record)}")
 
     if status == "invalid_credentials_anonymous":
         return f"{prefix} [-] {_credentials_label(record)}"
 
     if status == "valid_credentials":
-        return _with_optional_znodes(record, f"{prefix} [+] {_credentials_label(record)}")
+        return _with_optional_znodes(record, f"{prefix} [+] {_credentials_label(record)} {_znode_caps_suffix(record)}")
 
     if status == "auth_required":
         if record.get("provided_credentials"):
@@ -842,15 +981,44 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
     query_znode_dump_error = str(record.get("query_znode_dump_error") or "").strip()
 
     znodes_raw = record.get("znodes")
+    znode_details_raw = record.get("znode_details")
     znode_values_raw = record.get("znode_values")
 
     znodes: list[str] = []
     if isinstance(znodes_raw, list):
         znodes = sorted(str(item) for item in znodes_raw)
 
+    znode_details: list[dict[str, Any]] = []
+    if isinstance(znode_details_raw, list):
+        for item in znode_details_raw:
+            if not isinstance(item, dict):
+                continue
+            znode_details.append(
+                {
+                    "path": str(item.get("path") or ""),
+                    "state": str(item.get("state") or "unknown"),
+                    "children": item.get("children"),
+                    "bytes": item.get("bytes"),
+                    "error": str(item.get("error") or "").strip() or None,
+                }
+            )
+        znode_details = sorted(znode_details, key=lambda item: str(item.get("path") or ""))
+    elif znodes:
+        znode_details = [
+            {"path": path, "state": "unknown", "children": None, "bytes": None, "error": None} for path in znodes
+        ]
+
     znode_values: list[str] = []
     if isinstance(znode_values_raw, list):
         znode_values = [str(item) for item in znode_values_raw]
+
+    znode_count = record.get("znode_count")
+    max_znodes = record.get("max_znodes")
+    truncated = bool(record.get("znodes_truncated"))
+    shown_count = len(znode_details) if znode_details else len(znodes)
+    truncation_note = None
+    if truncated and isinstance(znode_count, int) and isinstance(max_znodes, int):
+        truncation_note = f"showing first {shown_count} of {znode_count} znodes (max_znodes={max_znodes})"
 
     if not show_znodes and not dump and not query_znode:
         return []
@@ -868,6 +1036,10 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
                         "port": record.get("port"),
                         "znode_count": record.get("znode_count"),
                         "znodes": znodes,
+                        "znodes_shown": shown_count,
+                        "znodes_truncated": truncated,
+                        "max_znodes": max_znodes,
+                        "znode_details": znode_details,
                     },
                     ensure_ascii=False,
                 )
@@ -922,10 +1094,26 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
 
     prefix = _nxc_prefix(record)
     lines: list[str] = []
-    if show_znodes and znodes:
+    if show_znodes and znode_details:
         lines.append(f"{prefix} [*] Show Znodes")
-        for item in znodes:
-            lines.append(f"{prefix} {item}")
+        if truncation_note:
+            lines.append(f"{prefix} [*] {truncation_note}")
+        for item in znode_details:
+            path = str(item.get("path") or "")
+            state = str(item.get("state") or "unknown")
+            error = str(item.get("error") or "").strip()
+            if error:
+                lines.append(f"{prefix} {path}:<{error}>")
+                continue
+            if state == "empty":
+                lines.append(f"{prefix} {path}:<empty>")
+                continue
+            children = item.get("children")
+            data_length = item.get("bytes")
+            if isinstance(children, int) and isinstance(data_length, int):
+                lines.append(f"{prefix} {path} (children:{children},bytes:{data_length})")
+            else:
+                lines.append(f"{prefix} {path}")
     if query_znode:
         lines.append(f"{prefix} [*] Znode {query_znode}")
         if isinstance(query_znode_value, str):
@@ -940,6 +1128,8 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
             lines.append(f"{prefix} <no data>")
     if dump and not query_znode and znode_values:
         lines.append(f"{prefix} [*] Dump Znodes")
+        if truncation_note:
+            lines.append(f"{prefix} [*] {truncation_note}")
         for item in znode_values:
             lines.append(f"{prefix} {item}")
     return lines
@@ -985,6 +1175,19 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
             znodes_value = znodes_match.group(1).strip()
             if znodes_value.isdigit() and int(znodes_value) > 0:
                 spans.append((znodes_match.start(), znodes_match.end(), "red"))
+
+        for capability in ("create", "delete"):
+            capability_match = re.search(rf"\({capability}:(True|False|unknown)\)", right)
+            if not capability_match:
+                continue
+            capability_value = capability_match.group(1)
+            if capability_value == "True":
+                capability_color = "red"
+            elif capability_value == "False":
+                capability_color = "bright_green"
+            else:
+                capability_color = "yellow"
+            spans.append((capability_match.start(), capability_match.end(), capability_color))
 
         if not spans:
             right_colored = console._paint(right, "white", sys.stdout)

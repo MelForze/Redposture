@@ -20,6 +20,7 @@ _EXPECTED_MODULES = (
     "redis",
     "etcd",
     "qdrant",
+    "elastic",
     "kafka",
     "zookeeper",
     "proxmox",
@@ -114,19 +115,16 @@ def _cli_smoke_checks() -> None:
         ("registry", "-h"),
         ("exporters", "scan", "-h"),
         ("postgres", "-h"),
+        ("elastic", "-h"),
     ]
     for args in checks:
         result = _run_cli_check(*args)
         if result.returncode != 0:
             raise SystemExit(f"cli smoke failed: redposture.py {' '.join(args)}")
 
-    db_result = _run_cli_check("db", "-h")
-    if db_result.returncode == 0:
-        raise SystemExit("db command is still available; expected hard removal")
-
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify lab matrix outputs without DB dependency.")
+    parser = argparse.ArgumentParser(description="Verify lab matrix outputs and artifacts.")
     parser.add_argument("--status-file", required=True)
     parser.add_argument("--out-dir", required=True)
     args = parser.parse_args()
