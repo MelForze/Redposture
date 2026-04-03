@@ -29,6 +29,8 @@ def test_discovery_exporters_include_new_defaults() -> None:
     assert ports["windows_exporter"] == {9182}
     assert ports["ipmi_exporter"] == {9290}
     assert ports["sql_exporter"] == {9399}
+    assert ports["pgbackrest_exporter"] == {9854}
+    assert ports["victoriametrics_exporter"] == {8428, 8429}
     assert ports["snmp_exporter"] == {9117}
 
 
@@ -49,4 +51,6 @@ def test_collect_exporters_include_new_defaults() -> None:
     assert ports["windows_exporter"] == {9182}
     assert ports["ipmi_exporter"] == {9290}
     assert ports["sql_exporter"] == {9399}
+    assert ports["pgbackrest_exporter"] == {9854}
+    assert ports["victoriametrics_exporter"] == {8428, 8429}
     assert ports["snmp_exporter"] == {9117}
