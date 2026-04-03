@@ -540,6 +540,48 @@ def _znode_detail_entry(path: str, meta: dict[str, Any] | None) -> dict[str, Any
     }
 
 
+def _normalize_auth_probe_result(err_code: int) -> tuple[str, str]:
+    if err_code == _ZK_ERR_NOAUTH:
+        return "noauth", "noauth"
+    if err_code == _ZK_ERR_OK:
+        return "ok", "ok"
+    if err_code == _ZK_ERR_NONODE:
+        return "neutral", "nonode"
+    return "error", _zk_error_name(err_code).lower()
+
+
+def _infer_auth_required_from_anonymous_probes(
+    client: _ZkClient, root_err: int, query_znode: str | None
+) -> tuple[bool | None, str, list[str]]:
+    root_state, root_code = _normalize_auth_probe_result(root_err)
+    trace = [f"/:{root_code}"]
+    if root_state == "noauth":
+        return True, "root_noauth", trace
+    if root_state == "ok":
+        return False, "root_ok", trace
+
+    probe_paths: list[str] = ["/zookeeper", "/zookeeper/config"]
+    if query_znode:
+        probe_paths.append(query_znode)
+
+    saw_ok = False
+    for probe_path in probe_paths:
+        try:
+            _children, probe_err, _stat = client.get_children2(probe_path)
+            probe_state, probe_code = _normalize_auth_probe_result(probe_err)
+            trace.append(f"{probe_path}:{probe_code}")
+            if probe_state == "noauth":
+                return True, "probe_noauth", trace
+            if probe_state == "ok":
+                saw_ok = True
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            trace.append(f"{probe_path}:error:{_friendly_error_from_exception(exc)}")
+
+    if saw_ok:
+        return False, "probe_ok", trace
+    return None, "inconclusive", trace
+
+
 def _audit_zookeeper_host(
     host: str,
     port: int,
@@ -579,6 +621,10 @@ def _audit_zookeeper_host(
                 time.sleep(_retry_delay(attempt))
                 continue
 
+            inferred_auth_required, auth_inference_source, auth_probe_trace = _infer_auth_required_from_anonymous_probes(
+                client, anonymous_root_err, query_znode
+            )
+
             if provided_credentials and username and password:
                 auth_applied_ok, auth_error = client.auth_digest(username, password)
                 if auth_applied_ok:
@@ -593,13 +639,7 @@ def _audit_zookeeper_host(
                     auth_error = "authentication failed"
 
             if provided_credentials and provided_credentials_ok is False:
-                auth_required_value: bool | None
-                if anonymous_root_err == _ZK_ERR_NOAUTH:
-                    auth_required_value = True
-                elif anonymous_root_err == _ZK_ERR_OK:
-                    auth_required_value = False
-                else:
-                    auth_required_value = None
+                auth_required_value = inferred_auth_required
 
                 auth_error_text = str(auth_error or "").strip()
                 if (
@@ -633,6 +673,8 @@ def _audit_zookeeper_host(
                         "can_create_znode": None,
                         "can_delete_znode": None,
                         "znode_capability_error": None,
+                        "auth_inference_source": auth_inference_source,
+                        "auth_probe_trace": auth_probe_trace,
                         "elapsed_ms": int((time.monotonic() - started) * 1000),
                         "error": auth_error_text,
                     }
@@ -666,6 +708,8 @@ def _audit_zookeeper_host(
                         "can_create_znode": None,
                         "can_delete_znode": None,
                         "znode_capability_error": None,
+                        "auth_inference_source": auth_inference_source,
+                        "auth_probe_trace": auth_probe_trace,
                         "elapsed_ms": int((time.monotonic() - started) * 1000),
                         "error": auth_error_text or "authentication failed",
                     }
@@ -697,6 +741,8 @@ def _audit_zookeeper_host(
                     "can_create_znode": None,
                     "can_delete_znode": None,
                     "znode_capability_error": None,
+                    "auth_inference_source": auth_inference_source,
+                    "auth_probe_trace": auth_probe_trace,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": auth_error,
                 }
@@ -714,7 +760,7 @@ def _audit_zookeeper_host(
                     "port": port,
                     "is_zookeeper": True,
                     "status": "fail",
-                    "auth_required": None,
+                    "auth_required": inferred_auth_required,
                     "provided_credentials": provided_credentials,
                     "provided_username": username,
                     "provided_password": password if provided_credentials else None,
@@ -734,6 +780,8 @@ def _audit_zookeeper_host(
                     "can_create_znode": None,
                     "can_delete_znode": None,
                     "znode_capability_error": None,
+                    "auth_inference_source": auth_inference_source,
+                    "auth_probe_trace": auth_probe_trace,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": f"root query failed: {_zk_error_name(root_err)}",
                 }
@@ -796,13 +844,7 @@ def _audit_zookeeper_host(
             if total_count == 0 and root_count > 0:
                 total_count = root_count
 
-            auth_required_value: bool | None
-            if anonymous_root_err == _ZK_ERR_NOAUTH:
-                auth_required_value = True
-            elif anonymous_root_err == _ZK_ERR_OK:
-                auth_required_value = False
-            else:
-                auth_required_value = None
+            auth_required_value = inferred_auth_required
 
             can_create_znode: bool | None = None
             can_delete_znode: bool | None = None
@@ -844,6 +886,8 @@ def _audit_zookeeper_host(
                 "can_create_znode": can_create_znode,
                 "can_delete_znode": can_delete_znode,
                 "znode_capability_error": znode_capability_error,
+                "auth_inference_source": auth_inference_source,
+                "auth_probe_trace": auth_probe_trace,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "error": last_error if not invalid_provided_credentials else (auth_error or "authentication failed"),
             }
@@ -882,6 +926,8 @@ def _audit_zookeeper_host(
         "can_create_znode": None,
         "can_delete_znode": None,
         "znode_capability_error": None,
+        "auth_inference_source": "not_run",
+        "auth_probe_trace": [],
         "elapsed_ms": None,
         "error": last_error or "connection failed",
     }
@@ -933,6 +979,8 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "service": "zookeeper",
                 "detected": bool(record.get("is_zookeeper")),
                 "auth_required": auth_required_value,
+                "auth_inference_source": record.get("auth_inference_source"),
+                "auth_probe_trace": record.get("auth_probe_trace") or [],
             },
             ensure_ascii=False,
         )
