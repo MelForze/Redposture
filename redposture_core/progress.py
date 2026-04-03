@@ -57,6 +57,7 @@ class ProgressBar:
         self._enabled = _progress_enabled(self._stream, enabled=enabled) and self._total > 0
         self._leave = bool(leave)
         self._started = time.monotonic()
+        self._resume_after_output_pending = False
         item_word = "target" if self._total == 1 else "targets"
         self._description = f"Running redposture against {self._total} {item_word}"
         self._register_active_progress()
@@ -125,15 +126,18 @@ class ProgressBar:
         if not self._enabled:
             return False
         self._lock.acquire()
-        self._pause_for_output_locked()
+        self._resume_after_output_pending = self._last_len > 0
+        if self._resume_after_output_pending:
+            self._pause_for_output_locked()
         return True
 
     def end_output(self) -> None:
         """Resume progress row and release lock after external output writes."""
         try:
-            if self._enabled:
+            if self._enabled and self._resume_after_output_pending:
                 self._resume_after_output_locked()
         finally:
+            self._resume_after_output_pending = False
             self._lock.release()
 
     def _pause_for_output_locked(self) -> None:

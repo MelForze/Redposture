@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gzip
 import json
 import os
 import re
@@ -14,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -26,6 +28,15 @@ from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 _ELASTIC_TAG = "ELASTIC"
 _DISCOVER_QUERY_SIZE = 10000
 _DISCOVER_MAX_PRINT_PER_INDEX = 200
+_DETECT_EXTENDED_TIMEOUT = 2.5
+_DETECT_CONFIRM_PATHS = (
+    "/_cluster/health",
+    "/_nodes?filter_path=nodes.*.version",
+    "/_cat/health",
+    "/_security/_authenticate",
+)
+_VERSION_NUMBER_RE = re.compile(r'"number"\s*:\s*"([0-9]+(?:\.[0-9]+){1,3}(?:[-+][^"]+)?)"')
+_VERSION_STRING_RE = re.compile(r'"version"\s*:\s*"([0-9]+(?:\.[0-9]+){1,3}(?:[-+][^"]+)?)"')
 
 _DISCOVER_KEYWORDS = (
     "password",
@@ -297,6 +308,56 @@ def _load_json_dict(payload: bytes) -> dict[str, Any] | None:
     return parsed
 
 
+def _load_json_dict_loose(payload: bytes, headers: dict[str, str] | None = None) -> dict[str, Any] | None:
+    direct = _load_json_dict(payload)
+    if isinstance(direct, dict):
+        return direct
+
+    encoding = str(_header_lookup(headers or {}, "Content-Encoding") or "").strip().lower()
+    if "gzip" in encoding or (len(payload) >= 2 and payload[:2] == b"\x1f\x8b"):
+        try:
+            unpacked = gzip.decompress(payload)
+        except (OSError, EOFError):
+            unpacked = b""
+        if unpacked:
+            parsed = _load_json_dict(unpacked)
+            if isinstance(parsed, dict):
+                return parsed
+            payload = unpacked
+    elif "deflate" in encoding:
+        unpacked = b""
+        for wbits in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+            try:
+                unpacked = zlib.decompress(payload, wbits)
+            except zlib.error:
+                continue
+            if unpacked:
+                break
+        if unpacked:
+            parsed = _load_json_dict(unpacked)
+            if isinstance(parsed, dict):
+                return parsed
+            payload = unpacked
+
+    text = payload.decode("utf-8", errors="replace").lstrip("\ufeff").strip()
+    if not text:
+        return None
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+
+    candidate = text[start : end + 1]
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
 def _load_json_list(payload: bytes) -> list[Any] | None:
     try:
         parsed = json.loads(payload.decode("utf-8", errors="replace"))
@@ -310,7 +371,7 @@ def _load_json_list(payload: bytes) -> list[Any] | None:
 def _looks_like_elastic_root(status: int, payload: bytes, headers: dict[str, str]) -> tuple[bool, str | None]:
     product_header = _header_lookup(headers, "X-Elastic-Product")
     if isinstance(product_header, str) and product_header.strip().lower() == "elasticsearch":
-        body_dict = _load_json_dict(payload)
+        body_dict = _load_json_dict_loose(payload, headers)
         if isinstance(body_dict, dict):
             version = body_dict.get("version")
             if isinstance(version, dict):
@@ -322,7 +383,7 @@ def _looks_like_elastic_root(status: int, payload: bytes, headers: dict[str, str
     if status not in {200, 401, 403}:
         return False, None
 
-    body_dict = _load_json_dict(payload)
+    body_dict = _load_json_dict_loose(payload, headers)
     if not isinstance(body_dict, dict):
         return False, None
 
@@ -337,6 +398,378 @@ def _looks_like_elastic_root(status: int, payload: bytes, headers: dict[str, str
             return True, number.strip()
 
     return True, None
+
+
+def _extract_version_from_body_dict(body: dict[str, Any]) -> str | None:
+    version = body.get("version")
+    if not isinstance(version, dict):
+        return None
+    number = version.get("number")
+    if isinstance(number, str) and number.strip():
+        return number.strip()
+    return None
+
+
+def _extract_version_from_nodes_body(body: dict[str, Any]) -> str | None:
+    nodes_raw = body.get("nodes")
+    if not isinstance(nodes_raw, dict):
+        return None
+    for node_data in nodes_raw.values():
+        if not isinstance(node_data, dict):
+            continue
+        raw = node_data.get("version")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
+def _extract_version_hint(payload: bytes, headers: dict[str, str] | None = None) -> str | None:
+    body = _load_json_dict_loose(payload, headers)
+    if isinstance(body, dict):
+        version = _extract_version_from_body_dict(body)
+        if isinstance(version, str) and version.strip():
+            return version.strip()
+        node_version = _extract_version_from_nodes_body(body)
+        if isinstance(node_version, str) and node_version.strip():
+            return node_version.strip()
+
+    text = payload.decode("utf-8", errors="replace")
+    match = _VERSION_NUMBER_RE.search(text)
+    if match:
+        return str(match.group(1)).strip()
+    match = _VERSION_STRING_RE.search(text)
+    if match:
+        return str(match.group(1)).strip()
+    return None
+
+
+def _detect_opensearch_marker(headers: dict[str, str], body: dict[str, Any] | None) -> str | None:
+    product_header = _header_lookup(headers, "X-Elastic-Product")
+    if isinstance(product_header, str) and "opensearch" in product_header.strip().lower():
+        return "vendor_opensearch_header"
+
+    server_header = _header_lookup(headers, "Server")
+    if isinstance(server_header, str) and "opensearch" in server_header.strip().lower():
+        return "vendor_opensearch_server"
+
+    if not isinstance(body, dict):
+        return None
+
+    tagline = str(body.get("tagline") or "").strip().lower()
+    if "opensearch" in tagline:
+        return "vendor_opensearch_tagline"
+
+    distribution = str(body.get("distribution") or "").strip().lower()
+    if "opensearch" in distribution:
+        return "vendor_opensearch_distribution"
+
+    version = body.get("version")
+    if not isinstance(version, dict):
+        return None
+    version_distribution = str(version.get("distribution") or "").strip().lower()
+    if "opensearch" in version_distribution:
+        return "vendor_opensearch_version_distribution"
+    build_flavor = str(version.get("build_flavor") or "").strip().lower()
+    if "opensearch" in build_flavor:
+        return "vendor_opensearch_build_flavor"
+    return None
+
+
+def _is_elastic_auth_error_payload(body: dict[str, Any]) -> bool:
+    error_obj = body.get("error")
+    if isinstance(error_obj, dict):
+        error_type = str(error_obj.get("type") or "").strip().lower()
+        reason = str(error_obj.get("reason") or "").strip().lower()
+        if error_type == "security_exception" and (
+            "missing authentication credentials" in reason
+            or "unable to authenticate user" in reason
+            or "authentication" in reason
+        ):
+            return True
+    elif isinstance(error_obj, str):
+        if "missing authentication credentials" in error_obj.lower():
+            return True
+    return False
+
+
+def _looks_like_non_json_gateway_payload(payload: bytes, headers: dict[str, str]) -> bool:
+    content_type = str(_header_lookup(headers, "Content-Type") or "").strip().lower()
+    if "application/json" in content_type:
+        return False
+
+    text = payload.decode("utf-8", errors="replace").strip().lower()
+    if not text:
+        return False
+    if text.startswith("{") or text.startswith("["):
+        return False
+    if "you know, for search" in text:
+        return False
+
+    html_markers = ("<!doctype html", "<html", "<head", "<body")
+    proxy_markers = ("nginx", "reverse proxy", "bad gateway", "gateway timeout", "access denied")
+    if "text/html" in content_type:
+        return True
+    if any(text.startswith(marker) for marker in html_markers):
+        return True
+    if any(marker in text[:300] for marker in proxy_markers):
+        return True
+    return False
+
+
+def _classify_detect_probe(
+    path: str,
+    status: int,
+    payload: bytes,
+    headers: dict[str, str],
+    error: str | None,
+) -> dict[str, Any]:
+    signals: list[str] = []
+    kind = "neutral"
+    version: str | None = None
+
+    if error:
+        return {"signal_kind": kind, "signals": signals, "version": version}
+
+    body = _load_json_dict_loose(payload, headers)
+    opensearch_marker = _detect_opensearch_marker(headers, body)
+    if opensearch_marker:
+        return {"signal_kind": "hard_negative", "signals": [opensearch_marker], "version": version}
+
+    product_header = _header_lookup(headers, "X-Elastic-Product")
+    if isinstance(product_header, str) and product_header.strip().lower() == "elasticsearch":
+        signals.append("header_x_elastic_product")
+        kind = "hard_positive"
+
+    if isinstance(body, dict):
+        version = _extract_version_from_body_dict(body)
+
+        if path == "/":
+            tagline = str(body.get("tagline") or "").strip()
+            if tagline == "You Know, for Search":
+                if "root_tagline" not in signals:
+                    signals.append("root_tagline")
+                kind = "hard_positive"
+            if version and (body.get("cluster_name") is not None or body.get("name") is not None):
+                if "root_version_shape" not in signals:
+                    signals.append("root_version_shape")
+                kind = "hard_positive"
+            if status in {401, 403} and _is_elastic_auth_error_payload(body):
+                if "security_exception_missing_auth" not in signals:
+                    signals.append("security_exception_missing_auth")
+                kind = "hard_positive"
+
+            soft_fields = 0
+            for field in ("cluster_name", "cluster_uuid", "name"):
+                value = body.get(field)
+                if isinstance(value, str) and value.strip():
+                    soft_fields += 1
+            if version:
+                soft_fields += 1
+            if kind != "hard_positive" and soft_fields >= 2:
+                signals.append("root_partial_shape")
+                kind = "soft_positive"
+
+        elif path.startswith("/_nodes"):
+            nodes_raw = body.get("nodes")
+            if isinstance(nodes_raw, dict) and nodes_raw:
+                has_node_version = any(
+                    isinstance(node_data, dict)
+                    and isinstance(node_data.get("version"), str)
+                    and str(node_data.get("version")).strip()
+                    for node_data in nodes_raw.values()
+                )
+                if has_node_version:
+                    signals.append("nodes_version_shape")
+                    version = _extract_version_from_nodes_body(body)
+                    kind = "hard_positive"
+                elif kind != "hard_positive":
+                    signals.append("nodes_partial_shape")
+                    kind = "soft_positive"
+
+        elif path == "/_cluster/health":
+            cluster_name = body.get("cluster_name")
+            cluster_status = body.get("status")
+            if (
+                kind != "hard_positive"
+                and isinstance(cluster_name, str)
+                and cluster_name.strip()
+                and isinstance(cluster_status, str)
+                and cluster_status.strip()
+            ):
+                signals.append("cluster_health_shape")
+                kind = "soft_positive"
+
+        elif path == "/_security/_authenticate":
+            if status in {401, 403} and _is_elastic_auth_error_payload(body):
+                signals.append("security_exception_missing_auth")
+                kind = "hard_positive"
+            elif kind != "hard_positive":
+                username = body.get("username")
+                if isinstance(username, str) and username.strip():
+                    signals.append("authenticate_username_shape")
+                    kind = "soft_positive"
+
+    elif path == "/_cat/health":
+        text = payload.decode("utf-8", errors="replace").strip().lower()
+        if status == 200 and "cluster" in text and "status" in text:
+            signals.append("cat_health_text_shape")
+            kind = "soft_positive"
+
+    if path == "/" and kind == "neutral" and _looks_like_non_json_gateway_payload(payload, headers):
+        signals.append("root_non_json_payload")
+        kind = "hard_negative"
+
+    return {"signal_kind": kind, "signals": signals, "version": version}
+
+
+def _request_detect_probe(
+    host: str,
+    port: int,
+    path: str,
+    timeout: float,
+    *,
+    preferred_scheme: str,
+    ca_file: str | None,
+) -> tuple[int, bytes, dict[str, str], str | None, str]:
+    use_https = preferred_scheme == "https"
+    status, payload, headers, error = _elastic_request(
+        host,
+        port,
+        path,
+        timeout,
+        use_https=use_https,
+        insecure=use_https,
+        ca_file=ca_file if use_https else None,
+    )
+    if status > 0:
+        return status, payload, headers, error, preferred_scheme
+
+    fallback_scheme = "http" if preferred_scheme == "https" else "https"
+    fallback_https = fallback_scheme == "https"
+    fallback_status, fallback_payload, fallback_headers, fallback_error = _elastic_request(
+        host,
+        port,
+        path,
+        timeout,
+        use_https=fallback_https,
+        insecure=fallback_https,
+        ca_file=ca_file if fallback_https else None,
+    )
+    if fallback_status > 0:
+        return fallback_status, fallback_payload, fallback_headers, fallback_error, fallback_scheme
+
+    primary_error = str(error or "").strip() or "connection failed"
+    secondary_error = str(fallback_error or "").strip() or "connection failed"
+    combined = f"{preferred_scheme}={primary_error}; {fallback_scheme}={secondary_error}"
+    return fallback_status, fallback_payload, fallback_headers, combined, fallback_scheme
+
+
+def _resolve_server_version_without_auth(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    preferred_scheme: str,
+    ca_file: str | None,
+) -> tuple[str | None, str | None]:
+    probe_timeout = max(float(timeout), _DETECT_EXTENDED_TIMEOUT)
+    attempts = 2
+    scheme = preferred_scheme
+    last_error: str | None = None
+
+    root_status, root_payload, root_headers, root_error, root_scheme, _root_insecure, _root_plain = (
+        _request_with_tls_fallback(
+            host,
+            port,
+            "/",
+            probe_timeout,
+            ca_file=ca_file,
+        )
+    )
+    if root_status > 0:
+        root_version = _extract_version_hint(root_payload, root_headers)
+        if root_version:
+            return root_version, None
+    elif root_error:
+        last_error = str(root_error).strip() or last_error
+    scheme = root_scheme
+
+    for attempt in range(attempts):
+        for path in ("/", "/_nodes?filter_path=nodes.*.version", "/_cat/nodes?format=json&h=version"):
+            status, payload, headers, error, used_scheme = _request_detect_probe(
+                host,
+                port,
+                path,
+                probe_timeout,
+                preferred_scheme=scheme,
+                ca_file=ca_file,
+            )
+            scheme = used_scheme
+            if status > 0:
+                version = _extract_version_hint(payload, headers)
+                if version:
+                    return version, None
+            elif error:
+                last_error = str(error).strip() or last_error
+        if attempt < attempts - 1:
+            time.sleep(_retry_delay(attempt))
+    return None, last_error
+
+
+def _evaluate_detect_decision(probes: list[dict[str, Any]]) -> dict[str, Any]:
+    hard_positive = [probe for probe in probes if str(probe.get("signal_kind")) == "hard_positive"]
+    soft_positive = [probe for probe in probes if str(probe.get("signal_kind")) == "soft_positive"]
+    hard_negative = [probe for probe in probes if str(probe.get("signal_kind")) == "hard_negative"]
+
+    soft_paths = {str(probe.get("path") or "") for probe in soft_positive if str(probe.get("path") or "").strip()}
+
+    signals: list[str] = []
+    for probe in probes:
+        probe_signals = probe.get("signals")
+        if not isinstance(probe_signals, list):
+            continue
+        for signal in probe_signals:
+            signal_text = str(signal).strip()
+            if signal_text and signal_text not in signals:
+                signals.append(signal_text)
+
+    if hard_positive:
+        detected = True
+        confidence = "high" if not hard_negative else "medium"
+    elif len(soft_paths) >= 2 and not hard_negative:
+        detected = True
+        confidence = "medium"
+    elif hard_negative and not soft_positive:
+        detected = False
+        confidence = "low"
+    else:
+        detected = True
+        confidence = "low"
+
+    primary_probe: dict[str, Any] | None = None
+    if hard_positive:
+        primary_probe = hard_positive[0]
+    elif soft_positive:
+        primary_probe = soft_positive[0]
+    elif probes:
+        primary_probe = probes[0]
+
+    version: str | None = None
+    for probe in hard_positive + soft_positive + probes:
+        probe_version = probe.get("version")
+        if isinstance(probe_version, str) and probe_version.strip():
+            version = probe_version.strip()
+            break
+
+    return {
+        "detected": detected,
+        "confidence": confidence,
+        "signals": signals,
+        "primary_probe": primary_probe,
+        "has_hard_negative": bool(hard_negative),
+        "has_positive": bool(hard_positive or soft_positive),
+        "version": version,
+    }
 
 
 def _normalize_access_level(
@@ -1309,7 +1742,163 @@ def _audit_elastic_host(
             time.sleep(_retry_delay(attempt))
             continue
 
-        is_elastic, version = _looks_like_elastic_root(status, payload, root_headers)
+        root_detection = _classify_detect_probe("/", status, payload, root_headers, error)
+        root_detection_version = root_detection.get("version")
+        if not isinstance(root_detection_version, str) or not root_detection_version.strip():
+            root_detection["version"] = _extract_version_hint(payload, root_headers)
+        if (
+            scheme == "https"
+            and status > 0
+            and str(root_detection.get("signal_kind") or "neutral") in {"neutral", "hard_negative"}
+        ):
+            plain_status, plain_payload, plain_headers, plain_error = _elastic_request(
+                host,
+                port,
+                "/",
+                timeout,
+                use_https=False,
+                insecure=False,
+                ca_file=None,
+            )
+            if plain_status > 0:
+                plain_detection = _classify_detect_probe("/", plain_status, plain_payload, plain_headers, plain_error)
+                plain_detection_version = plain_detection.get("version")
+                if not isinstance(plain_detection_version, str) or not plain_detection_version.strip():
+                    plain_detection["version"] = _extract_version_hint(plain_payload, plain_headers)
+                if str(plain_detection.get("signal_kind") or "neutral") in {"hard_positive", "soft_positive"}:
+                    status = plain_status
+                    payload = plain_payload
+                    root_headers = plain_headers
+                    error = plain_error
+                    scheme = "http"
+                    effective_insecure = False
+                    tls_auto_plain = True
+                    root_detection = plain_detection
+        detect_probes: list[dict[str, Any]] = [
+            {
+                "path": "/",
+                "status": int(status),
+                "scheme": scheme,
+                "error": error,
+                "signal_kind": str(root_detection.get("signal_kind") or "neutral"),
+                "signals": list(root_detection.get("signals") or []),
+                "version": root_detection.get("version"),
+                "payload": payload,
+                "headers": root_headers,
+                "insecure_effective": effective_insecure,
+                "tls_auto_plain": tls_auto_plain,
+                "pass": "base",
+            }
+        ]
+        root_probe_status = int(status)
+        root_probe_scheme = scheme
+
+        preferred_scheme = scheme
+        for probe_path in _DETECT_CONFIRM_PATHS:
+            probe_status, probe_payload, probe_headers, probe_error, probe_scheme = _request_detect_probe(
+                host,
+                port,
+                probe_path,
+                timeout,
+                preferred_scheme=preferred_scheme,
+                ca_file=ca_file,
+            )
+            probe_detection = _classify_detect_probe(
+                probe_path, probe_status, probe_payload, probe_headers, probe_error
+            )
+            probe_detection_version = probe_detection.get("version")
+            if not isinstance(probe_detection_version, str) or not probe_detection_version.strip():
+                probe_detection["version"] = _extract_version_hint(probe_payload, probe_headers)
+            detect_probes.append(
+                {
+                    "path": probe_path,
+                    "status": int(probe_status),
+                    "scheme": probe_scheme,
+                    "error": probe_error,
+                    "signal_kind": str(probe_detection.get("signal_kind") or "neutral"),
+                    "signals": list(probe_detection.get("signals") or []),
+                    "version": probe_detection.get("version"),
+                    "payload": probe_payload,
+                    "headers": probe_headers,
+                    "insecure_effective": probe_scheme == "https",
+                    "tls_auto_plain": probe_scheme == "http" and preferred_scheme == "https",
+                    "pass": "base",
+                }
+            )
+            if probe_status > 0:
+                preferred_scheme = probe_scheme
+
+        detect_decision = _evaluate_detect_decision(detect_probes)
+        if str(detect_decision.get("confidence") or "low") == "low":
+            extended_timeout = max(float(timeout), _DETECT_EXTENDED_TIMEOUT)
+            for probe_path in _DETECT_CONFIRM_PATHS:
+                probe_status, probe_payload, probe_headers, probe_error, probe_scheme = _request_detect_probe(
+                    host,
+                    port,
+                    probe_path,
+                    extended_timeout,
+                    preferred_scheme=preferred_scheme,
+                    ca_file=ca_file,
+                )
+                probe_detection = _classify_detect_probe(
+                    probe_path, probe_status, probe_payload, probe_headers, probe_error
+                )
+                probe_detection_version = probe_detection.get("version")
+                if not isinstance(probe_detection_version, str) or not probe_detection_version.strip():
+                    probe_detection["version"] = _extract_version_hint(probe_payload, probe_headers)
+                detect_probes.append(
+                    {
+                        "path": probe_path,
+                        "status": int(probe_status),
+                        "scheme": probe_scheme,
+                        "error": probe_error,
+                        "signal_kind": str(probe_detection.get("signal_kind") or "neutral"),
+                        "signals": list(probe_detection.get("signals") or []),
+                        "version": probe_detection.get("version"),
+                        "payload": probe_payload,
+                        "headers": probe_headers,
+                        "insecure_effective": probe_scheme == "https",
+                        "tls_auto_plain": probe_scheme == "http" and preferred_scheme == "https",
+                        "pass": "extended",
+                    }
+                )
+                if probe_status > 0:
+                    preferred_scheme = probe_scheme
+            detect_decision = _evaluate_detect_decision(detect_probes)
+
+        detect_confidence = str(detect_decision.get("confidence") or "low")
+        detect_signals = [str(item) for item in (detect_decision.get("signals") or []) if str(item).strip()]
+        detect_probe_trace = [
+            {
+                "path": str(probe.get("path") or "-"),
+                "status": int(probe.get("status") or 0),
+                "scheme": str(probe.get("scheme") or "-"),
+            }
+            for probe in detect_probes
+        ]
+
+        is_elastic = bool(detect_decision.get("detected"))
+        version_raw = detect_decision.get("version")
+        version = str(version_raw).strip() if isinstance(version_raw, str) and version_raw.strip() else None
+
+        primary_probe = detect_decision.get("primary_probe")
+        if isinstance(primary_probe, dict):
+            status = int(primary_probe.get("status") or status)
+            probe_payload = primary_probe.get("payload")
+            if isinstance(probe_payload, (bytes, bytearray)):
+                payload = bytes(probe_payload)
+            probe_headers = primary_probe.get("headers")
+            if isinstance(probe_headers, dict):
+                root_headers = {str(key): str(value) for key, value in probe_headers.items()}
+            probe_error = primary_probe.get("error")
+            if isinstance(probe_error, str):
+                error = probe_error
+            scheme = str(primary_probe.get("scheme") or scheme)
+            primary_insecure = primary_probe.get("insecure_effective")
+            if isinstance(primary_insecure, bool):
+                effective_insecure = primary_insecure
+            tls_auto_plain = bool(primary_probe.get("tls_auto_plain"))
+
         if not is_elastic:
             return {
                 "timestamp": utc_now_iso(),
@@ -1356,12 +1945,28 @@ def _audit_elastic_host(
                 "scheme": scheme,
                 "insecure_effective": effective_insecure,
                 "tls_auto_plain": tls_auto_plain,
+                "detect_confidence": detect_confidence,
+                "detect_signals": detect_signals,
+                "detect_probe_trace": detect_probe_trace,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "error": None,
             }
 
         auth_required: bool | None
-        if status in {401, 403}:
+        positive_probe_statuses = [
+            int(probe.get("status") or 0)
+            for probe in detect_probes
+            if str(probe.get("signal_kind") or "neutral") in {"hard_positive", "soft_positive"}
+        ]
+        if root_probe_status in {401, 403}:
+            auth_required = True
+        elif root_probe_status == 200:
+            auth_required = False
+        elif 200 in positive_probe_statuses:
+            auth_required = False
+        elif any(item in {401, 403} for item in positive_probe_statuses):
+            auth_required = True
+        elif status in {401, 403}:
             auth_required = True
         elif status == 200:
             auth_required = False
@@ -1424,6 +2029,17 @@ def _audit_elastic_host(
                 auth_error = (
                     f"{auth_error}; version probe: {version_error}" if auth_error else f"version probe: {version_error}"
                 )
+
+        if not version:
+            detected_version, _ = _resolve_server_version_without_auth(
+                host,
+                port,
+                timeout,
+                preferred_scheme=root_probe_scheme,
+                ca_file=ca_file,
+            )
+            if detected_version:
+                version = detected_version
 
         can_read: bool | None = None
         can_write: bool | None = None
@@ -1588,6 +2204,9 @@ def _audit_elastic_host(
             "scheme": scheme,
             "insecure_effective": effective_insecure,
             "tls_auto_plain": tls_auto_plain,
+            "detect_confidence": detect_confidence,
+            "detect_signals": detect_signals,
+            "detect_probe_trace": detect_probe_trace,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": "; ".join(errors) if errors else None,
         }
@@ -1637,6 +2256,9 @@ def _audit_elastic_host(
         "scheme": None,
         "insecure_effective": None,
         "tls_auto_plain": None,
+        "detect_confidence": None,
+        "detect_signals": [],
+        "detect_probe_trace": [],
         "elapsed_ms": None,
         "error": _friendly_error_text(last_error or "connection failed"),
     }
@@ -1684,6 +2306,9 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "auth_required": record.get("auth_required"),
                 "version": record.get("server_version"),
                 "scheme": record.get("scheme"),
+                "detect_confidence": record.get("detect_confidence"),
+                "detect_signals": record.get("detect_signals") or [],
+                "detect_probe_trace": record.get("detect_probe_trace") or [],
             },
             ensure_ascii=False,
         )
@@ -2185,6 +2810,7 @@ def audit_elastic_targets(
                         auth_required=record.get("auth_required"),
                         auth_valid=record.get("auth_valid"),
                         version=record.get("server_version"),
+                        detect_confidence=record.get("detect_confidence"),
                         access_level=record.get("access_level"),
                         endpoints=len(record.get("cat_endpoints") or [])
                         if isinstance(record.get("cat_endpoints"), list)
