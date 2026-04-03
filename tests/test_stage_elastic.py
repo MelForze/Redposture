@@ -167,7 +167,7 @@ def test_request_with_tls_fallback_retries_http_on_non_tls_error(monkeypatch: py
     assert tls_auto_plain is True
 
 
-def test_request_with_tls_fallback_double_fail_includes_ca_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_request_with_tls_fallback_double_fail_has_combined_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[bool] = []
 
     def fake_request(
@@ -207,7 +207,7 @@ def test_request_with_tls_fallback_double_fail_includes_ca_hint(monkeypatch: pyt
     assert isinstance(error, str)
     assert "https=certificate verify failed" in error
     assert "http=Remote end closed connection without response" in error
-    assert "provide --ca-file <path>" in error
+    assert "provide --ca-file <path>" not in error
 
 
 def test_verify_authenticate_and_privileges(monkeypatch: pytest.MonkeyPatch) -> None:
