@@ -201,6 +201,15 @@ def test_is_connection_timeout_fail_record_detection() -> None:
     assert not redis_stage._is_connection_timeout_fail_record({"status": "open_no_auth", "error": "connection timeout"})
 
 
+def test_is_connection_refused_fail_record_detection() -> None:
+    assert redis_stage._is_connection_refused_error("[Errno 111] Connection refused")
+    assert redis_stage._is_connection_refused_error("[Errno 61] Connection refused")
+    assert redis_stage._is_connection_refused_error("winsock error 10061")
+    assert redis_stage._is_connection_refused_fail_record({"status": "fail", "error": "connection refused"})
+    assert not redis_stage._is_connection_refused_fail_record({"status": "fail", "error": "connection timeout"})
+    assert not redis_stage._is_connection_refused_fail_record({"status": "open_no_auth", "error": "connection refused"})
+
+
 def test_audit_redis_host_open_access_reads_keys_and_query(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_redis.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
@@ -471,3 +480,84 @@ def test_audit_redis_targets_json_output_and_suppression(monkeypatch: pytest.Mon
     payloads = [json.loads(line) for line in lines]
     assert any(item.get("type") == "detect" for item in payloads)
     assert any(item.get("status") == "auth_required" for item in payloads)
+
+
+def test_audit_redis_targets_suppresses_connection_refused_status_line_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = iter(
+        [
+            {
+                "timestamp": "2026-03-27T00:00:00Z",
+                "host": "127.0.0.1",
+                "port": 6379,
+                "is_redis": False,
+                "status": "fail",
+                "error": "[Errno 111] Connection refused",
+                "auth_required": None,
+                "default_credentials": None,
+                "provided_credentials": False,
+                "provided_username": None,
+                "provided_password": None,
+                "provided_credentials_ok": None,
+                "defcreds_enabled": False,
+                "default_credentials_attempted": False,
+                "show_keys": False,
+                "dump_keys": False,
+                "query_key": None,
+                "key_count": None,
+                "keys": None,
+                "key_values": None,
+                "query_key_value": None,
+                "elapsed_ms": None,
+            },
+            {
+                "timestamp": "2026-03-27T00:00:01Z",
+                "host": "127.0.0.2",
+                "port": 6379,
+                "is_redis": False,
+                "status": "fail",
+                "error": "connection timeout",
+                "auth_required": None,
+                "default_credentials": None,
+                "provided_credentials": False,
+                "provided_username": None,
+                "provided_password": None,
+                "provided_credentials_ok": None,
+                "defcreds_enabled": False,
+                "default_credentials_attempted": False,
+                "show_keys": False,
+                "dump_keys": False,
+                "query_key": None,
+                "key_count": None,
+                "keys": None,
+                "key_values": None,
+                "query_key_value": None,
+                "elapsed_ms": None,
+            },
+        ]
+    )
+    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))  # type: ignore[no-untyped-def]
+
+    emitted: list[str] = []
+    totals = redis_stage.audit_redis_targets(
+        hosts=["127.0.0.1", "127.0.0.2"],
+        port=6379,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=emitted.append,
+        suppress_connection_refused_status_lines=True,
+    )
+
+    assert totals == (2, 0, 0, 0, 0, 2)
+    assert any("connection timeout" in line for line in emitted)
+    assert all("Connection refused" not in line for line in emitted)
