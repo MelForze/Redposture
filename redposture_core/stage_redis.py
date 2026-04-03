@@ -924,7 +924,7 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
                 suppress_timeout_status_lines=not bool(args.debug),
-                suppress_connection_refused_status_lines=bool(args.debug),
+                suppress_connection_refused_status_lines=True,
             )
             total += part_total
             open_no_auth += part_open
