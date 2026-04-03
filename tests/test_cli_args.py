@@ -118,10 +118,55 @@ def test_elastic_help_sections_are_present() -> None:
     help_text = _command_help("elastic")
     assert "\nCommon:\n" in help_text
     assert "\nAuth:\n" in help_text
-    assert "\nDiscovery / API:\n" in help_text
+    assert "\nActions:\n" in help_text
     assert "--apitoken value" in help_text
     assert "--plugins" in help_text
     assert "--user" in help_text
+
+
+@pytest.mark.parametrize(
+    ("command", "sections"),
+    [
+        ("registry", ["Common", "Auth", "Docker / OCI (Registry v2)", "Harbor", "GitLab Container Registry", "Nexus Repository"]),
+        ("grafana", ["Common", "Auth", "Actions", "SSRF / Probes"]),
+        ("proxmox", ["Common", "Auth", "Actions"]),
+        ("gitlab", ["Common", "Auth", "Actions"]),
+        ("consul", ["Common", "Auth", "Actions", "SSRF / Probes", "Revshell"]),
+        ("kubeapi", ["Common", "Auth", "Actions"]),
+        ("postgres", ["Common", "Database / Auth", "Discovery / Dump", "Execute / Shell"]),
+        ("clickhouse", ["Common", "Auth", "Actions", "Execute / Shell"]),
+        ("redis", ["Common", "Auth", "Actions"]),
+        ("etcd", ["Common", "Actions"]),
+        ("qdrant", ["Common", "Auth", "Actions", "SSRF / Probes"]),
+        ("elastic", ["Common", "Auth", "Actions"]),
+        ("kafka", ["Common", "Auth", "Actions"]),
+        ("zookeeper", ["Common", "Auth", "Actions"]),
+    ],
+)
+def test_module_help_has_grouped_sections_in_stable_order(command: str, sections: list[str]) -> None:
+    help_text = _command_help(command)
+    positions: list[int] = []
+    for section in sections:
+        marker = f"\n{section}:\n"
+        idx = help_text.find(marker)
+        assert idx != -1, f"missing section {section!r} in {command} help"
+        positions.append(idx)
+    assert positions == sorted(positions), f"sections are out of order for {command}"
+
+
+def test_exporters_subcommands_help_has_grouped_sections() -> None:
+    parser = build_parser()
+    root_action = parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
+    exporters_parser = root_action.choices["exporters"]
+    exporters_action = exporters_parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
+
+    scan_help = exporters_action.choices["scan"].format_help()
+    collect_help = exporters_action.choices["collect"].format_help()
+    trigger_help = exporters_action.choices["trigger"].format_help()
+
+    assert "\nCommon:\n" in scan_help and "\nActions:\n" in scan_help
+    assert "\nCommon:\n" in collect_help and "\nActions:\n" in collect_help
+    assert "\nCommon:\n" in trigger_help and "\nActions:\n" in trigger_help and "\nListener:\n" in trigger_help
 
 
 def test_postgres_rows_and_dump_limit_flags_are_parsed() -> None:
