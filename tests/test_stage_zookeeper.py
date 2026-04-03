@@ -475,6 +475,47 @@ def test_audit_zookeeper_inference_keeps_unknown_for_neutral_and_error_probes(
     assert "/zookeeper:nonode" in record["auth_probe_trace"]
 
 
+def test_audit_zookeeper_inference_maps_consistent_err_124_to_auth_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            _ = path
+            return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return None, _ZK_ERR_NONODE, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert record["status"] == "fail"
+    assert record["auth_required"] is True
+    assert record["auth_inference_source"] == "probe_retryable_124"
+    assert record["auth_probe_trace"] == ["/:err_-124", "/zookeeper:err_-124", "/zookeeper/config:err_-124"]
+
+
 def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     calls = {"auth": 0}
 

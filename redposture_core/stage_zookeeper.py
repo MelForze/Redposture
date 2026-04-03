@@ -545,6 +545,8 @@ def _normalize_auth_probe_result(err_code: int) -> tuple[str, str]:
         return "noauth", "noauth"
     if err_code == _ZK_ERR_OK:
         return "ok", "ok"
+    if err_code == _ZK_ERR_RETRYABLE_ROOT_QUERY:
+        return "retryable_auth_hint", "err_-124"
     if err_code == _ZK_ERR_NONODE:
         return "neutral", "nonode"
     return "error", _zk_error_name(err_code).lower()
@@ -577,6 +579,9 @@ def _infer_auth_required_from_anonymous_probes(
         probe_paths.append(query_znode)
 
     saw_ok = False
+    saw_retryable_auth_hint = root_state == "retryable_auth_hint"
+    probe_count = 1
+    retryable_count = 1 if root_state == "retryable_auth_hint" else 0
     for probe_path in probe_paths:
         probe_err, probe_exc = _run_anonymous_auth_probe(host, port, timeout, probe_path)
         if probe_exc:
@@ -585,15 +590,23 @@ def _infer_auth_required_from_anonymous_probes(
         if probe_err is None:
             trace.append(f"{probe_path}:error:unknown")
             continue
+        probe_count += 1
         probe_state, probe_code = _normalize_auth_probe_result(probe_err)
         trace.append(f"{probe_path}:{probe_code}")
         if probe_state == "noauth":
             return True, "probe_noauth", trace
         if probe_state == "ok":
             saw_ok = True
+        if probe_state == "retryable_auth_hint":
+            saw_retryable_auth_hint = True
+            retryable_count += 1
 
     if saw_ok:
         return False, "probe_ok", trace
+    if saw_retryable_auth_hint and retryable_count == probe_count and retryable_count >= 2:
+        # Balanced fallback: some ZooKeeper deployments consistently return err_-124 on anonymous reads.
+        # If every anonymous probe returns this marker, treat it as auth-required signal.
+        return True, "probe_retryable_124", trace
     return None, "inconclusive", trace
 
 
