@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -561,3 +562,44 @@ def test_audit_redis_targets_suppresses_connection_refused_status_line_only(
     assert totals == (2, 0, 0, 0, 0, 2)
     assert any("connection timeout" in line for line in emitted)
     assert all("Connection refused" not in line for line in emitted)
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_run_redis_stage_always_enables_connection_refused_suppression(
+    monkeypatch: pytest.MonkeyPatch, debug: bool
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+        return (1, 0, 0, 0, 0, 1)
+
+    monkeypatch.setattr(redis_stage, "audit_redis_targets", fake_audit_redis_targets)
+
+    args = SimpleNamespace(
+        debug=debug,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump=False,
+        key=None,
+        output=None,
+        output_format="txt",
+        port=6379,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+    )
+
+    class _DummyLogger:
+        def log(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+    rc = redis_stage.run_redis_stage(args, _DummyLogger())
+    assert rc == 0
+    assert captured.get("suppress_connection_refused_status_lines") is True
