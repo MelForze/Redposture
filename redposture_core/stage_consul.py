@@ -3136,7 +3136,8 @@ def audit_consul_targets(
                 total += 1
                 if bool(record.get("is_consul")):
                     detected += 1
-                if str(record.get("status") or "fail") == "fail":
+                status = str(record.get("status") or "fail")
+                if status == "fail":
                     failed += 1
                 script_revshell = record.get("script_revshell")
                 if (
@@ -3154,7 +3155,7 @@ def audit_consul_targets(
                 suppress_timeout_detect_line = (
                     suppress_timeout_status_lines
                     and output_format == "txt"
-                    and _is_connection_timeout_fail_record(record_out)
+                    and status == "fail"
                 )
                 if not suppress_timeout_detect_line:
                     _emit_line(out_fh, emit_line, _detect_line(record_out, output_format))

@@ -1732,7 +1732,7 @@ def audit_clickhouse_targets(
                     _emit_line(out_fh, emit_line, auth_line)
 
                 suppress_timeout_status_line = suppress_timeout_status_lines and (
-                    _is_connection_timeout_fail_record(record) or _is_connection_refused_fail_record(record)
+                    status == "fail"
                 )
 
                 if not suppress_timeout_status_line and _should_emit_status_line(record, output_format):
