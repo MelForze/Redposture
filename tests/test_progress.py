@@ -101,6 +101,19 @@ def test_progress_bar_pause_for_output_clears_current_row() -> None:
     bar.close()
 
 
+def test_console_plain_without_prior_progress_render_does_not_insert_blank_progress_row() -> None:
+    stream = _FakeStream(tty=True)
+    bar = ProgressBar("scan", total=2, enabled=True, stream=stream, leave=True)
+
+    console = Console(debug=False)
+    console.plain("ELASTIC\t127.0.0.1\t9200\t [*] Elasticsearch API", stream=stream)
+    bar.close()
+
+    assert "ELASTIC\t127.0.0.1\t9200\t [*] Elasticsearch API" in stream.buffer
+    assert not stream.buffer.startswith("\r")
+    assert stream.buffer.startswith("ELASTIC\t127.0.0.1\t9200\t [*] Elasticsearch API\n")
+
+
 def test_console_plain_suspends_and_resumes_active_progress(monkeypatch: pytest.MonkeyPatch) -> None:
     stream = _FakeStream(tty=True)
     bar = ProgressBar("scan", total=2, enabled=True, stream=stream, leave=True)
