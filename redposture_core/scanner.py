@@ -45,6 +45,8 @@ _EXPORTER_DISPLAY_NAMES = {
     "bind_exporter": "BIND Exporter",
     "mongodb_exporter": "MongoDB Exporter",
     "pgbouncer_exporter": "PgBouncer Exporter",
+    "pgbackrest_exporter": "pgBackRest Exporter",
+    "victoriametrics_exporter": "VictoriaMetrics Exporter",
     "ceph_exporter": "Ceph Exporter",
     "varnish_exporter": "Varnish Exporter",
     "windows_exporter": "Windows Exporter",

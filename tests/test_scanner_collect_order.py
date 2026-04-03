@@ -111,6 +111,8 @@ def test_collect_txt_line_contains_display_name_and_full_url(monkeypatch) -> Non
         ("ipmi_exporter", "IPMI Exporter", 9290),
         ("rabbitmq_exporter", "RabbitMQ Exporter", 9419),
         ("sql_exporter", "SQL Exporter", 9399),
+        ("pgbackrest_exporter", "pgBackRest Exporter", 9854),
+        ("victoriametrics_exporter", "VictoriaMetrics Exporter", 8428),
     ],
 )
 def test_collect_txt_line_contains_display_name_for_new_exporters(
