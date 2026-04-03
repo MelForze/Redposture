@@ -484,6 +484,8 @@ def test_validate_records_detects_mysql_tcp_style_dsn(capsys: pytest.CaptureFixt
         ("ipmi_exporter", "IPMI Exporter"),
         ("rabbitmq_exporter", "RabbitMQ Exporter"),
         ("sql_exporter", "SQL Exporter"),
+        ("pgbackrest_exporter", "pgBackRest Exporter"),
+        ("victoriametrics_exporter", "VictoriaMetrics Exporter"),
     ],
 )
 def test_validate_records_uses_display_name_for_new_exporters(
