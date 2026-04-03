@@ -115,7 +115,6 @@ def test_request_with_tls_fallback_switches_to_http(monkeypatch: pytest.MonkeyPa
         9200,
         "/",
         1.0,
-        insecure=True,
         ca_file=None,
     )
 
@@ -126,6 +125,89 @@ def test_request_with_tls_fallback_switches_to_http(monkeypatch: pytest.MonkeyPa
     assert scheme == "http"
     assert effective_insecure is False
     assert tls_auto_plain is True
+
+
+def test_request_with_tls_fallback_retries_http_on_non_tls_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+
+    def fake_request(
+        host: str,
+        port: int,
+        path: str,
+        timeout: float,
+        *,
+        use_https: bool,
+        insecure: bool,
+        ca_file: str | None,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        data: bytes | None = None,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        _ = (host, port, path, timeout, insecure, ca_file, method, headers, data)
+        calls.append(use_https)
+        if use_https:
+            return 0, b"", {}, "connection timeout"
+        return 200, b"{}", {}, None
+
+    monkeypatch.setattr(elastic_stage, "_elastic_request", fake_request)
+
+    status, _payload, _headers, error, scheme, effective_insecure, tls_auto_plain = _request_with_tls_fallback(
+        "127.0.0.1",
+        9200,
+        "/",
+        1.0,
+        ca_file=None,
+    )
+
+    assert calls == [True, False]
+    assert status == 200
+    assert error is None
+    assert scheme == "http"
+    assert effective_insecure is False
+    assert tls_auto_plain is True
+
+
+def test_request_with_tls_fallback_double_fail_includes_ca_hint(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bool] = []
+
+    def fake_request(
+        host: str,
+        port: int,
+        path: str,
+        timeout: float,
+        *,
+        use_https: bool,
+        insecure: bool,
+        ca_file: str | None,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        data: bytes | None = None,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        _ = (host, port, path, timeout, insecure, ca_file, method, headers, data)
+        calls.append(use_https)
+        if use_https:
+            return 0, b"", {}, "certificate verify failed"
+        return 0, b"", {}, "Remote end closed connection without response"
+
+    monkeypatch.setattr(elastic_stage, "_elastic_request", fake_request)
+
+    status, _payload, _headers, error, scheme, effective_insecure, tls_auto_plain = _request_with_tls_fallback(
+        "127.0.0.1",
+        9200,
+        "/",
+        1.0,
+        ca_file=None,
+    )
+
+    assert calls == [True, False]
+    assert status == 0
+    assert scheme == "http"
+    assert effective_insecure is False
+    assert tls_auto_plain is True
+    assert isinstance(error, str)
+    assert "https=certificate verify failed" in error
+    assert "http=Remote end closed connection without response" in error
+    assert "provide --ca-file <path>" in error
 
 
 def test_verify_authenticate_and_privileges(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -360,7 +442,6 @@ def test_audit_elastic_host_status_matrix(monkeypatch: pytest.MonkeyPatch) -> No
         username=None,
         password=None,
         api_token=None,
-        insecure=False,
         ca_file=None,
         show_endpoints=False,
         show_plugins=False,
@@ -392,7 +473,6 @@ def test_audit_elastic_host_status_matrix(monkeypatch: pytest.MonkeyPatch) -> No
         username=None,
         password=None,
         api_token=None,
-        insecure=False,
         ca_file=None,
         show_endpoints=False,
         show_plugins=False,
@@ -431,7 +511,6 @@ def test_audit_elastic_host_resolves_version_with_authenticated_probe(monkeypatc
         username=None,
         password=None,
         api_token="token",
-        insecure=False,
         ca_file=None,
         show_endpoints=False,
         show_plugins=False,
@@ -533,7 +612,6 @@ def test_audit_elastic_host_with_auth_and_features(monkeypatch: pytest.MonkeyPat
         username="elastic",
         password="ElasticRead!2026",
         api_token=None,
-        insecure=False,
         ca_file=None,
         show_endpoints=True,
         show_plugins=True,
@@ -636,7 +714,6 @@ def test_audit_targets_and_renderers(monkeypatch: pytest.MonkeyPatch) -> None:
         username=None,
         password=None,
         api_token=None,
-        insecure=False,
         ca_file=None,
         show_endpoints=True,
         show_plugins=False,
