@@ -6,7 +6,7 @@ cd "$ROOT_DIR" || exit 1
 
 OUT_DIR="${1:-/tmp/redposture_lab_matrix_$(date +%Y%m%d_%H%M%S)}"
 STATUS_FILE="${OUT_DIR}/matrix-status.tsv"
-VERIFY_SCRIPT="${ROOT_DIR}/scripts/verify_db_postrun.py"
+VERIFY_SCRIPT="${ROOT_DIR}/scripts/verify_postrun.py"
 COMPOSE_FILE="${ROOT_DIR}/docker-compose.lab.yml"
 if [ -n "${PYTHON_BIN:-}" ]; then
   PYTHON_BIN="${PYTHON_BIN}"
@@ -187,6 +187,9 @@ run_case etcd etcd_open etcd -t 127.0.0.1 --port 2379 --show-keys --dump
 run_case etcd etcd_auth etcd -t 127.0.0.1 --port 22379 --show-keys --dump
 
 run_case qdrant qdrant_default qdrant -t 127.0.0.1 --collections --dump
+
+run_case elastic elastic_open elastic -t 127.0.0.1 --port 19200 --endpoints --cluster --discover
+run_case elastic elastic_auth elastic -t 127.0.0.1 --port 19201 --apitoken "ZXM6bGFiLXRva2Vu" --endpoints --cluster --user --discover
 
 run_case kafka kafka_open kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
 run_case kafka kafka_auth kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
