@@ -1311,7 +1311,6 @@ def test_elastic_flags_are_parsed() -> None:
             "19200",
             "--ports",
             "9200,19200",
-            "--insecure",
             "--ca-file",
             "./elastic-ca.pem",
             "-u",
@@ -1338,7 +1337,6 @@ def test_elastic_flags_are_parsed() -> None:
     assert args.retries == 1
     assert args.port == 19200
     assert args.ports == "9200,19200"
-    assert args.insecure is True
     assert args.ca_file == "./elastic-ca.pem"
     assert args.username == "elastic"
     assert args.password == "ElasticRead!2026"
@@ -1355,6 +1353,12 @@ def test_elastic_flags_are_parsed() -> None:
 def test_elastic_rejects_profiles_file_flag() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args(["elastic", "-t", "10.0.0.71", "--profiles-file", "profiles.json"])
+    assert exc.value.code == 2
+
+
+def test_elastic_rejects_insecure_flag() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["elastic", "-t", "10.0.0.71", "--insecure"])
     assert exc.value.code == 2
 
 

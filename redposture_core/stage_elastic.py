@@ -246,7 +246,6 @@ def _request_with_tls_fallback(
     path: str,
     timeout: float,
     *,
-    insecure: bool,
     ca_file: str | None,
     method: str = "GET",
     headers: dict[str, str] | None = None,
@@ -258,17 +257,14 @@ def _request_with_tls_fallback(
         path,
         timeout,
         use_https=True,
-        insecure=insecure,
+        insecure=False,
         ca_file=ca_file,
         method=method,
         headers=headers,
         data=data,
     )
     if status > 0:
-        return status, payload, response_headers, error, "https", insecure, False
-
-    if not _is_tls_or_protocol_error(error or ""):
-        return status, payload, response_headers, error, "https", insecure, False
+        return status, payload, response_headers, error, "https", False, False
 
     fallback_status, fallback_payload, fallback_headers, fallback_error = _elastic_request(
         host,
@@ -285,10 +281,11 @@ def _request_with_tls_fallback(
     if fallback_status > 0:
         return fallback_status, fallback_payload, fallback_headers, fallback_error, "http", False, True
 
-    combined_error = (
-        "; ".join(part for part in (str(error or "").strip(), str(fallback_error or "").strip()) if part)
-        or "connection failed"
-    )
+    https_error = str(error or "").strip() or "connection failed"
+    http_error = str(fallback_error or "").strip() or "connection failed"
+    combined_error = f"https={https_error}; http={http_error}"
+    if _is_tls_or_protocol_error(https_error):
+        combined_error += "; TLS certificate check failed; provide --ca-file <path>"
     return fallback_status, fallback_payload, fallback_headers, combined_error, "http", False, True
 
 
@@ -1284,7 +1281,6 @@ def _audit_elastic_host(
     username: str | None,
     password: str | None,
     api_token: str | None,
-    insecure: bool,
     ca_file: str | None,
     show_endpoints: bool,
     show_plugins: bool,
@@ -1306,7 +1302,6 @@ def _audit_elastic_host(
             port,
             "/",
             timeout,
-            insecure=insecure,
             ca_file=ca_file,
         )
         if error and status <= 0:
@@ -2109,7 +2104,6 @@ def audit_elastic_targets(
     username: str | None,
     password: str | None,
     api_token: str | None,
-    insecure: bool,
     ca_file: str | None,
     show_endpoints: bool,
     show_plugins: bool,
@@ -2146,7 +2140,6 @@ def audit_elastic_targets(
                     username,
                     password,
                     api_token,
-                    insecure,
                     ca_file,
                     show_endpoints,
                     show_plugins,
@@ -2331,7 +2324,6 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 username=username,
                 password=password,
                 api_token=api_token,
-                insecure=bool(getattr(args, "insecure", False)),
                 ca_file=getattr(args, "ca_file", None),
                 show_endpoints=show_endpoints,
                 show_plugins=show_plugins,

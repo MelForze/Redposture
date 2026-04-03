@@ -1073,11 +1073,6 @@ def _configure_elastic_parser(parser: argparse.ArgumentParser) -> None:
     )
     _add_multi_ports_flag(common)
     common.add_argument(
-        "--insecure",
-        action="store_true",
-        help="Skip TLS certificate verification for HTTPS requests.",
-    )
-    common.add_argument(
         "--ca-file",
         dest="ca_file",
         default=None,
