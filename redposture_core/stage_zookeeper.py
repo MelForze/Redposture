@@ -550,8 +550,20 @@ def _normalize_auth_probe_result(err_code: int) -> tuple[str, str]:
     return "error", _zk_error_name(err_code).lower()
 
 
+def _run_anonymous_auth_probe(host: str, port: int, timeout: float, path: str) -> tuple[int | None, str | None]:
+    probe_client = _ZkClient(host, port, timeout)
+    try:
+        probe_client.connect()
+        _children, probe_err, _stat = probe_client.get_children2(path)
+        return int(probe_err), None
+    except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+        return None, _friendly_error_from_exception(exc)
+    finally:
+        probe_client.close()
+
+
 def _infer_auth_required_from_anonymous_probes(
-    client: _ZkClient, root_err: int, query_znode: str | None
+    host: str, port: int, timeout: float, root_err: int, query_znode: str | None
 ) -> tuple[bool | None, str, list[str]]:
     root_state, root_code = _normalize_auth_probe_result(root_err)
     trace = [f"/:{root_code}"]
@@ -566,16 +578,19 @@ def _infer_auth_required_from_anonymous_probes(
 
     saw_ok = False
     for probe_path in probe_paths:
-        try:
-            _children, probe_err, _stat = client.get_children2(probe_path)
-            probe_state, probe_code = _normalize_auth_probe_result(probe_err)
-            trace.append(f"{probe_path}:{probe_code}")
-            if probe_state == "noauth":
-                return True, "probe_noauth", trace
-            if probe_state == "ok":
-                saw_ok = True
-        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
-            trace.append(f"{probe_path}:error:{_friendly_error_from_exception(exc)}")
+        probe_err, probe_exc = _run_anonymous_auth_probe(host, port, timeout, probe_path)
+        if probe_exc:
+            trace.append(f"{probe_path}:error:{probe_exc}")
+            continue
+        if probe_err is None:
+            trace.append(f"{probe_path}:error:unknown")
+            continue
+        probe_state, probe_code = _normalize_auth_probe_result(probe_err)
+        trace.append(f"{probe_path}:{probe_code}")
+        if probe_state == "noauth":
+            return True, "probe_noauth", trace
+        if probe_state == "ok":
+            saw_ok = True
 
     if saw_ok:
         return False, "probe_ok", trace
@@ -622,7 +637,7 @@ def _audit_zookeeper_host(
                 continue
 
             inferred_auth_required, auth_inference_source, auth_probe_trace = _infer_auth_required_from_anonymous_probes(
-                client, anonymous_root_err, query_znode
+                host, port, timeout, anonymous_root_err, query_znode
             )
 
             if provided_credentials and username and password:
