@@ -334,6 +334,145 @@ def test_audit_zookeeper_valid_credentials_when_auth_was_required(monkeypatch) -
     assert record["status"] == "valid_credentials"
     assert record["provided_credentials_ok"] is True
     assert record["auth_required"] is True
+    assert record["auth_inference_source"] == "root_noauth"
+    assert record["auth_probe_trace"] == ["/:noauth"]
+
+
+def test_audit_zookeeper_infers_auth_required_true_from_anonymous_probes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            if path == "/":
+                return None, -1, None
+            if path == "/zookeeper":
+                return None, _ZK_ERR_NOAUTH, None
+            if path == "/zookeeper/config":
+                return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+            return [], _ZK_ERR_NONODE, None
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return None, _ZK_ERR_NONODE, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert record["status"] == "fail"
+    assert record["auth_required"] is True
+    assert record["auth_inference_source"] == "probe_noauth"
+    assert "/:systemerror" in record["auth_probe_trace"]
+    assert "/zookeeper:noauth" in record["auth_probe_trace"]
+
+
+def test_audit_zookeeper_infers_auth_required_false_from_anonymous_probes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            if path == "/":
+                return None, -1, None
+            if path == "/zookeeper":
+                return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+            if path == "/zookeeper/config":
+                return [], _ZK_ERR_NONODE, None
+            return [], _ZK_ERR_NONODE, None
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return None, _ZK_ERR_NONODE, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert record["status"] == "fail"
+    assert record["auth_required"] is False
+    assert record["auth_inference_source"] == "probe_ok"
+    assert "/:systemerror" in record["auth_probe_trace"]
+    assert "/zookeeper:ok" in record["auth_probe_trace"]
+
+
+def test_audit_zookeeper_inference_keeps_unknown_for_neutral_and_error_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            if path == "/":
+                return None, -1, None
+            if path == "/zookeeper":
+                return None, _ZK_ERR_NONODE, None
+            if path == "/zookeeper/config":
+                raise ConnectionError("simulated probe transport error")
+            return [], _ZK_ERR_NONODE, None
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return None, _ZK_ERR_NONODE, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert record["status"] == "fail"
+    assert record["auth_required"] is None
+    assert record["auth_inference_source"] == "inconclusive"
+    assert "/:systemerror" in record["auth_probe_trace"]
+    assert "/zookeeper:nonode" in record["auth_probe_trace"]
 
 
 def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(monkeypatch) -> None:  # type: ignore[no-untyped-def]
