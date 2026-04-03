@@ -3,15 +3,10 @@
 RedPosture is a Python security CLI for:
 
 - exporter discovery / trigger / collect workflows (`exporters`)
-- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `clickhouse`, `redis`, `etcd`, `kafka`, `zookeeper`)
+- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `clickhouse`, `redis`, `etcd`, `kafka`, `zookeeper`, `elastic`)
 - listener-based callback capture for lab SSRF workflows
 
 Use only on systems you own or are explicitly authorized to assess.
-
-## Breaking Changes (v4.0.0)
-
-- The built-in DB subsystem was removed in `v4.0.0`.
-- `redposture db ...` commands are no longer available.
 
 ## Install
 
@@ -47,6 +42,7 @@ redposture etcd -h
 redposture qdrant -h
 redposture kafka -h
 redposture zookeeper -h
+redposture elastic -h
 ```
 
 Common flags (most modules):
@@ -264,6 +260,22 @@ redposture kafka -t 127.0.0.1 --show-topics
 
 # Topic dump
 redposture kafka -t 127.0.0.1 --topic audit.logs --dump
+```
+
+### Elastic
+
+```bash
+# Baseline
+redposture elastic -t 127.0.0.1 --port 19200
+
+# Endpoints + cluster + users + discover (API key auth)
+redposture elastic -t 127.0.0.1 --port 19201 --apitoken ZXM6bGFiLXRva2Vu --endpoints --cluster --user --discover
+
+# Plugins list
+redposture elastic -t 127.0.0.1 --port 19200 --plugins
+
+# Basic auth
+redposture elastic -t 127.0.0.1 --port 19201 -u elastic -p 'ElasticRead!2026' --cluster
 ```
 
 ### ZooKeeper

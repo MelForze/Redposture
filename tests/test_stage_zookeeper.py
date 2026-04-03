@@ -128,9 +128,11 @@ def test_enumerate_znodes_handles_noauth_and_truncation() -> None:
                 return [], _ZK_ERR_OK, None
             return [], _ZK_ERR_NONODE, None
 
-    nodes, truncated, error = _enumerate_znodes(_FakeClient(), 2)  # type: ignore[arg-type]
+    nodes, total_count, truncated, meta, error = _enumerate_znodes(_FakeClient(), 2)  # type: ignore[arg-type]
     assert nodes == ["/brokers", "/brokers/ids"]
+    assert total_count == 3
     assert truncated is True
+    assert meta["/brokers/ids"]["error"] == "Access Denied"
     assert error is None
 
 
@@ -276,7 +278,7 @@ def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypat
     assert record["provided_credentials_ok"] is True
     znode_values = record.get("znode_values")
     assert isinstance(znode_values, list)
-    assert "/clickhouse:<access denied>" in znode_values
+    assert "/clickhouse:<Access Denied>" in znode_values
 
 
 def test_audit_zookeeper_valid_credentials_when_auth_was_required(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -354,8 +356,9 @@ def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(mo
             return False, "authentication failed: AUTHFAILED"
 
         def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
-            _ = path
-            return ["clickhouse"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
+            if path == "/":
+                return ["clickhouse"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
 
         def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
             _ = path
@@ -435,7 +438,13 @@ def test_audit_zookeeper_retries_retryable_root_query_and_reports_query_auth(mon
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
     monkeypatch.setattr(
         "redposture_core.stage_zookeeper._enumerate_znodes",
-        lambda _client, _max_znodes: (["/brokers"], False, None),
+        lambda _client, _max_znodes: (
+            ["/brokers"],
+            1,
+            False,
+            {"/brokers": {"path": "/brokers", "children": 0, "bytes": 0, "error": None}},
+            None,
+        ),
     )
     monkeypatch.setattr("redposture_core.stage_zookeeper._retry_delay", lambda _attempt: 0.0)
 
@@ -454,7 +463,7 @@ def test_audit_zookeeper_retries_retryable_root_query_and_reports_query_auth(mon
 
     assert calls["root"] == 2
     assert record["status"] == "open_no_auth"
-    assert record["query_znode_value"] == "/secure:<authentication required>"
+    assert record["query_znode_value"] == "/secure:<Access Denied>"
     assert record["query_znode_dump_error"] is None
 
 
@@ -468,22 +477,207 @@ def test_format_znodes_detail_records_cover_text_and_json_paths() -> None:
         "query_znode": "/brokers",
         "znode_count": 2,
         "znodes": ["/brokers", "/brokers/ids"],
+        "znode_details": [
+            {"path": "/brokers", "state": "empty", "children": 0, "bytes": 0, "error": None},
+            {"path": "/brokers/ids", "state": "denied", "children": None, "bytes": None, "error": "Access Denied"},
+        ],
         "znode_values": ["/brokers:<empty>"],
         "query_znode_value": "/brokers (children:1,bytes:0)",
         "query_znode_dump": None,
-        "query_znode_dump_error": "access denied",
+        "query_znode_dump_error": "Access Denied",
     }
 
     txt_lines = _format_znodes_detail_records(record, "txt")
     assert any("[*] Show Znodes" in line for line in txt_lines)
     assert any("[*] Znode /brokers" in line for line in txt_lines)
     assert any("[*] Dump Znode /brokers" in line for line in txt_lines)
-    assert any("[-] access denied" in line for line in txt_lines)
+    assert any("[-] Access Denied" in line for line in txt_lines)
+    assert any("/brokers:<empty>" in line for line in txt_lines)
+    assert any("/brokers/ids:<Access Denied>" in line for line in txt_lines)
 
     json_lines = _format_znodes_detail_records(record, "json")
     assert any('"type": "znodes_list"' in line for line in json_lines)
     assert any('"type": "znode_detail"' in line for line in json_lines)
     assert any('"type": "znode_dump"' in line for line in json_lines)
+
+
+def test_format_record_shows_exact_znode_count_without_plus_and_capabilities() -> None:
+    line = _format_record(
+        {
+            "status": "open_no_auth",
+            "host": "127.0.0.1",
+            "port": 2181,
+            "znode_count": 2050,
+            "znodes_truncated": True,
+            "can_create_znode": True,
+            "can_delete_znode": False,
+        },
+        "txt",
+    )
+    assert "(znodes:2050)" in line
+    assert "(znodes:2050+)" not in line
+    assert "(create:True)" in line
+    assert "(delete:False)" in line
+
+
+def test_format_znodes_detail_records_shows_truncation_note() -> None:
+    record = {
+        "timestamp": "2026-03-27T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 2181,
+        "show_znodes": True,
+        "dump": False,
+        "query_znode": None,
+        "znode_count": 3000,
+        "max_znodes": 2000,
+        "znodes_truncated": True,
+        "znode_details": [
+            {"path": "/a", "state": "empty", "children": 0, "bytes": 0, "error": None},
+            {"path": "/b", "state": "denied", "children": None, "bytes": None, "error": "Access Denied"},
+        ],
+    }
+    txt_lines = _format_znodes_detail_records(record, "txt")
+    assert any("showing first 2 of 3000 znodes (max_znodes=2000)" in line for line in txt_lines)
+    assert any("/a:<empty>" in line for line in txt_lines)
+    assert any("/b:<Access Denied>" in line for line in txt_lines)
+
+
+def test_audit_zookeeper_sets_create_delete_capabilities_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            _ = path
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return b"", _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def create(self, path: str, data: bytes = b"", flags: int = 1) -> int:
+            _ = (path, data, flags)
+            return _ZK_ERR_OK
+
+        def delete(self, path: str, version: int = -1) -> int:
+            _ = (path, version)
+            return _ZK_ERR_OK
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert record["status"] == "open_no_auth"
+    assert record["can_create_znode"] is True
+    assert record["can_delete_znode"] is True
+    assert record["znode_capability_error"] is None
+
+
+def test_audit_zookeeper_sets_create_delete_capabilities_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            _ = path
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return b"", _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def create(self, path: str, data: bytes = b"", flags: int = 1) -> int:
+            _ = (path, data, flags)
+            return _ZK_ERR_NOAUTH
+
+        def delete(self, path: str, version: int = -1) -> int:
+            _ = (path, version)
+            return _ZK_ERR_OK
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert record["status"] == "open_no_auth"
+    assert record["can_create_znode"] is False
+    assert record["can_delete_znode"] is False
+    assert record["znode_capability_error"] == "NOAUTH"
+
+
+def test_audit_zookeeper_sets_create_true_delete_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            _ = path
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return b"", _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def create(self, path: str, data: bytes = b"", flags: int = 1) -> int:
+            _ = (path, data, flags)
+            return _ZK_ERR_OK
+
+        def delete(self, path: str, version: int = -1) -> int:
+            _ = (path, version)
+            return _ZK_ERR_NOAUTH
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert record["status"] == "open_no_auth"
+    assert record["can_create_znode"] is True
+    assert record["can_delete_znode"] is False
+    assert record["znode_capability_error"] == "NOAUTH"
 
 
 def test_audit_zookeeper_targets_suppresses_auth_required_and_connection_fail(monkeypatch: pytest.MonkeyPatch) -> None:

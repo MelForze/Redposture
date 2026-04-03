@@ -6,6 +6,7 @@ import pytest
 
 from redposture_core.stage_clickhouse import _render_colored_clickhouse_line
 from redposture_core.stage_consul import _render_colored_consul_line
+from redposture_core.stage_elastic import _render_colored_elastic_line
 from redposture_core.stage_etcd import _render_colored_etcd_line
 from redposture_core.stage_gitlab import _render_colored_gitlab_line
 from redposture_core.stage_grafana import _render_colored_grafana_line
@@ -52,6 +53,7 @@ _Renderer = Callable[[_RecordingConsole, str], bool]
         (_render_colored_clickhouse_line, "CLICKHOUSE"),
         (_render_colored_qdrant_line, "QDRANT"),
         (_render_colored_consul_line, "CONSUL"),
+        (_render_colored_elastic_line, "ELASTIC"),
         (_render_colored_kubeapi_line, "KUBEAPI"),
         (_render_colored_grafana_line, "GRAFANA"),
         (_render_colored_gitlab_line, "GITLAB"),
@@ -85,6 +87,7 @@ def test_stage_colored_renderers_map_marker_colors(renderer: _Renderer, tag: str
         _render_colored_clickhouse_line,
         _render_colored_qdrant_line,
         _render_colored_consul_line,
+        _render_colored_elastic_line,
         _render_colored_kubeapi_line,
         _render_colored_grafana_line,
         _render_colored_gitlab_line,
@@ -174,6 +177,20 @@ def test_render_colored_consul_colors_pwned_and_counts() -> None:
     assert _contains_paint(console.paint_calls, "(services:1)", "orange")
     assert _contains_paint(console.paint_calls, "(agents:1)", "orange")
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
+
+
+def test_render_colored_elastic_colors_access_and_capabilities() -> None:
+    console = _RecordingConsole()
+    line = (
+        "ELASTIC\t127.0.0.1\t9200\t [+] apikey auth "
+        "(read:True) (write:False) (manage:unknown) (manage_security:False) "
+        "(auth required:unknown)"
+    )
+    assert _render_colored_elastic_line(console, line) is True
+    assert _contains_paint(console.paint_calls, "(read:True)", "red")
+    assert _contains_paint(console.paint_calls, "(write:False)", "bright_green")
+    assert _contains_paint(console.paint_calls, "(manage:unknown)", "yellow")
+    assert _contains_paint(console.paint_calls, "(manage_security:False)", "bright_green")
 
 
 def test_render_colored_kubeapi_colors_resources() -> None:
