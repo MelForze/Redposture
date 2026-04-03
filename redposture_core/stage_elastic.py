@@ -257,14 +257,14 @@ def _request_with_tls_fallback(
         path,
         timeout,
         use_https=True,
-        insecure=False,
+        insecure=True,
         ca_file=ca_file,
         method=method,
         headers=headers,
         data=data,
     )
     if status > 0:
-        return status, payload, response_headers, error, "https", False, False
+        return status, payload, response_headers, error, "https", True, False
 
     fallback_status, fallback_payload, fallback_headers, fallback_error = _elastic_request(
         host,
@@ -284,8 +284,6 @@ def _request_with_tls_fallback(
     https_error = str(error or "").strip() or "connection failed"
     http_error = str(fallback_error or "").strip() or "connection failed"
     combined_error = f"https={https_error}; http={http_error}"
-    if _is_tls_or_protocol_error(https_error):
-        combined_error += "; TLS certificate check failed; provide --ca-file <path>"
     return fallback_status, fallback_payload, fallback_headers, combined_error, "http", False, True
 
 
