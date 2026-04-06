@@ -123,6 +123,11 @@ def _is_root_query_err_124_error(value: Any) -> bool:
     return bool(text) and text.startswith(_ROOT_QUERY_ERR_124_PREFIX)
 
 
+def _is_remote_closed_connection_error(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return "remote end closed connection without response" in text
+
+
 def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
     if str(record.get("status") or "") != "fail":
         return False
@@ -622,10 +627,17 @@ def _audit_zookeeper_host(
     query_znode: str | None,
     max_znodes: int,
 ) -> dict[str, Any]:
+    normalized_username = str(username).strip() if username is not None else None
+    if normalized_username == "":
+        normalized_username = None
+    normalized_password = str(password).strip() if password is not None else None
+    if normalized_password == "":
+        normalized_password = None
+
     base_attempts = max(1, retries + 1)
     bonus_retry_for_root_query_124 = False
     last_error: str | None = None
-    provided_credentials = bool(username and password)
+    provided_credentials = bool(normalized_username and normalized_password)
 
     for attempt in range(base_attempts + 1):
         max_attempts = base_attempts + (1 if bonus_retry_for_root_query_124 else 0)
@@ -653,13 +665,13 @@ def _audit_zookeeper_host(
                 _infer_auth_required_from_anonymous_probes(host, port, timeout, anonymous_root_err, query_znode)
             )
 
-            if provided_credentials and username and password:
-                auth_applied_ok, auth_error = client.auth_digest(username, password)
+            if provided_credentials and normalized_username and normalized_password:
+                auth_applied_ok, auth_error = client.auth_digest(normalized_username, normalized_password)
                 if auth_applied_ok:
                     root_children, root_err, _ = client.get_children2("/")
-                    if anonymous_root_err == _ZK_ERR_NOAUTH and root_err == _ZK_ERR_OK:
-                        provided_credentials_ok = True
-                    elif anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_OK}:
+                    if root_err == _ZK_ERR_OK:
+                        provided_credentials_ok = anonymous_root_err != _ZK_ERR_OK
+                    elif anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_RETRYABLE_ROOT_QUERY}:
                         provided_credentials_ok = False
                 else:
                     provided_credentials_ok = False
@@ -670,6 +682,14 @@ def _audit_zookeeper_host(
                 auth_required_value = inferred_auth_required
 
                 auth_error_text = str(auth_error or "").strip()
+                if auth_required_value is True and (
+                    _is_unexpected_eof_error(auth_error_text)
+                    or _is_remote_closed_connection_error(auth_error_text)
+                ):
+                    auth_error_text = (
+                        "authentication failed: server closed connection during digest auth "
+                        "(invalid credentials or unsupported auth mode)"
+                    )
                 if (
                     auth_required_value is not False
                     and auth_error_text
@@ -683,8 +703,8 @@ def _audit_zookeeper_host(
                         "status": "fail",
                         "auth_required": auth_required_value,
                         "provided_credentials": provided_credentials,
-                        "provided_username": username,
-                        "provided_password": password if provided_credentials else None,
+                        "provided_username": normalized_username,
+                        "provided_password": normalized_password if provided_credentials else None,
                         "provided_credentials_ok": provided_credentials_ok,
                         "show_znodes": show_znodes,
                         "dump": dump,
@@ -718,8 +738,8 @@ def _audit_zookeeper_host(
                         "status": invalid_status,
                         "auth_required": auth_required_value,
                         "provided_credentials": provided_credentials,
-                        "provided_username": username,
-                        "provided_password": password if provided_credentials else None,
+                        "provided_username": normalized_username,
+                        "provided_password": normalized_password if provided_credentials else None,
                         "provided_credentials_ok": provided_credentials_ok,
                         "show_znodes": show_znodes,
                         "dump": dump,
@@ -751,8 +771,8 @@ def _audit_zookeeper_host(
                     "status": "auth_required",
                     "auth_required": True,
                     "provided_credentials": provided_credentials,
-                    "provided_username": username,
-                    "provided_password": password if provided_credentials else None,
+                    "provided_username": normalized_username,
+                    "provided_password": normalized_password if provided_credentials else None,
                     "provided_credentials_ok": provided_credentials_ok,
                     "show_znodes": show_znodes,
                     "dump": dump,
@@ -790,8 +810,8 @@ def _audit_zookeeper_host(
                     "status": "fail",
                     "auth_required": inferred_auth_required,
                     "provided_credentials": provided_credentials,
-                    "provided_username": username,
-                    "provided_password": password if provided_credentials else None,
+                    "provided_username": normalized_username,
+                    "provided_password": normalized_password if provided_credentials else None,
                     "provided_credentials_ok": provided_credentials_ok,
                     "show_znodes": show_znodes,
                     "dump": dump,
@@ -896,8 +916,8 @@ def _audit_zookeeper_host(
                 ),
                 "auth_required": auth_required_value,
                 "provided_credentials": provided_credentials,
-                "provided_username": username,
-                "provided_password": password if provided_credentials else None,
+                "provided_username": normalized_username,
+                "provided_password": normalized_password if provided_credentials else None,
                 "provided_credentials_ok": provided_credentials_ok,
                 "show_znodes": show_znodes,
                 "dump": dump,
@@ -936,8 +956,8 @@ def _audit_zookeeper_host(
         "status": "fail",
         "auth_required": None,
         "provided_credentials": provided_credentials,
-        "provided_username": username,
-        "provided_password": password if provided_credentials else None,
+        "provided_username": normalized_username,
+        "provided_password": normalized_password if provided_credentials else None,
         "provided_credentials_ok": None,
         "show_znodes": show_znodes,
         "dump": dump,
@@ -1408,6 +1428,13 @@ def audit_zookeeper_targets(
 def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     console = Console(debug=args.debug)
 
+    username = str(args.username).strip() if args.username is not None else None
+    if username == "":
+        username = None
+    password = str(args.password).strip() if args.password is not None else None
+    if password == "":
+        password = None
+
     if args.timeout <= 0:
         console.error("--timeout must be > 0")
         return 2
@@ -1417,7 +1444,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.max_znodes <= 0:
         console.error("--max-znodes must be > 0")
         return 2
-    if bool(args.username) != bool(args.password):
+    if bool(username) != bool(password):
         console.error("--username and --password must be set together")
         return 2
     try:
@@ -1464,7 +1491,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug and stream_to_stdout and args.output_format == "txt":
         mode_parts = ["count-znodes"]
-        if args.username and args.password:
+        if username and password:
             mode_parts.append("provided-creds")
         if show_znodes:
             mode_parts.append("show-znodes")
@@ -1480,7 +1507,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         )
     if args.debug and not stream_to_stdout:
         mode_parts = ["count-znodes"]
-        if args.username and args.password:
+        if username and password:
             mode_parts.append("provided-creds")
         if show_znodes:
             mode_parts.append("show-znodes")
@@ -1508,8 +1535,8 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 timeout=args.timeout,
                 retries=args.retries,
                 workers=args.workers,
-                username=args.username,
-                password=args.password,
+                username=username,
+                password=password,
                 show_znodes=show_znodes,
                 dump=dump,
                 query_znode=query_znode,
