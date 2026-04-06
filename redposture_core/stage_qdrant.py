@@ -22,7 +22,13 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import iter_completed_with_progress
-from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+from .utils import (
+    build_scan_execution_groups,
+    collect_scan_ports,
+    collect_scan_target_specs,
+    collect_scan_targets,
+    utc_now_iso,
+)
 
 _QDRANT_TAG = "QDRANT"
 _QDRANT_DEFAULT_PORT = 6333
@@ -1568,9 +1574,7 @@ def audit_qdrant_targets(
                 if bool(record.get("is_qdrant")):
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
                 suppress_timeout_status_line = (
-                    suppress_timeout_status_lines
-                    and output_format == "txt"
-                    and status == "fail"
+                    suppress_timeout_status_lines and output_format == "txt" and status == "fail"
                 )
                 if not suppress_timeout_status_line:
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))
@@ -1620,14 +1624,19 @@ def run_qdrant_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
 
     try:
-        hosts = collect_scan_targets(targets)
+        target_specs = collect_scan_target_specs(targets)
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
 
-    if not hosts:
+    if not target_specs:
         console.error("qdrant requires -t/--targets")
         return 2
+    if any(spec.scheme == "https" for spec in target_specs):
+        console.error("qdrant accepts only http:// URL targets for -t/--targets")
+        return 2
+    hosts = list(dict.fromkeys(spec.host for spec in target_specs))
+    execution_groups = build_scan_execution_groups(target_specs, ports, include_scheme_in_key=False)
 
     show_collections = bool(getattr(args, "show_collections", False))
     dump_requested = bool(getattr(args, "dump", False))
@@ -1682,12 +1691,12 @@ def run_qdrant_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug and stream_to_stdout and args.output_format == "txt":
         console.info(
-            f"qdrant audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
+            f"qdrant audit started: hosts={len(hosts)} ports={len(execution_groups)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} format=txt"
         )
     if args.debug and not stream_to_stdout:
         console.info(
-            f"qdrant audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
+            f"qdrant audit started: hosts={len(hosts)} ports={len(execution_groups)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} format={args.output_format} output={args.output}"
         )
 
@@ -1719,10 +1728,10 @@ def run_qdrant_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             if not any(bool(item.get("started")) for item in ssrf_listeners) and args.output_format == "txt":
                 console.warn("no local SSRF listeners started; check --ssrf-port and local port availability")
 
-        for idx, audit_port in enumerate(ports):
+        for idx, group in enumerate(execution_groups):
             part_total, part_open_no_auth, part_open_with_key, part_auth_required, part_failed = audit_qdrant_targets(
-                hosts=hosts,
-                port=audit_port,
+                hosts=group.hosts,
+                port=group.port,
                 timeout=args.timeout,
                 retries=args.retries,
                 workers=args.workers,
@@ -1754,7 +1763,7 @@ def run_qdrant_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if ssrf_listeners and args.output_format == "txt":
         listener_prefix_record = {
             "host": (hosts[0] if hosts else "local"),
-            "port": (ports[0] if ports else _QDRANT_DEFAULT_PORT),
+            "port": (execution_groups[0].port if execution_groups else _QDRANT_DEFAULT_PORT),
         }
         listener_prefix = _nxc_prefix(listener_prefix_record)
         for listener in ssrf_listeners:

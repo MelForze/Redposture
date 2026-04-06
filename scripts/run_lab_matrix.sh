@@ -53,7 +53,7 @@ wait_healthy_compose() {
       return 0
     fi
     local blocking
-    blocking="$(printf "%s" "${unhealthy}" | grep -Ev 'redposture-lab-consul-acl|redposture-lab-consul-seed' || true)"
+    blocking="$(printf "%s" "${unhealthy}" | grep -Ev 'redposture-lab-consul-acl|redposture-lab-consul-seed|redposture-lab-elastic-auth' || true)"
     if [ -z "${blocking}" ]; then
       echo "[warn] continuing with degraded consul lab branch" >&2
       printf "%s\n" "${unhealthy}" >&2
@@ -70,7 +70,8 @@ wait_healthy_compose() {
 run_case() {
   local module="$1"
   local label="$2"
-  shift 2
+  local expected_exit="$3"
+  shift 3
 
   local json_path="${OUT_DIR}/json/${label}.json"
   local log_path="${OUT_DIR}/logs/${label}.log"
@@ -81,9 +82,15 @@ run_case() {
   local rc=$?
   set -e
 
-  printf "%s\t%s\t%s\t%s\t%s\n" "${module}" "${label}" "${rc}" "${json_path}" "${log_path}" >> "${STATUS_FILE}"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "${module}" "${label}" "${expected_exit}" "${rc}" "${json_path}" "${log_path}" >> "${STATUS_FILE}"
+  if [ "${rc}" -ne "${expected_exit}" ]; then
+    echo "[error] ${label} exit mismatch: expected=${expected_exit} actual=${rc}" >&2
+    echo "[error] log: ${log_path}" >&2
+    return 1
+  fi
   if [ "${rc}" -ne 0 ]; then
-    echo "[warn] ${label} failed (rc=${rc})" >&2
+    echo "[warn] ${label} expected failure matched (rc=${rc})" >&2
   fi
   return 0
 }
@@ -91,7 +98,8 @@ run_case() {
 run_text_case() {
   local module="$1"
   local label="$2"
-  shift 2
+  local expected_exit="$3"
+  shift 3
 
   local text_path="${OUT_DIR}/logs/${label}.txt"
   local log_path="${OUT_DIR}/logs/${label}.log"
@@ -102,15 +110,21 @@ run_text_case() {
   local rc=$?
   set -e
 
-  printf "%s\t%s\t%s\t%s\t%s\n" "${module}" "${label}" "${rc}" "-" "${log_path}" >> "${STATUS_FILE}"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "${module}" "${label}" "${expected_exit}" "${rc}" "-" "${log_path}" >> "${STATUS_FILE}"
+  if [ "${rc}" -ne "${expected_exit}" ]; then
+    echo "[error] ${label} exit mismatch: expected=${expected_exit} actual=${rc}" >&2
+    echo "[error] log: ${log_path}" >&2
+    return 1
+  fi
   if [ "${rc}" -ne 0 ]; then
-    echo "[warn] ${label} failed (rc=${rc})" >&2
+    echo "[warn] ${label} expected failure matched (rc=${rc})" >&2
   fi
   return 0
 }
 
 set -e
-printf "module\tlabel\texit_code\tjson_path\tlog_path\n" > "${STATUS_FILE}"
+printf "module\tlabel\texpected_exit\texit_code\tjson_path\tlog_path\n" > "${STATUS_FILE}"
 
 set +e
 compose up -d --build --wait --wait-timeout 120
@@ -133,71 +147,95 @@ if [ "${HAS_CONSUL_TOKENS}" -eq 1 ]; then
   CONSUL_READ_TOKEN="$(grep '^CONSUL_ACL_READ_TOKEN=' docker/consul/output/consul_acl_tokens.env | cut -d= -f2-)"
   CONSUL_MGMT_TOKEN="$(grep '^CONSUL_ACL_MANAGEMENT_TOKEN=' docker/consul/output/consul_acl_tokens.env | cut -d= -f2-)"
 else
-  echo "[warn] consul ACL tokens are unavailable; auth consul runs will be skipped" >&2
+  echo "[error] consul ACL tokens are unavailable; strict matrix cannot continue" >&2
+  exit 1
 fi
 if [ "${HAS_KUBE_TOKENS}" -eq 1 ]; then
   KUBE_AUDITOR_TOKEN="$(grep '^KUBEAPI_AUDITOR_TOKEN=' docker/kubeapi/output/kubeapi_tokens.env | cut -d= -f2-)"
   KUBE_ADMIN_TOKEN="$(grep '^KUBEAPI_ADMIN_TOKEN=' docker/kubeapi/output/kubeapi_tokens.env | cut -d= -f2-)"
 else
-  echo "[warn] kubeapi tokens are unavailable; token kubeapi runs will be skipped" >&2
+  echo "[error] kubeapi tokens are unavailable; strict matrix cannot continue" >&2
+  exit 1
 fi
 
-run_case exporters exporters_scan exporters scan -t 127.0.0.1 -p "${EXPORTER_PORTS}"
-run_case exporters exporters_collect exporters collect -t 127.0.0.1 -p "${EXPORTER_PORTS}" --deep --save-responses-dir "${OUT_DIR}/collect_raw"
-run_case exporters exporters_trigger exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19308" --with-listen --listen-seconds 8 \
+if [ -z "${CONSUL_READ_TOKEN}" ] || [ -z "${CONSUL_MGMT_TOKEN}" ]; then
+  echo "[error] consul ACL tokens are empty; strict matrix cannot continue" >&2
+  exit 1
+fi
+if [ -z "${KUBE_AUDITOR_TOKEN}" ] || [ -z "${KUBE_ADMIN_TOKEN}" ]; then
+  echo "[error] kubeapi tokens are empty; strict matrix cannot continue" >&2
+  exit 1
+fi
+
+run_case exporters exporters_scan 0 exporters scan -t 127.0.0.1 -p "${EXPORTER_PORTS}"
+run_case exporters exporters_collect 0 exporters collect -t 127.0.0.1 -p "${EXPORTER_PORTS}" --deep --save-responses-dir "${OUT_DIR}/collect_raw"
+run_case exporters exporters_trigger 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19308" --with-listen --listen-seconds 8 \
   --postgres-port 15432 --redis-port 16379 --proxmox-port 28006 --blackbox-port 29115
+run_case exporters exporters_scan_url_http 0 exporters scan -t "http://127.0.0.1:19100/metrics?from=matrix"
+run_case exporters exporters_scan_url_https_reject 2 exporters scan -t "https://127.0.0.1:19100/metrics"
+run_case exporters exporters_collect_url_http 0 exporters collect -t "http://127.0.0.1:19100/debug/vars" --exporters node --save-responses-dir "${OUT_DIR}/collect_raw_url"
+run_case exporters exporters_collect_url_https_reject 2 exporters collect -t "https://127.0.0.1:19100/debug/vars"
+run_case exporters exporters_trigger_url_http 0 exporters trigger -t "http://127.0.0.1:19121/scrape?target=redis://127.0.0.1:6379" --callback-dns host.docker.internal --no-with-listen
+run_case exporters exporters_trigger_url_https_reject 2 exporters trigger -t "https://127.0.0.1:19121/scrape" --callback-dns host.docker.internal --no-with-listen
 
-run_case registry registry_open registry -t 127.0.0.1 --port 15000 --docker --images
-run_case registry registry_auth registry -t 127.0.0.1 --port 15001 -u admin -p admin --docker --images
-run_case registry registry_harbor registry -t 127.0.0.1 --port 15002 --harbor --images
-run_case registry registry_gitlab registry -t 127.0.0.1 --port 15003 --gitlab --images
-run_case registry registry_nexus registry -t 127.0.0.1 --port 15004 --nexus --assets
+run_case registry registry_open 0 registry -t 127.0.0.1 --port 15000 --docker --images
+run_case registry registry_auth 0 registry -t 127.0.0.1 --port 15001 -u admin -p admin --docker --images
+run_case registry registry_harbor 0 registry -t 127.0.0.1 --port 15002 --harbor --images
+run_case registry registry_gitlab 0 registry -t 127.0.0.1 --port 15003 --gitlab --images
+run_case registry registry_nexus 0 registry -t 127.0.0.1 --port 15004 --nexus --assets
+run_case registry registry_url_http 0 registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --docker --images
+run_case registry registry_url_https_reject 2 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
 
-run_case grafana grafana_default grafana -t 127.0.0.1 --defcreds --show-datasources
+run_case grafana grafana_default 0 grafana -t 127.0.0.1 --defcreds --show-datasources
+run_case grafana grafana_url_http 0 grafana -t "http://127.0.0.1:3000/login?next=%2F" --defcreds --show-datasources
+run_case grafana grafana_url_https_reject 2 grafana -t "https://127.0.0.1:3000/login"
+run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --defcreds --ssrf-target "http://127.0.0.1:19115/probe?module=http_2xx" --show-datasources
 
-run_case gitlab gitlab_public gitlab -t 127.0.0.1 --port 18080
-run_case gitlab gitlab_analyst gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-analyst-2026
+run_case gitlab gitlab_public 0 gitlab -t 127.0.0.1 --port 18080
+run_case gitlab gitlab_analyst 0 gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-analyst-2026
+run_case gitlab gitlab_url_override_http 0 gitlab -t "http://127.0.0.1:18080/users/sign_in?ref=matrix" --https
 
-run_case consul consul_open consul -t 127.0.0.1 --port 8500 --dump
-if [ -n "${CONSUL_READ_TOKEN}" ]; then
-  run_case consul consul_acl_read consul -t 127.0.0.1 --port 18500 --token "${CONSUL_READ_TOKEN}" --dump
-fi
-if [ -n "${CONSUL_MGMT_TOKEN}" ]; then
-  run_case consul consul_acl_mgmt consul -t 127.0.0.1 --port 18500 --token "${CONSUL_MGMT_TOKEN}" --dump
-fi
+run_case consul consul_open 0 consul -t 127.0.0.1 --port 8500 --dump
+run_case consul consul_acl_read 0 consul -t 127.0.0.1 --port 18500 --token "${CONSUL_READ_TOKEN}" --dump
+run_case consul consul_acl_mgmt 0 consul -t 127.0.0.1 --port 18500 --token "${CONSUL_MGMT_TOKEN}" --dump
+run_case consul consul_url_hint_http 0 consul -t "http://127.0.0.1:8500/v1/status/leader" --dump
 
-run_case kubeapi kubeapi_open kubeapi -t 127.0.0.1 --port 26443 --namespaces --pods
-if [ -n "${KUBE_AUDITOR_TOKEN}" ]; then
-  run_case kubeapi kubeapi_auditor kubeapi -t 127.0.0.1 --port 16443 --insecure --token "${KUBE_AUDITOR_TOKEN}" --namespaces --pods
-fi
-if [ -n "${KUBE_ADMIN_TOKEN}" ]; then
-  run_case kubeapi kubeapi_admin kubeapi -t 127.0.0.1 --port 16443 --insecure --token "${KUBE_ADMIN_TOKEN}" --secrets
-fi
+run_case kubeapi kubeapi_open 0 kubeapi -t 127.0.0.1 --port 26443 --namespaces --pods
+run_case kubeapi kubeapi_auditor 0 kubeapi -t 127.0.0.1 --port 16443 --insecure --token "${KUBE_AUDITOR_TOKEN}" --namespaces --pods
+run_case kubeapi kubeapi_admin 0 kubeapi -t 127.0.0.1 --port 16443 --insecure --token "${KUBE_ADMIN_TOKEN}" --secrets
+run_case kubeapi kubeapi_url_override_https 0 kubeapi -t "https://127.0.0.1:26443/api?from=matrix" --no-https --namespaces
 
-run_case postgres postgres_default postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables --dump 20
+run_case postgres postgres_default 0 postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables --dump 20
 
-run_case clickhouse clickhouse_native_open clickhouse -t 127.0.0.1 --show-databases --show-tables --dump
-run_case clickhouse clickhouse_http_open clickhouse -t 127.0.0.1 --http --port 8123 --show-databases --show-tables --dump
-run_case clickhouse clickhouse_native_auth clickhouse -t 127.0.0.1 --port 19000 -u default -p default --show-databases --show-tables --dump
-run_case clickhouse clickhouse_http_auth clickhouse -t 127.0.0.1 --http --port 18123 -u default -p default --show-databases --show-tables --dump
+run_case clickhouse clickhouse_native_open 0 clickhouse -t 127.0.0.1 --show-databases --show-tables --dump
+run_case clickhouse clickhouse_http_open 0 clickhouse -t 127.0.0.1 --http --port 8123 --show-databases --show-tables --dump
+run_case clickhouse clickhouse_native_auth 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --show-databases --show-tables --dump
+run_case clickhouse clickhouse_http_auth 0 clickhouse -t 127.0.0.1 --http --port 18123 -u default -p default --show-databases --show-tables --dump
 
-run_case redis redis_default redis -t 127.0.0.1 -u redis -p redis --show-keys --dump
+run_case redis redis_default 0 redis -t 127.0.0.1 -u redis -p redis --show-keys --dump
 
-run_case etcd etcd_open etcd -t 127.0.0.1 --port 2379 --show-keys --dump
-run_case etcd etcd_auth etcd -t 127.0.0.1 --port 22379 --show-keys --dump
+run_case etcd etcd_open 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump
+run_case etcd etcd_auth 0 etcd -t 127.0.0.1 --port 22379 --show-keys --dump
+run_case etcd etcd_url_http 0 etcd -t "http://127.0.0.1:2379/v2/keys?recursive=true" --show-keys --dump
+run_case etcd etcd_url_https_reject 2 etcd -t "https://127.0.0.1:2379/v2/keys?recursive=true" --show-keys
 
-run_case qdrant qdrant_default qdrant -t 127.0.0.1 --collections --dump
+run_case qdrant qdrant_default 0 qdrant -t 127.0.0.1 --collections --dump
+run_case qdrant qdrant_url_http 0 qdrant -t "http://127.0.0.1:6333/collections?from=matrix" --collections --dump
+run_case qdrant qdrant_url_https_reject 2 qdrant -t "https://127.0.0.1:6333/collections" --collections
 
-run_case elastic elastic_open elastic -t 127.0.0.1 --port 19200 --endpoints --cluster --discover
-run_case elastic elastic_auth elastic -t 127.0.0.1 --port 19201 --apitoken "ZXM6bGFiLXRva2Vu" --endpoints --cluster --user --discover
+run_case elastic elastic_open 0 elastic -t 127.0.0.1 --port 19200 --endpoints --cluster --discover
+run_case elastic elastic_auth 0 elastic -t 127.0.0.1 --port 19201 --apitoken "ZXM6bGFiLXRva2Vu" --endpoints --cluster --user --discover
+run_case elastic elastic_url_hint_https 0 elastic -t "https://127.0.0.1:19201/" --apitoken "ZXM6bGFiLXRva2Vu" --endpoints
+run_case elastic elastic_plugins_edge 0 elastic -t 127.0.0.1 --port 19201 --apitoken "ZXM6bGFiLXRva2Vu" --plugins
 
-run_case kafka kafka_open kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
-run_case kafka kafka_auth kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
+run_case kafka kafka_open 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
+run_case kafka kafka_auth 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
 
-run_case zookeeper zookeeper_default zookeeper -t 127.0.0.1 --show-znodes --dump
+run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --show-znodes --dump
 
-run_case proxmox proxmox_audit proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
-run_case proxmox proxmox_admin proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover-creds --nodes --users
+run_case proxmox proxmox_audit 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
+run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover-creds --nodes --users
+run_case proxmox proxmox_url_override_https 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket" --no-https --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
 
 "${PYTHON_BIN}" "${VERIFY_SCRIPT}" --status-file "${STATUS_FILE}" --out-dir "${OUT_DIR}"
 

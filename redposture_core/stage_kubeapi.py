@@ -22,7 +22,7 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import iter_completed_with_progress
-from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 _KUBE_TAG = "KUBEAPI"
 _KUBE_LIST_PAGE_LIMIT = 500
@@ -1664,13 +1664,15 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
 
     try:
-        hosts = collect_scan_targets(targets)
+        target_specs = collect_scan_target_specs(targets)
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
-    if not hosts:
+    if not target_specs:
         console.error("kubeapi requires -t/--targets")
         return 2
+    hosts = list(dict.fromkeys(spec.host for spec in target_specs))
+    execution_groups = build_scan_execution_groups(target_specs, ports, include_scheme_in_key=True)
 
     namespace_filters = _normalize_namespace_filters(getattr(args, "namespace", None))
     token = (getattr(args, "token", None) or "").strip() or None
@@ -1706,13 +1708,13 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.debug and args.output_format == "txt":
         target_auth = "token" if token else ("basic" if (username is not None or password is not None) else "none")
         console.info(
-            f"kubeapi audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
+            f"kubeapi audit started: hosts={len(hosts)} ports={len(execution_groups)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} https={args.https} insecure={args.insecure} "
             f"auth={target_auth} format=txt"
         )
     if args.debug and not stream_to_stdout and args.output_format != "txt":
         console.info(
-            f"kubeapi audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
+            f"kubeapi audit started: hosts={len(hosts)} ports={len(execution_groups)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} format={args.output_format} output={args.output}"
         )
 
@@ -1720,14 +1722,17 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     detected = 0
     failed = 0
     try:
-        for idx, audit_port in enumerate(ports):
+        for idx, group in enumerate(execution_groups):
+            group_use_https = bool(args.https)
+            if group.scheme_hint in {"http", "https"}:
+                group_use_https = group.scheme_hint == "https"
             part_total, part_detected, part_failed = audit_kubeapi_targets(
-                hosts=hosts,
-                port=audit_port,
+                hosts=group.hosts,
+                port=group.port,
                 timeout=args.timeout,
                 retries=args.retries,
                 workers=args.workers,
-                use_https=bool(args.https),
+                use_https=group_use_https,
                 insecure=bool(args.insecure),
                 ca_file=getattr(args, "ca_file", None),
                 token=token,

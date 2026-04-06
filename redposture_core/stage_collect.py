@@ -15,7 +15,7 @@ from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import collect_exporter_debug_data, scan_exporter_presence
 from .stage_validate import ValidationRecordAccumulator
-from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 COLLECT_VALIDATE_INPUT_FORMAT = "auto"
 COLLECT_VALIDATE_SHOW = True
@@ -196,9 +196,12 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
 
     try:
-        hosts = collect_scan_targets(targets)
+        target_specs = collect_scan_target_specs(targets)
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
+        return 2
+    if any(spec.scheme == "https" for spec in target_specs):
+        console.error("exporters collect accepts only http:// URL targets for -t/--targets")
         return 2
 
     try:
@@ -225,9 +228,10 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         selected_exporter_names=selected_collect_exporters,
     )
 
-    if not hosts:
+    if not target_specs:
         console.error("collect requires -t/--targets")
         return 2
+    hosts = list(dict.fromkeys(spec.host for spec in target_specs))
 
     stream_to_stdout = not bool(args.output)
     save_responses_dir = getattr(args, "save_responses_dir", None)
@@ -401,25 +405,74 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         finally:
             validate_console.close()
 
-    try:
-        scan_checks, scan_found, found_by_host = scan_exporter_presence(
-            hosts=hosts,
-            timeout=args.timeout,
-            output_path=None,
-            output_format="txt",
-            logger=logger if args.debug else None,
-            emit_line=emit_line if args.output_format == "txt" else None,
-            workers=args.workers,
-            retries=args.retries,
-            discovery_exporters=discovery_exporters,
-            custom_ports=custom_ports or None,
-            emit_summary=False,
-            show_progress=True,
-            progress_leave=False,
+    has_explicit_port_targets = any(spec.explicit_port is not None for spec in target_specs)
+    if not has_explicit_port_targets:
+        try:
+            scan_checks, scan_found, found_by_host = scan_exporter_presence(
+                hosts=hosts,
+                timeout=args.timeout,
+                output_path=None,
+                output_format="txt",
+                logger=logger if args.debug else None,
+                emit_line=emit_line if args.output_format == "txt" else None,
+                workers=args.workers,
+                retries=args.retries,
+                discovery_exporters=discovery_exporters,
+                custom_ports=custom_ports or None,
+                emit_summary=False,
+                show_progress=True,
+                progress_leave=False,
+            )
+        except OSError as exc:
+            console.error(f"failed to process collect discovery scan: {exc}")
+            return 2
+    else:
+        default_ports = list(
+            dict.fromkeys(int(item.get("port")) for item in discovery_exporters if item.get("port") is not None)
         )
-    except OSError as exc:
-        console.error(f"failed to process collect discovery scan: {exc}")
-        return 2
+        execution_groups = build_scan_execution_groups(
+            target_specs,
+            custom_ports or default_ports,
+            include_scheme_in_key=False,
+        )
+        scan_checks = 0
+        scan_found = 0
+        found_by_host: dict[str, list[dict[str, object]]] = {host: [] for host in hosts}
+        seen_hits: dict[str, set[tuple[str, int]]] = {host: set() for host in hosts}
+        try:
+            for group in execution_groups:
+                part_checks, part_found, part_found_by_host = scan_exporter_presence(
+                    hosts=group.hosts,
+                    timeout=args.timeout,
+                    output_path=None,
+                    output_format="txt",
+                    logger=logger if args.debug else None,
+                    emit_line=emit_line if args.output_format == "txt" else None,
+                    workers=args.workers,
+                    retries=args.retries,
+                    discovery_exporters=discovery_exporters,
+                    custom_ports=[group.port],
+                    emit_summary=False,
+                    show_progress=True,
+                    progress_leave=False,
+                )
+                scan_checks += part_checks
+                scan_found += part_found
+                for host, hits in part_found_by_host.items():
+                    for hit in hits:
+                        exporter = str(hit.get("exporter") or "")
+                        try:
+                            hit_port = int(hit.get("port"))
+                        except (TypeError, ValueError):
+                            continue
+                        hit_key = (exporter, hit_port)
+                        if hit_key in seen_hits.setdefault(host, set()):
+                            continue
+                        seen_hits[host].add(hit_key)
+                        found_by_host.setdefault(host, []).append(hit)
+        except OSError as exc:
+            console.error(f"failed to process collect discovery scan: {exc}")
+            return 2
 
     if args.debug:
         for host in hosts:

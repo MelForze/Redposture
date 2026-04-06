@@ -747,7 +747,11 @@ def test_audit_gitlab_targets_and_run_stage_paths(
     assert any("--timeout must be > 0" in msg for msg in fake_console.errors)
 
     monkeypatch.setattr(gitlab, "collect_scan_ports", lambda *_args, **_kwargs: [8080])
-    monkeypatch.setattr(gitlab, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+    monkeypatch.setattr(
+        gitlab,
+        "collect_scan_target_specs",
+        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
+    )
     monkeypatch.setattr(
         gitlab, "audit_gitlab_targets", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed"))
     )

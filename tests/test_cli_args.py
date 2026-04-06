@@ -127,7 +127,10 @@ def test_elastic_help_sections_are_present() -> None:
 @pytest.mark.parametrize(
     ("command", "sections"),
     [
-        ("registry", ["Common", "Auth", "Docker / OCI (Registry v2)", "Harbor", "GitLab Container Registry", "Nexus Repository"]),
+        (
+            "registry",
+            ["Common", "Auth", "Docker / OCI (Registry v2)", "Harbor", "GitLab Container Registry", "Nexus Repository"],
+        ),
         ("grafana", ["Common", "Auth", "Actions", "SSRF / Probes"]),
         ("proxmox", ["Common", "Auth", "Actions"]),
         ("gitlab", ["Common", "Auth", "Actions"]),

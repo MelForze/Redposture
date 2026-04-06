@@ -24,7 +24,13 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import iter_completed_with_progress
-from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+from .utils import (
+    build_scan_execution_groups,
+    collect_scan_ports,
+    collect_scan_target_specs,
+    collect_scan_targets,
+    utc_now_iso,
+)
 
 _CONSUL_TAG = "CONSUL"
 _CONSUL_SCOPE_NAMES = ("kv", "services", "agents")
@@ -261,8 +267,15 @@ def _probe_consul_scheme(
     host: str,
     port: int,
     timeout: float,
+    *,
+    preferred_scheme: str | None = None,
 ) -> tuple[bool, str | None, bool, bool, str | None, str | None]:
-    preferred_schemes = ["https", "http"] if port == 8501 else ["http", "https"]
+    normalized_scheme = str(preferred_scheme or "").strip().lower()
+    if normalized_scheme in {"http", "https"}:
+        alternate = "https" if normalized_scheme == "http" else "http"
+        preferred_schemes = [normalized_scheme, alternate]
+    else:
+        preferred_schemes = ["https", "http"] if port == 8501 else ["http", "https"]
     last_error: str | None = None
 
     for scheme in preferred_schemes:
@@ -1832,6 +1845,7 @@ def _audit_consul_host(
     revshell_port: int | None,
     revshell_payload: str | None,
     revshell_check_id: str | None,
+    preferred_scheme: str | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error = "connection failed"
@@ -1840,7 +1854,10 @@ def _audit_consul_host(
         try:
             started = time.monotonic()
             is_consul, scheme, insecure_effective, tls_auto_insecure, leader, probe_error = _probe_consul_scheme(
-                host, port, timeout
+                host,
+                port,
+                timeout,
+                preferred_scheme=preferred_scheme,
             )
             if not is_consul:
                 return {
@@ -3064,6 +3081,7 @@ def audit_consul_targets(
     logger: AttemptLogger | None = None,
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
+    preferred_scheme: str | None = None,
 ) -> tuple[int, int, int, bool]:
     total = 0
     detected = 0
@@ -3111,6 +3129,7 @@ def audit_consul_targets(
                     revshell_port=revshell_port,
                     revshell_payload=revshell_payload,
                     revshell_check_id=revshell_check_id,
+                    preferred_scheme=preferred_scheme,
                 ): host
                 for host in hosts
             }
@@ -3153,9 +3172,7 @@ def audit_consul_targets(
                     record_out["_password_display"] = password or ""
 
                 suppress_timeout_detect_line = (
-                    suppress_timeout_status_lines
-                    and output_format == "txt"
-                    and status == "fail"
+                    suppress_timeout_status_lines and output_format == "txt" and status == "fail"
                 )
                 if not suppress_timeout_detect_line:
                     _emit_line(out_fh, emit_line, _detect_line(record_out, output_format))
@@ -3219,13 +3236,15 @@ def run_consul_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if hosts_file:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
     try:
-        hosts = collect_scan_targets(targets)
+        target_specs = collect_scan_target_specs(targets)
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
-    if not hosts:
+    if not target_specs:
         console.error("consul requires -t/--targets")
         return 2
+    hosts = list(dict.fromkeys(spec.host for spec in target_specs))
+    execution_groups = build_scan_execution_groups(target_specs, ports, include_scheme_in_key=True)
 
     token = (getattr(args, "token", None) or "").strip() or None
     username = getattr(args, "username", None)
@@ -3407,7 +3426,7 @@ def run_consul_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.debug and args.output_format == "txt":
         auth_label = "token" if token else ("basic" if (username is not None or password is not None) else "none")
         console.info(
-            f"consul audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
+            f"consul audit started: hosts={len(hosts)} ports={len(execution_groups)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} auth={auth_label} ssrf={do_ssrf} "
             f"keys={show_keys} dump={dump_requested} dump_all={dump_all_requested} "
             f"services={show_services} agents={show_agents} checks={show_checks} nodes={show_nodes} "
@@ -3426,10 +3445,10 @@ def run_consul_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     failed = 0
     revshell_registered_any = False
     try:
-        for idx, port in enumerate(ports):
+        for idx, group in enumerate(execution_groups):
             part_total, part_detected, part_failed, part_revshell_registered = audit_consul_targets(
-                hosts=hosts,
-                port=port,
+                hosts=group.hosts,
+                port=group.port,
                 timeout=args.timeout,
                 retries=args.retries,
                 workers=args.workers,
@@ -3466,6 +3485,7 @@ def run_consul_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
                 suppress_timeout_status_lines=not bool(args.debug),
+                preferred_scheme=group.scheme_hint,
             )
             total += part_total
             detected += part_detected
@@ -3482,7 +3502,7 @@ def run_consul_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.info(f"consul audit complete: total={total} detected={detected} fail={failed}")
 
     if revshell_enabled and not delete_revshell and revshell_listen and revshell_port is not None:
-        if len(hosts) * len(ports) > 1:
+        if len(hosts) * len(execution_groups) > 1:
             console.warn("--listen starts one local listener for all selected targets/ports")
         if not revshell_registered_any:
             console.warn("local listener not started: revshell check was not registered")

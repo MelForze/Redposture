@@ -848,7 +848,11 @@ def test_audit_grafana_targets_and_run_stage_paths(
     assert any("--password is required when --username is set" in msg for msg in fake_console.errors)
 
     monkeypatch.setattr(grafana_stage, "collect_scan_ports", lambda *_args, **_kwargs: [3000])
-    monkeypatch.setattr(grafana_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+    monkeypatch.setattr(
+        grafana_stage,
+        "collect_scan_target_specs",
+        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
+    )
     monkeypatch.setattr(
         grafana_stage,
         "audit_grafana_targets",

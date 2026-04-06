@@ -1442,6 +1442,7 @@ def scan_exporter_presence(
     emit_summary: bool = True,
     show_progress: bool = True,
     progress_leave: bool = True,
+    output_mode: str = "w",
 ) -> tuple[int, int, dict[str, list[dict[str, Any]]]]:
     exporters = list(discovery_exporters or DISCOVERY_EXPORTERS)
     if custom_ports:
@@ -1460,7 +1461,7 @@ def scan_exporter_presence(
     out_fh: Any = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        out_fh = open(output_path, "w", encoding="utf-8")
+        out_fh = open(output_path, output_mode, encoding="utf-8")
 
     try:
         progress = ProgressBar("SCAN", len(work_items), enabled=show_progress, leave=progress_leave)

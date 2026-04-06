@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -104,6 +105,20 @@ def normalize_ip_literal(value: str) -> str | None:
     return host
 
 
+@dataclass(frozen=True)
+class ScanTargetSpec:
+    host: str
+    scheme: str | None = None
+    explicit_port: int | None = None
+
+
+@dataclass(frozen=True)
+class ScanExecutionGroup:
+    hosts: list[str]
+    port: int
+    scheme_hint: str | None = None
+
+
 def _expand_network_targets(token: str, max_hosts: int) -> list[str]:
     network = ipaddress.ip_network(token, strict=False)
 
@@ -119,6 +134,111 @@ def _expand_network_targets(token: str, max_hosts: int) -> list[str]:
     if not hosts:
         hosts = [str(network.network_address)]
     return hosts
+
+
+def collect_scan_target_specs(targets: str | None, max_network_hosts: int = 4096) -> list[ScanTargetSpec]:
+    if not targets:
+        return []
+
+    unique: list[ScanTargetSpec] = []
+    seen_specs: set[tuple[str, str | None, int | None]] = set()
+    processed_files: set[str] = set()
+
+    def _append_spec(spec: ScanTargetSpec) -> None:
+        key = (spec.host, spec.scheme, spec.explicit_port)
+        if key in seen_specs:
+            return
+        seen_specs.add(key)
+        unique.append(spec)
+
+    def _consume_token(token: str) -> None:
+        item = token.strip()
+        if not item:
+            return
+
+        if os.path.isfile(item):
+            real = os.path.realpath(item)
+            if real in processed_files:
+                return
+            processed_files.add(real)
+            with open(real, encoding="utf-8") as fh:
+                for raw in fh:
+                    clean = raw.split("#", 1)[0].strip()
+                    if not clean:
+                        continue
+                    for part in clean.split(","):
+                        _consume_token(part)
+            return
+
+        if "://" in item:
+            parsed = urlparse(item)
+            scheme = str(parsed.scheme or "").strip().lower()
+            if scheme not in {"http", "https"}:
+                raise ValueError(
+                    f"unsupported target URL scheme '{scheme or '-'}' in '{item}' (supported: http, https)"
+                )
+            host = (parsed.hostname or "").strip()
+            if not host:
+                raise ValueError(f"invalid URL target '{item}': missing host")
+            try:
+                explicit_port = parsed.port
+            except ValueError as exc:
+                raise ValueError(f"invalid URL target '{item}': {exc}") from exc
+            _append_spec(ScanTargetSpec(host=host, scheme=scheme, explicit_port=explicit_port))
+            return
+
+        if "/" in item:
+            try:
+                expanded = _expand_network_targets(item, max_hosts=max_network_hosts)
+            except ValueError as exc:
+                raise ValueError(f"invalid network target '{item}': {exc}") from exc
+            for host in expanded:
+                _append_spec(ScanTargetSpec(host=host, scheme=None, explicit_port=None))
+            return
+
+        host = normalize_scan_host(item)
+        if not host:
+            return
+        _append_spec(ScanTargetSpec(host=host, scheme=None, explicit_port=None))
+
+    for token in targets.split(","):
+        _consume_token(token)
+
+    return unique
+
+
+def build_scan_execution_groups(
+    target_specs: list[ScanTargetSpec],
+    port_matrix: list[int],
+    *,
+    include_scheme_in_key: bool = True,
+) -> list[ScanExecutionGroup]:
+    if not target_specs:
+        return []
+
+    unique_ports = [int(port) for port in dict.fromkeys(port_matrix)]
+    groups: dict[tuple[int, str | None], list[str]] = {}
+    seen_group_hosts: set[tuple[int, str | None, str]] = set()
+
+    for spec in target_specs:
+        ports = [int(spec.explicit_port)] if spec.explicit_port is not None else unique_ports
+        for port in ports:
+            scheme_hint = spec.scheme if include_scheme_in_key else None
+            group_key = (int(port), scheme_hint)
+            if group_key not in groups:
+                groups[group_key] = []
+            host_key = (int(port), scheme_hint, spec.host)
+            if host_key in seen_group_hosts:
+                continue
+            seen_group_hosts.add(host_key)
+            groups[group_key].append(spec.host)
+
+    result: list[ScanExecutionGroup] = []
+    for (port, scheme_hint), hosts in groups.items():
+        if not hosts:
+            continue
+        result.append(ScanExecutionGroup(hosts=hosts, port=port, scheme_hint=scheme_hint))
+    return result
 
 
 def collect_scan_targets(targets: str | None, max_network_hosts: int = 4096) -> list[str]:

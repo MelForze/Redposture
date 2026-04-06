@@ -23,7 +23,7 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import iter_completed_with_progress
-from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 _ELASTIC_TAG = "ELASTIC"
 _DISCOVER_QUERY_SIZE = 10000
@@ -258,44 +258,69 @@ def _request_with_tls_fallback(
     timeout: float,
     *,
     ca_file: str | None,
+    preferred_scheme: str = "https",
     method: str = "GET",
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None, str, bool, bool]:
+    normalized_scheme = str(preferred_scheme or "").strip().lower()
+    if normalized_scheme not in {"http", "https"}:
+        normalized_scheme = "https"
+    first_use_https = normalized_scheme == "https"
+    second_use_https = not first_use_https
+    first_scheme = "https" if first_use_https else "http"
+    second_scheme = "http" if first_use_https else "https"
+
     status, payload, response_headers, error = _elastic_request(
         host,
         port,
         path,
         timeout,
-        use_https=True,
-        insecure=True,
-        ca_file=ca_file,
+        use_https=first_use_https,
+        insecure=first_use_https,
+        ca_file=ca_file if first_use_https else None,
         method=method,
         headers=headers,
         data=data,
     )
     if status > 0:
-        return status, payload, response_headers, error, "https", True, False
+        return status, payload, response_headers, error, first_scheme, first_use_https, not first_use_https
 
     fallback_status, fallback_payload, fallback_headers, fallback_error = _elastic_request(
         host,
         port,
         path,
         timeout,
-        use_https=False,
-        insecure=False,
-        ca_file=None,
+        use_https=second_use_https,
+        insecure=second_use_https,
+        ca_file=ca_file if second_use_https else None,
         method=method,
         headers=headers,
         data=data,
     )
     if fallback_status > 0:
-        return fallback_status, fallback_payload, fallback_headers, fallback_error, "http", False, True
+        return (
+            fallback_status,
+            fallback_payload,
+            fallback_headers,
+            fallback_error,
+            second_scheme,
+            second_use_https,
+            not second_use_https,
+        )
 
-    https_error = str(error or "").strip() or "connection failed"
-    http_error = str(fallback_error or "").strip() or "connection failed"
-    combined_error = f"https={https_error}; http={http_error}"
-    return fallback_status, fallback_payload, fallback_headers, combined_error, "http", False, True
+    first_error = str(error or "").strip() or "connection failed"
+    second_error = str(fallback_error or "").strip() or "connection failed"
+    combined_error = f"{first_scheme}={first_error}; {second_scheme}={second_error}"
+    return (
+        fallback_status,
+        fallback_payload,
+        fallback_headers,
+        combined_error,
+        second_scheme,
+        second_use_https,
+        not second_use_https,
+    )
 
 
 def _load_json_dict(payload: bytes) -> dict[str, Any] | None:
@@ -1718,6 +1743,7 @@ def _audit_elastic_host(
     show_cluster: bool,
     show_users: bool,
     discover: bool,
+    preferred_scheme: str | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -1734,6 +1760,7 @@ def _audit_elastic_host(
             "/",
             timeout,
             ca_file=ca_file,
+            preferred_scheme=str(preferred_scheme or "https"),
         )
         if error and status <= 0:
             last_error = error
@@ -2739,6 +2766,7 @@ def audit_elastic_targets(
     logger: AttemptLogger | None = None,
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
+    preferred_scheme: str | None = None,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -2769,6 +2797,7 @@ def audit_elastic_targets(
                     show_cluster,
                     show_users,
                     discover,
+                    preferred_scheme,
                 ): host
                 for host in hosts
             }
@@ -2787,9 +2816,7 @@ def audit_elastic_targets(
                     failed += 1
 
                 suppress_timeout_detect_line = (
-                    suppress_timeout_status_lines
-                    and output_format == "txt"
-                    and status == "fail"
+                    suppress_timeout_status_lines and output_format == "txt" and status == "fail"
                 )
                 if not suppress_timeout_detect_line:
                     _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
@@ -2868,13 +2895,15 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
 
     try:
-        hosts = collect_scan_targets(targets)
+        target_specs = collect_scan_target_specs(targets)
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
-    if not hosts:
+    if not target_specs:
         console.error("elastic requires -t/--targets")
         return 2
+    hosts = list(dict.fromkeys(spec.host for spec in target_specs))
+    execution_groups = build_scan_execution_groups(target_specs, ports, include_scheme_in_key=True)
 
     api_token = str(getattr(args, "apitoken", "") or "").strip() or None
     username = getattr(args, "username", None)
@@ -2927,7 +2956,7 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         mode = ",".join(mode_parts)
         output_part = "format=txt" if stream_to_stdout else f"format={args.output_format} output={args.output}"
         console.info(
-            f"elastic audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
+            f"elastic audit started: hosts={len(hosts)} ports={len(execution_groups)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} mode={mode} {output_part}"
         )
 
@@ -2938,10 +2967,10 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     failed = 0
 
     try:
-        for idx, audit_port in enumerate(ports):
+        for idx, group in enumerate(execution_groups):
             part_total, part_open, part_valid, part_auth, part_failed = audit_elastic_targets(
-                hosts=hosts,
-                port=audit_port,
+                hosts=group.hosts,
+                port=group.port,
                 timeout=args.timeout,
                 retries=args.retries,
                 workers=args.workers,
@@ -2960,6 +2989,7 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
                 suppress_timeout_status_lines=not bool(args.debug),
+                preferred_scheme=group.scheme_hint,
             )
             total += part_total
             open_no_auth += part_open

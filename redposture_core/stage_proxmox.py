@@ -28,7 +28,7 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import iter_completed_with_progress
-from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 _PROXMOX_API_PREFIX = "/api2/json"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
@@ -2225,13 +2225,15 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
 
     try:
-        hosts = collect_scan_targets(targets)
+        target_specs = collect_scan_target_specs(targets)
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
-    if not hosts:
+    if not target_specs:
         console.error("proxmox requires -t/--targets")
         return 2
+    hosts = list(dict.fromkeys(spec.host for spec in target_specs))
+    execution_groups = build_scan_execution_groups(target_specs, ports, include_scheme_in_key=True)
 
     stream_to_stdout = not bool(args.output)
     discover_creds = bool(getattr(args, "discover_creds", False))
@@ -2260,7 +2262,7 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         destination = "stdout" if stream_to_stdout else str(args.output)
         proxy_mode = "none" if proxy is None else f"{proxy.scheme}://{proxy.host}:{proxy.port}"
         console.info(
-            f"proxmox audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
+            f"proxmox audit started: hosts={len(hosts)} ports={len(execution_groups)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} https={bool(args.https)} insecure={bool(args.insecure)} "
             f"discover_creds={discover_creds} nodes={show_nodes} users={show_users} add_user={bool(add_user)} "
             f"proxy={proxy_mode} output={destination}"
@@ -2273,15 +2275,18 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     failed = 0
     credential_hits = 0
     try:
-        for idx, audit_port in enumerate(ports):
+        for idx, group in enumerate(execution_groups):
+            group_use_https = bool(args.https)
+            if group.scheme_hint in {"http", "https"}:
+                group_use_https = group.scheme_hint == "https"
             part_total, part_ok, part_insufficient, part_auth_failed, part_failed, part_hits = audit_proxmox_targets(
-                hosts=hosts,
-                port=audit_port,
+                hosts=group.hosts,
+                port=group.port,
                 timeout=args.timeout,
                 retries=args.retries,
                 workers=args.workers,
                 pve_api_token=pve_api_token,
-                use_https=bool(args.https),
+                use_https=group_use_https,
                 insecure=bool(args.insecure),
                 proxy=proxy,
                 discover_creds=discover_creds,

@@ -1731,9 +1731,7 @@ def audit_clickhouse_targets(
                 for auth_line in _format_auth_attempt_detail_records(record, output_format):
                     _emit_line(out_fh, emit_line, auth_line)
 
-                suppress_timeout_status_line = suppress_timeout_status_lines and (
-                    status == "fail"
-                )
+                suppress_timeout_status_line = suppress_timeout_status_lines and (status == "fail")
 
                 if not suppress_timeout_status_line and _should_emit_status_line(record, output_format):
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))
