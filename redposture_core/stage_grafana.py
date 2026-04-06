@@ -20,7 +20,7 @@ from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import iter_completed_with_progress
+from .progress import ProgressBar, iter_completed_with_progress
 from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
@@ -1107,6 +1107,7 @@ def audit_grafana_targets(
     logger: AttemptLogger | None = None,
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
+    show_progress: bool = True,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -1133,7 +1134,7 @@ def audit_grafana_targets(
                 ): host
                 for host in hosts
             }
-            for future in iter_completed_with_progress(future_map, label="GRAFANA"):
+            for future in iter_completed_with_progress(future_map, label="GRAFANA", enabled=show_progress):
                 record = future.result()
                 record["show_datasources"] = show_datasources
                 total += 1
@@ -1296,6 +1297,11 @@ def run_grafana_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     valid = 0
     auth_required = 0
     failed = 0
+    progress_bar: ProgressBar | None = None
+    group_progress_enabled = len(execution_groups) <= 1
+    if not group_progress_enabled and stream_to_stdout and args.output_format == "txt":
+        total_targets = sum(len(group.hosts) for group in execution_groups)
+        progress_bar = ProgressBar("GRAFANA", total_targets, leave=True)
     try:
         for idx, group in enumerate(execution_groups):
             part_total, part_open, part_valid, part_auth, part_failed = audit_grafana_targets(
@@ -1315,15 +1321,21 @@ def run_grafana_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
                 suppress_timeout_status_lines=not bool(args.debug),
+                show_progress=group_progress_enabled,
             )
             total += part_total
             open_no_auth += part_open
             valid += part_valid
             auth_required += part_auth
             failed += part_failed
+            if progress_bar is not None and part_total > 0:
+                progress_bar.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process grafana output: {exc}")
         return 2
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
 
     if stream_to_stdout:
         if (

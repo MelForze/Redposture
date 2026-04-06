@@ -7,6 +7,10 @@ services:
       - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
     ports:
       - "6379:6379"
+      - "26380:6379"
+      - "26381:6379"
+      - "26382:6379"
+      - "26383:6379"
     healthcheck:
       test: ["CMD-SHELL", "redis-cli -a redis ping | grep -q PONG"]
       interval: 5s
@@ -41,6 +45,10 @@ services:
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     ports:
       - "5432:5432"
+      - "25432:5432"
+      - "25433:5432"
+      - "25434:5432"
+      - "25435:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 5s
@@ -60,6 +68,10 @@ services:
     ports:
       - "9000:9000"
       - "8123:8123"
+      - "29001:9000"
+      - "29002:9000"
+      - "29003:9000"
+      - "29004:9000"
     healthcheck:
       test: ["CMD-SHELL", "clickhouse-client --host 127.0.0.1 --port 9000 --query 'SELECT 1' >/dev/null 2>&1"]
       interval: 5s
@@ -493,6 +505,10 @@ services:
       ZOO_AUTOPURGE_PURGEINTERVAL: "1"
     ports:
       - "2181:2181"
+      - "22181:2181"
+      - "22182:2181"
+      - "22183:2181"
+      - "22184:2181"
     healthcheck:
       test: ["CMD-SHELL", "bash -ec '</dev/tcp/127.0.0.1/2181'"]
       interval: 5s
@@ -589,6 +605,10 @@ services:
       - --initial-cluster-state=new
     ports:
       - "2379:2379"
+      - "23790:2379"
+      - "23791:2379"
+      - "23792:2379"
+      - "23793:2379"
     volumes:
       - etcd-open-data:/etcd-data
     healthcheck:
@@ -760,6 +780,10 @@ services:
     entrypoint: ["/bin/sh", "/proxy/start.sh"]
     ports:
       - "26443:26443"
+      - "26444:26443"
+      - "26445:26443"
+      - "26446:26443"
+      - "26447:26443"
     volumes:
       - ./docker/kubeapi/open_proxy/start.sh:/proxy/start.sh:ro
       - ./docker/kubeapi/open_proxy/nginx.conf.template:/proxy/nginx.conf.template:ro
@@ -794,6 +818,10 @@ services:
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
     ports:
       - "9092:9092"
+      - "39092:9092"
+      - "39093:9092"
+      - "39094:9092"
+      - "39095:9092"
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1"]
       interval: 10s
@@ -957,6 +985,10 @@ services:
       - registry-open-data:/var/lib/registry
     ports:
       - "15000:5000"
+      - "15010:5000"
+      - "15011:5000"
+      - "15012:5000"
+      - "15013:5000"
     restart: unless-stopped
 
   registry-seed:
@@ -1014,6 +1046,10 @@ services:
       - ./docker/gitlab/gitlab_web_mock.py:/app/gitlab_web_mock.py:ro
     ports:
       - "18080:8080"
+      - "18081:8080"
+      - "18082:8080"
+      - "18083:8080"
+      - "18084:8080"
     restart: unless-stopped
 
   nexus:
@@ -1142,11 +1178,71 @@ services:
       - "3000:3000"
     restart: unless-stopped
 
+  grafana-2:
+    image: grafana/grafana-oss:latest
+    container_name: redposture-lab-grafana-2
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "13001:3000"
+    restart: unless-stopped
+
+  grafana-3:
+    image: grafana/grafana-oss:latest
+    container_name: redposture-lab-grafana-3
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "13002:3000"
+    restart: unless-stopped
+
+  grafana-4:
+    image: grafana/grafana-oss:latest
+    container_name: redposture-lab-grafana-4
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "13003:3000"
+    restart: unless-stopped
+
+  grafana-5:
+    image: grafana/grafana-oss:latest
+    container_name: redposture-lab-grafana-5
+    environment:
+      GF_SECURITY_ADMIN_USER: "admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "13004:3000"
+    restart: unless-stopped
+
   qdrant:
     image: qdrant/qdrant:v1.15.5
     container_name: redposture-lab-qdrant
     ports:
       - "6333:6333"
+      - "26333:6333"
+      - "26334:6333"
+      - "26335:6333"
+      - "26336:6333"
     volumes:
       - qdrant-data:/qdrant/storage
     extra_hosts:
@@ -1214,6 +1310,10 @@ services:
       - ./docker/elastic/elastic_api_mock.py:/mock/elastic_api_mock.py:ro
     ports:
       - "19200:9200"
+      - "19202:9200"
+      - "19203:9200"
+      - "19204:9200"
+      - "19205:9200"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9200/ >/dev/null 2>&1"]
       interval: 5s
@@ -1262,6 +1362,10 @@ services:
       - -enable-local-script-checks=true
     ports:
       - "8500:8500"
+      - "8501:8500"
+      - "8502:8500"
+      - "8503:8500"
+      - "8504:8500"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -1452,6 +1556,10 @@ services:
       - ./docker/kubeapi/open_mock/key.pem:/certs/key.pem:ro
     ports:
       - "18006:8006"
+      - "18061:8006"
+      - "18062:8006"
+      - "18063:8006"
+      - "18064:8006"
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - --no-check-certificate https://127.0.0.1:8006/healthz >/dev/null || exit 1"]
       interval: 5s

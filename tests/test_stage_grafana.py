@@ -861,3 +861,109 @@ def test_audit_grafana_targets_and_run_stage_paths(
     fake_console.errors.clear()
     assert run_grafana_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
     assert any("failed to process grafana output" in msg for msg in fake_console.errors)
+
+
+def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeConsole:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+            self.errors: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def info(self, _message: str) -> None:
+            return
+
+        def plain(self, _message: str, color: str | None = None) -> None:
+            _ = color
+            return
+
+        def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+    fake_console = _FakeConsole()
+    monkeypatch.setattr(grafana_stage, "Console", lambda debug=False: fake_console)
+
+    monkeypatch.setattr(grafana_stage, "collect_scan_ports", lambda *_args, **_kwargs: [3000])
+    monkeypatch.setattr(
+        grafana_stage,
+        "collect_scan_target_specs",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(host="host-a", scheme="http", explicit_port=3100),
+            SimpleNamespace(host="host-b", scheme="http", explicit_port=3200),
+            SimpleNamespace(host="host-c", scheme="http", explicit_port=3200),
+        ],
+    )
+    monkeypatch.setattr(
+        grafana_stage,
+        "build_scan_execution_groups",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(hosts=["host-a"], port=3100),
+            SimpleNamespace(hosts=["host-b", "host-c"], port=3200),
+        ],
+    )
+
+    seen_show_progress: list[bool] = []
+
+    def _fake_audit_grafana_targets(*_args: object, **kwargs: object) -> tuple[int, int, int, int, int]:
+        seen_show_progress.append(bool(kwargs.get("show_progress")))
+        hosts = list(kwargs.get("hosts") or [])
+        return len(hosts), 0, 0, len(hosts), 0
+
+    monkeypatch.setattr(grafana_stage, "audit_grafana_targets", _fake_audit_grafana_targets)
+
+    created_totals: list[int] = []
+    advanced_steps: list[int] = []
+    closed_count = 0
+
+    class _FakeProgressBar:
+        def __init__(
+            self,
+            _label: str,
+            total: int,
+            *,
+            enabled: bool = True,
+            stream=None,
+            leave: bool = True,
+        ) -> None:
+            _ = (enabled, stream, leave)
+            created_totals.append(total)
+
+        def advance(self, step: int = 1) -> None:
+            advanced_steps.append(step)
+
+        def close(self) -> None:
+            nonlocal closed_count
+            closed_count += 1
+
+    monkeypatch.setattr(grafana_stage, "ProgressBar", _FakeProgressBar)
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=False,
+        port=3000,
+        ports=None,
+        targets="host-a,host-b,host-c",
+        hosts=None,
+        hosts_file=None,
+        ssrf_target=None,
+        ssrf_port=None,
+        ssrf_path=None,
+        show_datasources=False,
+        output=None,
+        output_format="txt",
+        workers=2,
+    )
+    rc = run_grafana_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+
+    assert rc == 0
+    assert fake_console.errors == []
+    assert seen_show_progress == [False, False]
+    assert created_totals == [3]
+    assert advanced_steps == [1, 2]
+    assert closed_count == 1
