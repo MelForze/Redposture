@@ -20,7 +20,7 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import iter_completed_with_progress
-from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
@@ -1125,9 +1125,7 @@ def audit_gitlab_targets(
                     failed += 1
 
                 suppress_timeout_status_line = (
-                    suppress_timeout_status_lines
-                    and output_format == "txt"
-                    and status == "fail"
+                    suppress_timeout_status_lines and output_format == "txt" and status == "fail"
                 )
                 if not suppress_timeout_status_line:
                     _emit_line(out_fh, emit_line, _format_record(record, output_format))
@@ -1177,14 +1175,16 @@ def run_gitlab_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
 
     try:
-        hosts = collect_scan_targets(targets)
+        target_specs = collect_scan_target_specs(targets)
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
 
-    if not hosts:
+    if not target_specs:
         console.error("gitlab requires -t/--targets")
         return 2
+    hosts = list(dict.fromkeys(spec.host for spec in target_specs))
+    execution_groups = build_scan_execution_groups(target_specs, ports, include_scheme_in_key=True)
 
     project_filters = _normalize_project_filters(getattr(args, "project", None))
     clone = bool(getattr(args, "clone", False))
@@ -1217,7 +1217,7 @@ def run_gitlab_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if args.https:
             mode_parts.append("https")
         console.info(
-            f"gitlab audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
+            f"gitlab audit started: hosts={len(hosts)} ports={len(execution_groups)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} mode={'+'.join(mode_parts)} format=txt"
         )
 
@@ -1225,14 +1225,17 @@ def run_gitlab_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     detected = 0
     failed = 0
     try:
-        for idx, audit_port in enumerate(ports):
+        for idx, group in enumerate(execution_groups):
+            group_use_https = bool(getattr(args, "https", False))
+            if group.scheme_hint in {"http", "https"}:
+                group_use_https = group.scheme_hint == "https"
             part_total, part_detected, part_failed = audit_gitlab_targets(
-                hosts=hosts,
-                port=audit_port,
+                hosts=group.hosts,
+                port=group.port,
                 timeout=args.timeout,
                 retries=args.retries,
                 workers=args.workers,
-                use_https=bool(getattr(args, "https", False)),
+                use_https=group_use_https,
                 token=str(args.token).strip() if getattr(args, "token", None) else None,
                 project_filters=project_filters,
                 clone=clone,

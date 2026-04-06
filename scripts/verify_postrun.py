@@ -26,31 +26,121 @@ _EXPECTED_MODULES = (
     "proxmox",
 )
 
+_EXPECTED_LABELS = (
+    "exporters_scan",
+    "exporters_collect",
+    "exporters_trigger",
+    "exporters_scan_url_http",
+    "exporters_scan_url_https_reject",
+    "exporters_collect_url_http",
+    "exporters_collect_url_https_reject",
+    "exporters_trigger_url_http",
+    "exporters_trigger_url_https_reject",
+    "registry_open",
+    "registry_auth",
+    "registry_harbor",
+    "registry_gitlab",
+    "registry_nexus",
+    "registry_url_http",
+    "registry_url_https_reject",
+    "grafana_default",
+    "grafana_url_http",
+    "grafana_url_https_reject",
+    "grafana_ssrf_edge",
+    "gitlab_public",
+    "gitlab_analyst",
+    "gitlab_url_override_http",
+    "consul_open",
+    "consul_acl_read",
+    "consul_acl_mgmt",
+    "consul_url_hint_http",
+    "kubeapi_open",
+    "kubeapi_auditor",
+    "kubeapi_admin",
+    "kubeapi_url_override_https",
+    "postgres_default",
+    "clickhouse_native_open",
+    "clickhouse_http_open",
+    "clickhouse_native_auth",
+    "clickhouse_http_auth",
+    "redis_default",
+    "etcd_open",
+    "etcd_auth",
+    "etcd_url_http",
+    "etcd_url_https_reject",
+    "qdrant_default",
+    "qdrant_url_http",
+    "qdrant_url_https_reject",
+    "elastic_open",
+    "elastic_auth",
+    "elastic_url_hint_https",
+    "elastic_plugins_edge",
+    "kafka_open",
+    "kafka_auth",
+    "zookeeper_default",
+    "proxmox_audit",
+    "proxmox_admin",
+    "proxmox_url_override_https",
+)
+
 
 def _parse_status_file(path: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     with path.open(encoding="utf-8") as fh:
         header = fh.readline().strip()
-        if header != "module\tlabel\texit_code\tjson_path\tlog_path":
+        if header not in {
+            "module\tlabel\texit_code\tjson_path\tlog_path",
+            "module\tlabel\texpected_exit\texit_code\tjson_path\tlog_path",
+        }:
             raise SystemExit("matrix status header is invalid")
+        has_expected_exit = header.startswith("module\tlabel\texpected_exit\t")
         for raw in fh:
             raw = raw.rstrip("\n")
             if not raw:
                 continue
             parts = raw.split("\t")
-            if len(parts) != 5:
+            if has_expected_exit and len(parts) != 6:
                 raise SystemExit(f"invalid matrix status row: {raw}")
-            module, label, exit_code, json_path, log_path = parts
+            if not has_expected_exit and len(parts) != 5:
+                raise SystemExit(f"invalid matrix status row: {raw}")
+            if has_expected_exit:
+                module, label, expected_exit, exit_code, json_path, log_path = parts
+            else:
+                module, label, exit_code, json_path, log_path = parts
+                expected_exit = "0"
             rows.append(
                 {
                     "module": module,
                     "label": label,
+                    "expected_exit": expected_exit,
                     "exit_code": exit_code,
                     "json_path": json_path,
                     "log_path": log_path,
                 }
             )
     return rows
+
+
+def _validate_expected_exits(rows: list[dict[str, str]]) -> None:
+    for row in rows:
+        label = row["label"]
+        try:
+            expected_exit = int(row["expected_exit"])
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(f"invalid expected_exit for label '{label}': {row['expected_exit']}") from exc
+        try:
+            exit_code = int(row["exit_code"])
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(f"invalid exit_code for label '{label}': {row['exit_code']}") from exc
+        if exit_code != expected_exit:
+            raise SystemExit(f"label '{label}' exit mismatch: expected={expected_exit} actual={exit_code}")
+
+
+def _validate_expected_labels(rows: list[dict[str, str]]) -> None:
+    seen_labels = {row["label"] for row in rows}
+    missing = sorted(label for label in _EXPECTED_LABELS if label not in seen_labels)
+    if missing:
+        raise SystemExit(f"matrix status is missing expected labels: {', '.join(missing)}")
 
 
 def _validate_json_artifacts(rows: list[dict[str, str]]) -> Counter[str]:
@@ -142,6 +232,9 @@ def main() -> int:
     if not rows:
         raise SystemExit("matrix status file is empty")
 
+    _validate_expected_exits(rows)
+    _validate_expected_labels(rows)
+
     successful_modules = _validate_json_artifacts(rows)
     if not successful_modules:
         raise SystemExit("no successful runs were recorded")
@@ -161,6 +254,7 @@ def main() -> int:
         "total_rows": len(rows),
         "successful_modules": dict(successful_modules),
         "expected_modules": list(_EXPECTED_MODULES),
+        "expected_labels": list(_EXPECTED_LABELS),
     }
     (checks_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))

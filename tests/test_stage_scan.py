@@ -5,6 +5,7 @@ import argparse
 import pytest
 
 from redposture_core.stage_scan import run_scan_stage
+from redposture_core.utils import ScanTargetSpec
 
 
 def _args(**overrides: object) -> argparse.Namespace:
@@ -41,7 +42,7 @@ def test_run_scan_stage_handles_target_parse_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(
-        "redposture_core.stage_scan.collect_scan_targets",
+        "redposture_core.stage_scan.collect_scan_target_specs",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad targets")),
     )
 
@@ -53,7 +54,10 @@ def test_run_scan_stage_handles_target_parse_error(
 def test_run_scan_stage_handles_ports_parse_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.collect_scan_target_specs",
+        lambda *_args, **_kwargs: [ScanTargetSpec(host="127.0.0.1")],
+    )
     monkeypatch.setattr(
         "redposture_core.stage_scan.collect_scan_ports",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad ports")),
@@ -67,7 +71,10 @@ def test_run_scan_stage_handles_ports_parse_error(
 def test_run_scan_stage_handles_profiles_load_error(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.collect_scan_target_specs",
+        lambda *_args, **_kwargs: [ScanTargetSpec(host="127.0.0.1")],
+    )
     monkeypatch.setattr("redposture_core.stage_scan.collect_scan_ports", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         "redposture_core.stage_scan.load_profiles",
@@ -80,7 +87,7 @@ def test_run_scan_stage_handles_profiles_load_error(
 
 
 def test_run_scan_stage_requires_hosts(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_targets", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_target_specs", lambda *_args, **_kwargs: [])
     monkeypatch.setattr("redposture_core.stage_scan.collect_scan_ports", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         "redposture_core.stage_scan.load_profiles", lambda *_args, **_kwargs: {"discovery_exporters": []}
@@ -96,7 +103,10 @@ def test_run_scan_stage_streams_txt_and_passes_custom_ports(
 ) -> None:
     captured: dict[str, object] = {}
 
-    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.collect_scan_target_specs",
+        lambda *_args, **_kwargs: [ScanTargetSpec(host="127.0.0.1")],
+    )
     monkeypatch.setattr("redposture_core.stage_scan.collect_scan_ports", lambda *_args, **_kwargs: [9100])
     monkeypatch.setattr(
         "redposture_core.stage_scan.load_profiles", lambda *_args, **_kwargs: {"discovery_exporters": []}
@@ -124,7 +134,10 @@ def test_run_scan_stage_streams_txt_and_passes_custom_ports(
 def test_run_scan_stage_prints_json_lines_as_is(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.collect_scan_target_specs",
+        lambda *_args, **_kwargs: [ScanTargetSpec(host="127.0.0.1")],
+    )
     monkeypatch.setattr("redposture_core.stage_scan.collect_scan_ports", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         "redposture_core.stage_scan.load_profiles", lambda *_args, **_kwargs: {"discovery_exporters": []}
@@ -146,7 +159,10 @@ def test_run_scan_stage_prints_json_lines_as_is(
 def test_run_scan_stage_output_mode_reports_per_host_summary(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_targets", lambda *_args, **_kwargs: ["h1", "h2"])
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.collect_scan_target_specs",
+        lambda *_args, **_kwargs: [ScanTargetSpec(host="h1"), ScanTargetSpec(host="h2")],
+    )
     monkeypatch.setattr("redposture_core.stage_scan.collect_scan_ports", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         "redposture_core.stage_scan.load_profiles", lambda *_args, **_kwargs: {"discovery_exporters": []}

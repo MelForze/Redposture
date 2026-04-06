@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from redposture_core.utils import (
+    ScanExecutionGroup,
+    ScanTargetSpec,
+    build_scan_execution_groups,
     collect_scan_ports,
+    collect_scan_target_specs,
     collect_scan_targets,
     normalize_ip_literal,
     normalize_scan_host,
@@ -48,6 +52,64 @@ def test_collect_scan_targets_rejects_invalid_cidr() -> None:
 def test_collect_scan_targets_rejects_non_network_slash_tokens() -> None:
     with pytest.raises(ValueError, match="invalid network target"):
         collect_scan_targets("not_a_host/24")
+
+
+def test_collect_scan_target_specs_parses_http_and_https_urls() -> None:
+    specs = collect_scan_target_specs("http://10.0.0.1:8500/v1/status/leader,https://api.local:9200/_cat/health")
+    assert specs == [
+        ScanTargetSpec(host="10.0.0.1", scheme="http", explicit_port=8500),
+        ScanTargetSpec(host="api.local", scheme="https", explicit_port=9200),
+    ]
+
+
+def test_collect_scan_target_specs_ignores_url_path_and_query() -> None:
+    specs = collect_scan_target_specs("http://grafana.local:3000/login?next=%2F")
+    assert specs == [ScanTargetSpec(host="grafana.local", scheme="http", explicit_port=3000)]
+
+
+def test_collect_scan_target_specs_handles_mixed_hosts_and_file(tmp_path: Path) -> None:
+    hosts_file = tmp_path / "targets.txt"
+    hosts_file.write_text(
+        "http://10.0.0.2:9200/_cluster/health\n10.0.0.3\n10.0.1.0/30\n",
+        encoding="utf-8",
+    )
+    specs = collect_scan_target_specs(f"10.0.0.1,{hosts_file}")
+    assert specs == [
+        ScanTargetSpec(host="10.0.0.1", scheme=None, explicit_port=None),
+        ScanTargetSpec(host="10.0.0.2", scheme="http", explicit_port=9200),
+        ScanTargetSpec(host="10.0.0.3", scheme=None, explicit_port=None),
+        ScanTargetSpec(host="10.0.1.1", scheme=None, explicit_port=None),
+        ScanTargetSpec(host="10.0.1.2", scheme=None, explicit_port=None),
+    ]
+
+
+def test_collect_scan_target_specs_rejects_unsupported_url_scheme() -> None:
+    with pytest.raises(ValueError, match="unsupported target URL scheme"):
+        collect_scan_target_specs("redis://10.0.0.1:6379")
+
+
+def test_build_scan_execution_groups_url_port_overrides_matrix() -> None:
+    specs = [
+        ScanTargetSpec(host="10.0.0.1", scheme=None, explicit_port=None),
+        ScanTargetSpec(host="10.0.0.2", scheme="http", explicit_port=8500),
+    ]
+    groups = build_scan_execution_groups(specs, [8500, 8501], include_scheme_in_key=False)
+    assert groups == [
+        ScanExecutionGroup(hosts=["10.0.0.1", "10.0.0.2"], port=8500, scheme_hint=None),
+        ScanExecutionGroup(hosts=["10.0.0.1"], port=8501, scheme_hint=None),
+    ]
+
+
+def test_build_scan_execution_groups_can_group_by_scheme_hint() -> None:
+    specs = [
+        ScanTargetSpec(host="gitlab-http.local", scheme="http", explicit_port=8080),
+        ScanTargetSpec(host="gitlab-https.local", scheme="https", explicit_port=8080),
+    ]
+    groups = build_scan_execution_groups(specs, [80], include_scheme_in_key=True)
+    assert groups == [
+        ScanExecutionGroup(hosts=["gitlab-http.local"], port=8080, scheme_hint="http"),
+        ScanExecutionGroup(hosts=["gitlab-https.local"], port=8080, scheme_hint="https"),
+    ]
 
 
 def test_collect_scan_ports_deduplicates_and_expands_ranges() -> None:
