@@ -338,6 +338,62 @@ def test_audit_zookeeper_valid_credentials_when_auth_was_required(monkeypatch) -
     assert record["auth_probe_trace"] == ["/:noauth"]
 
 
+def test_audit_zookeeper_valid_credentials_after_retryable_root_query(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls = {"auth": 0}
+
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+            self._authed = False
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def auth_digest(self, username: str, password: str) -> tuple[bool, str | None]:
+            calls["auth"] += 1
+            assert username == "admin"
+            assert password == "admin"
+            self._authed = True
+            return True, None
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            if not self._authed:
+                return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+            if path == "/":
+                return ["secure"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
+            if path == "/secure":
+                return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+            return None, _ZK_ERR_NONODE, None
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return b"ok", _ZK_ERR_OK, {"data_length": 2, "num_children": 0}
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username="admin",
+        password="admin",
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert calls["auth"] == 1
+    assert record["status"] == "valid_credentials"
+    assert record["provided_credentials_ok"] is True
+    assert record["auth_required"] is True
+    assert record["auth_inference_source"] == "probe_retryable_124"
+
+
 def test_audit_zookeeper_infers_auth_required_true_from_anonymous_probes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     class _FakeZkClient:
         def __init__(self, host: str, port: int, timeout: float) -> None:
@@ -564,6 +620,60 @@ def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(mo
     assert record["auth_required"] is False
     assert record["provided_credentials_ok"] is False
     assert "authentication failed" in str(record["error"]).lower()
+    line = _format_record(record, "txt")
+    assert "[-] admin:wrong" in line
+
+
+def test_audit_zookeeper_auth_eof_with_required_auth_is_reported_as_auth_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"auth": 0}
+
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def auth_digest(self, username: str, password: str) -> tuple[bool, str | None]:
+            calls["auth"] += 1
+            assert username == "admin"
+            assert password == "wrong"
+            return False, "unexpected EOF"
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            if path == "/":
+                return None, _ZK_ERR_NOAUTH, None
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
+            _ = path
+            return None, _ZK_ERR_NONODE, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username="admin",
+        password="wrong",
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert calls["auth"] == 1
+    assert record["status"] == "auth_required"
+    assert record["auth_required"] is True
+    assert record["provided_credentials_ok"] is False
+    assert str(record["error"]).lower().startswith("authentication failed:")
     line = _format_record(record, "txt")
     assert "[-] admin:wrong" in line
 
@@ -1022,3 +1132,64 @@ def test_run_zookeeper_stage_validation_and_oserror(monkeypatch: pytest.MonkeyPa
     fake_console.errors.clear()
     assert run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
     assert any("failed to process zookeeper output" in msg for msg in fake_console.errors)
+
+
+def test_run_zookeeper_stage_trims_and_forwards_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeConsole:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+            self.errors: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def warn(self, _message: str) -> None:
+            return
+
+        def info(self, _message: str) -> None:
+            return
+
+        def plain(self, _message: str, color: str | None = None) -> None:
+            _ = color
+            return
+
+        def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+    captured: dict[str, str | None] = {}
+    fake_console = _FakeConsole()
+    monkeypatch.setattr("redposture_core.stage_zookeeper.Console", lambda debug=False: fake_console)
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_args, **_kwargs: [2181])
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+
+    def _fake_audit(*_args, **kwargs):
+        captured["username"] = kwargs.get("username")
+        captured["password"] = kwargs.get("password")
+        return (1, 0, 0, 1, 0)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", _fake_audit)
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        max_znodes=100,
+        username=" admin ",
+        password=" secret ",
+        port=2181,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        show_znodes=False,
+        dump=False,
+        znode=None,
+        output=None,
+        output_format="txt",
+        workers=1,
+    )
+
+    rc = run_zookeeper_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    assert captured == {"username": "admin", "password": "secret"}
+    assert fake_console.errors == []
