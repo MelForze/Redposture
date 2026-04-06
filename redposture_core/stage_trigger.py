@@ -17,7 +17,7 @@ from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import scan_exporters_and_trigger
 from .servers import RunningServer
-from .utils import collect_scan_ports, collect_scan_targets, normalize_ip_literal, normalize_scan_host, utc_now_iso
+from .utils import collect_scan_ports, collect_scan_target_specs, normalize_ip_literal, normalize_scan_host, utc_now_iso
 
 _TRIGGER_EXPORTER_DISPLAY_NAMES = {
     "blackbox_exporter": "Blackbox Exporter",
@@ -723,7 +723,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
 
     try:
-        hosts = collect_scan_targets(targets)
+        target_specs = collect_scan_target_specs(targets)
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
@@ -741,8 +741,11 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
     postgres_auth_modules = _parse_postgres_auth_modules(getattr(args, "postgres_auth_modules", None))
 
-    if not hosts:
+    if not target_specs:
         console.error("trigger requires -t/--targets")
+        return 2
+    if any(spec.scheme == "https" for spec in target_specs):
+        console.error("exporters trigger accepts only http:// URL targets for -t/--targets")
         return 2
 
     callback_targets: list[str] = []
@@ -790,17 +793,44 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             "trigger exporters filter=" + ",".join(sorted(str(item.get("name") or "") for item in trigger_exporters))
         )
 
-    if custom_ports:
-        trigger_exporters = _override_trigger_exporter_ports(trigger_exporters, custom_ports)
-        console.debug("trigger custom ports=" + ",".join(str(int(port)) for port in dict.fromkeys(custom_ports)))
+    plain_hosts: list[str] = []
+    explicit_port_groups: dict[int, list[str]] = {}
+    for spec in target_specs:
+        if spec.explicit_port is None:
+            if spec.host not in plain_hosts:
+                plain_hosts.append(spec.host)
+            continue
+        port_key = int(spec.explicit_port)
+        explicit_hosts = explicit_port_groups.setdefault(port_key, [])
+        if spec.host not in explicit_hosts:
+            explicit_hosts.append(spec.host)
+
+    run_batches: list[tuple[list[str], list[dict[str, Any]]]] = []
+    if plain_hosts:
+        plain_trigger_exporters = trigger_exporters
+        if custom_ports:
+            plain_trigger_exporters = _override_trigger_exporter_ports(plain_trigger_exporters, custom_ports)
+            console.debug("trigger custom ports=" + ",".join(str(int(port)) for port in dict.fromkeys(custom_ports)))
+        run_batches.append((plain_hosts, plain_trigger_exporters))
+    for explicit_port, explicit_hosts in explicit_port_groups.items():
+        batch_exporters = _override_trigger_exporter_ports(trigger_exporters, [explicit_port])
+        run_batches.append((explicit_hosts, batch_exporters))
+        console.debug("trigger target URL explicit port=" + str(explicit_port) + " hosts=" + str(len(explicit_hosts)))
+    if not run_batches:
+        console.error("trigger requires at least one valid target")
+        return 2
 
     if args.with_listen:
-        trigger_exporters = _patch_trigger_exporters_for_with_listen(trigger_exporters, args)
+        patched_batches: list[tuple[list[str], list[dict[str, Any]]]] = []
+        for batch_hosts, batch_exporters in run_batches:
+            patched_batches.append((batch_hosts, _patch_trigger_exporters_for_with_listen(batch_exporters, args)))
+        run_batches = patched_batches
+        check_exporters = run_batches[0][1]
         proxmox_tls_enabled = bool(getattr(args, "proxmox_tls", False))
         proxmox_requires_tls = any(
             str(item.get("name") or "").strip().lower() == "proxmox_exporter"
             and str(item.get("trigger_path") or "").strip() == "/pve"
-            for item in trigger_exporters
+            for item in check_exporters
         )
         if proxmox_requires_tls and not proxmox_tls_enabled:
             console.warn(
@@ -808,7 +838,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 "enable --proxmox-tls to capture proxmox callbacks"
             )
         if args.debug:
-            for item in trigger_exporters:
+            for item in check_exporters:
                 query = str(item.get("trigger_query") or "").strip()
                 if query:
                     console.debug(
@@ -821,17 +851,18 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     show_trigger_info = output_format == "txt" or not stream_to_stdout
 
     if not args.with_listen:
-        _run_trigger_requests(
-            args,
-            logger,
-            console,
-            hosts,
-            callback_targets,
-            trigger_exporters,
-            show_trigger_info=show_trigger_info,
-            log_trigger_attempts=output_format == "txt" or not stream_to_stdout,
-            record_sink=trigger_records if output_format == "json" else None,
-        )
+        for batch_hosts, batch_exporters in run_batches:
+            _run_trigger_requests(
+                args,
+                logger,
+                console,
+                batch_hosts,
+                callback_targets,
+                batch_exporters,
+                show_trigger_info=show_trigger_info,
+                log_trigger_attempts=output_format == "txt" or not stream_to_stdout,
+                record_sink=trigger_records if output_format == "json" else None,
+            )
         if output_format == "json":
             try:
                 _write_trigger_json_records(output_path, trigger_records)
@@ -849,17 +880,18 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             deduplicate=not args.debug,
         )
         running, temp_cert_dir = start_listeners_for_trigger(args, logger, console)
-        _run_trigger_requests(
-            args,
-            logger,
-            console,
-            hosts,
-            callback_targets,
-            trigger_exporters,
-            show_trigger_info=show_trigger_info,
-            log_trigger_attempts=False,
-            record_sink=trigger_records if output_format == "json" else None,
-        )
+        for batch_hosts, batch_exporters in run_batches:
+            _run_trigger_requests(
+                args,
+                logger,
+                console,
+                batch_hosts,
+                callback_targets,
+                batch_exporters,
+                show_trigger_info=show_trigger_info,
+                log_trigger_attempts=False,
+                record_sink=trigger_records if output_format == "json" else None,
+            )
         if getattr(args, "check_credentials", False):
             _run_trigger_credential_checks(args, logger, console)
         if output_format == "json":

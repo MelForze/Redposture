@@ -262,7 +262,10 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         dest="targets",
         default=None,
         metavar="targets",
-        help="Targets list: dns/ip/cidr/file (comma-separated). Files may contain dns/ip/cidr per line.",
+        help=(
+            "Targets list: dns/ip/cidr/http(s)://host[:port]/file (comma-separated). "
+            "URL path/query are ignored for target resolution. Files may contain targets per line."
+        ),
     )
     parser.add_argument(
         "--timeout",

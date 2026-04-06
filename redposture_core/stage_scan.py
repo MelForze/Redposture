@@ -9,7 +9,7 @@ from .console import Console
 from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import scan_exporter_presence
-from .utils import collect_scan_ports, collect_scan_targets
+from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs
 
 
 def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None) -> int:
@@ -28,10 +28,14 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         targets = f"{targets},{hosts_file}" if targets else hosts_file
 
     try:
-        hosts = collect_scan_targets(targets)
+        target_specs = collect_scan_target_specs(targets)
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
+    if any(spec.scheme == "https" for spec in target_specs):
+        console.error("exporters scan accepts only http:// URL targets for -t/--targets")
+        return 2
+    hosts = list(dict.fromkeys(spec.host for spec in target_specs))
 
     try:
         custom_ports = collect_scan_ports(getattr(args, "ports", None))
@@ -45,7 +49,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         console.error(f"failed to load profiles: {exc}")
         return 2
 
-    if not hosts:
+    if not target_specs:
         console.error("scan requires -t/--targets")
         return 2
 
@@ -108,22 +112,72 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
             f"format={args.output_format} output={args.output}{ports_hint}"
         )
 
-    try:
-        checks, found, found_by_host = scan_exporter_presence(
-            hosts=hosts,
-            timeout=args.timeout,
-            output_path=args.output,
-            output_format=args.output_format,
-            logger=logger if args.debug else None,
-            emit_line=emit_line,
-            workers=args.workers,
-            retries=args.retries,
-            discovery_exporters=profiles["discovery_exporters"],
-            custom_ports=custom_ports or None,
+    has_explicit_port_targets = any(spec.explicit_port is not None for spec in target_specs)
+    if not has_explicit_port_targets:
+        try:
+            checks, found, found_by_host = scan_exporter_presence(
+                hosts=hosts,
+                timeout=args.timeout,
+                output_path=args.output,
+                output_format=args.output_format,
+                logger=logger if args.debug else None,
+                emit_line=emit_line,
+                workers=args.workers,
+                retries=args.retries,
+                discovery_exporters=profiles["discovery_exporters"],
+                custom_ports=custom_ports or None,
+            )
+        except OSError as exc:
+            console.error(f"failed to process scan output: {exc}")
+            return 2
+    else:
+        default_ports = list(
+            dict.fromkeys(
+                int(item.get("port")) for item in profiles["discovery_exporters"] if item.get("port") is not None
+            )
         )
-    except OSError as exc:
-        console.error(f"failed to process scan output: {exc}")
-        return 2
+        execution_groups = build_scan_execution_groups(
+            target_specs,
+            custom_ports or default_ports,
+            include_scheme_in_key=False,
+        )
+        checks = 0
+        found = 0
+        found_by_host: dict[str, list[dict[str, object]]] = {host: [] for host in hosts}
+        seen_hits: dict[str, set[tuple[str, int]]] = {host: set() for host in hosts}
+        try:
+            for idx, group in enumerate(execution_groups):
+                part_checks, part_found, part_found_by_host = scan_exporter_presence(
+                    hosts=group.hosts,
+                    timeout=args.timeout,
+                    output_path=args.output,
+                    output_format=args.output_format,
+                    logger=logger if args.debug else None,
+                    emit_line=emit_line,
+                    workers=args.workers,
+                    retries=args.retries,
+                    discovery_exporters=profiles["discovery_exporters"],
+                    custom_ports=[group.port],
+                    emit_summary=False,
+                    output_mode="a" if idx > 0 else "w",
+                )
+                checks += part_checks
+                found += part_found
+                for host, hits in part_found_by_host.items():
+                    for hit in hits:
+                        exporter = str(hit.get("exporter") or "")
+                        try:
+                            hit_port = int(hit.get("port"))
+                        except (TypeError, ValueError):
+                            continue
+                        hit_key = (exporter, hit_port)
+                        if hit_key in seen_hits.setdefault(host, set()):
+                            continue
+                        seen_hits[host].add(hit_key)
+                        found_by_host.setdefault(host, []).append(hit)
+        except OSError as exc:
+            console.error(f"failed to process scan output: {exc}")
+            return 2
 
     if stream_to_stdout:
         if args.output_format == "txt":

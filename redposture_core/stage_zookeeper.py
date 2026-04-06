@@ -649,8 +649,8 @@ def _audit_zookeeper_host(
                 time.sleep(_retry_delay(attempt))
                 continue
 
-            inferred_auth_required, auth_inference_source, auth_probe_trace = _infer_auth_required_from_anonymous_probes(
-                host, port, timeout, anonymous_root_err, query_znode
+            inferred_auth_required, auth_inference_source, auth_probe_trace = (
+                _infer_auth_required_from_anonymous_probes(host, port, timeout, anonymous_root_err, query_znode)
             )
 
             if provided_credentials and username and password:

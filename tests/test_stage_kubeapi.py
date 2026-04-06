@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -783,7 +784,11 @@ def test_run_kubeapi_stage_warns_on_token_override_and_all_unreachable(monkeypat
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kube, "Console", _ConsoleCapture)
     monkeypatch.setattr(kube, "collect_scan_ports", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(kube, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+    monkeypatch.setattr(
+        kube,
+        "collect_scan_target_specs",
+        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
+    )
     captured: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
@@ -806,7 +811,11 @@ def test_run_kubeapi_stage_debug_flow_passes_logger_and_append_output(monkeypatc
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kube, "Console", _ConsoleCapture)
     monkeypatch.setattr(kube, "collect_scan_ports", lambda *_args, **_kwargs: [16443, 26443])
-    monkeypatch.setattr(kube, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+    monkeypatch.setattr(
+        kube,
+        "collect_scan_target_specs",
+        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
+    )
 
     captured: list[dict[str, object]] = []
 
@@ -833,8 +842,15 @@ def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.Monk
     monkeypatch.setattr(kube, "collect_scan_ports", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(
         kube,
-        "collect_scan_targets",
-        lambda targets: ["127.0.0.1"] if "hosts.txt" not in str(targets) else ["127.0.0.1", "127.0.0.2"],
+        "collect_scan_target_specs",
+        lambda targets: (
+            [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)]
+            if "hosts.txt" not in str(targets)
+            else [
+                SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None),
+                SimpleNamespace(host="127.0.0.2", scheme=None, explicit_port=None),
+            ]
+        ),
     )
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
