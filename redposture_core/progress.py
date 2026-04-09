@@ -87,6 +87,18 @@ class ProgressBar:
                 return
             self._render()
 
+    def set_total(self, total: int) -> None:
+        """Adjust progress total while preserving current done counter."""
+        new_total = max(0, int(total))
+        if not self._enabled:
+            self._total = max(self._done, new_total)
+            return
+        with self._lock:
+            self._total = max(self._done, new_total)
+            if not self._leave and self._done >= self._total:
+                return
+            self._render()
+
     def close(self) -> None:
         if not self._enabled:
             self._unregister_active_progress()

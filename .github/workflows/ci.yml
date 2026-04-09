@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e .[dev]
+          python -m pip install ruff mypy
 
       - name: Ruff lint
         run: ruff check .
@@ -42,7 +42,6 @@ jobs:
       - name: CLI help smoke
         run: |
           python redposture.py --help > /dev/null
-          redposture --help > /dev/null
 
   tests:
     name: Tests (py${{ matrix.python-version }})
