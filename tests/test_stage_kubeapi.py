@@ -884,3 +884,178 @@ def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.Monk
         for level, msg in _ConsoleCapture.instances[-1].messages
         if level == "error"
     )
+
+
+def test_audit_kubeapi_host_debug_stage_telemetry_and_passive_capabilities(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        kube,
+        "_api_get_json",
+        lambda _host, _port, path, _timeout, **_kwargs: (
+            200,
+            {"gitVersion": "v1.31.6"} if path == "/version" else {"versions": ["v1"]},
+            {},
+            None,
+        ),
+    )
+    monkeypatch.setattr(kube, "_list_namespaces", lambda *_args, **_kwargs: (["default"], 200, None))
+
+    record = kube._audit_kubeapi_host(
+        "127.0.0.1",
+        16443,
+        1.0,
+        0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        token=None,
+        username=None,
+        password=None,
+        show_namespaces=False,
+        show_pods=False,
+        show_secrets=False,
+        namespace_filters=[],
+        exec_pod=None,
+        exec_command=None,
+        debug=True,
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert record["can_list_namespaces"] is True
+    assert record["can_list_pods"] is None
+    assert record["can_list_secrets"] is None
+    assert record["can_exec_pod"] is None
+    assert isinstance(record.get("stages"), list)
+    stage_names = [str(item.get("stage_name") or "") for item in record["stages"] if isinstance(item, dict)]
+    assert "detect_protocol" in stage_names
+    assert "auth_inference_credentials" in stage_names
+    assert "access_capabilities" in stage_names
+    assert "data" in stage_names
+    debug_events = record.get("debug_events") or []
+    assert any("stage_timing_summary" in str(item) for item in debug_events)
+
+
+def test_audit_kubeapi_targets_two_pass_gate_and_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, bool]] = []
+
+    def fake_call(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        *,
+        use_https: bool,
+        insecure: bool,
+        ca_file: str | None,
+        token: str | None,
+        username: str | None,
+        password: str | None,
+        show_namespaces: bool,
+        show_pods: bool,
+        show_secrets: bool,
+        namespace_filters: list[str],
+        exec_pod: str | None,
+        exec_command: str | None,
+        debug: bool,
+        run_deep_checks: bool,
+        debug_emit,
+    ) -> dict[str, object]:
+        _ = (
+            port,
+            timeout,
+            retries,
+            use_https,
+            insecure,
+            ca_file,
+            token,
+            username,
+            password,
+            show_namespaces,
+            show_pods,
+            show_secrets,
+            namespace_filters,
+            exec_pod,
+            exec_command,
+            debug,
+            debug_emit,
+        )
+        calls.append((host, run_deep_checks))
+        status = "open_no_auth" if host == "10.0.0.1" else "auth_required"
+        return {
+            "timestamp": "2026-04-10T00:00:00Z",
+            "host": host,
+            "port": 16443,
+            "https": True,
+            "insecure_effective": True,
+            "tls_auto_insecure": False,
+            "is_kubeapi": True,
+            "status": status,
+            "version": "v1.31.6",
+            "auth_required": status == "auth_required",
+            "auth_mode": "none",
+            "auth_valid": None,
+            "auth_error": None,
+            "namespace_filters": [],
+            "show_namespaces": False,
+            "show_pods": False,
+            "show_secrets": False,
+            "exec_pod": None,
+            "exec_command": None,
+            "exec_result": None,
+            "namespaces": [],
+            "pods": [],
+            "secrets": [],
+            "namespaces_error": None,
+            "pods_error": None,
+            "secrets_error": None,
+            "error": None,
+            "elapsed_ms": 1,
+            "can_list_namespaces": True,
+            "can_list_pods": None,
+            "can_list_secrets": None,
+            "can_exec_pod": None,
+            "stages": [],
+            "stage_failed_at": None,
+            "stage_durations_ms": {},
+            "stage_attempts": {},
+            "debug_events": [],
+            "debug_events_streamed": False,
+        }
+
+    monkeypatch.setattr(kube, "_call_audit_kubeapi_host_with_thread_debug", fake_call)
+
+    text_lines: list[str] = []
+    debug_lines: list[str] = []
+    total, detected, failed = kube.audit_kubeapi_targets(
+        hosts=["10.0.0.1", "10.0.0.2"],
+        port=16443,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        token=None,
+        username=None,
+        password=None,
+        show_namespaces=False,
+        show_pods=False,
+        show_secrets=False,
+        namespace_filters=[],
+        exec_pod=None,
+        exec_command=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=text_lines.append,
+        debug_emit=debug_lines.append,
+    )
+
+    assert (total, detected, failed) == (2, 2, 0)
+    assert calls == [
+        ("10.0.0.1", False),
+        ("10.0.0.2", False),
+        ("10.0.0.1", True),
+    ]
+    assert any("pass=1 detect start total=2" in line for line in debug_lines)
+    assert any("pass=2 deep start total=1" in line for line in debug_lines)
+    assert any("10.0.0.1:16443 stage2_gate=run reason=status=open_no_auth" in line for line in debug_lines)
+    assert any("10.0.0.2:16443 stage2_gate=skip reason=status=auth_required" in line for line in debug_lines)
