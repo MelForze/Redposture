@@ -631,13 +631,13 @@ def _audit_zookeeper_host(
     if normalized_username == "":
         normalized_username = None
     normalized_password = str(password).strip() if password is not None else None
-    if normalized_password == "":
+    if normalized_username is None and normalized_password == "":
         normalized_password = None
 
     base_attempts = max(1, retries + 1)
     bonus_retry_for_root_query_124 = False
     last_error: str | None = None
-    provided_credentials = bool(normalized_username and normalized_password)
+    provided_credentials = normalized_username is not None and normalized_password is not None
 
     for attempt in range(base_attempts + 1):
         max_attempts = base_attempts + (1 if bonus_retry_for_root_query_124 else 0)
@@ -665,14 +665,15 @@ def _audit_zookeeper_host(
                 _infer_auth_required_from_anonymous_probes(host, port, timeout, anonymous_root_err, query_znode)
             )
 
-            if provided_credentials and normalized_username and normalized_password:
+            if provided_credentials and normalized_username is not None and normalized_password is not None:
                 auth_applied_ok, auth_error = client.auth_digest(normalized_username, normalized_password)
                 if auth_applied_ok:
                     root_children, root_err, _ = client.get_children2("/")
                     if root_err == _ZK_ERR_OK:
                         provided_credentials_ok = anonymous_root_err != _ZK_ERR_OK
                     elif anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_RETRYABLE_ROOT_QUERY}:
-                        provided_credentials_ok = False
+                        # Digest auth succeeded, but root listing may still be ACL-restricted.
+                        provided_credentials_ok = True
                 else:
                     provided_credentials_ok = False
                 if not auth_applied_ok and not auth_error:
@@ -1366,11 +1367,15 @@ def audit_zookeeper_targets(
                     dump,
                     query_znode,
                     max_znodes,
-                ): host
-                for host in hosts
+                ): idx
+                for idx, host in enumerate(hosts)
             }
 
+            buffered_records: dict[int, dict[str, Any]] = {}
+            next_emit_idx = 0
+
             for future in iter_completed_with_progress(future_map, label="ZOOKEEPER"):
+                record_idx = int(future_map[future])
                 record = future.result()
                 total += 1
                 status = str(record.get("status") or "fail")
@@ -1384,40 +1389,48 @@ def audit_zookeeper_targets(
                 else:
                     failed += 1
 
-                if bool(record.get("is_zookeeper")):
-                    _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
+                buffered_records[record_idx] = record
 
-                suppress_auth_required_status_line = (
-                    output_format == "txt"
-                    and bool(record.get("is_zookeeper"))
-                    and status == "auth_required"
-                    and not bool(record.get("provided_credentials"))
-                )
-                suppress_connection_refused_status_line = (
-                    suppress_connection_refused_status_lines
-                    and output_format == "txt"
-                    and _is_suppressed_fail_record(record)
-                )
-                if not suppress_auth_required_status_line and not suppress_connection_refused_status_line:
-                    _emit_line(out_fh, emit_line, _format_record(record, output_format))
+                while next_emit_idx in buffered_records:
+                    emit_record = buffered_records.pop(next_emit_idx)
+                    emit_status = str(emit_record.get("status") or "fail")
 
-                if bool(record.get("is_zookeeper")):
-                    for detail in _format_znodes_detail_records(record, output_format):
-                        _emit_line(out_fh, emit_line, detail)
+                    if bool(emit_record.get("is_zookeeper")):
+                        _emit_line(out_fh, emit_line, _format_detect_record(emit_record, output_format))
 
-                if logger is not None and not (
-                    suppress_connection_refused_status_lines and _is_suppressed_fail_record(record)
-                ):
-                    logger.log(
-                        "zookeeper",
-                        (str(record.get("host") or "-"), int(record.get("port") or port)),
-                        phase="audit",
-                        status=record.get("status"),
-                        auth_required=record.get("auth_required"),
-                        provided_credentials_ok=record.get("provided_credentials_ok"),
-                        znode_count=record.get("znode_count"),
-                        error=record.get("error"),
+                    suppress_auth_required_status_line = (
+                        output_format == "txt"
+                        and bool(emit_record.get("is_zookeeper"))
+                        and emit_status == "auth_required"
+                        and not bool(emit_record.get("provided_credentials"))
                     )
+                    suppress_connection_refused_status_line = (
+                        suppress_connection_refused_status_lines
+                        and output_format == "txt"
+                        and _is_suppressed_fail_record(emit_record)
+                    )
+                    if not suppress_auth_required_status_line and not suppress_connection_refused_status_line:
+                        _emit_line(out_fh, emit_line, _format_record(emit_record, output_format))
+
+                    if bool(emit_record.get("is_zookeeper")):
+                        for detail in _format_znodes_detail_records(emit_record, output_format):
+                            _emit_line(out_fh, emit_line, detail)
+
+                    if logger is not None and not (
+                        suppress_connection_refused_status_lines and _is_suppressed_fail_record(emit_record)
+                    ):
+                        logger.log(
+                            "zookeeper",
+                            (str(emit_record.get("host") or "-"), int(emit_record.get("port") or port)),
+                            phase="audit",
+                            status=emit_record.get("status"),
+                            auth_required=emit_record.get("auth_required"),
+                            provided_credentials_ok=emit_record.get("provided_credentials_ok"),
+                            znode_count=emit_record.get("znode_count"),
+                            error=emit_record.get("error"),
+                        )
+
+                    next_emit_idx += 1
     finally:
         if out_fh is not None:
             out_fh.close()
@@ -1432,7 +1445,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if username == "":
         username = None
     password = str(args.password).strip() if args.password is not None else None
-    if password == "":
+    if username is None and password == "":
         password = None
 
     if args.timeout <= 0:
@@ -1444,7 +1457,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.max_znodes <= 0:
         console.error("--max-znodes must be > 0")
         return 2
-    if bool(username) != bool(password):
+    if (username is None) != (password is None):
         console.error("--username and --password must be set together")
         return 2
     try:
@@ -1486,8 +1499,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             return
         if _render_colored_zookeeper_line(console, line):
             return
-        if args.debug:
-            console.plain(line)
+        console.plain(line)
 
     if args.debug and stream_to_stdout and args.output_format == "txt":
         mode_parts = ["count-znodes"]
