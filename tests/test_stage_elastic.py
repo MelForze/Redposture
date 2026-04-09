@@ -1244,3 +1244,190 @@ def test_run_elastic_stage_validation_and_apikey_precedence(monkeypatch: pytest.
     assert captured["password"] is None
     assert captured["api_token"] == "ZXM6bGFiLXRva2Vu"
     assert captured["show_plugins"] is False
+
+
+def test_audit_elastic_host_debug_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_with_tls_fallback",
+        lambda *_args, **_kwargs: (
+            200,
+            b'{"name":"elk","cluster_name":"elastic-cluster","version":{"number":"8.17.3"},"tagline":"You Know, for Search"}',
+            {"X-Elastic-Product": "Elasticsearch"},
+            None,
+            "https",
+            False,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_detect_probe",
+        lambda *_args, **_kwargs: (404, b"{}", {"Content-Type": "application/json"}, None, "https"),
+    )
+
+    record = _audit_elastic_host(
+        "127.0.0.1",
+        9200,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        api_token=None,
+        ca_file=None,
+        show_endpoints=False,
+        show_plugins=False,
+        show_cluster=False,
+        show_users=False,
+        discover=False,
+        debug=True,
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert isinstance(record.get("stages"), list)
+    stage_names = [str(item.get("stage_name") or "") for item in record["stages"] if isinstance(item, dict)]
+    assert "detect_protocol" in stage_names
+    assert "auth_inference_credentials" in stage_names
+    assert "access_capabilities" in stage_names
+    assert "data" in stage_names
+    assert isinstance(record.get("stage_durations_ms"), dict)
+    assert isinstance(record.get("stage_attempts"), dict)
+    debug_events = record.get("debug_events") or []
+    assert any("stage_timing_summary" in str(item) for item in debug_events)
+
+
+def test_audit_elastic_targets_two_pass_gate_and_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, bool]] = []
+
+    def fake_call(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        username: str | None,
+        password: str | None,
+        api_token: str | None,
+        ca_file: str | None,
+        show_endpoints: bool,
+        show_plugins: bool,
+        show_cluster: bool,
+        show_users: bool,
+        discover: bool,
+        preferred_scheme: str | None,
+        debug: bool,
+        run_deep_checks: bool,
+        debug_emit,
+    ) -> dict[str, object]:
+        _ = (
+            port,
+            timeout,
+            retries,
+            username,
+            password,
+            api_token,
+            ca_file,
+            show_endpoints,
+            show_plugins,
+            show_cluster,
+            show_users,
+            discover,
+            preferred_scheme,
+            debug,
+            debug_emit,
+        )
+        calls.append((host, run_deep_checks))
+        status = "open_no_auth" if host == "10.0.0.1" else "auth_required"
+        return {
+            "timestamp": "2026-04-10T00:00:00Z",
+            "host": host,
+            "port": 9200,
+            "is_elastic": True,
+            "status": status,
+            "auth_required": status == "auth_required",
+            "server_version": "8.17.3",
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "provided_token": False,
+            "api_token": None,
+            "api_key_probe_status": "not_run",
+            "api_key_probe_error": None,
+            "effective_username": None,
+            "auth_valid": None,
+            "show_endpoints": False,
+            "show_plugins": False,
+            "show_cluster": False,
+            "show_users": False,
+            "discover": False,
+            "cat_endpoints": None,
+            "endpoint_diagnostics": None,
+            "cat_plugins": None,
+            "cluster_health": None,
+            "cluster_nodes": None,
+            "misconfig_findings": None,
+            "misconfig_error": None,
+            "users": None,
+            "discover_results": None,
+            "can_read": None,
+            "can_write": None,
+            "can_manage": None,
+            "can_manage_security": None,
+            "access_level": "unknown",
+            "rights_error": None,
+            "endpoints_error": None,
+            "plugins_error": None,
+            "cluster_error": None,
+            "users_error": None,
+            "discover_error": None,
+            "scheme": "https",
+            "insecure_effective": False,
+            "tls_auto_plain": False,
+            "detect_confidence": "high",
+            "detect_signals": ["header_x_elastic_product"],
+            "detect_probe_trace": [{"path": "/", "status": 200, "scheme": "https"}],
+            "elapsed_ms": 1,
+            "error": None,
+            "stages": [],
+            "stage_failed_at": None,
+            "stage_durations_ms": {},
+            "stage_attempts": {},
+            "debug_events": [],
+            "debug_events_streamed": False,
+        }
+
+    monkeypatch.setattr(elastic_stage, "_call_audit_elastic_host_with_thread_debug", fake_call)
+
+    text_lines: list[str] = []
+    debug_lines: list[str] = []
+    totals = audit_elastic_targets(
+        hosts=["10.0.0.1", "10.0.0.2"],
+        port=9200,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        api_token=None,
+        ca_file=None,
+        show_endpoints=False,
+        show_plugins=False,
+        show_cluster=False,
+        show_users=False,
+        discover=False,
+        output_path=None,
+        output_format="txt",
+        emit_line=text_lines.append,
+        suppress_timeout_status_lines=False,
+        debug_emit=debug_lines.append,
+    )
+
+    assert totals == (2, 1, 0, 1, 0)
+    assert calls == [
+        ("10.0.0.1", False),
+        ("10.0.0.2", False),
+        ("10.0.0.1", True),
+    ]
+    assert any("pass=1 detect start total=2" in line for line in debug_lines)
+    assert any("pass=2 deep start total=1" in line for line in debug_lines)
+    assert any("10.0.0.1:9200 stage2_gate=run reason=status=open_no_auth" in line for line in debug_lines)
+    assert any("10.0.0.2:9200 stage2_gate=skip reason=status=auth_required" in line for line in debug_lines)

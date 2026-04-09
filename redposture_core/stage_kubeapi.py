@@ -11,17 +11,18 @@ import re
 import socket
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import iter_completed_with_progress
+from .progress import ProgressBar
 from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 _KUBE_TAG = "KUBEAPI"
@@ -31,6 +32,12 @@ _KUBE_WS_READ_TIMEOUT = 3.0
 _KUBE_WS_HANDSHAKE_TIMEOUT = 5.0
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
+
+_STAGE_DETECT_PROTOCOL = "detect_protocol"
+_STAGE_AUTH_INFERENCE = "auth_inference_credentials"
+_STAGE_ACCESS_CAPABILITIES = "access_capabilities"
+_STAGE_DATA = "data"
+_THREAD_LOCAL_DEBUG_EMIT = threading.local()
 
 
 def _clip(text: str, width: int = 72) -> str:
@@ -43,6 +50,13 @@ def _clip(text: str, width: int = 72) -> str:
 
 def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
+
+
+def _get_thread_debug_emitter() -> Callable[[str], None] | None:
+    callback = getattr(_THREAD_LOCAL_DEBUG_EMIT, "callback", None)
+    if callable(callback):
+        return callback
+    return None
 
 
 def _friendly_error_text(value: str) -> str:
@@ -867,6 +881,82 @@ def _auth_label(token: str | None, username: str | None, password: str | None) -
     return "anonymous access"
 
 
+def _call_audit_kubeapi_host_with_thread_debug(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    token: str | None,
+    username: str | None,
+    password: str | None,
+    show_namespaces: bool,
+    show_pods: bool,
+    show_secrets: bool,
+    namespace_filters: list[str],
+    exec_pod: str | None,
+    exec_command: str | None,
+    debug: bool,
+    run_deep_checks: bool,
+    debug_emit: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    def _invoke() -> dict[str, Any]:
+        try:
+            return _audit_kubeapi_host(
+                host,
+                port,
+                timeout,
+                retries,
+                use_https=use_https,
+                insecure=insecure,
+                ca_file=ca_file,
+                token=token,
+                username=username,
+                password=password,
+                show_namespaces=show_namespaces,
+                show_pods=show_pods,
+                show_secrets=show_secrets,
+                namespace_filters=namespace_filters,
+                exec_pod=exec_pod,
+                exec_command=exec_command,
+                debug=debug,
+                run_deep_checks=run_deep_checks,
+            )
+        except TypeError:
+            return _audit_kubeapi_host(
+                host,
+                port,
+                timeout,
+                retries,
+                use_https=use_https,
+                insecure=insecure,
+                ca_file=ca_file,
+                token=token,
+                username=username,
+                password=password,
+                show_namespaces=show_namespaces,
+                show_pods=show_pods,
+                show_secrets=show_secrets,
+                namespace_filters=namespace_filters,
+                exec_pod=exec_pod,
+                exec_command=exec_command,
+            )
+
+    if debug_emit is None:
+        return _invoke()
+    _THREAD_LOCAL_DEBUG_EMIT.callback = debug_emit
+    try:
+        return _invoke()
+    finally:
+        try:
+            delattr(_THREAD_LOCAL_DEBUG_EMIT, "callback")
+        except AttributeError:
+            pass
+
+
 def _audit_kubeapi_host(
     host: str,
     port: int,
@@ -885,11 +975,116 @@ def _audit_kubeapi_host(
     namespace_filters: list[str],
     exec_pod: str | None,
     exec_command: str | None,
+    debug: bool = False,
+    run_deep_checks: bool = True,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
+    debug_events: list[str] = []
+    stages: list[dict[str, Any]] = []
+    stage_durations_ms: dict[str, int] = {}
+    stage_attempts: dict[str, int] = {}
+    stage_failed_at: str | None = None
+    debug_events_streamed = False
+
+    def _debug(message: str) -> None:
+        nonlocal debug_events_streamed
+        if not debug:
+            return
+        debug_line = f"{host}:{port} {message}"
+        debug_events.append(debug_line)
+        live_emitter = _get_thread_debug_emitter()
+        if live_emitter is not None:
+            live_emitter(debug_line)
+            debug_events_streamed = True
+
+    def _debug_retry_decision(
+        stage_name: str,
+        *,
+        attempt: int,
+        max_attempts: int,
+        delay_s: float,
+        reason: str | None,
+    ) -> None:
+        reason_text = str(reason or "").strip() or "-"
+        _debug(
+            f"retry_decision stage={stage_name} attempt={attempt}/{max_attempts} "
+            f"backoff={delay_s:.2f}s reason={reason_text}"
+        )
+
+    def _stage_trace(
+        stage_name: str,
+        *,
+        attempt: int,
+        started_at: float,
+        result: str,
+        error: str | None = None,
+    ) -> None:
+        nonlocal stage_failed_at
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        stage_attempts[stage_name] = max(int(stage_attempts.get(stage_name, 0)), int(attempt))
+        stage_durations_ms[stage_name] = int(stage_durations_ms.get(stage_name, 0)) + duration_ms
+        entry = {
+            "stage_name": stage_name,
+            "attempt": int(attempt),
+            "duration_ms": int(duration_ms),
+            "result": str(result),
+            "error": str(error or "").strip() or None,
+        }
+        stages.append(entry)
+        if stage_failed_at is None and result in {"fail", "timeout"}:
+            stage_failed_at = stage_name
+        _debug(
+            f"stage_trace stage_name={stage_name} attempt={attempt} duration_ms={duration_ms} "
+            f"result={result} error={str(error or '-').strip() or '-'}"
+        )
+
+    def _emit_stage_timing_summary(*, status: str, attempts_done: int, max_attempts: int) -> None:
+        def _duration(stage_name: str) -> str:
+            raw = stage_durations_ms.get(stage_name)
+            if isinstance(raw, int):
+                return f"{raw}ms"
+            return "-"
+
+        def _attempt_count(stage_name: str) -> int:
+            raw = stage_attempts.get(stage_name)
+            return int(raw) if isinstance(raw, int) else 0
+
+        _debug(
+            f"stage_timing_summary status={status} attempts={attempts_done}/{max_attempts} "
+            f"detect={_duration(_STAGE_DETECT_PROTOCOL)} "
+            f"auth={_duration(_STAGE_AUTH_INFERENCE)} "
+            f"capabilities={_duration(_STAGE_ACCESS_CAPABILITIES)} "
+            f"data={_duration(_STAGE_DATA)} "
+            f"stage_attempts="
+            f"detect:{_attempt_count(_STAGE_DETECT_PROTOCOL)},"
+            f"auth:{_attempt_count(_STAGE_AUTH_INFERENCE)},"
+            f"capabilities:{_attempt_count(_STAGE_ACCESS_CAPABILITIES)},"
+            f"data:{_attempt_count(_STAGE_DATA)}"
+        )
+
+    def _record(payload: dict[str, Any], *, attempts_done: int, max_attempts: int) -> dict[str, Any]:
+        if debug:
+            _emit_stage_timing_summary(
+                status=str(payload.get("status") or "fail"),
+                attempts_done=attempts_done,
+                max_attempts=max_attempts,
+            )
+        record = dict(payload)
+        record["attempts"] = int(attempts_done)
+        record["max_attempts"] = int(max_attempts)
+        record["stages"] = list(stages)
+        record["stage_failed_at"] = stage_failed_at
+        record["stage_durations_ms"] = dict(stage_durations_ms)
+        record["stage_attempts"] = dict(stage_attempts)
+        record["debug_events"] = list(debug_events) if debug else []
+        record["debug_events_streamed"] = bool(debug_events_streamed)
+        return record
+
     for attempt in range(attempts):
         started = time.monotonic()
+        _debug(f"attempt={attempt + 1}/{attempts} start timeout={timeout}s")
+        stage1_started = time.monotonic()
         try:
             effective_insecure = bool(insecure)
             tls_auto_insecure = False
@@ -951,37 +1146,60 @@ def _audit_kubeapi_host(
             if not is_kubeapi:
                 if version_error and api_error:
                     raise ValueError(version_error if version_error == api_error else f"{version_error}; {api_error}")
-                return {
-                    "timestamp": utc_now_iso(),
-                    "host": host,
-                    "port": port,
-                    "https": use_https,
-                    "insecure_effective": effective_insecure,
-                    "tls_auto_insecure": tls_auto_insecure,
-                    "is_kubeapi": False,
-                    "status": "not_kubeapi",
-                    "version": version_text,
-                    "auth_required": None,
-                    "auth_mode": None,
-                    "auth_valid": None,
-                    "namespace_filters": list(namespace_filters),
-                    "show_namespaces": show_namespaces,
-                    "show_pods": show_pods,
-                    "show_secrets": show_secrets,
-                    "exec_pod": exec_pod,
-                    "exec_command": exec_command,
-                    "exec_result": None,
-                    "namespaces": [],
-                    "pods": [],
-                    "secrets": [],
-                    "namespaces_error": None,
-                    "pods_error": None,
-                    "secrets_error": None,
-                    "error": None,
-                    "elapsed_ms": int((time.monotonic() - started) * 1000),
-                }
+                _stage_trace(
+                    _STAGE_DETECT_PROTOCOL,
+                    attempt=attempt + 1,
+                    started_at=stage1_started,
+                    result="not_kubeapi",
+                    error=None,
+                )
+                return _record(
+                    {
+                        "timestamp": utc_now_iso(),
+                        "host": host,
+                        "port": port,
+                        "https": use_https,
+                        "insecure_effective": effective_insecure,
+                        "tls_auto_insecure": tls_auto_insecure,
+                        "is_kubeapi": False,
+                        "status": "not_kubeapi",
+                        "version": version_text,
+                        "auth_required": None,
+                        "auth_mode": None,
+                        "auth_valid": None,
+                        "namespace_filters": list(namespace_filters),
+                        "show_namespaces": show_namespaces,
+                        "show_pods": show_pods,
+                        "show_secrets": show_secrets,
+                        "exec_pod": exec_pod,
+                        "exec_command": exec_command,
+                        "exec_result": None,
+                        "namespaces": [],
+                        "pods": [],
+                        "secrets": [],
+                        "namespaces_error": None,
+                        "pods_error": None,
+                        "secrets_error": None,
+                        "error": None,
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "can_list_namespaces": None,
+                        "can_list_pods": None,
+                        "can_list_secrets": None,
+                        "can_exec_pod": None,
+                    },
+                    attempts_done=attempt + 1,
+                    max_attempts=attempts,
+                )
+            _stage_trace(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                started_at=stage1_started,
+                result="ok",
+                error=None,
+            )
 
             # Determine whether unauthenticated namespace listing is allowed.
+            stage2_started = time.monotonic()
             unauth_ns_items, unauth_ns_status, unauth_ns_error = _list_namespaces(
                 host,
                 port,
@@ -1052,18 +1270,95 @@ def _audit_kubeapi_host(
                 else:
                     status = "detected"
 
+            can_list_namespaces: bool | None = None
+            if auth_mode == "none":
+                if auth_required is False:
+                    can_list_namespaces = True
+                elif auth_required is True:
+                    can_list_namespaces = False
+            else:
+                if auth_valid is True:
+                    can_list_namespaces = True
+                elif auth_valid is False:
+                    can_list_namespaces = False
+
+            _stage_trace(
+                _STAGE_AUTH_INFERENCE,
+                attempt=attempt + 1,
+                started_at=stage2_started,
+                result=status,
+                error=auth_error,
+            )
+
+            base_record = {
+                "timestamp": utc_now_iso(),
+                "host": host,
+                "port": port,
+                "https": use_https,
+                "insecure_effective": effective_insecure,
+                "tls_auto_insecure": tls_auto_insecure,
+                "is_kubeapi": True,
+                "status": status,
+                "version": version_text,
+                "auth_required": auth_required,
+                "auth_mode": auth_mode,
+                "auth_valid": auth_valid,
+                "auth_error": auth_error,
+                "namespace_filters": list(namespace_filters),
+                "show_namespaces": show_namespaces,
+                "show_pods": show_pods,
+                "show_secrets": show_secrets,
+                "exec_pod": exec_pod,
+                "exec_command": exec_command,
+                "exec_result": None,
+                "namespaces": [],
+                "pods": [],
+                "secrets": [],
+                "namespaces_error": namespaces_error,
+                "pods_error": None,
+                "secrets_error": None,
+                "error": None,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "can_list_namespaces": can_list_namespaces,
+                "can_list_pods": None,
+                "can_list_secrets": None,
+                "can_exec_pod": None,
+            }
+
+            if not run_deep_checks:
+                _debug(f"attempt={attempt + 1}/{attempts} detect-only result={status}")
+                return _record(base_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+            if status not in {"open_no_auth", "auth_valid"}:
+                _debug(f"stage2_gate=skip reason=status={status}")
+                return _record(base_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+            _debug(f"stage2_gate=run reason=status={status}")
+            stage3_started = time.monotonic()
+            _stage_trace(
+                _STAGE_ACCESS_CAPABILITIES,
+                attempt=attempt + 1,
+                started_at=stage3_started,
+                result="ok",
+                error=None,
+            )
+
             namespaces_out: list[str] = []
             pods_out: list[dict[str, Any]] = []
             secrets_out: list[dict[str, Any]] = []
             exec_out: dict[str, Any] | None = None
             pods_error: str | None = None
             secrets_error: str | None = None
+            can_list_pods: bool | None = None
+            can_list_secrets: bool | None = None
+            can_exec_pod: bool | None = None
 
             list_token = token_clean if auth_mode == "token" and auth_valid is True else None
             list_user = username_value if auth_mode == "basic" and auth_valid is True else None
             list_pass = password_value if auth_mode == "basic" and auth_valid is True else None
 
             can_list = (auth_mode == "none" and auth_required is False) or (auth_valid is True)
+            stage4_started = time.monotonic()
             if can_list:
                 if show_namespaces and access_namespaces is not None:
                     namespaces_out = list(access_namespaces)
@@ -1099,6 +1394,9 @@ def _audit_kubeapi_host(
                     )
                     if pods_items is not None:
                         pods_out = pods_items
+                        can_list_pods = True
+                    else:
+                        can_list_pods = False
 
                 if show_secrets:
                     secret_items, secrets_error = _list_secrets(
@@ -1115,6 +1413,9 @@ def _audit_kubeapi_host(
                     )
                     if secret_items is not None:
                         secrets_out = secret_items
+                        can_list_secrets = True
+                    else:
+                        can_list_secrets = False
 
                 if exec_pod and exec_command:
                     pods_for_resolution = pods_out if pods_out else None
@@ -1176,6 +1477,22 @@ def _audit_kubeapi_host(
                                 username=list_user,
                                 password=list_pass,
                             )
+                    if isinstance(exec_out, dict):
+                        if bool(exec_out.get("ok")):
+                            can_exec_pod = True
+                        else:
+                            exec_error_text = str(exec_out.get("error") or "").lower()
+                            if any(
+                                token_text in exec_error_text
+                                for token_text in (
+                                    "forbidden",
+                                    "access denied",
+                                    "unauthorized",
+                                    "not allowed",
+                                    "exec unavailable",
+                                )
+                            ):
+                                can_exec_pod = False
                 elif exec_pod or exec_command:
                     exec_out = {
                         "namespace": None,
@@ -1187,6 +1504,7 @@ def _audit_kubeapi_host(
                         "error": "use --pod together with -X/--exec-command",
                         "exit_code": None,
                     }
+                    can_exec_pod = False
             elif exec_pod or exec_command:
                 exec_out = {
                     "namespace": None,
@@ -1198,73 +1516,166 @@ def _audit_kubeapi_host(
                     "error": "exec unavailable without successful API access",
                     "exit_code": None,
                 }
+                can_exec_pod = False
 
-            return {
-                "timestamp": utc_now_iso(),
-                "host": host,
-                "port": port,
-                "https": use_https,
-                "insecure_effective": effective_insecure,
-                "tls_auto_insecure": tls_auto_insecure,
-                "is_kubeapi": True,
-                "status": status,
-                "version": version_text,
-                "auth_required": auth_required,
-                "auth_mode": auth_mode,
-                "auth_valid": auth_valid,
-                "auth_error": auth_error,
-                "namespace_filters": list(namespace_filters),
-                "show_namespaces": show_namespaces,
-                "show_pods": show_pods,
-                "show_secrets": show_secrets,
-                "exec_pod": exec_pod,
-                "exec_command": exec_command,
-                "exec_result": exec_out,
-                "namespaces": namespaces_out,
-                "pods": pods_out,
-                "secrets": secrets_out,
-                "namespaces_error": namespaces_error,
-                "pods_error": pods_error,
-                "secrets_error": secrets_error,
-                "error": None,
-                "elapsed_ms": int((time.monotonic() - started) * 1000),
-            }
+            data_error = "; ".join(
+                item
+                for item in (
+                    namespaces_error,
+                    pods_error,
+                    secrets_error,
+                    str(exec_out.get("error") or "").strip() if isinstance(exec_out, dict) else None,
+                )
+                if str(item or "").strip()
+            )
+            data_requested = bool(show_namespaces or show_pods or show_secrets or exec_pod or exec_command)
+            _stage_trace(
+                _STAGE_DATA,
+                attempt=attempt + 1,
+                started_at=stage4_started,
+                result="error" if data_error else "ok" if data_requested else "skipped",
+                error=data_error or None,
+            )
+
+            final_record = dict(base_record)
+            final_record.update(
+                {
+                    "exec_result": exec_out,
+                    "namespaces": namespaces_out,
+                    "pods": pods_out,
+                    "secrets": secrets_out,
+                    "namespaces_error": namespaces_error,
+                    "pods_error": pods_error,
+                    "secrets_error": secrets_error,
+                    "can_list_pods": can_list_pods,
+                    "can_list_secrets": can_list_secrets,
+                    "can_exec_pod": can_exec_pod,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "error": None,
+                }
+            )
+            _debug(
+                f"attempt={attempt + 1}/{attempts} result={status} total_ms={int((time.monotonic() - started) * 1000)}"
+            )
+            return _record(final_record, attempts_done=attempt + 1, max_attempts=attempts)
         except (OSError, ValueError, ConnectionError) as exc:
             last_error = str(exc)
+            if attempt < attempts - 1:
+                _stage_trace(
+                    _STAGE_DETECT_PROTOCOL,
+                    attempt=attempt + 1,
+                    started_at=stage1_started,
+                    result="retry",
+                    error=last_error,
+                )
+                delay = _retry_delay(attempt)
+                _debug_retry_decision(
+                    _STAGE_DETECT_PROTOCOL,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    delay_s=delay,
+                    reason=last_error,
+                )
+                time.sleep(delay)
+                continue
+            _stage_trace(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                started_at=stage1_started,
+                result="fail",
+                error=last_error,
+            )
             if attempt >= attempts - 1:
                 break
-            time.sleep(_retry_delay(attempt))
+    return _record(
+        {
+            "timestamp": utc_now_iso(),
+            "host": host,
+            "port": port,
+            "https": use_https,
+            "insecure_effective": bool(insecure),
+            "tls_auto_insecure": False,
+            "is_kubeapi": False,
+            "status": "fail",
+            "version": None,
+            "auth_required": None,
+            "auth_mode": None,
+            "auth_valid": None,
+            "auth_error": None,
+            "namespace_filters": list(namespace_filters),
+            "show_namespaces": show_namespaces,
+            "show_pods": show_pods,
+            "show_secrets": show_secrets,
+            "exec_pod": exec_pod,
+            "exec_command": exec_command,
+            "exec_result": None,
+            "namespaces": [],
+            "pods": [],
+            "secrets": [],
+            "namespaces_error": None,
+            "pods_error": None,
+            "secrets_error": None,
+            "error": _friendly_error_text(last_error or "connection failed"),
+            "elapsed_ms": None,
+            "can_list_namespaces": None,
+            "can_list_pods": None,
+            "can_list_secrets": None,
+            "can_exec_pod": None,
+        },
+        attempts_done=attempts,
+        max_attempts=attempts,
+    )
 
-    return {
-        "timestamp": utc_now_iso(),
-        "host": host,
-        "port": port,
-        "https": use_https,
-        "insecure_effective": bool(insecure),
-        "tls_auto_insecure": False,
-        "is_kubeapi": False,
-        "status": "fail",
-        "version": None,
-        "auth_required": None,
-        "auth_mode": None,
-        "auth_valid": None,
-        "auth_error": None,
-        "namespace_filters": list(namespace_filters),
-        "show_namespaces": show_namespaces,
-        "show_pods": show_pods,
-        "show_secrets": show_secrets,
-        "exec_pod": exec_pod,
-        "exec_command": exec_command,
-        "exec_result": None,
-        "namespaces": [],
-        "pods": [],
-        "secrets": [],
-        "namespaces_error": None,
-        "pods_error": None,
-        "secrets_error": None,
-        "error": _friendly_error_text(last_error or "connection failed"),
-        "elapsed_ms": None,
-    }
+
+def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(detect_record)
+
+    detect_debug_events = detect_record.get("debug_events")
+    deep_debug_events = deep_record.get("debug_events")
+    merged_debug_events: list[str] = []
+    if isinstance(detect_debug_events, list):
+        for item in detect_debug_events:
+            if isinstance(item, str) and item.strip():
+                merged_debug_events.append(item)
+    if isinstance(deep_debug_events, list):
+        for item in deep_debug_events:
+            if isinstance(item, str) and item.strip():
+                merged_debug_events.append(item)
+    merged["debug_events"] = merged_debug_events
+    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
+        deep_record.get("debug_events_streamed")
+    )
+
+    deep_fields = (
+        "status",
+        "version",
+        "auth_required",
+        "auth_mode",
+        "auth_valid",
+        "auth_error",
+        "exec_result",
+        "namespaces",
+        "pods",
+        "secrets",
+        "namespaces_error",
+        "pods_error",
+        "secrets_error",
+        "elapsed_ms",
+        "error",
+        "can_list_namespaces",
+        "can_list_pods",
+        "can_list_secrets",
+        "can_exec_pod",
+        "attempts",
+        "max_attempts",
+        "stages",
+        "stage_failed_at",
+        "stage_durations_ms",
+        "stage_attempts",
+    )
+    for field in deep_fields:
+        merged[field] = deep_record.get(field)
+    return merged
 
 
 def _kxc_prefix(record: dict[str, Any]) -> str:
@@ -1550,21 +1961,31 @@ def audit_kubeapi_targets(
     logger: AttemptLogger | None = None,
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
+    debug_emit: Callable[[str], None] | None = None,
 ) -> tuple[int, int, int]:
     total = 0
     detected = 0
     failed = 0
 
     out_fh: Any = None
+    progress: ProgressBar | None = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
+        indexed_hosts = list(enumerate(hosts))
+        detect_records: dict[int, dict[str, Any]] = {}
+        deep_records: dict[int, dict[str, Any]] = {}
+        progress = ProgressBar("KUBEAPI", len(indexed_hosts), enabled=True, leave=True)
+
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
+
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            future_map = {
+            pass1_future_map = {
                 executor.submit(
-                    _audit_kubeapi_host,
+                    _call_audit_kubeapi_host_with_thread_debug,
                     host,
                     port,
                     timeout,
@@ -1581,60 +2002,162 @@ def audit_kubeapi_targets(
                     namespace_filters=namespace_filters,
                     exec_pod=exec_pod,
                     exec_command=exec_command,
-                ): host
-                for host in hosts
+                    debug=bool(debug_emit),
+                    run_deep_checks=False,
+                    debug_emit=debug_emit,
+                ): idx
+                for idx, host in indexed_hosts
             }
-            for future in iter_completed_with_progress(future_map, label="KUBEAPI"):
-                record = future.result()
-                total += 1
-                if bool(record.get("is_kubeapi")):
-                    detected += 1
-                if str(record.get("status") or "fail") == "fail":
-                    failed += 1
+            buffered_records: dict[int, dict[str, Any]] = {}
+            next_emit_idx = 0
+            for future in as_completed(pass1_future_map):
+                record_idx = int(pass1_future_map[future])
+                buffered_records[record_idx] = future.result()
+                progress.advance()
+                while next_emit_idx in buffered_records:
+                    detect_record = buffered_records.pop(next_emit_idx)
+                    detect_records[next_emit_idx] = detect_record
+                    if output_format == "txt":
+                        suppress_timeout_detect_line = (
+                            suppress_timeout_status_lines
+                            and output_format == "txt"
+                            and str(detect_record.get("status") or "") == "fail"
+                        )
+                        if not suppress_timeout_detect_line:
+                            record_for_output = dict(detect_record)
+                            if username is not None or password is not None:
+                                record_for_output["_username_display"] = username or ""
+                                record_for_output["_password_display"] = password or ""
+                            _emit_line(out_fh, emit_line, _format_detect_record(record_for_output, output_format))
+                    next_emit_idx += 1
 
-                # Add masked/basic display only for text summary formatting.
-                record_for_output = dict(record)
-                if username is not None or password is not None:
-                    record_for_output["_username_display"] = username or ""
-                    record_for_output["_password_display"] = password or ""
+        deep_candidates: list[tuple[int, str]] = []
+        detected_total = 0
+        for idx, host in indexed_hosts:
+            detect_record = detect_records[idx]
+            detect_status = str(detect_record.get("status") or "fail")
+            if not bool(detect_record.get("is_kubeapi")):
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_kubeapi")
+                continue
+            detected_total += 1
+            if detect_status in {"open_no_auth", "auth_valid"}:
+                deep_candidates.append((idx, host))
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
+            elif debug_emit is not None:
+                debug_emit(f"{host}:{port} stage2_gate=skip reason=status={detect_status}")
 
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect complete kubeapi={detected_total} deep_candidates={len(deep_candidates)}")
+
+        progress.set_total(len(indexed_hosts) + len(deep_candidates))
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
+
+        if deep_candidates:
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+                pass2_future_map = {
+                    executor.submit(
+                        _call_audit_kubeapi_host_with_thread_debug,
+                        host,
+                        port,
+                        timeout,
+                        retries,
+                        use_https=use_https,
+                        insecure=insecure,
+                        ca_file=ca_file,
+                        token=token,
+                        username=username,
+                        password=password,
+                        show_namespaces=show_namespaces,
+                        show_pods=show_pods,
+                        show_secrets=show_secrets,
+                        namespace_filters=namespace_filters,
+                        exec_pod=exec_pod,
+                        exec_command=exec_command,
+                        debug=bool(debug_emit),
+                        run_deep_checks=True,
+                        debug_emit=debug_emit,
+                    ): idx
+                    for idx, host in deep_candidates
+                }
+                for future in as_completed(pass2_future_map):
+                    record_idx = int(pass2_future_map[future])
+                    deep_records[record_idx] = future.result()
+                    progress.advance()
+
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
+
+        final_records: dict[int, dict[str, Any]] = {}
+        for idx in range(len(hosts)):
+            detect_record = detect_records[idx]
+            deep_record = deep_records.get(idx)
+            if deep_record is None:
+                final_records[idx] = detect_record
+            else:
+                final_records[idx] = _merge_stage2_record(detect_record, deep_record)
+
+        for idx in range(len(hosts)):
+            record = final_records[idx]
+            total += 1
+            if bool(record.get("is_kubeapi")):
+                detected += 1
+            if str(record.get("status") or "fail") == "fail":
+                failed += 1
+
+            if debug_emit is not None and not bool(record.get("debug_events_streamed")):
+                for event in record.get("debug_events") or []:
+                    if isinstance(event, str) and event.strip():
+                        debug_emit(event)
+
+            # Add masked/basic display only for text summary formatting.
+            record_for_output = dict(record)
+            if username is not None or password is not None:
+                record_for_output["_username_display"] = username or ""
+                record_for_output["_password_display"] = password or ""
+
+            if output_format != "txt":
+                _emit_line(out_fh, emit_line, _format_detect_record(record_for_output, output_format))
+
+            if output_format == "txt":
                 suppress_timeout_detect_line = (
                     suppress_timeout_status_lines
                     and output_format == "txt"
                     and str(record_for_output.get("status") or "") == "fail"
                 )
-                if not suppress_timeout_detect_line:
-                    _emit_line(out_fh, emit_line, _format_detect_record(record_for_output, output_format))
-                if output_format == "txt":
-                    status_line = _status_summary_line(record_for_output)
-                    suppress_auth_required_status_line = (
-                        bool(record_for_output.get("is_kubeapi"))
-                        and str(record_for_output.get("status") or "") == "auth_required"
-                    )
-                    if status_line and not suppress_auth_required_status_line:
-                        _emit_line(out_fh, emit_line, f"{_kxc_prefix(record_for_output)} {status_line}")
-                    for detail in _format_detail_records(record_for_output, output_format):
-                        _emit_line(out_fh, emit_line, detail)
+                status_line = _status_summary_line(record_for_output)
+                suppress_auth_required_status_line = (
+                    bool(record_for_output.get("is_kubeapi"))
+                    and str(record_for_output.get("status") or "") == "auth_required"
+                )
+                if status_line and not suppress_auth_required_status_line and not suppress_timeout_detect_line:
+                    _emit_line(out_fh, emit_line, f"{_kxc_prefix(record_for_output)} {status_line}")
+                for detail in _format_detail_records(record_for_output, output_format):
+                    _emit_line(out_fh, emit_line, detail)
 
-                if logger is not None:
-                    logger.log(
-                        "kubeapi",
-                        (str(record.get("host") or "-"), int(record.get("port") or port)),
-                        phase="audit",
-                        status=record.get("status"),
-                        auth_required=record.get("auth_required"),
-                        auth_mode=record.get("auth_mode"),
-                        auth_valid=record.get("auth_valid"),
-                        version=record.get("version"),
-                        namespaces=len(record.get("namespaces") or []),
-                        pods=len(record.get("pods") or []),
-                        secrets=len(record.get("secrets") or []),
-                        exec_ok=bool((record.get("exec_result") or {}).get("ok"))
-                        if isinstance(record.get("exec_result"), dict)
-                        else None,
-                        error=record.get("error"),
-                    )
+            if logger is not None:
+                logger.log(
+                    "kubeapi",
+                    (str(record.get("host") or "-"), int(record.get("port") or port)),
+                    phase="audit",
+                    status=record.get("status"),
+                    auth_required=record.get("auth_required"),
+                    auth_mode=record.get("auth_mode"),
+                    auth_valid=record.get("auth_valid"),
+                    version=record.get("version"),
+                    namespaces=len(record.get("namespaces") or []),
+                    pods=len(record.get("pods") or []),
+                    secrets=len(record.get("secrets") or []),
+                    exec_ok=bool((record.get("exec_result") or {}).get("ok"))
+                    if isinstance(record.get("exec_result"), dict)
+                    else None,
+                    error=record.get("error"),
+                )
     finally:
+        if progress is not None:
+            progress.close()
         if out_fh is not None:
             out_fh.close()
 
@@ -1705,6 +2228,15 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if args.debug:
             console.plain(line)
 
+    def emit_debug(message: str) -> None:
+        if not args.debug:
+            return
+        debug_method = getattr(console, "debug", None)
+        if callable(debug_method):
+            debug_method(message)
+            return
+        console.info(message)
+
     if args.debug and args.output_format == "txt":
         target_auth = "token" if token else ("basic" if (username is not None or password is not None) else "none")
         console.info(
@@ -1750,6 +2282,7 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
                 suppress_timeout_status_lines=not bool(args.debug),
+                debug_emit=emit_debug if args.debug else None,
             )
             total += part_total
             detected += part_detected
