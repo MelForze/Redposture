@@ -326,6 +326,85 @@ def test_enumerate_znodes_handles_noauth_and_truncation() -> None:
     assert error is None
 
 
+def test_enumerate_znodes_count_only_mode_skips_path_collection() -> None:
+    class _FakeClient:
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            if path == "/":
+                return ["brokers", "zookeeper"], _ZK_ERR_OK, None
+            if path == "/brokers":
+                return ["ids", "topics"], _ZK_ERR_OK, None
+            if path == "/brokers/ids":
+                return [], _ZK_ERR_NOAUTH, None
+            if path == "/brokers/topics":
+                return [], _ZK_ERR_OK, None
+            return [], _ZK_ERR_NONODE, None
+
+    nodes, total_count, truncated, meta, error = _enumerate_znodes(  # type: ignore[arg-type]
+        _FakeClient(),
+        2,
+        collect_paths=False,
+    )
+    assert nodes == []
+    assert total_count == 3
+    assert truncated is False
+    assert meta == {}
+    assert error is None
+
+
+def test_audit_host_uses_count_only_enumeration_when_details_not_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    collect_flags: list[bool] = []
+
+    class _FakeZkClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
+            if path == "/":
+                return ["brokers"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+    def _fake_enumerate(
+        _client,
+        _max_znodes: int,
+        _progress_hook=None,
+        _progress_every: int = 500,
+        collect_paths: bool = True,
+    ):
+        collect_flags.append(bool(collect_paths))
+        return [], 3210, False, {}, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
+    monkeypatch.setattr("redposture_core.stage_zookeeper._enumerate_znodes", _fake_enumerate)
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._probe_znode_create_delete", lambda *_a, **_k: (False, False, None)
+    )
+
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert collect_flags == [False]
+    assert record["status"] == "open_no_auth"
+    assert record["znode_count"] == 3210
+    assert record["znodes"] == []
+    assert record["znode_details"] is None
+
+
 def test_audit_zookeeper_suppresses_unexpected_eof_when_suppression_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def fake_audit(*_args, **_kwargs):
         return {
@@ -424,11 +503,236 @@ def test_audit_zookeeper_emits_records_in_input_order(monkeypatch: pytest.Monkey
     )
 
     assert totals == (2, 2, 0, 0, 0)
-    host_a_positions = [idx for idx, line in enumerate(lines) if "\thost-a\t" in line]
-    host_b_positions = [idx for idx, line in enumerate(lines) if "\thost-b\t" in line]
-    assert host_a_positions
-    assert host_b_positions
-    assert max(host_a_positions) < min(host_b_positions)
+    detect_lines = [line for line in lines if "ZooKeeper Service" in line]
+    status_lines = [line for line in lines if "anonymous access" in line]
+    assert len(detect_lines) == 2
+    assert len(status_lines) == 2
+    assert "\thost-a\t" in detect_lines[0]
+    assert "\thost-b\t" in detect_lines[1]
+    assert "\thost-a\t" in status_lines[0]
+    assert "\thost-b\t" in status_lines[1]
+    detect_positions = [idx for idx, line in enumerate(lines) if "ZooKeeper Service" in line]
+    status_positions = [idx for idx, line in enumerate(lines) if "anonymous access" in line]
+    assert detect_positions
+    assert status_positions
+    assert max(detect_positions) < min(status_positions)
+
+
+def test_audit_zookeeper_two_pass_scope_and_policy_parity(monkeypatch: pytest.MonkeyPatch) -> None:
+    call_trace: list[tuple[str, bool, float, int]] = []
+
+    def _record_for(
+        host: str,
+        *,
+        status: str,
+        is_zookeeper: bool,
+        znode_count: int | None,
+    ) -> dict[str, object]:
+        return {
+            "timestamp": "2026-03-02T00:00:00Z",
+            "host": host,
+            "port": 2181,
+            "is_zookeeper": is_zookeeper,
+            "status": status,
+            "auth_required": False if status != "auth_required" else True,
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "provided_credentials_ok": None,
+            "show_znodes": False,
+            "dump": False,
+            "query_znode": None,
+            "max_znodes": 100,
+            "znode_count": znode_count,
+            "znodes": [] if znode_count is not None else None,
+            "znode_details": None,
+            "znode_values": None,
+            "znodes_truncated": False,
+            "query_znode_value": None,
+            "query_znode_dump": None,
+            "query_znode_dump_error": None,
+            "can_create_znode": None,
+            "can_delete_znode": None,
+            "znode_capability_error": None,
+            "auth_inference_source": "root_ok",
+            "auth_probe_trace": ["/:ok"],
+            "elapsed_ms": 1,
+            "error": "connection timeout" if status == "fail" else None,
+            "debug_events": [],
+        }
+
+    def fake_audit(
+        host: str,
+        _port: int,
+        timeout: float,
+        retries: int,
+        _username: str | None,
+        _password: str | None,
+        _show_znodes: bool,
+        _dump: bool,
+        _query_znode: str | None,
+        _max_znodes: int,
+        _debug: bool,
+        run_deep_checks: bool = True,
+    ) -> dict[str, object]:
+        call_trace.append((host, bool(run_deep_checks), float(timeout), int(retries)))
+        if not run_deep_checks:
+            if host == "host-open":
+                return _record_for(host, status="open_no_auth", is_zookeeper=True, znode_count=None)
+            if host == "host-valid":
+                return _record_for(host, status="valid_credentials", is_zookeeper=True, znode_count=None)
+            if host == "host-auth":
+                return _record_for(host, status="auth_required", is_zookeeper=True, znode_count=None)
+            return _record_for(host, status="fail", is_zookeeper=False, znode_count=None)
+
+        if host == "host-open":
+            return _record_for(host, status="open_no_auth", is_zookeeper=True, znode_count=123)
+        if host == "host-valid":
+            return _record_for(host, status="valid_credentials", is_zookeeper=True, znode_count=321)
+        return _record_for(host, status="fail", is_zookeeper=False, znode_count=None)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
+
+    lines: list[str] = []
+    totals = audit_zookeeper_targets(
+        hosts=["host-open", "host-valid", "host-auth", "host-fail"],
+        port=2181,
+        timeout=2.5,
+        retries=3,
+        workers=1,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+        output_path=None,
+        output_format="txt",
+        emit_line=lines.append,
+        suppress_connection_refused_status_lines=False,
+    )
+
+    assert totals == (4, 1, 1, 1, 1)
+    detect_calls = [entry for entry in call_trace if entry[1] is False]
+    deep_calls = [entry for entry in call_trace if entry[1] is True]
+    assert [host for host, *_rest in detect_calls] == ["host-open", "host-valid", "host-auth", "host-fail"]
+    assert {host for host, *_rest in deep_calls} == {"host-open", "host-valid"}
+    assert all(timeout == 2.5 for _, _, timeout, _ in detect_calls + deep_calls)
+    assert all(retries == 3 for _, _, _, retries in detect_calls + deep_calls)
+    assert any("host-open" in line and "(znodes:123)" in line for line in lines)
+    assert any("host-valid" in line and "(znodes:321)" in line for line in lines)
+    assert any("host-auth" in line and "(auth required:True)" in line for line in lines)
+
+
+def test_merge_stage2_record_marks_unknown_partial_and_timeout_note() -> None:
+    detect_record = {
+        "host": "127.0.0.1",
+        "port": 2181,
+        "is_zookeeper": True,
+        "status": "open_no_auth",
+        "show_znodes": True,
+        "dump": False,
+        "query_znode": None,
+        "max_znodes": 100,
+        "debug_events": ["stage1"],
+    }
+    deep_record = {
+        "host": "127.0.0.1",
+        "port": 2181,
+        "is_zookeeper": True,
+        "status": "open_no_auth",
+        "znode_count": 12,
+        "znodes": ["/a"],
+        "znode_details": [{"path": "/a", "state": "empty", "children": 0, "bytes": 0, "error": None}],
+        "znode_values": None,
+        "znodes_truncated": False,
+        "query_znode_value": None,
+        "query_znode_dump": None,
+        "query_znode_dump_error": None,
+        "can_create_znode": True,
+        "can_delete_znode": True,
+        "znode_capability_error": None,
+        "connect_ms": 10,
+        "auth_ms": 0,
+        "enumerate_ms": 100,
+        "dump_ms": None,
+        "elapsed_ms": 110,
+        "connect_error": None,
+        "auth_error": None,
+        "enum_error": "connection timeout",
+        "query_error": None,
+        "dump_error": None,
+        "attempts": 2,
+        "max_attempts": 2,
+        "stage2_error": None,
+        "error": "connection timeout",
+        "debug_events": ["stage2"],
+    }
+
+    merged = zookeeper_stage._merge_stage2_record(detect_record, deep_record, timeout=3.0, retries=2)
+    assert merged["znode_count_unknown"] is True
+    assert merged["znode_count_partial"] is True
+    assert merged["znode_count_attempt_timeouts"] == [3.0, 3.0, 3.0]
+    assert merged["stage2_error"] == "connection timeout"
+    assert merged["debug_events"] == ["stage1", "stage2"]
+
+    detail_lines = _format_znodes_detail_records(merged, "txt")
+    assert any("znode count unknown (partial)" in line for line in detail_lines)
+    assert any("timeouts=3s,3s,3s" in line for line in detail_lines)
+
+
+def test_audit_host_runs_capability_probe_before_enumeration(monkeypatch: pytest.MonkeyPatch) -> None:
+    call_order: list[str] = []
+
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
+        lambda *_a, **_k: (False, "root_ok", ["/:ok"]),
+    )
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str):
+            if path == "/":
+                return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def get_data(self, _path: str):
+            return b"", _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+    def _probe(*_args, **_kwargs):
+        call_order.append("probe")
+        return True, True, None
+
+    def _enumerate(*_args, **_kwargs):
+        call_order.append("enumerate")
+        return [], 0, False, {}, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _Client)
+    monkeypatch.setattr("redposture_core.stage_zookeeper._probe_znode_create_delete", _probe)
+    monkeypatch.setattr("redposture_core.stage_zookeeper._enumerate_znodes", _enumerate)
+
+    rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert rec["status"] == "open_no_auth"
+    assert call_order[:2] == ["probe", "enumerate"]
 
 
 def test_audit_zookeeper_marks_provided_credentials_invalid_on_anonymous_open_target(monkeypatch) -> None:  # type: ignore[no-untyped-def]
