@@ -15,6 +15,7 @@ import time
 from collections import Counter, deque
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Empty, Queue
 from typing import Any
 
 from .console import Console
@@ -461,7 +462,26 @@ def _enumerate_znodes(
     progress_hook: Callable[[dict[str, Any]], None] | None = None,
     progress_interval_s: float = _ZK_ENUM_PROGRESS_INTERVAL_SECONDS,
     collect_paths: bool = True,
+    enum_workers: int = 1,
+    auth_username: str | None = None,
+    auth_password: str | None = None,
 ) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
+    worker_count = max(1, int(enum_workers))
+    parallel_capable = all(hasattr(client, attr) for attr in ("host", "port", "timeout"))
+    if worker_count > 1 and parallel_capable:
+        return _enumerate_znodes_parallel(
+            host=client.host,
+            port=client.port,
+            timeout=client.timeout,
+            max_znodes=max_znodes,
+            progress_hook=progress_hook,
+            progress_interval_s=progress_interval_s,
+            collect_paths=collect_paths,
+            enum_workers=worker_count,
+            auth_username=auth_username,
+            auth_password=auth_password,
+        )
+
     queue = deque(["/"])
     visited = {"/"}
     listed_nodes: list[str] = []
@@ -471,6 +491,7 @@ def _enumerate_znodes(
     started = time.monotonic()
     last_report_at = started
     last_report_count = 0
+    last_report_processed = 0
 
     while queue:
         parent = queue.popleft()
@@ -539,10 +560,12 @@ def _enumerate_znodes(
                             "elapsed_s": max(0.0, now - started),
                             "interval_s": elapsed_since_report,
                             "interval_count": interval_count,
+                            "interval_processed": int(processed_parents - last_report_processed),
                         }
                     )
                     last_report_at = now
                     last_report_count = total_count
+                    last_report_processed = processed_parents
         if progress_hook is not None and progress_interval_s > 0 and total_count > 0:
             now = time.monotonic()
             elapsed_since_report = max(0.0, now - last_report_at)
@@ -558,10 +581,12 @@ def _enumerate_znodes(
                         "elapsed_s": max(0.0, now - started),
                         "interval_s": elapsed_since_report,
                         "interval_count": interval_count,
+                        "interval_processed": int(processed_parents - last_report_processed),
                     }
                 )
                 last_report_at = now
                 last_report_count = total_count
+                last_report_processed = processed_parents
 
     truncated = (total_count > len(listed_nodes)) if collect_paths else False
     if progress_hook is not None:
@@ -576,6 +601,215 @@ def _enumerate_znodes(
             }
         )
     return listed_nodes, total_count, truncated, listed_meta, None
+
+
+def _enumerate_znodes_parallel(
+    *,
+    host: str,
+    port: int,
+    timeout: float,
+    max_znodes: int,
+    progress_hook: Callable[[dict[str, Any]], None] | None = None,
+    progress_interval_s: float = _ZK_ENUM_PROGRESS_INTERVAL_SECONDS,
+    collect_paths: bool = True,
+    enum_workers: int = 3,
+    auth_username: str | None = None,
+    auth_password: str | None = None,
+) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
+    worker_count = max(1, int(enum_workers))
+    task_queue: Queue[str | None] = Queue()
+    result_queue: Queue[dict[str, Any]] = Queue()
+    stop_event = threading.Event()
+
+    queue_set = {"/"}
+    listed_nodes: list[str] = []
+    listed_meta: dict[str, dict[str, Any]] = {}
+    total_count = 0
+    processed_parents = 0
+    in_flight = 1
+
+    started = time.monotonic()
+    last_report_at = started
+    last_report_count = 0
+    last_report_processed = 0
+    worker_init_failures = 0
+
+    task_queue.put("/")
+
+    def _emit_progress(now: float) -> None:
+        nonlocal last_report_at, last_report_count, last_report_processed
+        if progress_hook is None or progress_interval_s <= 0 or total_count <= 0:
+            return
+        elapsed_since_report = max(0.0, now - last_report_at)
+        if elapsed_since_report < progress_interval_s:
+            return
+        interval_count = int(total_count - last_report_count)
+        interval_processed = int(processed_parents - last_report_processed)
+        progress_hook(
+            {
+                "event": "enumerate_progress",
+                "processed_parents": processed_parents,
+                "queued": max(0, int(in_flight)),
+                "total_count": total_count,
+                "listed_count": len(listed_nodes),
+                "elapsed_s": max(0.0, now - started),
+                "interval_s": elapsed_since_report,
+                "interval_count": interval_count,
+                "interval_processed": interval_processed,
+            }
+        )
+        last_report_at = now
+        last_report_count = total_count
+        last_report_processed = processed_parents
+
+    def _worker() -> None:
+        client: _ZkClient | None = None
+        try:
+            client = _ZkClient(host, port, timeout)
+            client.connect()
+            if auth_username is not None and auth_password is not None:
+                auth_ok, auth_error = client.auth_digest(auth_username, auth_password)
+                if not auth_ok:
+                    result_queue.put(
+                        {
+                            "kind": "worker_error",
+                            "error": str(auth_error or "authentication failed"),
+                        }
+                    )
+                    return
+            while not stop_event.is_set():
+                try:
+                    parent = task_queue.get(timeout=0.2)
+                except Empty:
+                    continue
+                if parent is None:
+                    return
+                try:
+                    children, err, stat = client.get_children2(parent)
+                    result_queue.put(
+                        {
+                            "kind": "result",
+                            "parent": parent,
+                            "children": children,
+                            "err": int(err),
+                            "stat": stat,
+                            "error": None,
+                        }
+                    )
+                except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+                    result_queue.put(
+                        {
+                            "kind": "result",
+                            "parent": parent,
+                            "children": None,
+                            "err": None,
+                            "stat": None,
+                            "error": _friendly_error_from_exception(exc),
+                        }
+                    )
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            result_queue.put(
+                {
+                    "kind": "worker_error",
+                    "error": _friendly_error_from_exception(exc),
+                }
+            )
+        finally:
+            if client is not None:
+                client.close()
+
+    threads = [threading.Thread(target=_worker, daemon=True) for _ in range(worker_count)]
+    for thread in threads:
+        thread.start()
+
+    enum_error: str | None = None
+    try:
+        while in_flight > 0 and enum_error is None:
+            try:
+                item = result_queue.get(timeout=0.2)
+            except Empty:
+                _emit_progress(time.monotonic())
+                continue
+
+            kind = str(item.get("kind") or "")
+            if kind == "worker_error":
+                worker_init_failures += 1
+                if worker_init_failures >= worker_count:
+                    enum_error = f"worker init failed: {str(item.get('error') or 'connection failed')}"
+                continue
+
+            parent = str(item.get("parent") or "/")
+            in_flight = max(0, int(in_flight - 1))
+            processed_parents += 1
+
+            item_error = str(item.get("error") or "").strip()
+            if item_error:
+                enum_error = f"getChildren failed for {parent}: {item_error}"
+                break
+
+            err = int(item.get("err")) if item.get("err") is not None else _ZK_ERR_OK
+            children = item.get("children")
+            stat = item.get("stat")
+            parent_meta = listed_meta.get(parent) if collect_paths else None
+
+            if err == _ZK_ERR_NONODE:
+                if parent_meta is not None:
+                    parent_meta["error"] = "not found"
+                _emit_progress(time.monotonic())
+                continue
+            if err == _ZK_ERR_NOAUTH:
+                if parent_meta is not None:
+                    parent_meta["error"] = "Access Denied"
+                _emit_progress(time.monotonic())
+                continue
+            if err != _ZK_ERR_OK:
+                if parent_meta is not None:
+                    parent_meta["error"] = _zk_error_name(err)
+                enum_error = f"getChildren failed for {parent}: {_zk_error_name(err)}"
+                break
+            if children is None:
+                _emit_progress(time.monotonic())
+                continue
+            if parent_meta is not None:
+                parent_meta["children"] = int(len(children))
+                parent_meta["bytes"] = int((stat or {}).get("data_length") or 0)
+                parent_meta["error"] = None
+
+            for child in children:
+                full_path = _join_znode_path(parent, child)
+                if _is_system_znode(full_path):
+                    continue
+                if full_path in queue_set:
+                    continue
+                queue_set.add(full_path)
+                total_count += 1
+                if collect_paths and len(listed_nodes) < max_znodes:
+                    listed_nodes.append(full_path)
+                    listed_meta[full_path] = {"path": full_path, "children": None, "bytes": None, "error": None}
+                in_flight += 1
+                task_queue.put(full_path)
+
+            _emit_progress(time.monotonic())
+    finally:
+        stop_event.set()
+        for _ in range(worker_count):
+            task_queue.put(None)
+        for thread in threads:
+            thread.join(timeout=1.0)
+
+    truncated = (total_count > len(listed_nodes)) if collect_paths else False
+    if progress_hook is not None:
+        progress_hook(
+            {
+                "event": "enumerate_done",
+                "processed_parents": processed_parents,
+                "queued": max(0, int(in_flight)),
+                "total_count": total_count,
+                "listed_count": len(listed_nodes),
+                "elapsed_s": max(0.0, time.monotonic() - started),
+            }
+        )
+    return listed_nodes, total_count, truncated, listed_meta, enum_error
 
 
 def _probe_znode_create_delete(client: _ZkClient, host: str, port: int) -> tuple[bool | None, bool | None, str | None]:
@@ -719,39 +953,48 @@ def _call_audit_host_with_thread_debug(
     max_znodes: int,
     debug: bool,
     run_deep_checks: bool,
+    enum_workers: int,
     debug_emit: Callable[[str], None] | None,
 ) -> dict[str, Any]:
+    def _invoke() -> dict[str, Any]:
+        try:
+            return _audit_zookeeper_host(
+                host,
+                port,
+                timeout,
+                retries,
+                username,
+                password,
+                show_znodes,
+                dump,
+                query_znode,
+                max_znodes,
+                debug,
+                run_deep_checks,
+                enum_workers=enum_workers,
+            )
+        except TypeError:
+            # Backward-safe for patched tests/helpers with legacy signature.
+            return _audit_zookeeper_host(
+                host,
+                port,
+                timeout,
+                retries,
+                username,
+                password,
+                show_znodes,
+                dump,
+                query_znode,
+                max_znodes,
+                debug,
+                run_deep_checks,
+            )
+
     if debug_emit is None:
-        return _audit_zookeeper_host(
-            host,
-            port,
-            timeout,
-            retries,
-            username,
-            password,
-            show_znodes,
-            dump,
-            query_znode,
-            max_znodes,
-            debug,
-            run_deep_checks,
-        )
+        return _invoke()
     _THREAD_LOCAL_DEBUG_EMIT.callback = debug_emit
     try:
-        return _audit_zookeeper_host(
-            host,
-            port,
-            timeout,
-            retries,
-            username,
-            password,
-            show_znodes,
-            dump,
-            query_znode,
-            max_znodes,
-            debug,
-            run_deep_checks,
-        )
+        return _invoke()
     finally:
         try:
             delattr(_THREAD_LOCAL_DEBUG_EMIT, "callback")
@@ -772,6 +1015,7 @@ def _audit_zookeeper_host(
     max_znodes: int,
     debug: bool = False,
     run_deep_checks: bool = True,
+    enum_workers: int = 3,
 ) -> dict[str, Any]:
     normalized_username = str(username).strip() if username is not None else None
     if normalized_username == "":
@@ -1430,6 +1674,8 @@ def _audit_zookeeper_host(
             stage4_started = time.monotonic()
             enum_started = time.monotonic()
             collect_znode_paths = bool(show_znodes or (dump and not query_znode))
+            enum_auth_username = normalized_username if provided_credentials_ok else None
+            enum_auth_password = normalized_password if provided_credentials_ok else None
 
             progress_hook: Callable[[dict[str, Any]], None] | None = None
             if debug:
@@ -1443,10 +1689,14 @@ def _audit_zookeeper_host(
                     listed_count_event = int(event.get("listed_count") or 0)
                     processed_parents_event = int(event.get("processed_parents") or 0)
                     interval_count_event = int(event.get("interval_count") or 0)
+                    interval_processed_event = int(event.get("interval_processed") or 0)
                     interval_s_event = float(event.get("interval_s") or 0.0)
                     rate = interval_count_event / max(interval_s_event, 0.001)
                     eta = queued_event / rate if rate > 0 else None
+                    process_rate = interval_processed_event / max(interval_s_event, 0.001)
+                    process_eta = queued_event / process_rate if process_rate > 0 else None
                     eta_text = f"{eta:.1f}s" if eta is not None else "-"
+                    process_eta_text = f"{process_eta:.1f}s" if process_eta is not None else "-"
                     window_text = f"{interval_s_event:.1f}s" if interval_s_event > 0 else "-"
                     if event_type == "enumerate_done":
                         elapsed_event = float(event.get("elapsed_s") or 0.0)
@@ -1458,7 +1708,8 @@ def _audit_zookeeper_host(
                     _debug(
                         f"enumerate progress discovered={total_count_event} listed={listed_count_event} "
                         f"processed={processed_parents_event} queued={queued_event} "
-                        f"window={window_text} rate={rate:.1f}/s eta={eta_text}"
+                        f"window={window_text} rate={rate:.1f}/s eta={eta_text} "
+                        f"process_rate={process_rate:.1f}/s process_eta={process_eta_text}"
                     )
 
                 progress_hook = _progress
@@ -1469,10 +1720,31 @@ def _audit_zookeeper_host(
                     max_znodes,
                     progress_hook,
                     collect_paths=collect_znode_paths,
+                    enum_workers=enum_workers,
+                    auth_username=enum_auth_username,
+                    auth_password=enum_auth_password,
                 )
             except TypeError:
-                # Backward-safe for patched tests/helpers that still expose the legacy 2-arg signature.
-                listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(client, max_znodes)
+                # Backward-safe for patched tests/helpers that may expose legacy signatures.
+                try:
+                    listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
+                        client,
+                        max_znodes,
+                        progress_hook,
+                        collect_paths=collect_znode_paths,
+                    )
+                except TypeError:
+                    try:
+                        listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
+                            client,
+                            max_znodes,
+                            progress_hook,
+                        )
+                    except TypeError:
+                        listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
+                            client,
+                            max_znodes,
+                        )
             enumerate_ms = int((time.monotonic() - enum_started) * 1000)
             last_enumerate_ms = enumerate_ms
             if enum_error:
@@ -2237,6 +2509,7 @@ def audit_zookeeper_targets(
     suppress_connection_refused_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
     debug_stats: dict[str, Any] | None = None,
+    enum_workers: int = 3,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -2275,6 +2548,7 @@ def audit_zookeeper_targets(
                     max_znodes,
                     bool(debug_emit),
                     False,
+                    enum_workers,
                     debug_emit,
                 ): idx
                 for idx, host in indexed_hosts
@@ -2310,9 +2584,7 @@ def audit_zookeeper_targets(
             elif debug_emit is not None:
                 debug_emit(f"{host}:{port} stage2_gate=skip reason=status={detect_status}")
         if debug_emit is not None:
-            debug_emit(
-                f"pass=1 detect complete zookeeper={zookeeper_detected} deep_candidates={len(deep_candidates)}"
-            )
+            debug_emit(f"pass=1 detect complete zookeeper={zookeeper_detected} deep_candidates={len(deep_candidates)}")
 
         progress.set_total(len(indexed_hosts) + len(deep_candidates))
         if debug_emit is not None:
@@ -2334,6 +2606,7 @@ def audit_zookeeper_targets(
                         max_znodes,
                         bool(debug_emit),
                         True,
+                        enum_workers,
                         debug_emit,
                     ): idx
                     for idx, host in deep_candidates
@@ -2433,6 +2706,7 @@ def audit_zookeeper_targets(
 
 def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     console = Console(debug=args.debug)
+    enum_workers = int(getattr(args, "enum_workers", 3) or 3)
 
     username = str(args.username).strip() if args.username is not None else None
     if username == "":
@@ -2449,6 +2723,9 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
     if args.max_znodes <= 0:
         console.error("--max-znodes must be > 0")
+        return 2
+    if enum_workers <= 0:
+        console.error("--enum-workers must be > 0")
         return 2
     if (username is None) != (password is None):
         console.error("--username and --password must be set together")
@@ -2516,7 +2793,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         mode = "+".join(mode_parts)
         console.info(
             f"zookeeper audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
-            f"workers={args.workers} retries={args.retries} max_znodes={args.max_znodes} "
+            f"workers={args.workers} retries={args.retries} max_znodes={args.max_znodes} enum_workers={enum_workers} "
             f"mode={mode} format=txt"
         )
     if args.debug and not stream_to_stdout:
@@ -2532,7 +2809,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         mode = "+".join(mode_parts)
         console.info(
             f"zookeeper audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
-            f"workers={args.workers} retries={args.retries} max_znodes={args.max_znodes} "
+            f"workers={args.workers} retries={args.retries} max_znodes={args.max_znodes} enum_workers={enum_workers} "
             f"mode={mode} format={args.output_format} output={args.output}"
         )
 
@@ -2564,6 +2841,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 suppress_connection_refused_status_lines=not bool(args.debug),
                 debug_emit=emit_debug if args.debug else None,
                 debug_stats=debug_stats if args.debug else None,
+                enum_workers=enum_workers,
             )
             total += part_total
             open_no_auth += part_open

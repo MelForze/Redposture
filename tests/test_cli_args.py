@@ -1308,6 +1308,8 @@ def test_zookeeper_flags_are_parsed() -> None:
             "/brokers/ids/1",
             "--max-znodes",
             "500",
+            "--enum-workers",
+            "7",
             "-f",
             "json",
             "-o",
@@ -1327,6 +1329,7 @@ def test_zookeeper_flags_are_parsed() -> None:
     assert args.dump is True
     assert args.znode == "/brokers/ids/1"
     assert args.max_znodes == 500
+    assert args.enum_workers == 7
     assert args.output_format == "json"
     assert args.output == "zookeeper_audit.jsonl"
 
@@ -1346,6 +1349,7 @@ def test_zookeeper_dump_legacy_alias_is_parsed() -> None:
 def test_zookeeper_default_timeout_is_five_seconds() -> None:
     args = parse_args(["zookeeper", "-t", "10.0.0.9"])
     assert args.timeout == 5.0
+    assert args.enum_workers == 3
 
 
 def test_zookeeper_help_timeout_default_is_five_seconds() -> None:
