@@ -11,18 +11,19 @@ import re
 import socket
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import iter_completed_with_progress
+from .progress import ProgressBar
 from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 _ELASTIC_TAG = "ELASTIC"
@@ -35,6 +36,12 @@ _DETECT_CONFIRM_PATHS = (
     "/_cat/health",
     "/_security/_authenticate",
 )
+
+_STAGE_DETECT_PROTOCOL = "detect_protocol"
+_STAGE_AUTH_INFERENCE = "auth_inference_credentials"
+_STAGE_ACCESS_CAPABILITIES = "access_capabilities"
+_STAGE_DATA = "data"
+_THREAD_LOCAL_DEBUG_EMIT = threading.local()
 _VERSION_NUMBER_RE = re.compile(r'"number"\s*:\s*"([0-9]+(?:\.[0-9]+){1,3}(?:[-+][^"]+)?)"')
 _VERSION_STRING_RE = re.compile(r'"version"\s*:\s*"([0-9]+(?:\.[0-9]+){1,3}(?:[-+][^"]+)?)"')
 
@@ -99,6 +106,13 @@ def _clip(text: str, width: int = 96) -> str:
 
 def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
+
+
+def _get_thread_debug_emitter() -> Callable[[str], None] | None:
+    callback = getattr(_THREAD_LOCAL_DEBUG_EMIT, "callback", None)
+    if callable(callback):
+        return callback
+    return None
 
 
 def _header_lookup(headers: dict[str, str], name: str) -> str | None:
@@ -1729,6 +1743,75 @@ def _verify_authenticate(
     return None, f"status={status}", None
 
 
+def _call_audit_elastic_host_with_thread_debug(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    username: str | None,
+    password: str | None,
+    api_token: str | None,
+    ca_file: str | None,
+    show_endpoints: bool,
+    show_plugins: bool,
+    show_cluster: bool,
+    show_users: bool,
+    discover: bool,
+    preferred_scheme: str | None,
+    debug: bool,
+    run_deep_checks: bool,
+    debug_emit: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    def _invoke() -> dict[str, Any]:
+        try:
+            return _audit_elastic_host(
+                host,
+                port,
+                timeout,
+                retries,
+                username,
+                password,
+                api_token,
+                ca_file,
+                show_endpoints,
+                show_plugins,
+                show_cluster,
+                show_users,
+                discover,
+                preferred_scheme=preferred_scheme,
+                debug=debug,
+                run_deep_checks=run_deep_checks,
+            )
+        except TypeError:
+            return _audit_elastic_host(
+                host,
+                port,
+                timeout,
+                retries,
+                username,
+                password,
+                api_token,
+                ca_file,
+                show_endpoints,
+                show_plugins,
+                show_cluster,
+                show_users,
+                discover,
+                preferred_scheme=preferred_scheme,
+            )
+
+    if debug_emit is None:
+        return _invoke()
+    _THREAD_LOCAL_DEBUG_EMIT.callback = debug_emit
+    try:
+        return _invoke()
+    finally:
+        try:
+            delattr(_THREAD_LOCAL_DEBUG_EMIT, "callback")
+        except AttributeError:
+            pass
+
+
 def _audit_elastic_host(
     host: str,
     port: int,
@@ -1744,6 +1827,8 @@ def _audit_elastic_host(
     show_users: bool,
     discover: bool,
     preferred_scheme: str | None = None,
+    debug: bool = False,
+    run_deep_checks: bool = True,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -1751,9 +1836,109 @@ def _audit_elastic_host(
     provided_credentials = bool(username is not None and password is not None)
     provided_token = bool(api_token)
     auth_provided = provided_token or provided_credentials
+    debug_events: list[str] = []
+    stages: list[dict[str, Any]] = []
+    stage_durations_ms: dict[str, int] = {}
+    stage_attempts: dict[str, int] = {}
+    stage_failed_at: str | None = None
+    debug_events_streamed = False
+
+    def _debug(message: str) -> None:
+        nonlocal debug_events_streamed
+        if not debug:
+            return
+        debug_line = f"{host}:{port} {message}"
+        debug_events.append(debug_line)
+        live_emitter = _get_thread_debug_emitter()
+        if live_emitter is not None:
+            live_emitter(debug_line)
+            debug_events_streamed = True
+
+    def _debug_retry_decision(
+        stage_name: str,
+        *,
+        attempt: int,
+        max_attempts: int,
+        delay_s: float,
+        reason: str | None,
+    ) -> None:
+        reason_text = str(reason or "").strip() or "-"
+        _debug(
+            f"retry_decision stage={stage_name} attempt={attempt}/{max_attempts} "
+            f"backoff={delay_s:.2f}s reason={reason_text}"
+        )
+
+    def _stage_trace(
+        stage_name: str,
+        *,
+        attempt: int,
+        started_at: float,
+        result: str,
+        error: str | None = None,
+    ) -> None:
+        nonlocal stage_failed_at
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        stage_attempts[stage_name] = max(int(stage_attempts.get(stage_name, 0)), int(attempt))
+        stage_durations_ms[stage_name] = int(stage_durations_ms.get(stage_name, 0)) + duration_ms
+        entry = {
+            "stage_name": stage_name,
+            "attempt": int(attempt),
+            "duration_ms": int(duration_ms),
+            "result": str(result),
+            "error": str(error or "").strip() or None,
+        }
+        stages.append(entry)
+        if stage_failed_at is None and result in {"fail", "timeout"}:
+            stage_failed_at = stage_name
+        _debug(
+            f"stage_trace stage_name={stage_name} attempt={attempt} duration_ms={duration_ms} "
+            f"result={result} error={str(error or '-').strip() or '-'}"
+        )
+
+    def _emit_stage_timing_summary(*, status: str, attempts_done: int, max_attempts: int) -> None:
+        def _duration(stage_name: str) -> str:
+            raw = stage_durations_ms.get(stage_name)
+            if isinstance(raw, int):
+                return f"{raw}ms"
+            return "-"
+
+        def _attempt_count(stage_name: str) -> int:
+            raw = stage_attempts.get(stage_name)
+            return int(raw) if isinstance(raw, int) else 0
+
+        _debug(
+            f"stage_timing_summary status={status} attempts={attempts_done}/{max_attempts} "
+            f"detect={_duration(_STAGE_DETECT_PROTOCOL)} "
+            f"auth={_duration(_STAGE_AUTH_INFERENCE)} "
+            f"capabilities={_duration(_STAGE_ACCESS_CAPABILITIES)} "
+            f"data={_duration(_STAGE_DATA)} "
+            f"stage_attempts="
+            f"detect:{_attempt_count(_STAGE_DETECT_PROTOCOL)},"
+            f"auth:{_attempt_count(_STAGE_AUTH_INFERENCE)},"
+            f"capabilities:{_attempt_count(_STAGE_ACCESS_CAPABILITIES)},"
+            f"data:{_attempt_count(_STAGE_DATA)}"
+        )
+
+    def _record(payload: dict[str, Any], *, attempts_done: int, max_attempts: int) -> dict[str, Any]:
+        if debug:
+            _emit_stage_timing_summary(
+                status=str(payload.get("status") or "fail"), attempts_done=attempts_done, max_attempts=max_attempts
+            )
+        record = dict(payload)
+        record["attempts"] = int(attempts_done)
+        record["max_attempts"] = int(max_attempts)
+        record["stages"] = list(stages)
+        record["stage_failed_at"] = stage_failed_at
+        record["stage_durations_ms"] = dict(stage_durations_ms)
+        record["stage_attempts"] = dict(stage_attempts)
+        record["debug_events"] = list(debug_events) if debug else []
+        record["debug_events_streamed"] = bool(debug_events_streamed)
+        return record
 
     for attempt in range(attempts):
         started = time.monotonic()
+        _debug(f"attempt={attempt + 1}/{attempts} start timeout={timeout}s")
+        stage1_started = time.monotonic()
         status, payload, root_headers, error, scheme, effective_insecure, tls_auto_plain = _request_with_tls_fallback(
             host,
             port,
@@ -1764,10 +1949,33 @@ def _audit_elastic_host(
         )
         if error and status <= 0:
             last_error = error
+            if attempt < attempts - 1:
+                _stage_trace(
+                    _STAGE_DETECT_PROTOCOL,
+                    attempt=attempt + 1,
+                    started_at=stage1_started,
+                    result="retry",
+                    error=last_error,
+                )
+                delay = _retry_delay(attempt)
+                _debug_retry_decision(
+                    _STAGE_DETECT_PROTOCOL,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    delay_s=delay,
+                    reason=last_error,
+                )
+                time.sleep(delay)
+                continue
+            _stage_trace(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                started_at=stage1_started,
+                result="fail",
+                error=last_error,
+            )
             if attempt >= attempts - 1:
                 break
-            time.sleep(_retry_delay(attempt))
-            continue
 
         root_detection = _classify_detect_probe("/", status, payload, root_headers, error)
         root_detection_version = root_detection.get("version")
@@ -1927,58 +2135,80 @@ def _audit_elastic_host(
             tls_auto_plain = bool(primary_probe.get("tls_auto_plain"))
 
         if not is_elastic:
-            return {
-                "timestamp": utc_now_iso(),
-                "host": host,
-                "port": port,
-                "is_elastic": False,
-                "status": "not_elastic",
-                "auth_required": None,
-                "server_version": None,
-                "provided_credentials": provided_credentials,
-                "provided_username": username,
-                "provided_password": password if provided_credentials else None,
-                "provided_token": provided_token,
-                "api_token": api_token if provided_token else None,
-                "api_key_probe_status": "not_run",
-                "api_key_probe_error": None,
-                "effective_username": None,
-                "auth_valid": None,
-                "show_endpoints": show_endpoints,
-                "show_plugins": show_plugins,
-                "show_cluster": show_cluster,
-                "show_users": show_users,
-                "discover": discover,
-                "cat_endpoints": None,
-                "endpoint_diagnostics": None,
-                "cat_plugins": None,
-                "cluster_health": None,
-                "cluster_nodes": None,
-                "misconfig_findings": None,
-                "misconfig_error": None,
-                "users": None,
-                "discover_results": None,
-                "can_read": None,
-                "can_write": None,
-                "can_manage": None,
-                "can_manage_security": None,
-                "access_level": "unknown",
-                "rights_error": None,
-                "endpoints_error": None,
-                "plugins_error": None,
-                "cluster_error": None,
-                "users_error": None,
-                "discover_error": None,
-                "scheme": scheme,
-                "insecure_effective": effective_insecure,
-                "tls_auto_plain": tls_auto_plain,
-                "detect_confidence": detect_confidence,
-                "detect_signals": detect_signals,
-                "detect_probe_trace": detect_probe_trace,
-                "elapsed_ms": int((time.monotonic() - started) * 1000),
-                "error": None,
-            }
+            _stage_trace(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                started_at=stage1_started,
+                result="not_elastic",
+                error=None,
+            )
+            _debug(
+                f"attempt={attempt + 1}/{attempts} result=not_elastic total_ms={int((time.monotonic() - started) * 1000)}"
+            )
+            return _record(
+                {
+                    "timestamp": utc_now_iso(),
+                    "host": host,
+                    "port": port,
+                    "is_elastic": False,
+                    "status": "not_elastic",
+                    "auth_required": None,
+                    "server_version": None,
+                    "provided_credentials": provided_credentials,
+                    "provided_username": username,
+                    "provided_password": password if provided_credentials else None,
+                    "provided_token": provided_token,
+                    "api_token": api_token if provided_token else None,
+                    "api_key_probe_status": "not_run",
+                    "api_key_probe_error": None,
+                    "effective_username": None,
+                    "auth_valid": None,
+                    "show_endpoints": show_endpoints,
+                    "show_plugins": show_plugins,
+                    "show_cluster": show_cluster,
+                    "show_users": show_users,
+                    "discover": discover,
+                    "cat_endpoints": None,
+                    "endpoint_diagnostics": None,
+                    "cat_plugins": None,
+                    "cluster_health": None,
+                    "cluster_nodes": None,
+                    "misconfig_findings": None,
+                    "misconfig_error": None,
+                    "users": None,
+                    "discover_results": None,
+                    "can_read": None,
+                    "can_write": None,
+                    "can_manage": None,
+                    "can_manage_security": None,
+                    "access_level": "unknown",
+                    "rights_error": None,
+                    "endpoints_error": None,
+                    "plugins_error": None,
+                    "cluster_error": None,
+                    "users_error": None,
+                    "discover_error": None,
+                    "scheme": scheme,
+                    "insecure_effective": effective_insecure,
+                    "tls_auto_plain": tls_auto_plain,
+                    "detect_confidence": detect_confidence,
+                    "detect_signals": detect_signals,
+                    "detect_probe_trace": detect_probe_trace,
+                    "elapsed_ms": int((time.monotonic() - started) * 1000),
+                    "error": None,
+                },
+                attempts_done=attempt + 1,
+                max_attempts=attempts,
+            )
+        _stage_trace(
+            _STAGE_DETECT_PROTOCOL,
+            attempt=attempt + 1,
+            started_at=stage1_started,
+            result="ok",
+            error=None,
+        )
 
+        stage2_started = time.monotonic()
         auth_required: bool | None
         positive_probe_statuses = [
             int(probe.get("status") or 0)
@@ -2068,12 +2298,87 @@ def _audit_elastic_host(
             if detected_version:
                 version = detected_version
 
+        _stage_trace(
+            _STAGE_AUTH_INFERENCE,
+            attempt=attempt + 1,
+            started_at=stage2_started,
+            result=service_status,
+            error=auth_error,
+        )
+
+        base_record = {
+            "timestamp": utc_now_iso(),
+            "host": host,
+            "port": port,
+            "is_elastic": True,
+            "status": service_status,
+            "auth_required": auth_required,
+            "server_version": version,
+            "provided_credentials": provided_credentials,
+            "provided_username": username,
+            "provided_password": password if provided_credentials else None,
+            "provided_token": provided_token,
+            "api_token": api_token if provided_token else None,
+            "api_key_probe_status": "not_run",
+            "api_key_probe_error": None,
+            "effective_username": effective_username,
+            "auth_valid": auth_valid,
+            "show_endpoints": show_endpoints,
+            "show_plugins": show_plugins,
+            "show_cluster": show_cluster,
+            "show_users": show_users,
+            "discover": discover,
+            "cat_endpoints": None,
+            "endpoint_diagnostics": None,
+            "cat_plugins": None,
+            "cluster_health": None,
+            "cluster_nodes": None,
+            "misconfig_findings": None,
+            "misconfig_error": None,
+            "users": None,
+            "discover_results": None,
+            "can_read": None,
+            "can_write": None,
+            "can_manage": None,
+            "can_manage_security": None,
+            "access_level": "unknown",
+            "rights_error": None,
+            "endpoints_error": None,
+            "plugins_error": None,
+            "cluster_error": None,
+            "users_error": None,
+            "discover_error": None,
+            "scheme": scheme,
+            "insecure_effective": effective_insecure,
+            "tls_auto_plain": tls_auto_plain,
+            "detect_confidence": detect_confidence,
+            "detect_signals": detect_signals,
+            "detect_probe_trace": detect_probe_trace,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "error": None,
+        }
+
+        if not run_deep_checks:
+            _debug(
+                f"attempt={attempt + 1}/{attempts} detect-only result={service_status} "
+                f"total_ms={int((time.monotonic() - started) * 1000)}"
+            )
+            return _record(base_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+        if service_status not in {"open_no_auth", "valid_credentials"}:
+            _debug(f"stage2_gate=skip reason=status={service_status}")
+            return _record(base_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+        _debug(f"stage2_gate=run reason=status={service_status}")
+        stage3_started = time.monotonic()
         can_read: bool | None = None
         can_write: bool | None = None
         can_manage: bool | None = None
         can_manage_security: bool | None = None
         rights_error: str | None = None
         access_level = "unknown"
+        api_key_probe_status = "not_run"
+        api_key_probe_error: str | None = None
         if auth_provided:
             can_read, can_write, can_manage, can_manage_security, rights_error = _check_privileges(
                 host,
@@ -2090,10 +2395,48 @@ def _audit_elastic_host(
                 can_manage=can_manage,
                 can_manage_security=can_manage_security,
             )
+            if provided_token:
+                api_key_probe_status, api_key_probe_error = _verify_api_key_probe(
+                    host,
+                    port,
+                    timeout,
+                    scheme=scheme,
+                    insecure=effective_insecure,
+                    ca_file=ca_file,
+                    auth_headers=auth_headers,
+                )
+            stage3_error = "; ".join(item for item in (rights_error, api_key_probe_error) if str(item or "").strip())
+            _stage_trace(
+                _STAGE_ACCESS_CAPABILITIES,
+                attempt=attempt + 1,
+                started_at=stage3_started,
+                result="error" if stage3_error else "ok",
+                error=stage3_error or None,
+            )
+        else:
+            _stage_trace(
+                _STAGE_ACCESS_CAPABILITIES,
+                attempt=attempt + 1,
+                started_at=stage3_started,
+                result="skipped",
+                error="no auth provided",
+            )
 
+        stage4_started = time.monotonic()
         cat_endpoints: list[str] | None = None
         endpoints_error: str | None = None
         endpoint_diagnostics: list[dict[str, Any]] | None = None
+        cat_plugins: list[dict[str, str]] | None = None
+        plugins_error: str | None = None
+        cluster_health: dict[str, Any] | None = None
+        cluster_nodes: list[dict[str, Any]] | None = None
+        cluster_error: str | None = None
+        misconfig_findings: list[dict[str, str]] | None = None
+        misconfig_error: str | None = None
+        users: list[dict[str, Any]] | None = None
+        users_error: str | None = None
+        discover_results: list[dict[str, Any]] | None = None
+        discover_error: str | None = None
         if show_endpoints:
             cat_endpoints, endpoints_error, endpoint_diagnostics = _fetch_cat_endpoints(
                 host,
@@ -2104,9 +2447,6 @@ def _audit_elastic_host(
                 ca_file=ca_file,
                 auth_headers=auth_headers,
             )
-
-        cat_plugins: list[dict[str, str]] | None = None
-        plugins_error: str | None = None
         if show_plugins:
             cat_plugins, plugins_error = _fetch_cat_plugins(
                 host,
@@ -2117,12 +2457,6 @@ def _audit_elastic_host(
                 ca_file=ca_file,
                 auth_headers=auth_headers,
             )
-
-        cluster_health: dict[str, Any] | None = None
-        cluster_nodes: list[dict[str, Any]] | None = None
-        cluster_error: str | None = None
-        misconfig_findings: list[dict[str, str]] | None = None
-        misconfig_error: str | None = None
         if show_cluster:
             cluster_health, cluster_nodes, cluster_error = _fetch_cluster_data(
                 host,
@@ -2142,9 +2476,6 @@ def _audit_elastic_host(
                 ca_file=ca_file,
                 auth_headers=auth_headers,
             )
-
-        users: list[dict[str, Any]] | None = None
-        users_error: str | None = None
         if show_users:
             users, users_error = _fetch_security_users(
                 host,
@@ -2155,9 +2486,6 @@ def _audit_elastic_host(
                 ca_file=ca_file,
                 auth_headers=auth_headers,
             )
-
-        discover_results: list[dict[str, Any]] | None = None
-        discover_error: str | None = None
         if discover:
             discover_results, discover_error = _collect_discover_results(
                 host,
@@ -2168,6 +2496,19 @@ def _audit_elastic_host(
                 ca_file=ca_file,
                 auth_headers=auth_headers,
             )
+        stage4_error = "; ".join(
+            item
+            for item in (endpoints_error, plugins_error, cluster_error, misconfig_error, users_error, discover_error)
+            if str(item or "").strip()
+        )
+        stage4_requested = bool(show_endpoints or show_plugins or show_cluster or show_users or discover)
+        _stage_trace(
+            _STAGE_DATA,
+            attempt=attempt + 1,
+            started_at=stage4_started,
+            result="error" if stage4_error else "ok" if stage4_requested else "skipped",
+            error=stage4_error or None,
+        )
 
         errors: list[str] = []
         for value in (
@@ -2186,109 +2527,165 @@ def _audit_elastic_host(
             if clean and clean not in errors:
                 errors.append(clean)
 
-        return {
+        final_record = dict(base_record)
+        final_record.update(
+            {
+                "api_key_probe_status": api_key_probe_status,
+                "api_key_probe_error": api_key_probe_error,
+                "cat_endpoints": cat_endpoints,
+                "endpoint_diagnostics": endpoint_diagnostics,
+                "cat_plugins": cat_plugins,
+                "cluster_health": cluster_health,
+                "cluster_nodes": cluster_nodes,
+                "misconfig_findings": misconfig_findings,
+                "misconfig_error": misconfig_error,
+                "users": users,
+                "discover_results": discover_results,
+                "can_read": can_read,
+                "can_write": can_write,
+                "can_manage": can_manage,
+                "can_manage_security": can_manage_security,
+                "access_level": access_level,
+                "rights_error": rights_error,
+                "endpoints_error": endpoints_error,
+                "plugins_error": plugins_error,
+                "cluster_error": cluster_error,
+                "users_error": users_error,
+                "discover_error": discover_error,
+                "error": "; ".join(errors) if errors else None,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+            }
+        )
+        _debug(
+            f"attempt={attempt + 1}/{attempts} result={service_status} "
+            f"total_ms={int((time.monotonic() - started) * 1000)}"
+        )
+        return _record(final_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+    _debug(f"final fail attempts={attempts}/{attempts} error={_friendly_error_text(last_error or 'connection failed')}")
+    return _record(
+        {
             "timestamp": utc_now_iso(),
             "host": host,
             "port": port,
-            "is_elastic": True,
-            "status": service_status,
-            "auth_required": auth_required,
-            "server_version": version,
+            "is_elastic": False,
+            "status": "fail",
+            "auth_required": None,
+            "server_version": None,
             "provided_credentials": provided_credentials,
             "provided_username": username,
             "provided_password": password if provided_credentials else None,
             "provided_token": provided_token,
             "api_token": api_token if provided_token else None,
-            "api_key_probe_status": api_key_probe_status,
-            "api_key_probe_error": api_key_probe_error,
-            "effective_username": effective_username,
-            "auth_valid": auth_valid,
+            "api_key_probe_status": "not_run",
+            "api_key_probe_error": None,
+            "effective_username": None,
+            "auth_valid": None,
             "show_endpoints": show_endpoints,
             "show_plugins": show_plugins,
             "show_cluster": show_cluster,
             "show_users": show_users,
             "discover": discover,
-            "cat_endpoints": cat_endpoints,
-            "endpoint_diagnostics": endpoint_diagnostics,
-            "cat_plugins": cat_plugins,
-            "cluster_health": cluster_health,
-            "cluster_nodes": cluster_nodes,
-            "misconfig_findings": misconfig_findings,
-            "misconfig_error": misconfig_error,
-            "users": users,
-            "discover_results": discover_results,
-            "can_read": can_read,
-            "can_write": can_write,
-            "can_manage": can_manage,
-            "can_manage_security": can_manage_security,
-            "access_level": access_level,
-            "rights_error": rights_error,
-            "endpoints_error": endpoints_error,
-            "plugins_error": plugins_error,
-            "cluster_error": cluster_error,
-            "users_error": users_error,
-            "discover_error": discover_error,
-            "scheme": scheme,
-            "insecure_effective": effective_insecure,
-            "tls_auto_plain": tls_auto_plain,
-            "detect_confidence": detect_confidence,
-            "detect_signals": detect_signals,
-            "detect_probe_trace": detect_probe_trace,
-            "elapsed_ms": int((time.monotonic() - started) * 1000),
-            "error": "; ".join(errors) if errors else None,
-        }
+            "cat_endpoints": None,
+            "endpoint_diagnostics": None,
+            "cat_plugins": None,
+            "cluster_health": None,
+            "cluster_nodes": None,
+            "misconfig_findings": None,
+            "misconfig_error": None,
+            "users": None,
+            "discover_results": None,
+            "can_read": None,
+            "can_write": None,
+            "can_manage": None,
+            "can_manage_security": None,
+            "access_level": "unknown",
+            "rights_error": None,
+            "endpoints_error": None,
+            "plugins_error": None,
+            "cluster_error": None,
+            "users_error": None,
+            "discover_error": None,
+            "scheme": None,
+            "insecure_effective": None,
+            "tls_auto_plain": None,
+            "detect_confidence": None,
+            "detect_signals": [],
+            "detect_probe_trace": [],
+            "elapsed_ms": None,
+            "error": _friendly_error_text(last_error or "connection failed"),
+        },
+        attempts_done=attempts,
+        max_attempts=attempts,
+    )
 
-    return {
-        "timestamp": utc_now_iso(),
-        "host": host,
-        "port": port,
-        "is_elastic": False,
-        "status": "fail",
-        "auth_required": None,
-        "server_version": None,
-        "provided_credentials": provided_credentials,
-        "provided_username": username,
-        "provided_password": password if provided_credentials else None,
-        "provided_token": provided_token,
-        "api_token": api_token if provided_token else None,
-        "api_key_probe_status": "not_run",
-        "api_key_probe_error": None,
-        "effective_username": None,
-        "auth_valid": None,
-        "show_endpoints": show_endpoints,
-        "show_plugins": show_plugins,
-        "show_cluster": show_cluster,
-        "show_users": show_users,
-        "discover": discover,
-        "cat_endpoints": None,
-        "endpoint_diagnostics": None,
-        "cat_plugins": None,
-        "cluster_health": None,
-        "cluster_nodes": None,
-        "misconfig_findings": None,
-        "misconfig_error": None,
-        "users": None,
-        "discover_results": None,
-        "can_read": None,
-        "can_write": None,
-        "can_manage": None,
-        "can_manage_security": None,
-        "access_level": "unknown",
-        "rights_error": None,
-        "endpoints_error": None,
-        "plugins_error": None,
-        "cluster_error": None,
-        "users_error": None,
-        "discover_error": None,
-        "scheme": None,
-        "insecure_effective": None,
-        "tls_auto_plain": None,
-        "detect_confidence": None,
-        "detect_signals": [],
-        "detect_probe_trace": [],
-        "elapsed_ms": None,
-        "error": _friendly_error_text(last_error or "connection failed"),
-    }
+
+def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(detect_record)
+
+    detect_debug_events = detect_record.get("debug_events")
+    deep_debug_events = deep_record.get("debug_events")
+    merged_debug_events: list[str] = []
+    if isinstance(detect_debug_events, list):
+        for item in detect_debug_events:
+            if isinstance(item, str) and item.strip():
+                merged_debug_events.append(item)
+    if isinstance(deep_debug_events, list):
+        for item in deep_debug_events:
+            if isinstance(item, str) and item.strip():
+                merged_debug_events.append(item)
+    merged["debug_events"] = merged_debug_events
+    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
+        deep_record.get("debug_events_streamed")
+    )
+
+    deep_fields = (
+        "status",
+        "auth_required",
+        "server_version",
+        "api_key_probe_status",
+        "api_key_probe_error",
+        "effective_username",
+        "auth_valid",
+        "cat_endpoints",
+        "endpoint_diagnostics",
+        "cat_plugins",
+        "cluster_health",
+        "cluster_nodes",
+        "misconfig_findings",
+        "misconfig_error",
+        "users",
+        "discover_results",
+        "can_read",
+        "can_write",
+        "can_manage",
+        "can_manage_security",
+        "access_level",
+        "rights_error",
+        "endpoints_error",
+        "plugins_error",
+        "cluster_error",
+        "users_error",
+        "discover_error",
+        "scheme",
+        "insecure_effective",
+        "tls_auto_plain",
+        "elapsed_ms",
+        "error",
+        "attempts",
+        "max_attempts",
+        "stages",
+        "stage_failed_at",
+        "stage_durations_ms",
+        "stage_attempts",
+    )
+    for field in deep_fields:
+        merged[field] = deep_record.get(field)
+
+    deep_status = str(deep_record.get("status") or "")
+    if deep_status in {"open_no_auth", "valid_credentials", "invalid_credentials_anonymous"}:
+        return merged
+    return merged
 
 
 def _nxc_prefix(record: dict[str, Any]) -> str:
@@ -2767,6 +3164,7 @@ def audit_elastic_targets(
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
     preferred_scheme: str | None = None,
+    debug_emit: Callable[[str], None] | None = None,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -2775,15 +3173,24 @@ def audit_elastic_targets(
     failed = 0
 
     out_fh: Any = None
+    progress: ProgressBar | None = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
+        indexed_hosts = list(enumerate(hosts))
+        detect_records: dict[int, dict[str, Any]] = {}
+        deep_records: dict[int, dict[str, Any]] = {}
+        progress = ProgressBar(_ELASTIC_TAG, len(indexed_hosts), enabled=True, leave=True)
+
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
+
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            future_map = {
+            pass1_future_map = {
                 executor.submit(
-                    _audit_elastic_host,
+                    _call_audit_elastic_host_with_thread_debug,
                     host,
                     port,
                     timeout,
@@ -2798,70 +3205,156 @@ def audit_elastic_targets(
                     show_users,
                     discover,
                     preferred_scheme,
-                ): host
-                for host in hosts
+                    bool(debug_emit),
+                    False,
+                    debug_emit,
+                ): idx
+                for idx, host in indexed_hosts
             }
-            for future in iter_completed_with_progress(future_map, label=_ELASTIC_TAG):
-                record = future.result()
-                total += 1
-
-                status = str(record.get("status") or "fail")
-                if status in {"open_no_auth", "invalid_credentials_anonymous"}:
-                    open_no_auth += 1
-                elif status == "valid_credentials":
-                    valid += 1
-                elif status == "auth_required":
-                    auth_required += 1
-                elif status == "fail":
-                    failed += 1
-
-                suppress_timeout_detect_line = (
-                    suppress_timeout_status_lines and output_format == "txt" and status == "fail"
-                )
-                if not suppress_timeout_detect_line:
-                    _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
-
-                suppress_auth_required_status_line = bool(record.get("is_elastic")) and status == "auth_required"
-                if not suppress_auth_required_status_line and not suppress_timeout_detect_line:
-                    _emit_line(out_fh, emit_line, _format_record(record, output_format))
-
-                for detail in _format_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, detail)
-
-                if logger is not None:
-                    logger.log(
-                        "elastic",
-                        (str(record.get("host") or "-"), int(record.get("port") or port)),
-                        phase="audit",
-                        status=record.get("status"),
-                        auth_required=record.get("auth_required"),
-                        auth_valid=record.get("auth_valid"),
-                        version=record.get("server_version"),
-                        detect_confidence=record.get("detect_confidence"),
-                        access_level=record.get("access_level"),
-                        endpoints=len(record.get("cat_endpoints") or [])
-                        if isinstance(record.get("cat_endpoints"), list)
-                        else 0,
-                        plugins=len(record.get("cat_plugins") or [])
-                        if isinstance(record.get("cat_plugins"), list)
-                        else 0,
-                        misconfig_findings=len(record.get("misconfig_findings") or [])
-                        if isinstance(record.get("misconfig_findings"), list)
-                        else 0,
-                        api_key_probe_status=record.get("api_key_probe_status"),
-                        users=len(record.get("users") or []) if isinstance(record.get("users"), list) else 0,
-                        discover_rows=(
-                            sum(
-                                int(item.get("shown_hits") or 0)
-                                for item in (record.get("discover_results") or [])
-                                if isinstance(item, dict)
-                            )
-                            if isinstance(record.get("discover_results"), list)
-                            else 0
-                        ),
-                        error=record.get("error"),
+            buffered_records: dict[int, dict[str, Any]] = {}
+            next_emit_idx = 0
+            for future in as_completed(pass1_future_map):
+                record_idx = int(pass1_future_map[future])
+                buffered_records[record_idx] = future.result()
+                progress.advance()
+                while next_emit_idx in buffered_records:
+                    detect_record = buffered_records.pop(next_emit_idx)
+                    detect_records[next_emit_idx] = detect_record
+                    detect_status = str(detect_record.get("status") or "fail")
+                    suppress_timeout_detect_line = (
+                        suppress_timeout_status_lines and output_format == "txt" and detect_status == "fail"
                     )
+                    if not suppress_timeout_detect_line:
+                        _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
+                    next_emit_idx += 1
+
+        deep_candidates: list[tuple[int, str]] = []
+        detected_count = 0
+        for idx, host in indexed_hosts:
+            detect_record = detect_records[idx]
+            detect_status = str(detect_record.get("status") or "fail")
+            if not bool(detect_record.get("is_elastic")):
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_elastic")
+                continue
+            detected_count += 1
+            if detect_status in {"open_no_auth", "valid_credentials"}:
+                deep_candidates.append((idx, host))
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
+            elif debug_emit is not None:
+                debug_emit(f"{host}:{port} stage2_gate=skip reason=status={detect_status}")
+
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect complete elastic={detected_count} deep_candidates={len(deep_candidates)}")
+
+        progress.set_total(len(indexed_hosts) + len(deep_candidates))
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
+
+        if deep_candidates:
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+                pass2_future_map = {
+                    executor.submit(
+                        _call_audit_elastic_host_with_thread_debug,
+                        host,
+                        port,
+                        timeout,
+                        retries,
+                        username,
+                        password,
+                        api_token,
+                        ca_file,
+                        show_endpoints,
+                        show_plugins,
+                        show_cluster,
+                        show_users,
+                        discover,
+                        preferred_scheme,
+                        bool(debug_emit),
+                        True,
+                        debug_emit,
+                    ): idx
+                    for idx, host in deep_candidates
+                }
+                for future in as_completed(pass2_future_map):
+                    record_idx = int(pass2_future_map[future])
+                    deep_records[record_idx] = future.result()
+                    progress.advance()
+
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
+
+        final_records: dict[int, dict[str, Any]] = {}
+        for idx in range(len(hosts)):
+            detect_record = detect_records[idx]
+            deep_record = deep_records.get(idx)
+            if deep_record is None:
+                final_records[idx] = detect_record
+            else:
+                final_records[idx] = _merge_stage2_record(detect_record, deep_record)
+
+        for idx in range(len(hosts)):
+            record = final_records[idx]
+            total += 1
+
+            status = str(record.get("status") or "fail")
+            if status in {"open_no_auth", "invalid_credentials_anonymous"}:
+                open_no_auth += 1
+            elif status == "valid_credentials":
+                valid += 1
+            elif status == "auth_required":
+                auth_required += 1
+            elif status == "fail":
+                failed += 1
+
+            if debug_emit is not None and not bool(record.get("debug_events_streamed")):
+                for event in record.get("debug_events") or []:
+                    if isinstance(event, str) and event.strip():
+                        debug_emit(event)
+
+            suppress_timeout_detect_line = suppress_timeout_status_lines and output_format == "txt" and status == "fail"
+            suppress_auth_required_status_line = bool(record.get("is_elastic")) and status == "auth_required"
+            if not suppress_auth_required_status_line and not suppress_timeout_detect_line:
+                _emit_line(out_fh, emit_line, _format_record(record, output_format))
+
+            for detail in _format_detail_records(record, output_format):
+                _emit_line(out_fh, emit_line, detail)
+
+            if logger is not None:
+                logger.log(
+                    "elastic",
+                    (str(record.get("host") or "-"), int(record.get("port") or port)),
+                    phase="audit",
+                    status=record.get("status"),
+                    auth_required=record.get("auth_required"),
+                    auth_valid=record.get("auth_valid"),
+                    version=record.get("server_version"),
+                    detect_confidence=record.get("detect_confidence"),
+                    access_level=record.get("access_level"),
+                    endpoints=len(record.get("cat_endpoints") or [])
+                    if isinstance(record.get("cat_endpoints"), list)
+                    else 0,
+                    plugins=len(record.get("cat_plugins") or []) if isinstance(record.get("cat_plugins"), list) else 0,
+                    misconfig_findings=len(record.get("misconfig_findings") or [])
+                    if isinstance(record.get("misconfig_findings"), list)
+                    else 0,
+                    api_key_probe_status=record.get("api_key_probe_status"),
+                    users=len(record.get("users") or []) if isinstance(record.get("users"), list) else 0,
+                    discover_rows=(
+                        sum(
+                            int(item.get("shown_hits") or 0)
+                            for item in (record.get("discover_results") or [])
+                            if isinstance(item, dict)
+                        )
+                        if isinstance(record.get("discover_results"), list)
+                        else 0
+                    ),
+                    error=record.get("error"),
+                )
     finally:
+        if progress is not None:
+            progress.close()
         if out_fh is not None:
             out_fh.close()
 
@@ -2935,6 +3428,15 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if args.debug:
             console.plain(line)
 
+    def emit_debug(message: str) -> None:
+        if not args.debug:
+            return
+        debug_method = getattr(console, "debug", None)
+        if callable(debug_method):
+            debug_method(message)
+            return
+        console.info(message)
+
     if args.debug:
         mode_parts: list[str] = []
         if api_token:
@@ -2990,6 +3492,7 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 append_output=idx > 0,
                 suppress_timeout_status_lines=not bool(args.debug),
                 preferred_scheme=group.scheme_hint,
+                debug_emit=emit_debug if args.debug else None,
             )
             total += part_total
             open_no_auth += part_open
