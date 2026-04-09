@@ -10,6 +10,7 @@ import re
 import socket
 import struct
 import sys
+import threading
 import time
 from collections import Counter, deque
 from collections.abc import Callable
@@ -43,7 +44,14 @@ _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _UNEXPECTED_EOF_PREFIX = "unexpected eof"
 _ROOT_QUERY_ERR_124_PREFIX = "root query failed: err_-124"
 _ZK_AUTH_XID = -4
-_ZK_ENUM_PROGRESS_EVERY = 500
+_ZK_ENUM_PROGRESS_INTERVAL_SECONDS = 2.0
+
+_STAGE_DETECT_PROTOCOL = "detect_protocol"
+_STAGE_AUTH_INFERENCE = "auth_inference_credentials"
+_STAGE_ACCESS_CAPABILITIES = "access_capabilities"
+_STAGE_DATA = "data"
+
+_THREAD_LOCAL_DEBUG_EMIT = threading.local()
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -128,6 +136,15 @@ def _is_root_query_err_124_error(value: Any) -> bool:
 def _is_remote_closed_connection_error(value: Any) -> bool:
     text = str(value or "").strip().lower()
     return "remote end closed connection without response" in text
+
+
+def _is_retryable_stage_error(value: Any) -> bool:
+    return (
+        _is_connection_timeout_error(value)
+        or _is_unexpected_eof_error(value)
+        or _is_remote_closed_connection_error(value)
+        or _is_root_query_err_124_error(value)
+    )
 
 
 def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
@@ -442,7 +459,7 @@ def _enumerate_znodes(
     client: _ZkClient,
     max_znodes: int,
     progress_hook: Callable[[dict[str, Any]], None] | None = None,
-    progress_every: int = _ZK_ENUM_PROGRESS_EVERY,
+    progress_interval_s: float = _ZK_ENUM_PROGRESS_INTERVAL_SECONDS,
     collect_paths: bool = True,
 ) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
     queue = deque(["/"])
@@ -452,6 +469,7 @@ def _enumerate_znodes(
     total_count = 0
     processed_parents = 0
     started = time.monotonic()
+    last_report_at = started
     last_report_count = 0
 
     while queue:
@@ -506,23 +524,44 @@ def _enumerate_znodes(
                 listed_nodes.append(full_path)
                 listed_meta[full_path] = {"path": full_path, "children": None, "bytes": None, "error": None}
             queue.append(full_path)
-        if (
-            progress_hook is not None
-            and progress_every > 0
-            and total_count > 0
-            and total_count - last_report_count >= progress_every
-        ):
-            last_report_count = total_count
-            progress_hook(
-                {
-                    "event": "enumerate_progress",
-                    "processed_parents": processed_parents,
-                    "queued": len(queue),
-                    "total_count": total_count,
-                    "listed_count": len(listed_nodes),
-                    "elapsed_s": max(0.0, time.monotonic() - started),
-                }
-            )
+            if progress_hook is not None and progress_interval_s > 0:
+                now = time.monotonic()
+                elapsed_since_report = max(0.0, now - last_report_at)
+                if elapsed_since_report >= progress_interval_s:
+                    interval_count = int(total_count - last_report_count)
+                    progress_hook(
+                        {
+                            "event": "enumerate_progress",
+                            "processed_parents": processed_parents,
+                            "queued": len(queue),
+                            "total_count": total_count,
+                            "listed_count": len(listed_nodes),
+                            "elapsed_s": max(0.0, now - started),
+                            "interval_s": elapsed_since_report,
+                            "interval_count": interval_count,
+                        }
+                    )
+                    last_report_at = now
+                    last_report_count = total_count
+        if progress_hook is not None and progress_interval_s > 0 and total_count > 0:
+            now = time.monotonic()
+            elapsed_since_report = max(0.0, now - last_report_at)
+            if elapsed_since_report >= progress_interval_s:
+                interval_count = int(total_count - last_report_count)
+                progress_hook(
+                    {
+                        "event": "enumerate_progress",
+                        "processed_parents": processed_parents,
+                        "queued": len(queue),
+                        "total_count": total_count,
+                        "listed_count": len(listed_nodes),
+                        "elapsed_s": max(0.0, now - started),
+                        "interval_s": elapsed_since_report,
+                        "interval_count": interval_count,
+                    }
+                )
+                last_report_at = now
+                last_report_count = total_count
 
     truncated = (total_count > len(listed_nodes)) if collect_paths else False
     if progress_hook is not None:
@@ -662,6 +701,64 @@ def _infer_auth_required_from_anonymous_probes(
     return None, "inconclusive", trace
 
 
+def _get_thread_debug_emitter() -> Callable[[str], None] | None:
+    candidate = getattr(_THREAD_LOCAL_DEBUG_EMIT, "callback", None)
+    return candidate if callable(candidate) else None
+
+
+def _call_audit_host_with_thread_debug(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    username: str | None,
+    password: str | None,
+    show_znodes: bool,
+    dump: bool,
+    query_znode: str | None,
+    max_znodes: int,
+    debug: bool,
+    run_deep_checks: bool,
+    debug_emit: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    if debug_emit is None:
+        return _audit_zookeeper_host(
+            host,
+            port,
+            timeout,
+            retries,
+            username,
+            password,
+            show_znodes,
+            dump,
+            query_znode,
+            max_znodes,
+            debug,
+            run_deep_checks,
+        )
+    _THREAD_LOCAL_DEBUG_EMIT.callback = debug_emit
+    try:
+        return _audit_zookeeper_host(
+            host,
+            port,
+            timeout,
+            retries,
+            username,
+            password,
+            show_znodes,
+            dump,
+            query_znode,
+            max_znodes,
+            debug,
+            run_deep_checks,
+        )
+    finally:
+        try:
+            delattr(_THREAD_LOCAL_DEBUG_EMIT, "callback")
+        except AttributeError:
+            pass
+
+
 def _audit_zookeeper_host(
     host: str,
     port: int,
@@ -688,6 +785,11 @@ def _audit_zookeeper_host(
     last_error: str | None = None
     provided_credentials = normalized_username is not None and normalized_password is not None
     debug_events: list[str] = []
+    stages: list[dict[str, Any]] = []
+    stage_durations_ms: dict[str, int] = {}
+    stage_attempts: dict[str, int] = {}
+    stage_failed_at: str | None = None
+    debug_events_streamed = False
 
     last_connect_ms: int | None = None
     last_auth_ms: int | None = None
@@ -703,8 +805,89 @@ def _audit_zookeeper_host(
     last_max_attempts = base_attempts
 
     def _debug(message: str) -> None:
+        nonlocal debug_events_streamed
         if debug:
-            debug_events.append(f"{host}:{port} {message}")
+            debug_line = f"{host}:{port} {message}"
+            debug_events.append(debug_line)
+            live_emitter = _get_thread_debug_emitter()
+            if live_emitter is not None:
+                live_emitter(debug_line)
+                debug_events_streamed = True
+
+    def _debug_retry_decision(
+        stage_name: str,
+        *,
+        attempt: int,
+        max_attempts: int,
+        delay_s: float,
+        reason: str | None,
+    ) -> None:
+        reason_text = str(reason or "").strip() or "-"
+        _debug(
+            f"retry_decision stage={stage_name} attempt={attempt}/{max_attempts} "
+            f"backoff={delay_s:.2f}s reason={reason_text}"
+        )
+
+    def _emit_stage_timing_summary(
+        *,
+        status: str,
+        attempts: int,
+        max_attempts: int,
+        stage_duration_totals: dict[str, int],
+        stage_attempt_totals: dict[str, int],
+    ) -> None:
+        duration_map = dict(stage_duration_totals)
+        attempt_map = dict(stage_attempt_totals)
+
+        def _duration(stage_name: str) -> str:
+            raw = duration_map.get(stage_name)
+            if isinstance(raw, int):
+                return f"{raw}ms"
+            return "-"
+
+        def _attempt_count(stage_name: str) -> int:
+            raw = attempt_map.get(stage_name)
+            return int(raw) if isinstance(raw, int) else 0
+
+        _debug(
+            f"stage_timing_summary status={status} attempts={attempts}/{max_attempts} "
+            f"detect={_duration(_STAGE_DETECT_PROTOCOL)} "
+            f"auth={_duration(_STAGE_AUTH_INFERENCE)} "
+            f"capabilities={_duration(_STAGE_ACCESS_CAPABILITIES)} "
+            f"data={_duration(_STAGE_DATA)} "
+            f"stage_attempts="
+            f"detect:{_attempt_count(_STAGE_DETECT_PROTOCOL)},"
+            f"auth:{_attempt_count(_STAGE_AUTH_INFERENCE)},"
+            f"capabilities:{_attempt_count(_STAGE_ACCESS_CAPABILITIES)},"
+            f"data:{_attempt_count(_STAGE_DATA)}"
+        )
+
+    def _stage_trace(
+        stage_name: str,
+        *,
+        attempt: int,
+        started_at: float,
+        result: str,
+        error: str | None = None,
+    ) -> None:
+        nonlocal stage_failed_at
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        stage_attempts[stage_name] = max(int(stage_attempts.get(stage_name, 0)), int(attempt))
+        stage_durations_ms[stage_name] = int(stage_durations_ms.get(stage_name, 0)) + duration_ms
+        entry = {
+            "stage_name": stage_name,
+            "attempt": int(attempt),
+            "duration_ms": int(duration_ms),
+            "result": str(result),
+            "error": str(error or "").strip() or None,
+        }
+        stages.append(entry)
+        if stage_failed_at is None and result in {"fail", "timeout"}:
+            stage_failed_at = stage_name
+        _debug(
+            f"stage_trace stage_name={stage_name} attempt={attempt} duration_ms={duration_ms} "
+            f"result={result} error={str(error or '-').strip() or '-'}"
+        )
 
     def _record(
         *,
@@ -742,7 +925,21 @@ def _audit_zookeeper_host(
         znode_count_attempt_timeouts: list[float] | None = None,
         znode_count_partial: bool = False,
         stage2_error: str | None = None,
+        stage_records: list[dict[str, Any]] | None = None,
+        stage_fail_at: str | None = None,
+        stage_duration_totals_ms: dict[str, int] | None = None,
+        stage_attempt_totals: dict[str, int] | None = None,
     ) -> dict[str, Any]:
+        resolved_stage_durations = dict(stage_duration_totals_ms or stage_durations_ms)
+        resolved_stage_attempts = dict(stage_attempt_totals or stage_attempts)
+        if debug:
+            _emit_stage_timing_summary(
+                status=status,
+                attempts=int(attempts),
+                max_attempts=int(max_attempts),
+                stage_duration_totals=resolved_stage_durations,
+                stage_attempt_totals=resolved_stage_attempts,
+            )
         return {
             "timestamp": utc_now_iso(),
             "host": host,
@@ -787,7 +984,12 @@ def _audit_zookeeper_host(
             "znode_count_attempt_timeouts": list(znode_count_attempt_timeouts or []),
             "znode_count_partial": bool(znode_count_partial),
             "stage2_error": stage2_error,
+            "stages": list(stage_records or stages),
+            "stage_failed_at": stage_fail_at if stage_fail_at is not None else stage_failed_at,
+            "stage_durations_ms": resolved_stage_durations,
+            "stage_attempts": resolved_stage_attempts,
             "debug_events": list(debug_events) if debug else [],
+            "debug_events_streamed": bool(debug_events_streamed),
             "error": error,
         }
 
@@ -811,6 +1013,7 @@ def _audit_zookeeper_host(
         dump_error_detail: str | None = None
 
         _debug(f"attempt={attempt + 1}/{max_attempts} start timeout={timeout}s")
+        stage1_started = time.monotonic()
         client = _ZkClient(host, port, timeout)
         try:
             connect_started = time.monotonic()
@@ -829,14 +1032,33 @@ def _audit_zookeeper_host(
             if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and not bonus_retry_for_root_query_124:
                 bonus_retry_for_root_query_124 = True
                 last_error = f"root query failed: {_zk_error_name(root_err)}"
+                _stage_trace(
+                    _STAGE_DETECT_PROTOCOL,
+                    attempt=attempt + 1,
+                    started_at=stage1_started,
+                    result="retry",
+                    error=last_error,
+                )
                 delay = _retry_delay(attempt)
-                _debug(
-                    f"attempt={attempt + 1}/{max_attempts} retry reason={last_error} "
-                    f"delay={delay:.2f}s last_error={last_error}"
+                _debug_retry_decision(
+                    _STAGE_DETECT_PROTOCOL,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                    delay_s=delay,
+                    reason=last_error,
                 )
                 time.sleep(delay)
                 continue
 
+            _stage_trace(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                started_at=stage1_started,
+                result="ok",
+                error=None,
+            )
+
+            stage2_started = time.monotonic()
             inferred_auth_required, auth_inference_source, auth_probe_trace = (
                 _infer_auth_required_from_anonymous_probes(host, port, timeout, anonymous_root_err, query_znode)
             )
@@ -883,6 +1105,13 @@ def _audit_zookeeper_host(
                     and not auth_error_text.lower().startswith("authentication failed")
                 ):
                     auth_error_detail = auth_error_text
+                    _stage_trace(
+                        _STAGE_AUTH_INFERENCE,
+                        attempt=attempt + 1,
+                        started_at=stage2_started,
+                        result="fail",
+                        error=auth_error_text,
+                    )
                     _debug(
                         f"attempt={attempt + 1}/{max_attempts} result=fail auth_error={auth_error_text} "
                         f"connect_ms={connect_ms if connect_ms is not None else '-'} "
@@ -926,6 +1155,13 @@ def _audit_zookeeper_host(
                 else:
                     invalid_status = "auth_required" if auth_required_value is True else "fail"
                     query_error_detail = "NOAUTH"
+                    _stage_trace(
+                        _STAGE_AUTH_INFERENCE,
+                        attempt=attempt + 1,
+                        started_at=stage2_started,
+                        result="auth_required" if invalid_status == "auth_required" else "fail",
+                        error=auth_error_text or "authentication failed",
+                    )
                     _debug(
                         f"attempt={attempt + 1}/{max_attempts} result={invalid_status} "
                         f"connect_ms={connect_ms if connect_ms is not None else '-'} "
@@ -967,6 +1203,13 @@ def _audit_zookeeper_host(
 
             if root_err == _ZK_ERR_NOAUTH:
                 query_error_detail = "NOAUTH"
+                _stage_trace(
+                    _STAGE_AUTH_INFERENCE,
+                    attempt=attempt + 1,
+                    started_at=stage2_started,
+                    result="auth_required",
+                    error=auth_error,
+                )
                 _debug(
                     f"attempt={attempt + 1}/{max_attempts} result=auth_required "
                     f"connect_ms={connect_ms if connect_ms is not None else '-'} "
@@ -1012,15 +1255,32 @@ def _audit_zookeeper_host(
                 delay = _retry_delay(attempt)
                 query_error_detail = _zk_error_name(root_err)
                 last_query_error = query_error_detail
-                _debug(
-                    f"attempt={attempt + 1}/{max_attempts} retry reason={last_error} "
-                    f"delay={delay:.2f}s last_error={last_error}"
+                _stage_trace(
+                    _STAGE_AUTH_INFERENCE,
+                    attempt=attempt + 1,
+                    started_at=stage2_started,
+                    result="retry",
+                    error=last_error,
+                )
+                _debug_retry_decision(
+                    _STAGE_AUTH_INFERENCE,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                    delay_s=delay,
+                    reason=last_error,
                 )
                 time.sleep(delay)
                 continue
 
             if root_err != _ZK_ERR_OK:
                 query_error_detail = _zk_error_name(root_err)
+                _stage_trace(
+                    _STAGE_AUTH_INFERENCE,
+                    attempt=attempt + 1,
+                    started_at=stage2_started,
+                    result="fail",
+                    error=f"root query failed: {_zk_error_name(root_err)}",
+                )
                 _debug(
                     f"attempt={attempt + 1}/{max_attempts} result=fail root_err={query_error_detail} "
                     f"connect_ms={connect_ms if connect_ms is not None else '-'} "
@@ -1059,6 +1319,21 @@ def _audit_zookeeper_host(
                     attempts=attempt + 1,
                     max_attempts=max_attempts,
                 )
+
+            stage2_result = "ok"
+            if provided_credentials_ok is True:
+                stage2_result = "valid_credentials"
+            elif invalid_provided_credentials:
+                stage2_result = "invalid_credentials_anonymous"
+            elif inferred_auth_required is True:
+                stage2_result = "auth_required"
+            _stage_trace(
+                _STAGE_AUTH_INFERENCE,
+                attempt=attempt + 1,
+                started_at=stage2_started,
+                result=stage2_result,
+                error=auth_error_detail,
+            )
 
             if not run_deep_checks:
                 detect_status = (
@@ -1111,11 +1386,48 @@ def _audit_zookeeper_host(
             can_create_znode: bool | None = None
             can_delete_znode: bool | None = None
             znode_capability_error: str | None = None
+            stage3_started = time.monotonic()
             if not invalid_provided_credentials:
                 can_create_znode, can_delete_znode, znode_capability_error = _probe_znode_create_delete(
                     client, host, port
                 )
+            if znode_capability_error:
+                if _is_retryable_stage_error(znode_capability_error) and attempt < max_attempts - 1:
+                    last_error = znode_capability_error
+                    _stage_trace(
+                        _STAGE_ACCESS_CAPABILITIES,
+                        attempt=attempt + 1,
+                        started_at=stage3_started,
+                        result="retry",
+                        error=znode_capability_error,
+                    )
+                    delay = _retry_delay(attempt)
+                    _debug_retry_decision(
+                        _STAGE_ACCESS_CAPABILITIES,
+                        attempt=attempt + 1,
+                        max_attempts=max_attempts,
+                        delay_s=delay,
+                        reason=znode_capability_error,
+                    )
+                    time.sleep(delay)
+                    continue
+                _stage_trace(
+                    _STAGE_ACCESS_CAPABILITIES,
+                    attempt=attempt + 1,
+                    started_at=stage3_started,
+                    result="error",
+                    error=znode_capability_error,
+                )
+            else:
+                _stage_trace(
+                    _STAGE_ACCESS_CAPABILITIES,
+                    attempt=attempt + 1,
+                    started_at=stage3_started,
+                    result="ok",
+                    error=None,
+                )
 
+            stage4_started = time.monotonic()
             enum_started = time.monotonic()
             collect_znode_paths = bool(show_znodes or (dump and not query_znode))
 
@@ -1123,18 +1435,30 @@ def _audit_zookeeper_host(
             if debug:
 
                 def _progress(event: dict[str, Any]) -> None:
-                    if event.get("event") != "enumerate_progress":
+                    event_type = str(event.get("event") or "")
+                    if event_type not in {"enumerate_progress", "enumerate_done"}:
                         return
                     total_count_event = int(event.get("total_count") or 0)
                     queued_event = int(event.get("queued") or 0)
                     listed_count_event = int(event.get("listed_count") or 0)
-                    elapsed_event = float(event.get("elapsed_s") or 0.0)
-                    rate = total_count_event / max(elapsed_event, 0.001)
+                    processed_parents_event = int(event.get("processed_parents") or 0)
+                    interval_count_event = int(event.get("interval_count") or 0)
+                    interval_s_event = float(event.get("interval_s") or 0.0)
+                    rate = interval_count_event / max(interval_s_event, 0.001)
                     eta = queued_event / rate if rate > 0 else None
                     eta_text = f"{eta:.1f}s" if eta is not None else "-"
+                    window_text = f"{interval_s_event:.1f}s" if interval_s_event > 0 else "-"
+                    if event_type == "enumerate_done":
+                        elapsed_event = float(event.get("elapsed_s") or 0.0)
+                        _debug(
+                            f"enumerate done discovered={total_count_event} listed={listed_count_event} "
+                            f"processed={processed_parents_event} queued={queued_event} elapsed={elapsed_event:.1f}s"
+                        )
+                        return
                     _debug(
                         f"enumerate progress discovered={total_count_event} listed={listed_count_event} "
-                        f"queued={queued_event} rate={rate:.1f}/s eta={eta_text}"
+                        f"processed={processed_parents_event} queued={queued_event} "
+                        f"window={window_text} rate={rate:.1f}/s eta={eta_text}"
                     )
 
                 progress_hook = _progress
@@ -1234,6 +1558,45 @@ def _audit_zookeeper_host(
             if query_error_detail:
                 last_query_error = query_error_detail
 
+            if enum_error_detail and _is_retryable_stage_error(enum_error_detail) and attempt < max_attempts - 1:
+                last_error = enum_error_detail
+                _stage_trace(
+                    _STAGE_DATA,
+                    attempt=attempt + 1,
+                    started_at=stage4_started,
+                    result="retry",
+                    error=enum_error_detail,
+                )
+                delay = _retry_delay(attempt)
+                _debug_retry_decision(
+                    _STAGE_DATA,
+                    attempt=attempt + 1,
+                    max_attempts=max_attempts,
+                    delay_s=delay,
+                    reason=enum_error_detail,
+                )
+                time.sleep(delay)
+                continue
+
+            stage4_result = "ok"
+            stage4_error_value: str | None = None
+            if enum_error_detail:
+                stage4_result = "partial"
+                stage4_error_value = enum_error_detail
+            elif query_error_detail and query_error_detail not in {"NOAUTH", "NONODE"}:
+                stage4_result = "partial"
+                stage4_error_value = query_error_detail
+            elif dump_error_detail and dump_error_detail not in {"NOAUTH", "NONODE"}:
+                stage4_result = "partial"
+                stage4_error_value = dump_error_detail
+            _stage_trace(
+                _STAGE_DATA,
+                attempt=attempt + 1,
+                started_at=stage4_started,
+                result=stage4_result,
+                error=stage4_error_value,
+            )
+
             root_count = len(root_children or [])
             if total_count == 0 and root_count > 0:
                 total_count = root_count
@@ -1295,12 +1658,25 @@ def _audit_zookeeper_host(
             last_auth_ms = auth_ms
             last_enumerate_ms = enumerate_ms
             last_dump_ms = dump_ms
-            _debug(f"attempt={attempt + 1}/{max_attempts} failed err={last_error}")
             max_attempts = base_attempts + (1 if bonus_retry_for_root_query_124 else 0)
+            stage_result = "retry" if attempt < max_attempts - 1 else "fail"
+            _stage_trace(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                started_at=stage1_started,
+                result=stage_result,
+                error=last_error,
+            )
             if attempt >= max_attempts - 1:
                 break
             delay = _retry_delay(attempt)
-            _debug(f"attempt={attempt + 1}/{max_attempts} retry delay={delay:.2f}s last_error={last_error}")
+            _debug_retry_decision(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                max_attempts=max_attempts,
+                delay_s=delay,
+                reason=last_error,
+            )
             time.sleep(delay)
         finally:
             client.close()
@@ -1376,6 +1752,9 @@ def _merge_stage2_record(
             if isinstance(item, str) and item.strip():
                 merged_debug_events.append(item)
     merged["debug_events"] = merged_debug_events
+    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
+        deep_record.get("debug_events_streamed")
+    )
 
     stage2_attempts = max(1, retries + 1)
     stage2_fields = (
@@ -1402,6 +1781,10 @@ def _merge_stage2_record(
         "dump_error",
         "attempts",
         "max_attempts",
+        "stages",
+        "stage_failed_at",
+        "stage_durations_ms",
+        "stage_attempts",
     )
     for field in stage2_fields:
         merged[field] = deep_record.get(field)
@@ -1872,12 +2255,14 @@ def audit_zookeeper_targets(
         progress = ProgressBar("ZOOKEEPER", len(indexed_hosts), enabled=True, leave=True)
         detect_records: dict[int, dict[str, Any]] = {}
         deep_records: dict[int, dict[str, Any]] = {}
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
 
         # Pass 1: detect/auth only for every target, emit detect lines in input order as records are ready.
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
             pass1_future_map = {
                 executor.submit(
-                    _audit_zookeeper_host,
+                    _call_audit_host_with_thread_debug,
                     host,
                     port,
                     timeout,
@@ -1890,6 +2275,7 @@ def audit_zookeeper_targets(
                     max_znodes,
                     bool(debug_emit),
                     False,
+                    debug_emit,
                 ): idx
                 for idx, host in indexed_hosts
             }
@@ -1907,18 +2293,35 @@ def audit_zookeeper_targets(
                     next_emit_idx += 1
 
         # Pass 2: deep checks only for accessible records, same timeout/retry policy as pass 1.
-        deep_candidates = [
-            (idx, host)
-            for idx, host in indexed_hosts
-            if bool(detect_records[idx].get("is_zookeeper"))
-            and str(detect_records[idx].get("status") or "") in {"open_no_auth", "valid_credentials"}
-        ]
+        deep_candidates: list[tuple[int, str]] = []
+        zookeeper_detected = 0
+        for idx, host in indexed_hosts:
+            detect_record = detect_records[idx]
+            detect_status = str(detect_record.get("status") or "fail")
+            if not bool(detect_record.get("is_zookeeper")):
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_zookeeper")
+                continue
+            zookeeper_detected += 1
+            if detect_status in {"open_no_auth", "valid_credentials"}:
+                deep_candidates.append((idx, host))
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
+            elif debug_emit is not None:
+                debug_emit(f"{host}:{port} stage2_gate=skip reason=status={detect_status}")
+        if debug_emit is not None:
+            debug_emit(
+                f"pass=1 detect complete zookeeper={zookeeper_detected} deep_candidates={len(deep_candidates)}"
+            )
+
         progress.set_total(len(indexed_hosts) + len(deep_candidates))
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
         if deep_candidates:
             with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
                 pass2_future_map = {
                     executor.submit(
-                        _audit_zookeeper_host,
+                        _call_audit_host_with_thread_debug,
                         host,
                         port,
                         timeout,
@@ -1931,6 +2334,7 @@ def audit_zookeeper_targets(
                         max_znodes,
                         bool(debug_emit),
                         True,
+                        debug_emit,
                     ): idx
                     for idx, host in deep_candidates
                 }
@@ -1938,6 +2342,8 @@ def audit_zookeeper_targets(
                     record_idx = int(pass2_future_map[future])
                     deep_records[record_idx] = future.result()
                     progress.advance()
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
 
         final_records: dict[int, dict[str, Any]] = {}
         for idx in range(len(hosts)):
@@ -1967,7 +2373,7 @@ def audit_zookeeper_targets(
             else:
                 failed += 1
 
-            if debug_emit is not None:
+            if debug_emit is not None and not bool(emit_record.get("debug_events_streamed")):
                 for event in emit_record.get("debug_events") or []:
                     if isinstance(event, str) and event.strip():
                         debug_emit(event)
