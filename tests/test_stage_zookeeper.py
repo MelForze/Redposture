@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import redposture_core.stage_zookeeper as zookeeper_stage
 from redposture_core.stage_zookeeper import (
     _ZK_ERR_NOAUTH,
     _ZK_ERR_NONODE,
@@ -35,6 +36,197 @@ def _zk_string(value: str) -> bytes:
     raw = value.encode("utf-8")
     return struct.pack(">i", len(raw)) + raw
 
+
+class _QueuedSocket:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+        self.sent = b""
+        self.timeout: float | None = None
+        self.closed = False
+
+    def recv(self, size: int) -> bytes:
+        if not self._chunks:
+            return b""
+        chunk = self._chunks.pop(0)
+        if len(chunk) > size:
+            self._chunks.insert(0, chunk[size:])
+            return chunk[:size]
+        return chunk
+
+    def sendall(self, data: bytes) -> None:
+        self.sent += data
+
+    def settimeout(self, value: float) -> None:
+        self.timeout = value
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _frame(payload: bytes) -> bytes:
+    return struct.pack(">i", len(payload)) + payload
+
+
+def test_clip_and_error_helpers() -> None:
+    assert zookeeper_stage._clip("abcd", 3) == "abc"
+    assert zookeeper_stage._clip("abcdef", 4) == "a..."
+    assert zookeeper_stage._friendly_error_text("") == "connection failed"
+    assert (
+        zookeeper_stage._friendly_error_text("[Errno 111] Connection refused")
+        == "connection refused (service is not listening on target port)"
+    )
+    assert zookeeper_stage._friendly_error_text("[Errno 60] timed out") == "connection timeout"
+    assert zookeeper_stage._friendly_error_text("[Errno 8] nodename nor servname provided") == "dns lookup failed"
+    assert zookeeper_stage._friendly_error_text("[Errno 65] No route to host") == "network unreachable"
+    assert zookeeper_stage._friendly_error_text("[Errno 999] custom detail") == "custom detail"
+    assert zookeeper_stage._friendly_error_from_exception(TimeoutError()) == "connection timeout"
+    assert zookeeper_stage._is_connection_refused_error("connection refused (service is not listening on target port)")
+    assert not zookeeper_stage._is_connection_refused_error("connection timeout")
+    assert zookeeper_stage._is_connection_refused_fail_record({"status": "fail", "error": "connection refused"})
+    assert zookeeper_stage._is_connection_timeout_error("connection timeout")
+    assert zookeeper_stage._is_unexpected_eof_error("unexpected EOF")
+    assert zookeeper_stage._is_root_query_err_124_error("root query failed: err_-124")
+    assert zookeeper_stage._is_remote_closed_connection_error("Remote end closed connection without response")
+    assert zookeeper_stage._is_suppressed_fail_record({"status": "fail", "error": "unexpected eof"})
+    assert not zookeeper_stage._is_suppressed_fail_record(
+        {"status": "fail", "error": "authentication failed: AUTHFAILED", "provided_credentials": True}
+    )
+    assert zookeeper_stage._zk_error_name(123456) == "ERR_123456"
+
+
+def test_parse_children_and_stat_invalid_payloads() -> None:
+    with pytest.raises(ValueError):
+        _parse_children_vector(b"\x00\x00\x00")
+    assert _parse_children_vector(struct.pack(">i", -1)) == ([], 4)
+    with pytest.raises(ValueError):
+        _parse_stat(b"\x00" * 67)
+
+
+def test_format_znode_data_nil_and_control_chars() -> None:
+    assert _format_znode_data(None) == "<nil>"
+    assert _format_znode_data(b"\x01hello") == "<base64:AWhlbGxv>"
+
+
+def test_zkclient_require_sock_and_next_xid() -> None:
+    client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 0.5)
+    with pytest.raises(RuntimeError):
+        client._require_sock()
+    assert client._next_xid() == 1
+    assert client._next_xid() == 2
+
+
+def test_zkclient_request_with_xid_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 0.5)
+    client.sock = object()  # type: ignore[assignment]
+    monkeypatch.setattr("redposture_core.stage_zookeeper._send_frame", lambda *_a, **_k: None)
+    monkeypatch.setattr("redposture_core.stage_zookeeper._recv_frame", lambda *_a, **_k: b"\x00" * 15)
+    with pytest.raises(ValueError):
+        client._request_with_xid(3, 1, b"")
+
+    bad_xid_resp = struct.pack(">i", 4) + struct.pack(">q", 1) + struct.pack(">i", 0)
+    monkeypatch.setattr("redposture_core.stage_zookeeper._recv_frame", lambda *_a, **_k: bad_xid_resp)
+    with pytest.raises(ValueError):
+        client._request_with_xid(3, 1, b"")
+
+    good_resp = struct.pack(">i", 3) + struct.pack(">q", 2) + struct.pack(">i", -101) + b"payload"
+    monkeypatch.setattr("redposture_core.stage_zookeeper._recv_frame", lambda *_a, **_k: good_resp)
+    err, payload = client._request_with_xid(3, 1, b"")
+    assert err == -101
+    assert payload == b"payload"
+
+
+def test_zkclient_connect_and_close_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = (
+        struct.pack(">i", 0)
+        + struct.pack(">i", 1000)
+        + struct.pack(">q", 1)
+        + struct.pack(">i", 16)
+        + (b"\x00" * 16)
+        + b"\x00"
+    )
+    fake_sock = _QueuedSocket([_frame(payload)])
+    monkeypatch.setattr("socket.create_connection", lambda *_a, **_k: fake_sock)
+
+    client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 1.2)
+    client.connect()
+    assert fake_sock.timeout == 1.2
+    assert len(fake_sock.sent) > 4
+
+    client.close()
+    assert fake_sock.closed is True
+    assert client.sock is None
+
+    bad_payload = (
+        struct.pack(">i", 0)
+        + struct.pack(">i", 1000)
+        + struct.pack(">q", 1)
+        + struct.pack(">i", 9999)
+        + b"\x00"
+    )
+    bad_sock = _QueuedSocket([_frame(bad_payload)])
+    monkeypatch.setattr("socket.create_connection", lambda *_a, **_k: bad_sock)
+    bad_client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 1.2)
+    with pytest.raises(ValueError):
+        bad_client.connect()
+
+
+def test_zkclient_close_ignores_send_and_close_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _BadSocket:
+        def sendall(self, _data: bytes) -> None:
+            raise OSError("send failed")
+
+        def close(self) -> None:
+            raise OSError("close failed")
+
+    client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 1.0)
+    client.sock = _BadSocket()  # type: ignore[assignment]
+    client.close()
+    assert client.sock is None
+
+
+def test_zkclient_auth_children_data_create_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 1.0)
+    stat_payload = struct.pack(">qqqqiiiqiiq", 1, 2, 3, 4, 5, 6, 7, 8, 9, 2, 10)
+    children_payload = struct.pack(">i", 2) + _zk_string("a") + _zk_string("b") + stat_payload
+    data_payload = struct.pack(">i", 3) + b"abc" + stat_payload
+
+    monkeypatch.setattr(client, "_request_with_xid", lambda *_a, **_k: (_ZK_ERR_OK, b""))
+    ok, err = client.auth_digest("admin", "admin")
+    assert (ok, err) == (True, None)
+
+    monkeypatch.setattr(client, "_request_with_xid", lambda *_a, **_k: (-115, b""))
+    ok, err = client.auth_digest("admin", "bad")
+    assert ok is False
+    assert err == "authentication failed: AUTHFAILED"
+
+    monkeypatch.setattr(client, "_request_with_xid", lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("boom")))
+    ok, err = client.auth_digest("admin", "bad")
+    assert ok is False
+    assert err == "connection timeout"
+
+    monkeypatch.setattr(client, "_request", lambda *_a, **_k: (-102, b""))
+    children, code, stat = client.get_children2("/")
+    assert (children, code, stat) == (None, -102, None)
+
+    monkeypatch.setattr(client, "_request", lambda *_a, **_k: (_ZK_ERR_OK, children_payload))
+    children, code, stat = client.get_children2("/")
+    assert children == ["a", "b"]
+    assert code == _ZK_ERR_OK
+    assert stat == {"data_length": 9, "num_children": 2}
+
+    monkeypatch.setattr(client, "_request", lambda *_a, **_k: (-102, b""))
+    data, code, stat = client.get_data("/")
+    assert (data, code, stat) == (None, -102, None)
+
+    monkeypatch.setattr(client, "_request", lambda *_a, **_k: (_ZK_ERR_OK, data_payload))
+    data, code, stat = client.get_data("/")
+    assert data == b"abc"
+    assert code == _ZK_ERR_OK
+    assert stat == {"data_length": 9, "num_children": 2}
+
+    monkeypatch.setattr(client, "_request", lambda *_a, **_k: (-110, b""))
+    assert client.create("/tmp") == -110
+    assert client.delete("/tmp") == -110
 
 def test_normalize_znode_path() -> None:
     assert _normalize_znode_path(None) is None
@@ -171,6 +363,74 @@ def test_audit_zookeeper_suppresses_unexpected_eof_when_suppression_enabled(monk
 
     assert (total, open_no_auth, valid, auth_required, failed) == (1, 0, 0, 0, 1)
     assert lines == []
+
+
+def test_audit_zookeeper_emits_records_in_input_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_audit(host: str, *_args, **_kwargs):
+        return {
+            "timestamp": "2026-03-02T00:00:00Z",
+            "host": host,
+            "port": 2181,
+            "is_zookeeper": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "provided_credentials_ok": None,
+            "show_znodes": False,
+            "dump": False,
+            "query_znode": None,
+            "max_znodes": 100,
+            "znode_count": 1,
+            "znodes": ["/root"],
+            "znode_details": None,
+            "znode_values": None,
+            "znodes_truncated": False,
+            "query_znode_value": None,
+            "query_znode_dump": None,
+            "query_znode_dump_error": None,
+            "can_create_znode": None,
+            "can_delete_znode": None,
+            "znode_capability_error": None,
+            "auth_inference_source": "root_ok",
+            "auth_probe_trace": ["/:ok"],
+            "elapsed_ms": 1,
+            "error": None,
+        }
+
+    def fake_iter_completed(future_map, label: str = ""):
+        _ = label
+        yield from reversed(list(future_map.keys()))
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
+    monkeypatch.setattr("redposture_core.stage_zookeeper.iter_completed_with_progress", fake_iter_completed)
+
+    lines: list[str] = []
+    totals = audit_zookeeper_targets(
+        hosts=["host-a", "host-b"],
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        workers=2,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+        output_path=None,
+        output_format="txt",
+        emit_line=lines.append,
+        suppress_connection_refused_status_lines=False,
+    )
+
+    assert totals == (2, 2, 0, 0, 0)
+    host_a_positions = [idx for idx, line in enumerate(lines) if "\thost-a\t" in line]
+    host_b_positions = [idx for idx, line in enumerate(lines) if "\thost-b\t" in line]
+    assert host_a_positions
+    assert host_b_positions
+    assert max(host_a_positions) < min(host_b_positions)
 
 
 def test_audit_zookeeper_marks_provided_credentials_invalid_on_anonymous_open_target(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1193,3 +1453,1260 @@ def test_run_zookeeper_stage_trims_and_forwards_credentials(monkeypatch: pytest.
     assert rc == 0
     assert captured == {"username": "admin", "password": "secret"}
     assert fake_console.errors == []
+
+    captured.clear()
+    args_empty_password = SimpleNamespace(**{**args.__dict__, "username": "admin", "password": ""})
+    rc_empty_password = run_zookeeper_stage(args_empty_password, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc_empty_password == 0
+    assert captured == {"username": "admin", "password": ""}
+
+
+def test_probe_znode_create_delete_nodeexists_and_exceptions() -> None:
+    class _NodeExistsClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def create(self, _path: str) -> int:
+            self.calls += 1
+            return -110
+
+        def delete(self, _path: str, _version: int = -1) -> int:
+            return 0
+
+    nodeexists_client = _NodeExistsClient()
+    create_ok, delete_ok, err = zookeeper_stage._probe_znode_create_delete(nodeexists_client, "127.0.0.1", 2181)
+    assert (create_ok, delete_ok, err) == (False, False, "NODEEXISTS")
+    assert nodeexists_client.calls == 3
+
+    class _NoCreateClient:
+        pass
+
+    create_ok, delete_ok, err = zookeeper_stage._probe_znode_create_delete(_NoCreateClient(), "127.0.0.1", 2181)
+    assert (create_ok, delete_ok, err) == (None, None, "capability probe unsupported")
+
+    class _TimeoutClient:
+        def create(self, _path: str) -> int:
+            raise TimeoutError("slow")
+
+        def delete(self, _path: str, _version: int = -1) -> int:
+            return 0
+
+    create_ok, delete_ok, err = zookeeper_stage._probe_znode_create_delete(_TimeoutClient(), "127.0.0.1", 2181)
+    assert (create_ok, delete_ok, err) == (None, None, "connection timeout")
+
+
+def test_detail_entry_and_auth_probe_helpers() -> None:
+    assert zookeeper_stage._znode_detail_entry("/x", {"error": "Access Denied"})["state"] == "denied"
+    assert zookeeper_stage._znode_detail_entry("/x", {"error": "BROKEN"})["state"] == "error"
+    assert zookeeper_stage._znode_detail_entry("/x", {"children": 0, "bytes": 0})["state"] == "empty"
+    assert zookeeper_stage._znode_detail_entry("/x", {"children": 1, "bytes": 1})["state"] == "readable"
+    assert zookeeper_stage._znode_detail_entry("/x", None)["state"] == "unknown"
+
+    assert zookeeper_stage._normalize_auth_probe_result(_ZK_ERR_RETRYABLE_ROOT_QUERY) == (
+        "retryable_auth_hint",
+        "err_-124",
+    )
+    assert zookeeper_stage._normalize_auth_probe_result(_ZK_ERR_NONODE) == ("neutral", "nonode")
+    assert zookeeper_stage._normalize_auth_probe_result(-115) == ("error", "authfailed")
+
+
+def test_run_anonymous_probe_and_infer_unknown_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _ProbeClient:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            _ = (host, port, timeout)
+
+        def connect(self) -> None:
+            return
+
+        def get_children2(self, _path: str):
+            return ([], _ZK_ERR_OK, None)
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _ProbeClient)
+    err_code, probe_exc = zookeeper_stage._run_anonymous_auth_probe("127.0.0.1", 2181, 0.2, "/")
+    assert (err_code, probe_exc) == (_ZK_ERR_OK, None)
+
+    class _ProbeFailClient(_ProbeClient):
+        def connect(self) -> None:
+            raise ConnectionError("probe fail")
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _ProbeFailClient)
+    err_code, probe_exc = zookeeper_stage._run_anonymous_auth_probe("127.0.0.1", 2181, 0.2, "/")
+    assert err_code is None
+    assert probe_exc == "probe fail"
+
+    seq = [(None, None), (_ZK_ERR_NONODE, None), (_ZK_ERR_NONODE, None), (_ZK_ERR_NONODE, None)]
+
+    def fake_probe(*_args, **_kwargs):
+        return seq.pop(0)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._run_anonymous_auth_probe", fake_probe)
+    auth_required, source, trace = zookeeper_stage._infer_auth_required_from_anonymous_probes(
+        "127.0.0.1", 2181, 0.2, -1, "/x"
+    )
+    assert auth_required is None
+    assert source == "inconclusive"
+    assert "/x:nonode" in trace
+    assert any(item.endswith("error:unknown") for item in trace)
+
+
+def test_format_detect_record_and_record_json_branches() -> None:
+    record = {
+        "timestamp": "2026-04-09T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 2181,
+        "is_zookeeper": True,
+        "auth_required": True,
+        "auth_inference_source": "root_noauth",
+        "auth_probe_trace": ["/:noauth"],
+    }
+    detect_json = zookeeper_stage._format_detect_record(record, "json")
+    assert '"type": "detect"' in detect_json
+    assert '"auth_required": true' in detect_json
+
+    record_json = zookeeper_stage._format_record(
+        {
+            **record,
+            "status": "fail",
+            "provided_credentials": False,
+            "error": None,
+        },
+        "json",
+    )
+    assert '"status": "fail"' in record_json
+    line = zookeeper_stage._format_record({"status": "auth_required", "host": "h", "port": 1}, "txt")
+    assert "authentication required" in line
+    line = zookeeper_stage._format_record({"status": "fail", "host": "h", "port": 1, "error": None}, "txt")
+    assert "[!] connection failed" in line
+
+
+def test_format_znodes_detail_records_extra_paths() -> None:
+    record_json_dump = {
+        "timestamp": "2026-04-09T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 2181,
+        "show_znodes": False,
+        "dump": True,
+        "query_znode": None,
+        "znode_count": 2,
+        "znode_values": ["/a:1", "/b:2"],
+    }
+    lines = _format_znodes_detail_records(record_json_dump, "json")
+    assert any('"type": "znodes_dump"' in line for line in lines)
+
+    record_txt_dump = {
+        "host": "127.0.0.1",
+        "port": 2181,
+        "show_znodes": False,
+        "dump": True,
+        "query_znode": "/x",
+        "query_znode_dump": None,
+        "query_znode_dump_error": "",
+    }
+    lines = _format_znodes_detail_records(record_txt_dump, "txt")
+    assert any("<no data>" in line for line in lines)
+
+
+def test_render_colored_zookeeper_line_and_emit_line(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    class _FakeConsole:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, text: str, color: str, _stream) -> str:
+            return f"<{color}>{text}</{color}>"
+
+        def plain(self, text: str, color: str | None = None) -> None:
+            _ = color
+            self.lines.append(text)
+
+    console = _FakeConsole()
+    assert not zookeeper_stage._render_colored_zookeeper_line(console, "OTHER line")
+    assert zookeeper_stage._render_colored_zookeeper_line(
+        console, "ZOOKEEPER   127.0.0.1 2181 [*] ZooKeeper Service (auth required:True)"
+    )
+    assert any("<blue>ZOOKEEPER</blue>" in line for line in console.lines)
+
+    assert zookeeper_stage._render_colored_zookeeper_line(
+        console,
+        "ZOOKEEPER   127.0.0.1 2181 [+] anonymous access (create:True) (delete:False) (znodes:12)",
+    )
+    assert len(console.lines) >= 2
+
+    output_path = tmp_path / "out.txt"
+    emitted: list[str] = []
+    with output_path.open("w", encoding="utf-8") as out_fh:
+        zookeeper_stage._emit_line(out_fh, emitted.append, "line-a")
+    assert output_path.read_text(encoding="utf-8").strip() == "line-a"
+    assert emitted == ["line-a"]
+
+
+def test_audit_targets_writes_output_file_and_append(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    def fake_audit(host: str, *_args, **_kwargs):
+        return {
+            "timestamp": "2026-04-09T00:00:00Z",
+            "host": host,
+            "port": 2181,
+            "is_zookeeper": True,
+            "status": "valid_credentials",
+            "auth_required": True,
+            "provided_credentials": True,
+            "provided_username": "admin",
+            "provided_password": "admin",
+            "provided_credentials_ok": True,
+            "show_znodes": False,
+            "dump": False,
+            "query_znode": None,
+            "max_znodes": 2000,
+            "znode_count": 1,
+            "znodes": ["/a"],
+            "znode_details": None,
+            "znode_values": None,
+            "znodes_truncated": False,
+            "query_znode_value": None,
+            "query_znode_dump": None,
+            "query_znode_dump_error": None,
+            "can_create_znode": True,
+            "can_delete_znode": True,
+            "znode_capability_error": None,
+            "auth_inference_source": "root_noauth",
+            "auth_probe_trace": ["/:noauth"],
+            "elapsed_ms": 1,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
+    out_path = tmp_path / "zk.txt"
+
+    totals = audit_zookeeper_targets(
+        hosts=["h1"],
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        workers=1,
+        username="admin",
+        password="admin",
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=2000,
+        output_path=str(out_path),
+        output_format="txt",
+        append_output=False,
+    )
+    assert totals == (1, 0, 1, 0, 0)
+    first_size = out_path.stat().st_size
+    assert first_size > 0
+
+    audit_zookeeper_targets(
+        hosts=["h2"],
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        workers=1,
+        username="admin",
+        password="admin",
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=2000,
+        output_path=str(out_path),
+        output_format="txt",
+        append_output=True,
+    )
+    assert out_path.stat().st_size > first_size
+
+
+def test_run_stage_additional_error_paths_and_output_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeConsole:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+            self.errors: list[str] = []
+            self.warns: list[str] = []
+            self.infos: list[str] = []
+            self.plain_lines: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def warn(self, message: str) -> None:
+            self.warns.append(message)
+
+        def info(self, message: str) -> None:
+            self.infos.append(message)
+
+        def plain(self, message: str, color: str | None = None) -> None:
+            _ = color
+            self.plain_lines.append(message)
+
+        def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+    fake_console = _FakeConsole()
+    monkeypatch.setattr("redposture_core.stage_zookeeper.Console", lambda debug=False: fake_console)
+
+    base_args = dict(
+        debug=True,
+        timeout=1.0,
+        retries=0,
+        max_znodes=100,
+        username=None,
+        password=None,
+        port=2181,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        show_znodes=False,
+        dump=False,
+        znode=None,
+        output=None,
+        output_format="txt",
+        workers=1,
+    )
+
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper.collect_scan_ports",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad ports")),
+    )
+    assert run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+    assert any("failed to parse --port" in msg for msg in fake_console.errors)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_args, **_kwargs: [2181])
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper.collect_scan_targets",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad targets")),
+    )
+    fake_console.errors.clear()
+    assert run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+    assert any("failed to parse targets" in msg for msg in fake_console.errors)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_args, **_kwargs: [])
+    fake_console.errors.clear()
+    assert run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+    assert any("zookeeper requires -t/--targets" in msg for msg in fake_console.errors)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", lambda *_args, **_kwargs: (1, 0, 0, 0, 1))
+    fake_console.warns.clear()
+    fake_console.infos.clear()
+    rc = run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    assert any("all zookeeper targets are unreachable" in msg for msg in fake_console.warns)
+    assert any("zookeeper audit complete" in msg for msg in fake_console.infos)
+
+    args_json = {**base_args, "output_format": "json", "debug": False}
+    printed: list[str] = []
+    monkeypatch.setattr("builtins.print", lambda *a, **_k: printed.append(" ".join(str(x) for x in a)))
+
+    def fake_audit_json(*_args, **kwargs):
+        emit = kwargs.get("emit_line")
+        if emit:
+            emit('{"k":"v"}')
+        return (1, 1, 0, 0, 0)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", fake_audit_json)
+    rc = run_zookeeper_stage(SimpleNamespace(**args_json), logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    assert '{"k":"v"}' in printed
+
+
+def test_friendly_error_extra_branches_and_decode_edge_cases() -> None:
+    assert zookeeper_stage._friendly_error_text("temporary failure in name resolution") == "dns lookup temporary failure"
+    assert zookeeper_stage._friendly_error_text("operation not permitted") == "operation not permitted by local environment"
+    assert zookeeper_stage._friendly_error_text("[Errno 111] denied") == (
+        "connection refused (service is not listening on target port)"
+    )
+    assert zookeeper_stage._friendly_error_text("[Errno 110] denied") == "connection timeout"
+    assert zookeeper_stage._friendly_error_text("[Errno -2] denied") == "dns lookup failed"
+    assert zookeeper_stage._friendly_error_text("[Errno 113] denied") == "network unreachable"
+
+    class _EmptySocket:
+        def recv(self, _size: int) -> bytes:
+            return b""
+
+    with pytest.raises(ConnectionError):
+        _recv_exact(_EmptySocket(), 1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        _decode_zk_string(b"\x00\x00\x00")
+    assert _decode_zk_buffer(struct.pack(">i", -1)) == (None, 4)
+    with pytest.raises(ValueError):
+        _decode_zk_buffer(struct.pack(">i", 8) + b"abc")
+
+
+def test_zkclient_more_branches_and_enumerate_edges(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 1.0)
+    client.sock = object()  # type: ignore[assignment]
+    monkeypatch.setattr("redposture_core.stage_zookeeper._send_frame", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._recv_frame",
+        lambda *_a, **_k: struct.pack(">i", 1) + struct.pack(">q", 2) + struct.pack(">i", _ZK_ERR_OK),
+    )
+    err, payload = client._request(123)
+    assert err == _ZK_ERR_OK
+    assert payload == b""
+
+    short_payload = struct.pack(">i", 0) + struct.pack(">i", 1000) + struct.pack(">q", 1) + struct.pack(">i", 0)
+    short_sock = _QueuedSocket([_frame(short_payload)])
+    monkeypatch.setattr("socket.create_connection", lambda *_a, **_k: short_sock)
+    bad_client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 1.0)
+    with pytest.raises(ValueError):
+        bad_client.connect()
+
+    close_client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 1.0)
+    close_client.close()
+    assert close_client.sock is None
+
+    class _EnumClient:
+        def get_children2(self, path: str):
+            if path == "/":
+                return ["dup", "dup", "gone", "err", "none"], _ZK_ERR_OK, {"data_length": 0, "num_children": 5}
+            if path == "/dup":
+                return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+            if path == "/gone":
+                return None, _ZK_ERR_NONODE, None
+            if path == "/err":
+                return None, -1, None
+            if path == "/none":
+                return None, _ZK_ERR_OK, None
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+    nodes, total_count, truncated, meta, enum_error = _enumerate_znodes(_EnumClient(), 100)  # type: ignore[arg-type]
+    assert "/dup" in nodes
+    assert total_count >= 3
+    assert truncated is False
+    assert meta["/gone"]["error"] == "not found"
+    assert enum_error == "getChildren failed for /err: SYSTEMERROR"
+
+
+def test_audit_host_additional_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _WhitespaceCredsClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, _path: str):
+            return None, _ZK_ERR_NOAUTH, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _WhitespaceCredsClient)
+    rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=" ",
+        password=" ",
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert rec["status"] == "auth_required"
+    assert rec["provided_credentials"] is False
+
+    class _AuthWeirdClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def auth_digest(self, _u: str, _p: str):
+            return False, "digest transport failed"
+
+        def get_children2(self, _path: str):
+            return None, _ZK_ERR_NOAUTH, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _AuthWeirdClient)
+    rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username="admin",
+        password="admin",
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert rec["status"] == "fail"
+    assert rec["error"] == "digest transport failed"
+
+    class _QueryDumpClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str):
+            if path == "/":
+                return ["q"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
+            if path == "/q":
+                return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+            if path == "/missing":
+                return None, _ZK_ERR_NONODE, None
+            if path == "/denied":
+                return None, _ZK_ERR_NOAUTH, None
+            if path == "/boom":
+                return None, -115, None
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def get_data(self, path: str):
+            if path == "/q":
+                return b"ok", _ZK_ERR_OK, {"data_length": 2, "num_children": 0}
+            if path == "/missing":
+                return None, _ZK_ERR_NONODE, None
+            if path == "/denied":
+                return None, _ZK_ERR_NOAUTH, None
+            return None, -115, None
+
+        def create(self, _path: str, data: bytes = b"", flags: int = 1) -> int:
+            _ = (data, flags)
+            return _ZK_ERR_OK
+
+        def delete(self, _path: str, version: int = -1) -> int:
+            _ = version
+            return _ZK_ERR_OK
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _QueryDumpClient)
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._enumerate_znodes",
+        lambda *_a, **_k: (["/q"], 0, False, {"/q": {"path": "/q", "children": 0, "bytes": 0, "error": None}}, "enum warn"),
+    )
+    rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=True,
+        query_znode="/missing",
+        max_znodes=100,
+    )
+    assert rec["query_znode_value"] == "/missing:<not found>"
+    assert rec["query_znode_dump_error"] == "znode not found"
+    assert rec["error"] == "enum warn"
+    assert rec["znode_count"] == 1
+
+    rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=True,
+        query_znode="/denied",
+        max_znodes=100,
+    )
+    assert rec["query_znode_value"] == "/denied:<Access Denied>"
+    assert rec["query_znode_dump_error"] == "Access Denied"
+
+    rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=True,
+        query_znode="/boom",
+        max_znodes=100,
+    )
+    assert rec["query_znode_value"] == "/boom:<error:AUTHFAILED>"
+    assert rec["query_znode_dump_error"] == "AUTHFAILED"
+
+
+def test_render_color_extra_markers_and_run_stage_debug_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeConsole:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+            self.lines: list[str] = []
+            self.infos: list[str] = []
+
+        def _paint(self, text: str, color: str, _stream) -> str:
+            return f"<{color}>{text}</{color}>"
+
+        def plain(self, text: str, color: str | None = None) -> None:
+            _ = color
+            self.lines.append(text)
+
+        def info(self, text: str) -> None:
+            self.infos.append(text)
+
+        def warn(self, _text: str) -> None:
+            return
+
+        def error(self, _text: str) -> None:
+            return
+
+        def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+    c = _FakeConsole()
+    assert zookeeper_stage._render_colored_zookeeper_line(c, "ZOOKEEPER\th\t1\t [*] plain marker")
+    assert zookeeper_stage._render_colored_zookeeper_line(c, "ZOOKEEPER\th\t1\t [*] x (auth required:False)")
+    assert zookeeper_stage._render_colored_zookeeper_line(c, "ZOOKEEPER\th\t1\t [*] x (auth required:unknown)")
+    assert zookeeper_stage._render_colored_zookeeper_line(c, "ZOOKEEPER\th\t1\t [+] x (create:unknown) (delete:unknown)")
+
+    fake_console = _FakeConsole(debug=True)
+    monkeypatch.setattr("redposture_core.stage_zookeeper.Console", lambda debug=False: fake_console)
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_a, **_k: [2181])
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_a, **_k: ["127.0.0.1"])
+
+    def fake_audit(*_args, **kwargs):
+        emit = kwargs.get("emit_line")
+        if emit:
+            emit("ZOOKEEPER\t127.0.0.1\t2181\t payload-only-line")
+            emit("ZOOKEEPER\t127.0.0.1\t2181\t [*] marker-line")
+        return (1, 1, 0, 0, 0)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", fake_audit)
+    args = SimpleNamespace(
+        debug=True,
+        timeout=1.0,
+        retries=0,
+        max_znodes=100,
+        username=None,
+        password=None,
+        port=2181,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        show_znodes=False,
+        dump=False,
+        znode=None,
+        output="/tmp/zookeeper-debug-out.json",
+        output_format="json",
+        workers=1,
+    )
+    rc = run_zookeeper_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    assert any("format=json output=/tmp/zookeeper-debug-out.json" in msg for msg in fake_console.infos)
+
+
+def test_enumerate_znodes_children_none_with_ok_error_is_ignored() -> None:
+    class _Client:
+        def get_children2(self, path: str):
+            if path == "/":
+                return ["none"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
+            if path == "/none":
+                return None, _ZK_ERR_OK, None
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+    nodes, total_count, truncated, meta, enum_error = _enumerate_znodes(_Client(), 100)  # type: ignore[arg-type]
+    assert nodes == ["/none"]
+    assert total_count == 1
+    assert truncated is False
+    assert enum_error is None
+    assert meta["/none"]["children"] is None
+    assert meta["/none"]["bytes"] is None
+
+
+def test_audit_host_auth_digest_edge_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
+        lambda *_a, **_k: (True, "probe_noauth", []),
+    )
+
+    class _StillNoAuthAfterDigestClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, _path: str):
+            return None, _ZK_ERR_NOAUTH, None
+
+        def auth_digest(self, _u: str, _p: str):
+            return True, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _StillNoAuthAfterDigestClient)
+    rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username="admin",
+        password="admin",
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert rec["status"] == "auth_required"
+    assert rec["provided_credentials_ok"] is True
+
+    class _AuthDigestFailsWithoutErrorClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, _path: str):
+            return None, _ZK_ERR_NOAUTH, None
+
+        def auth_digest(self, _u: str, _p: str):
+            return False, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _AuthDigestFailsWithoutErrorClient)
+    rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username="admin",
+        password="admin",
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert rec["status"] == "auth_required"
+    assert rec["error"] == "authentication failed"
+
+
+def test_audit_host_retryable_root_query_after_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
+        lambda *_a, **_k: (True, "probe_noauth", []),
+    )
+    monkeypatch.setattr("redposture_core.stage_zookeeper._enumerate_znodes", lambda *_a, **_k: ([], 0, False, {}, None))
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._probe_znode_create_delete",
+        lambda *_a, **_k: (True, True, None),
+    )
+
+    class _RetryAfterDigestClient:
+        instance_idx = 0
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.idx = _RetryAfterDigestClient.instance_idx
+            _RetryAfterDigestClient.instance_idx += 1
+            self.root_calls = 0
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def auth_digest(self, _u: str, _p: str):
+            return True, None
+
+        def get_children2(self, path: str):
+            if path != "/":
+                return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+            self.root_calls += 1
+            if self.idx == 0:
+                if self.root_calls == 1:
+                    return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+                if self.root_calls == 2:
+                    return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+            else:
+                if self.root_calls == 1:
+                    return None, _ZK_ERR_NOAUTH, None
+                if self.root_calls == 2:
+                    return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _RetryAfterDigestClient)
+    rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=1,
+        username="admin",
+        password="admin",
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert rec["status"] == "valid_credentials"
+    assert rec["provided_credentials_ok"] is True
+
+
+def test_audit_host_dump_query_dump_and_retry_fail_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
+        lambda *_a, **_k: (False, "root_ok", []),
+    )
+
+    class _DumpClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str):
+            if path == "/":
+                return ["a", "b"], _ZK_ERR_OK, {"data_length": 0, "num_children": 2}
+            if path in {"/a", "/b", "/q_nonode", "/q_noauth", "/q_other", "/q_ok"}:
+                return [], _ZK_ERR_OK, {"data_length": 5, "num_children": 0}
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def get_data(self, path: str):
+            if path == "/a":
+                return None, _ZK_ERR_NONODE, None
+            if path == "/b":
+                return None, -115, None
+            if path == "/q_nonode":
+                return None, _ZK_ERR_NONODE, None
+            if path == "/q_noauth":
+                return None, _ZK_ERR_NOAUTH, None
+            if path == "/q_other":
+                return None, -115, None
+            if path == "/q_ok":
+                return b"payload", _ZK_ERR_OK, {"data_length": 7, "num_children": 0}
+            return None, _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def create(self, _path: str, data: bytes = b"", flags: int = 1) -> int:
+            _ = (data, flags)
+            return _ZK_ERR_OK
+
+        def delete(self, _path: str, version: int = -1) -> int:
+            _ = version
+            return _ZK_ERR_OK
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _DumpClient)
+    rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=True,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert isinstance(rec["znode_values"], list)
+    assert any("<not found>" in item for item in rec["znode_values"])
+    assert any("<error:AUTHFAILED>" in item for item in rec["znode_values"])
+
+    rec_nonode = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=True,
+        query_znode="/q_nonode",
+        max_znodes=100,
+    )
+    assert rec_nonode["query_znode_dump_error"] == "znode not found"
+
+    rec_noauth = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=True,
+        query_znode="/q_noauth",
+        max_znodes=100,
+    )
+    assert rec_noauth["query_znode_dump_error"] == "Access Denied"
+
+    rec_other = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=True,
+        query_znode="/q_other",
+        max_znodes=100,
+    )
+    assert rec_other["query_znode_dump_error"] == "AUTHFAILED"
+
+    rec_ok = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=True,
+        query_znode="/q_ok",
+        max_znodes=100,
+    )
+    assert rec_ok["query_znode_value"] == "/q_ok (children:0,bytes:5)"
+    assert rec_ok["query_znode_dump"] == "payload"
+
+    class _TimeoutClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def connect(self) -> None:
+            raise TimeoutError("slow")
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _TimeoutClient)
+    monkeypatch.setattr("redposture_core.stage_zookeeper._retry_delay", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr("redposture_core.stage_zookeeper.time.sleep", lambda *_a, **_k: None)
+    fail_rec = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=1,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+    assert fail_rec["status"] == "fail"
+    assert fail_rec["is_zookeeper"] is False
+    assert fail_rec["error"] == "connection timeout"
+
+
+def test_formatting_remaining_text_branches() -> None:
+    assert zookeeper_stage._with_optional_znodes({"znode_count": None}, "line") == "line (znodes:-)"
+
+    auth_failed_line = _format_record(
+        {
+            "host": "127.0.0.1",
+            "port": 2181,
+            "status": "fail",
+            "provided_credentials": True,
+            "provided_username": "admin",
+            "provided_password": "bad",
+            "error": "authentication failed: AUTHFAILED",
+        },
+        output_format="txt",
+    )
+    assert "[-] admin:bad" in auth_failed_line
+
+    fail_line = _format_record(
+        {"host": "127.0.0.1", "port": 2181, "status": "fail", "error": "boom"},
+        output_format="txt",
+    )
+    assert "err=boom" in fail_line
+
+    detail_lines = _format_znodes_detail_records(
+        {
+            "host": "127.0.0.1",
+            "port": 2181,
+            "show_znodes": True,
+            "dump": False,
+            "query_znode": None,
+            "znode_count": 2,
+            "max_znodes": 100,
+            "znodes_truncated": False,
+            "znode_details": [
+                {"path": "/a", "state": "non_empty", "children": 2, "bytes": 9, "error": None},
+                "skip-me",
+                {"path": "/b", "state": "unknown", "children": None, "bytes": None, "error": None},
+            ],
+            "znode_values": None,
+        },
+        output_format="txt",
+    )
+    assert any("/a (children:2,bytes:9)" in line for line in detail_lines)
+    assert any(line.endswith(" /b") for line in detail_lines)
+
+    query_dump_lines = _format_znodes_detail_records(
+        {
+            "host": "127.0.0.1",
+            "port": 2181,
+            "show_znodes": False,
+            "dump": True,
+            "query_znode": "/q",
+            "query_znode_value": "/q (children:0,bytes:0)",
+            "query_znode_dump": "payload-value",
+            "query_znode_dump_error": None,
+            "znodes": [],
+            "znode_details": [],
+            "znode_values": [],
+        },
+        output_format="txt",
+    )
+    assert any(line.endswith(" payload-value") for line in query_dump_lines)
+
+    dump_lines = _format_znodes_detail_records(
+        {
+            "host": "127.0.0.1",
+            "port": 2181,
+            "show_znodes": False,
+            "dump": True,
+            "query_znode": None,
+            "query_znode_value": None,
+            "query_znode_dump": None,
+            "query_znode_dump_error": None,
+            "znodes": ["/a"],
+            "znode_details": [],
+            "znode_values": ["/a:payload"],
+            "znode_count": 10,
+            "max_znodes": 1,
+            "znodes_truncated": True,
+        },
+        output_format="txt",
+    )
+    assert any("[*] Dump Znodes" in line for line in dump_lines)
+    assert any("showing first" in line for line in dump_lines)
+    assert any(line.endswith(" /a:payload") for line in dump_lines)
+
+
+def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _RenderConsole:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, text: str, color: str, _stream) -> str:
+            return f"<{color}>{text}</{color}>"
+
+        def plain(self, text: str, color: str | None = None) -> None:
+            _ = color
+            self.lines.append(text)
+
+    assert zookeeper_stage._render_colored_zookeeper_line(_RenderConsole(), "ZOOKEEPER\t127.0.0.1\t2181\t plain line") is False
+
+    class _FakeMatch:
+        def __init__(self, start: int, end: int, group1: str = "") -> None:
+            self._start = start
+            self._end = end
+            self._group1 = group1
+
+        def start(self) -> int:
+            return self._start
+
+        def end(self) -> int:
+            return self._end
+
+        def group(self, index: int = 0) -> str:
+            return self._group1 if index == 1 else ""
+
+    real_search = zookeeper_stage.re.search
+
+    def _overlap_search(pattern: str, text: str):
+        if pattern == r"\(znodes:(\d+)(?:\+)?(?: [^)]*)?\)":
+            return _FakeMatch(0, 2, "9")
+        if pattern.startswith(r"\(create:"):
+            return _FakeMatch(1, 3, "True")
+        if pattern.startswith(r"\(delete:"):
+            return None
+        return real_search(pattern, text)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.re.search", _overlap_search)
+    overlap_console = _RenderConsole()
+    assert zookeeper_stage._render_colored_zookeeper_line(overlap_console, "ZOOKEEPER\t127.0.0.1\t2181\t [*] znodes-tail")
+    assert overlap_console.lines
+
+    def _fake_audit_host(*_args, **_kwargs):
+        return {
+            "timestamp": "2026-01-01T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 2181,
+            "is_zookeeper": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "provided_credentials_ok": None,
+            "show_znodes": True,
+            "dump": False,
+            "query_znode": None,
+            "max_znodes": 100,
+            "znode_count": 1,
+            "znodes": ["/a"],
+            "znode_details": [{"path": "/a", "state": "empty", "children": 0, "bytes": 0, "error": None}],
+            "znode_values": None,
+            "znodes_truncated": False,
+            "query_znode_value": None,
+            "query_znode_dump": None,
+            "query_znode_dump_error": None,
+            "can_create_znode": None,
+            "can_delete_znode": None,
+            "znode_capability_error": None,
+            "auth_inference_source": "root_ok",
+            "auth_probe_trace": [],
+            "elapsed_ms": 1,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", _fake_audit_host)
+    emitted: list[str] = []
+    totals = audit_zookeeper_targets(
+        hosts=["127.0.0.1"],
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        show_znodes=True,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+        output_path=None,
+        output_format="txt",
+        emit_line=emitted.append,
+    )
+    assert totals == (1, 1, 0, 0, 0)
+    assert any("/a:<empty>" in line for line in emitted)
+
+    class _FakeConsole:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+            self.errors: list[str] = []
+            self.infos: list[str] = []
+            self.warns: list[str] = []
+            self.plain_lines: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def warn(self, message: str) -> None:
+            self.warns.append(message)
+
+        def info(self, message: str) -> None:
+            self.infos.append(message)
+
+        def plain(self, message: str, color: str | None = None) -> None:
+            _ = color
+            self.plain_lines.append(message)
+
+        def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
+            if _args and isinstance(_args[0], str):
+                return "payload-tagged-line" in _args[0]
+            return False
+
+    fake_console = _FakeConsole(debug=True)
+    monkeypatch.setattr("redposture_core.stage_zookeeper.Console", lambda debug=False: fake_console)
+
+    def _fake_render_colored(_console: object, line: str) -> bool:
+        return "marker-line" in line
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._render_colored_zookeeper_line", _fake_render_colored)
+
+    collected_target_inputs: list[str | None] = []
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_a, **_k: [])
+
+    def _capture_targets(value: str | None):
+        collected_target_inputs.append(value)
+        return ["127.0.0.1"]
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", _capture_targets)
+
+    def _fake_stage_audit(*_args, **kwargs):
+        emit = kwargs.get("emit_line")
+        if emit:
+            emit("ZOOKEEPER\t127.0.0.1\t2181\t payload-tagged-line")
+            emit("ZOOKEEPER\t127.0.0.1\t2181\t payload-plain-line")
+            emit("ZOOKEEPER\t127.0.0.1\t2181\t [*] marker-line")
+            emit("raw debug payload")
+        return (1, 1, 0, 0, 0)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", _fake_stage_audit)
+    assert zookeeper_stage._render_colored_zookeeper_line(fake_console, "ZOOKEEPER\t127.0.0.1\t2181\t plain line") is False
+
+    args_neg_retries = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=-1,
+        max_znodes=100,
+        username=None,
+        password=None,
+        port=2181,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        show_znodes=False,
+        dump=False,
+        znode=None,
+        output=None,
+        output_format="txt",
+        workers=1,
+    )
+    assert run_zookeeper_stage(args_neg_retries, logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+    assert any("--retries must be >= 0" in msg for msg in fake_console.errors)
+
+    args_bad_max = SimpleNamespace(**{**args_neg_retries.__dict__, "retries": 0, "max_znodes": 0})
+    fake_console.errors.clear()
+    assert run_zookeeper_stage(args_bad_max, logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+    assert any("--max-znodes must be > 0" in msg for msg in fake_console.errors)
+
+    args_trim = SimpleNamespace(**{**args_neg_retries.__dict__, "retries": 0, "max_znodes": 100, "username": "", "password": ""})
+    fake_console.errors.clear()
+    rc_trim = run_zookeeper_stage(args_trim, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc_trim == 0
+
+    args_debug_stdout = SimpleNamespace(
+        **{
+            **args_neg_retries.__dict__,
+            "debug": True,
+            "retries": 0,
+            "max_znodes": 100,
+            "username": "admin",
+            "password": "admin",
+            "show_znodes": True,
+            "dump": True,
+            "znode": "/demo",
+            "targets": "127.0.0.1",
+            "hosts_file": "hosts.txt",
+            "output": None,
+            "output_format": "txt",
+        }
+    )
+    rc_debug_stdout = run_zookeeper_stage(args_debug_stdout, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc_debug_stdout == 0
+    assert collected_target_inputs[-1] == "127.0.0.1,hosts.txt"
+    assert any("mode=count-znodes+provided-creds+show-znodes+dump+znode=/demo format=txt" in msg for msg in fake_console.infos)
+    assert any("payload-plain-line" in line for line in fake_console.plain_lines)
+    assert "raw debug payload" in fake_console.plain_lines
+
+    args_debug_file = SimpleNamespace(
+        **{
+            **args_debug_stdout.__dict__,
+            "output": "/tmp/zookeeper-stage-out.txt",
+        }
+    )
+    rc_debug_file = run_zookeeper_stage(args_debug_file, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc_debug_file == 0
+    assert any("output=/tmp/zookeeper-stage-out.txt" in msg for msg in fake_console.infos)
