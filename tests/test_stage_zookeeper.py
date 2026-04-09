@@ -476,12 +476,7 @@ def test_audit_zookeeper_emits_records_in_input_order(monkeypatch: pytest.Monkey
             "error": None,
         }
 
-    def fake_iter_completed(future_map, label: str = ""):
-        _ = label
-        yield from reversed(list(future_map.keys()))
-
     monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
-    monkeypatch.setattr("redposture_core.stage_zookeeper.iter_completed_with_progress", fake_iter_completed)
 
     lines: list[str] = []
     totals = audit_zookeeper_targets(

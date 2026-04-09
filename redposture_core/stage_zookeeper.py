@@ -18,7 +18,7 @@ from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import iter_completed_with_progress
+from .progress import ProgressBar
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 _ZK_PROTOCOL_VERSION = 0
@@ -1862,23 +1862,61 @@ def audit_zookeeper_targets(
     failed = 0
 
     out_fh: Any = None
+    progress: ProgressBar | None = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
         indexed_hosts = list(enumerate(hosts))
+        progress = ProgressBar("ZOOKEEPER", len(indexed_hosts), enabled=True, leave=True)
+        detect_records: dict[int, dict[str, Any]] = {}
+        deep_records: dict[int, dict[str, Any]] = {}
 
-        def _run_pass(
-            targets: list[tuple[int, str]],
-            *,
-            run_deep_checks: bool,
-            with_progress: bool,
-        ) -> dict[int, dict[str, Any]]:
-            if not targets:
-                return {}
+        # Pass 1: detect/auth only for every target, emit detect lines in input order as records are ready.
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+            pass1_future_map = {
+                executor.submit(
+                    _audit_zookeeper_host,
+                    host,
+                    port,
+                    timeout,
+                    retries,
+                    username,
+                    password,
+                    show_znodes,
+                    dump,
+                    query_znode,
+                    max_znodes,
+                    bool(debug_emit),
+                    False,
+                ): idx
+                for idx, host in indexed_hosts
+            }
+            buffered_records: dict[int, dict[str, Any]] = {}
+            next_emit_idx = 0
+            for future in as_completed(pass1_future_map):
+                record_idx = int(pass1_future_map[future])
+                buffered_records[record_idx] = future.result()
+                progress.advance()
+                while next_emit_idx in buffered_records:
+                    detect_record = buffered_records.pop(next_emit_idx)
+                    detect_records[next_emit_idx] = detect_record
+                    if bool(detect_record.get("is_zookeeper")):
+                        _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
+                    next_emit_idx += 1
+
+        # Pass 2: deep checks only for accessible records, same timeout/retry policy as pass 1.
+        deep_candidates = [
+            (idx, host)
+            for idx, host in indexed_hosts
+            if bool(detect_records[idx].get("is_zookeeper"))
+            and str(detect_records[idx].get("status") or "") in {"open_no_auth", "valid_credentials"}
+        ]
+        progress.set_total(len(indexed_hosts) + len(deep_candidates))
+        if deep_candidates:
             with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-                future_map = {
+                pass2_future_map = {
                     executor.submit(
                         _audit_zookeeper_host,
                         host,
@@ -1892,34 +1930,14 @@ def audit_zookeeper_targets(
                         query_znode,
                         max_znodes,
                         bool(debug_emit),
-                        run_deep_checks,
+                        True,
                     ): idx
-                    for idx, host in targets
+                    for idx, host in deep_candidates
                 }
-                records: dict[int, dict[str, Any]] = {}
-                iterator = iter_completed_with_progress(future_map, label="ZOOKEEPER") if with_progress else as_completed(
-                    future_map
-                )
-                for future in iterator:
-                    records[int(future_map[future])] = future.result()
-                return records
-
-        # Pass 1: detect/auth only for every target.
-        detect_records = _run_pass(indexed_hosts, run_deep_checks=False, with_progress=True)
-
-        for idx in range(len(hosts)):
-            detect_record = detect_records[idx]
-            if bool(detect_record.get("is_zookeeper")):
-                _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
-
-        # Pass 2: deep checks only for accessible records, same timeout/retry policy as pass 1.
-        deep_candidates = [
-            (idx, host)
-            for idx, host in indexed_hosts
-            if bool(detect_records[idx].get("is_zookeeper"))
-            and str(detect_records[idx].get("status") or "") in {"open_no_auth", "valid_credentials"}
-        ]
-        deep_records = _run_pass(deep_candidates, run_deep_checks=True, with_progress=False)
+                for future in as_completed(pass2_future_map):
+                    record_idx = int(pass2_future_map[future])
+                    deep_records[record_idx] = future.result()
+                    progress.advance()
 
         final_records: dict[int, dict[str, Any]] = {}
         for idx in range(len(hosts)):
@@ -1999,6 +2017,8 @@ def audit_zookeeper_targets(
                     error=emit_record.get("error"),
                 )
     finally:
+        if progress is not None:
+            progress.close()
         if out_fh is not None:
             out_fh.close()
 
