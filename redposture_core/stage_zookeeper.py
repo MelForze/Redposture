@@ -11,9 +11,9 @@ import socket
 import struct
 import sys
 import time
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .console import Console
@@ -443,8 +443,9 @@ def _enumerate_znodes(
     max_znodes: int,
     progress_hook: Callable[[dict[str, Any]], None] | None = None,
     progress_every: int = _ZK_ENUM_PROGRESS_EVERY,
+    collect_paths: bool = True,
 ) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
-    queue = ["/"]
+    queue = deque(["/"])
     visited = {"/"}
     listed_nodes: list[str] = []
     listed_meta: dict[str, dict[str, Any]] = {}
@@ -454,10 +455,19 @@ def _enumerate_znodes(
     last_report_count = 0
 
     while queue:
-        parent = queue.pop(0)
+        parent = queue.popleft()
         processed_parents += 1
-        children, err, _stat = client.get_children2(parent)
-        parent_meta = listed_meta.get(parent)
+        try:
+            children, err, _stat = client.get_children2(parent)
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            return (
+                listed_nodes,
+                total_count,
+                total_count > len(listed_nodes),
+                listed_meta,
+                (f"getChildren failed for {parent}: {_friendly_error_from_exception(exc)}"),
+            )
+        parent_meta = listed_meta.get(parent) if collect_paths else None
         if err == _ZK_ERR_NONODE:
             if parent_meta is not None:
                 parent_meta["error"] = "not found"
@@ -492,7 +502,7 @@ def _enumerate_znodes(
                 continue
             visited.add(full_path)
             total_count += 1
-            if len(listed_nodes) < max_znodes:
+            if collect_paths and len(listed_nodes) < max_znodes:
                 listed_nodes.append(full_path)
                 listed_meta[full_path] = {"path": full_path, "children": None, "bytes": None, "error": None}
             queue.append(full_path)
@@ -514,7 +524,7 @@ def _enumerate_znodes(
                 }
             )
 
-    truncated = total_count > len(listed_nodes)
+    truncated = (total_count > len(listed_nodes)) if collect_paths else False
     if progress_hook is not None:
         progress_hook(
             {
@@ -664,6 +674,7 @@ def _audit_zookeeper_host(
     query_znode: str | None,
     max_znodes: int,
     debug: bool = False,
+    run_deep_checks: bool = True,
 ) -> dict[str, Any]:
     normalized_username = str(username).strip() if username is not None else None
     if normalized_username == "":
@@ -727,6 +738,10 @@ def _audit_zookeeper_host(
         dump_error: str | None,
         attempts: int,
         max_attempts: int,
+        znode_count_unknown: bool = False,
+        znode_count_attempt_timeouts: list[float] | None = None,
+        znode_count_partial: bool = False,
+        stage2_error: str | None = None,
     ) -> dict[str, Any]:
         return {
             "timestamp": utc_now_iso(),
@@ -768,6 +783,10 @@ def _audit_zookeeper_host(
             "dump_error": dump_error,
             "attempts": attempts,
             "max_attempts": max_attempts,
+            "znode_count_unknown": bool(znode_count_unknown),
+            "znode_count_attempt_timeouts": list(znode_count_attempt_timeouts or []),
+            "znode_count_partial": bool(znode_count_partial),
+            "stage2_error": stage2_error,
             "debug_events": list(debug_events) if debug else [],
             "error": error,
         }
@@ -1041,9 +1060,64 @@ def _audit_zookeeper_host(
                     max_attempts=max_attempts,
                 )
 
+            if not run_deep_checks:
+                detect_status = (
+                    "valid_credentials"
+                    if provided_credentials_ok
+                    else "invalid_credentials_anonymous"
+                    if invalid_provided_credentials
+                    else "open_no_auth"
+                )
+                _debug(
+                    f"attempt={attempt + 1}/{max_attempts} detect-only result={detect_status} "
+                    f"connect_ms={connect_ms if connect_ms is not None else '-'} "
+                    f"auth_ms={auth_ms if auth_ms is not None else '-'} "
+                    f"total_ms={int((time.monotonic() - started) * 1000)}"
+                )
+                return _record(
+                    is_zookeeper=True,
+                    status=detect_status,
+                    auth_required=inferred_auth_required,
+                    provided_credentials_ok=provided_credentials_ok,
+                    znode_count=None,
+                    znodes=None,
+                    znode_details=None,
+                    znode_values=None,
+                    znodes_truncated=False,
+                    query_znode_value=None,
+                    query_znode_dump=None,
+                    query_znode_dump_error=None,
+                    can_create_znode=None,
+                    can_delete_znode=None,
+                    znode_capability_error=None,
+                    auth_inference_source=auth_inference_source,
+                    auth_probe_trace=auth_probe_trace,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    error=last_error if not invalid_provided_credentials else (auth_error or "authentication failed"),
+                    connect_ms=connect_ms,
+                    auth_ms=auth_ms,
+                    enumerate_ms=None,
+                    dump_ms=None,
+                    connect_error=connect_error_detail,
+                    auth_error=auth_error_detail,
+                    enum_error=enum_error_detail,
+                    query_error=query_error_detail,
+                    dump_error=dump_error_detail,
+                    attempts=attempt + 1,
+                    max_attempts=max_attempts,
+                )
+
             noauth_detail_text = "Access Denied"
+            can_create_znode: bool | None = None
+            can_delete_znode: bool | None = None
+            znode_capability_error: str | None = None
+            if not invalid_provided_credentials:
+                can_create_znode, can_delete_znode, znode_capability_error = _probe_znode_create_delete(
+                    client, host, port
+                )
 
             enum_started = time.monotonic()
+            collect_znode_paths = bool(show_znodes or (dump and not query_znode))
 
             progress_hook: Callable[[dict[str, Any]], None] | None = None
             if debug:
@@ -1070,6 +1144,7 @@ def _audit_zookeeper_host(
                     client,
                     max_znodes,
                     progress_hook,
+                    collect_paths=collect_znode_paths,
                 )
             except TypeError:
                 # Backward-safe for patched tests/helpers that still expose the legacy 2-arg signature.
@@ -1080,8 +1155,14 @@ def _audit_zookeeper_host(
                 last_error = enum_error
                 enum_error_detail = enum_error
                 last_enum_error = enum_error_detail
-            sorted_znodes = sorted(listed_znodes)
-            znode_details = [_znode_detail_entry(path, listed_meta.get(path)) for path in sorted_znodes]
+            sorted_znodes: list[str]
+            znode_details: list[dict[str, Any]] | None
+            if collect_znode_paths:
+                sorted_znodes = sorted(listed_znodes)
+                znode_details = [_znode_detail_entry(path, listed_meta.get(path)) for path in sorted_znodes]
+            else:
+                sorted_znodes = []
+                znode_details = None
 
             dump_started = time.monotonic() if (dump or query_znode) else None
             dump_error_codes: set[str] = set()
@@ -1158,14 +1239,6 @@ def _audit_zookeeper_host(
                 total_count = root_count
 
             auth_required_value = inferred_auth_required
-
-            can_create_znode: bool | None = None
-            can_delete_znode: bool | None = None
-            znode_capability_error: str | None = None
-            if not invalid_provided_credentials:
-                can_create_znode, can_delete_znode, znode_capability_error = _probe_znode_create_delete(
-                    client, host, port
-                )
 
             elapsed_ms = int((time.monotonic() - started) * 1000)
             final_status = (
@@ -1274,10 +1347,105 @@ def _nxc_prefix(record: dict[str, Any]) -> str:
 
 
 def _with_optional_znodes(record: dict[str, Any], message: str) -> str:
+    if bool(record.get("znode_count_unknown")):
+        suffix = "unknown partial" if bool(record.get("znode_count_partial")) else "unknown"
+        return f"{message} (znodes:{suffix})"
     znode_count = record.get("znode_count")
     if not isinstance(znode_count, int):
         return f"{message} (znodes:-)"
     return f"{message} (znodes:{znode_count})"
+
+
+def _merge_stage2_record(
+    detect_record: dict[str, Any],
+    deep_record: dict[str, Any],
+    *,
+    timeout: float,
+    retries: int,
+) -> dict[str, Any]:
+    merged = dict(detect_record)
+    detect_debug_events = detect_record.get("debug_events")
+    deep_debug_events = deep_record.get("debug_events")
+    merged_debug_events: list[str] = []
+    if isinstance(detect_debug_events, list):
+        for item in detect_debug_events:
+            if isinstance(item, str) and item.strip():
+                merged_debug_events.append(item)
+    if isinstance(deep_debug_events, list):
+        for item in deep_debug_events:
+            if isinstance(item, str) and item.strip():
+                merged_debug_events.append(item)
+    merged["debug_events"] = merged_debug_events
+
+    stage2_attempts = max(1, retries + 1)
+    stage2_fields = (
+        "znode_count",
+        "znodes",
+        "znode_details",
+        "znode_values",
+        "znodes_truncated",
+        "query_znode_value",
+        "query_znode_dump",
+        "query_znode_dump_error",
+        "can_create_znode",
+        "can_delete_znode",
+        "znode_capability_error",
+        "connect_ms",
+        "auth_ms",
+        "enumerate_ms",
+        "dump_ms",
+        "elapsed_ms",
+        "connect_error",
+        "auth_error",
+        "enum_error",
+        "query_error",
+        "dump_error",
+        "attempts",
+        "max_attempts",
+    )
+    for field in stage2_fields:
+        merged[field] = deep_record.get(field)
+
+    deep_status = str(deep_record.get("status") or "")
+    deep_is_zk = bool(deep_record.get("is_zookeeper"))
+    deep_success = deep_is_zk and deep_status in {"open_no_auth", "valid_credentials", "invalid_credentials_anonymous"}
+
+    if deep_success:
+        enum_error = str(deep_record.get("enum_error") or "").strip()
+        stage2_error = str(deep_record.get("stage2_error") or "").strip()
+        if not stage2_error:
+            stage2_error = enum_error or str(deep_record.get("error") or "").strip()
+        partial_hint = bool(deep_record.get("znodes")) or bool(deep_record.get("znode_values"))
+        if not partial_hint and isinstance(deep_record.get("znode_count"), int):
+            partial_hint = int(deep_record.get("znode_count") or 0) > 0
+
+        merged["znode_count_unknown"] = bool(enum_error)
+        merged["znode_count_partial"] = bool(enum_error) and partial_hint
+        merged["znode_count_attempt_timeouts"] = (
+            [float(timeout)] * stage2_attempts if _is_connection_timeout_error(enum_error) else []
+        )
+        merged["stage2_error"] = stage2_error or None
+        return merged
+
+    stage2_error = str(deep_record.get("error") or "").strip() or "stage2 deep checks failed"
+    merged["znode_count"] = None
+    merged["znodes"] = detect_record.get("znodes")
+    merged["znode_details"] = detect_record.get("znode_details")
+    merged["znode_values"] = detect_record.get("znode_values")
+    merged["znodes_truncated"] = bool(detect_record.get("znodes_truncated"))
+    merged["query_znode_value"] = detect_record.get("query_znode_value")
+    merged["query_znode_dump"] = detect_record.get("query_znode_dump")
+    merged["query_znode_dump_error"] = detect_record.get("query_znode_dump_error")
+    merged["can_create_znode"] = None
+    merged["can_delete_znode"] = None
+    merged["znode_capability_error"] = None
+    merged["znode_count_unknown"] = True
+    merged["znode_count_partial"] = bool(merged.get("znodes")) or bool(merged.get("znode_values"))
+    merged["znode_count_attempt_timeouts"] = (
+        [float(timeout)] * stage2_attempts if _is_connection_timeout_error(stage2_error) else []
+    )
+    merged["stage2_error"] = stage2_error
+    return merged
 
 
 def _credentials_label(record: dict[str, Any]) -> str:
@@ -1397,10 +1565,29 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
     znode_count = record.get("znode_count")
     max_znodes = record.get("max_znodes")
     truncated = bool(record.get("znodes_truncated"))
+    znode_count_unknown = bool(record.get("znode_count_unknown"))
+    znode_count_partial = bool(record.get("znode_count_partial"))
+    stage2_error = str(record.get("stage2_error") or "").strip()
+    attempt_timeouts_raw = record.get("znode_count_attempt_timeouts")
+    attempt_timeouts: list[float] = []
+    if isinstance(attempt_timeouts_raw, list):
+        for item in attempt_timeouts_raw:
+            if isinstance(item, (int, float)):
+                attempt_timeouts.append(float(item))
     shown_count = len(znode_details) if znode_details else len(znodes)
     truncation_note = None
     if truncated and isinstance(znode_count, int) and isinstance(max_znodes, int):
         truncation_note = f"showing first {shown_count} of {znode_count} znodes (max_znodes={max_znodes})"
+    unknown_note = None
+    if znode_count_unknown:
+        unknown_note = "znode count unknown"
+        if znode_count_partial:
+            unknown_note += " (partial)"
+        if attempt_timeouts:
+            timeout_text = ",".join(f"{value:g}s" for value in attempt_timeouts)
+            unknown_note += f" (timeouts={timeout_text})"
+        if stage2_error:
+            unknown_note += f" reason={stage2_error}"
 
     if not show_znodes and not dump and not query_znode:
         return []
@@ -1478,6 +1665,8 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
     lines: list[str] = []
     if show_znodes and znode_details:
         lines.append(f"{prefix} [*] Show Znodes")
+        if unknown_note:
+            lines.append(f"{prefix} [*] {unknown_note}")
         if truncation_note:
             lines.append(f"{prefix} [*] {truncation_note}")
         for item in znode_details:
@@ -1510,10 +1699,14 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
             lines.append(f"{prefix} <no data>")
     if dump and not query_znode and znode_values:
         lines.append(f"{prefix} [*] Dump Znodes")
+        if unknown_note:
+            lines.append(f"{prefix} [*] {unknown_note}")
         if truncation_note:
             lines.append(f"{prefix} [*] {truncation_note}")
         for item in znode_values:
             lines.append(f"{prefix} {item}")
+    if unknown_note and not znode_details and not znode_values and (show_znodes or dump):
+        lines.append(f"{prefix} [*] {unknown_note}")
     return lines
 
 
@@ -1674,103 +1867,137 @@ def audit_zookeeper_targets(
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            future_map = {
-                executor.submit(
-                    _audit_zookeeper_host,
-                    host,
-                    port,
-                    timeout,
-                    retries,
-                    username,
-                    password,
-                    show_znodes,
-                    dump,
-                    query_znode,
-                    max_znodes,
-                    bool(debug_emit),
-                ): idx
-                for idx, host in enumerate(hosts)
-            }
+        indexed_hosts = list(enumerate(hosts))
 
-            buffered_records: dict[int, dict[str, Any]] = {}
-            next_emit_idx = 0
+        def _run_pass(
+            targets: list[tuple[int, str]],
+            *,
+            run_deep_checks: bool,
+            with_progress: bool,
+        ) -> dict[int, dict[str, Any]]:
+            if not targets:
+                return {}
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+                future_map = {
+                    executor.submit(
+                        _audit_zookeeper_host,
+                        host,
+                        port,
+                        timeout,
+                        retries,
+                        username,
+                        password,
+                        show_znodes,
+                        dump,
+                        query_znode,
+                        max_znodes,
+                        bool(debug_emit),
+                        run_deep_checks,
+                    ): idx
+                    for idx, host in targets
+                }
+                records: dict[int, dict[str, Any]] = {}
+                iterator = iter_completed_with_progress(future_map, label="ZOOKEEPER") if with_progress else as_completed(
+                    future_map
+                )
+                for future in iterator:
+                    records[int(future_map[future])] = future.result()
+                return records
 
-            for future in iter_completed_with_progress(future_map, label="ZOOKEEPER"):
-                record_idx = int(future_map[future])
-                record = future.result()
-                total += 1
-                status = str(record.get("status") or "fail")
+        # Pass 1: detect/auth only for every target.
+        detect_records = _run_pass(indexed_hosts, run_deep_checks=False, with_progress=True)
 
-                if status in {"open_no_auth", "invalid_credentials_anonymous"}:
-                    open_no_auth += 1
-                elif status == "valid_credentials":
-                    valid += 1
-                elif status == "auth_required":
-                    auth_required += 1
-                else:
-                    failed += 1
+        for idx in range(len(hosts)):
+            detect_record = detect_records[idx]
+            if bool(detect_record.get("is_zookeeper")):
+                _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
 
-                buffered_records[record_idx] = record
+        # Pass 2: deep checks only for accessible records, same timeout/retry policy as pass 1.
+        deep_candidates = [
+            (idx, host)
+            for idx, host in indexed_hosts
+            if bool(detect_records[idx].get("is_zookeeper"))
+            and str(detect_records[idx].get("status") or "") in {"open_no_auth", "valid_credentials"}
+        ]
+        deep_records = _run_pass(deep_candidates, run_deep_checks=True, with_progress=False)
 
-                while next_emit_idx in buffered_records:
-                    emit_record = buffered_records.pop(next_emit_idx)
-                    emit_status = str(emit_record.get("status") or "fail")
+        final_records: dict[int, dict[str, Any]] = {}
+        for idx in range(len(hosts)):
+            detect_record = detect_records[idx]
+            deep_record = deep_records.get(idx)
+            if deep_record is not None:
+                final_records[idx] = _merge_stage2_record(
+                    detect_record,
+                    deep_record,
+                    timeout=timeout,
+                    retries=retries,
+                )
+            else:
+                final_records[idx] = detect_record
 
-                    if debug_emit is not None:
-                        for event in emit_record.get("debug_events") or []:
-                            if isinstance(event, str) and event.strip():
-                                debug_emit(event)
-                    if debug_stats is not None:
-                        _update_debug_stats(debug_stats, emit_record)
+        for idx in range(len(hosts)):
+            emit_record = final_records[idx]
+            emit_status = str(emit_record.get("status") or "fail")
+            total += 1
 
-                    if bool(emit_record.get("is_zookeeper")):
-                        _emit_line(out_fh, emit_line, _format_detect_record(emit_record, output_format))
+            if emit_status in {"open_no_auth", "invalid_credentials_anonymous"}:
+                open_no_auth += 1
+            elif emit_status == "valid_credentials":
+                valid += 1
+            elif emit_status == "auth_required":
+                auth_required += 1
+            else:
+                failed += 1
 
-                    suppress_auth_required_status_line = (
-                        output_format == "txt"
-                        and bool(emit_record.get("is_zookeeper"))
-                        and emit_status == "auth_required"
-                        and not bool(emit_record.get("provided_credentials"))
-                    )
-                    suppress_connection_refused_status_line = (
-                        suppress_connection_refused_status_lines
-                        and output_format == "txt"
-                        and _is_suppressed_fail_record(emit_record)
-                    )
-                    if not suppress_auth_required_status_line and not suppress_connection_refused_status_line:
-                        _emit_line(out_fh, emit_line, _format_record(emit_record, output_format))
+            if debug_emit is not None:
+                for event in emit_record.get("debug_events") or []:
+                    if isinstance(event, str) and event.strip():
+                        debug_emit(event)
+            if debug_stats is not None:
+                _update_debug_stats(debug_stats, emit_record)
 
-                    if bool(emit_record.get("is_zookeeper")):
-                        for detail in _format_znodes_detail_records(emit_record, output_format):
-                            _emit_line(out_fh, emit_line, detail)
+            suppress_auth_required_status_line = (
+                output_format == "txt"
+                and bool(emit_record.get("is_zookeeper"))
+                and emit_status == "auth_required"
+                and not bool(emit_record.get("provided_credentials"))
+            )
+            suppress_connection_refused_status_line = (
+                suppress_connection_refused_status_lines
+                and output_format == "txt"
+                and _is_suppressed_fail_record(emit_record)
+            )
+            if not suppress_auth_required_status_line and not suppress_connection_refused_status_line:
+                _emit_line(out_fh, emit_line, _format_record(emit_record, output_format))
 
-                    if logger is not None and not (
-                        suppress_connection_refused_status_lines and _is_suppressed_fail_record(emit_record)
-                    ):
-                        logger.log(
-                            "zookeeper",
-                            (str(emit_record.get("host") or "-"), int(emit_record.get("port") or port)),
-                            phase="audit",
-                            status=emit_record.get("status"),
-                            auth_required=emit_record.get("auth_required"),
-                            provided_credentials_ok=emit_record.get("provided_credentials_ok"),
-                            znode_count=emit_record.get("znode_count"),
-                            connect_ms=emit_record.get("connect_ms"),
-                            auth_ms=emit_record.get("auth_ms"),
-                            enumerate_ms=emit_record.get("enumerate_ms"),
-                            dump_ms=emit_record.get("dump_ms"),
-                            attempts=emit_record.get("attempts"),
-                            max_attempts=emit_record.get("max_attempts"),
-                            connect_error=emit_record.get("connect_error"),
-                            auth_error=emit_record.get("auth_error"),
-                            enum_error=emit_record.get("enum_error"),
-                            query_error=emit_record.get("query_error"),
-                            dump_error=emit_record.get("dump_error"),
-                            error=emit_record.get("error"),
-                        )
+            if bool(emit_record.get("is_zookeeper")):
+                for detail in _format_znodes_detail_records(emit_record, output_format):
+                    _emit_line(out_fh, emit_line, detail)
 
-                    next_emit_idx += 1
+            if logger is not None and not (
+                suppress_connection_refused_status_lines and _is_suppressed_fail_record(emit_record)
+            ):
+                logger.log(
+                    "zookeeper",
+                    (str(emit_record.get("host") or "-"), int(emit_record.get("port") or port)),
+                    phase="audit",
+                    status=emit_record.get("status"),
+                    auth_required=emit_record.get("auth_required"),
+                    provided_credentials_ok=emit_record.get("provided_credentials_ok"),
+                    znode_count=emit_record.get("znode_count"),
+                    connect_ms=emit_record.get("connect_ms"),
+                    auth_ms=emit_record.get("auth_ms"),
+                    enumerate_ms=emit_record.get("enumerate_ms"),
+                    dump_ms=emit_record.get("dump_ms"),
+                    attempts=emit_record.get("attempts"),
+                    max_attempts=emit_record.get("max_attempts"),
+                    connect_error=emit_record.get("connect_error"),
+                    auth_error=emit_record.get("auth_error"),
+                    enum_error=emit_record.get("enum_error"),
+                    query_error=emit_record.get("query_error"),
+                    dump_error=emit_record.get("dump_error"),
+                    error=emit_record.get("error"),
+                )
     finally:
         if out_fh is not None:
             out_fh.close()
