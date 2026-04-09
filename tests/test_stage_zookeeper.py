@@ -405,9 +405,13 @@ def test_audit_host_uses_count_only_enumeration_when_details_not_requested(monke
         _client,
         _max_znodes: int,
         _progress_hook=None,
-        _progress_every: int = 500,
+        _progress_interval_s: float = 2.0,
         collect_paths: bool = True,
+        enum_workers: int = 1,
+        auth_username: str | None = None,
+        auth_password: str | None = None,
     ):
+        _ = (_progress_interval_s, enum_workers, auth_username, auth_password)
         collect_flags.append(bool(collect_paths))
         return [], 3210, False, {}, None
 
@@ -687,11 +691,7 @@ def test_audit_zookeeper_debug_pass_markers_and_stage2_gate_reasons(monkeypatch:
         }
 
     def _fake_audit(host: str, *args, **kwargs) -> dict[str, object]:
-        run_deep_checks = (
-            bool(args[10])
-            if len(args) >= 11
-            else bool(kwargs.get("run_deep_checks", True))
-        )
+        run_deep_checks = bool(args[10]) if len(args) >= 11 else bool(kwargs.get("run_deep_checks", True))
         if not run_deep_checks:
             if host == "host-open":
                 return _record_for(host, is_zookeeper=True, status="open_no_auth")
@@ -787,7 +787,9 @@ def test_audit_zookeeper_live_debug_streaming_avoids_duplicates(monkeypatch: pyt
         return ["/a"], 1, False, {"/a": {"path": "/a", "children": 0, "bytes": 0, "error": None}}, None
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _Client)
-    monkeypatch.setattr("redposture_core.stage_zookeeper._probe_znode_create_delete", lambda *_a, **_k: (True, True, None))
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._probe_znode_create_delete", lambda *_a, **_k: (True, True, None)
+    )
     monkeypatch.setattr("redposture_core.stage_zookeeper._enumerate_znodes", _enum)
 
     debug_lines: list[str] = []

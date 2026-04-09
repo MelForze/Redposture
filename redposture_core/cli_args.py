@@ -2093,6 +2093,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="ZooKeeper port spec: single port, list/range, or file (examples: 2181, 2181,22181, ./ports.txt).",
     )
     _add_multi_ports_flag(zookeeper_common)
+    zookeeper_common.add_argument(
+        "--enum-workers",
+        dest="enum_workers",
+        type=_positive_int,
+        default=3,
+        metavar="count",
+        help="Parallel workers for znode enumeration during deep checks.",
+    )
     zookeeper_auth.add_argument(
         "-u",
         "--username",
