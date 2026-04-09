@@ -1343,6 +1343,16 @@ def test_zookeeper_dump_legacy_alias_is_parsed() -> None:
     assert exc.value.code == 2
 
 
+def test_zookeeper_default_timeout_is_five_seconds() -> None:
+    args = parse_args(["zookeeper", "-t", "10.0.0.9"])
+    assert args.timeout == 5.0
+
+
+def test_zookeeper_help_timeout_default_is_five_seconds() -> None:
+    help_text = _command_help("zookeeper")
+    assert "Network timeout in seconds. (default: 5.0)" in help_text
+
+
 def test_elastic_flags_are_parsed() -> None:
     args = parse_args(
         [
