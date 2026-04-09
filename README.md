@@ -66,6 +66,14 @@ Start a single service lab (example: ZooKeeper):
 docker compose -f lab/services/zookeeper/docker-compose.yml up -d --build
 ```
 
+Create a standalone large ZooKeeper lab (single instance) with high znode counts:
+
+```bash
+scripts/setup_zookeeper_scale_lab.sh 100k
+scripts/setup_zookeeper_scale_lab.sh 500k
+scripts/setup_zookeeper_scale_lab.sh 1000k
+```
+
 ## Examples
 
 ### Exporters
