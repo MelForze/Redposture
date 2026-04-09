@@ -2077,6 +2077,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_output_flags(zookeeper_common)  # type: ignore[arg-type]
     _add_log_flag(zookeeper_common)
     _add_scan_host_flags(zookeeper_common, include_profiles=False)  # type: ignore[arg-type]
+    # ZooKeeper often requires a longer handshake window on real networks.
+    # Keep module-local default timeout at 5s without changing other modules.
+    for action in zookeeper_parser._actions:
+        if action.dest == "timeout":
+            action.default = 5.0
+            break
+    zookeeper_parser.set_defaults(timeout=5.0)
     zookeeper_common.add_argument(
         "--port",
         dest="port",

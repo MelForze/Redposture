@@ -54,10 +54,16 @@ Common flags (most modules):
 
 ## Docker Lab (Local Testing)
 
-Start lab:
+Start full lab:
 
 ```bash
-docker compose -f docker-compose.lab.yml up -d --build
+docker compose -f lab/full/docker-compose.yml up -d --build
+```
+
+Start a single service lab (example: ZooKeeper):
+
+```bash
+docker compose -f lab/services/zookeeper/docker-compose.yml up -d --build
 ```
 
 ## Examples
@@ -229,7 +235,7 @@ redposture etcd -t 127.0.0.1 --dump
 ### Proxmox
 
 ```bash
-# Lab mock (docker-compose.lab.yml service: proxmox-mock)
+# Lab mock (lab/full/docker-compose.yml service: proxmox-mock)
 redposture proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken 'audit@pve!redposture=pve-redposture-token-2026' --nodes --users
 
 # Create user (admin token required, password is auto-generated, role Administrator on / is granted)

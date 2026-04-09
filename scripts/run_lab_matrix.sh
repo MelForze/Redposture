@@ -7,7 +7,7 @@ cd "$ROOT_DIR" || exit 1
 OUT_DIR="${1:-/tmp/redposture_lab_matrix_$(date +%Y%m%d_%H%M%S)}"
 STATUS_FILE="${OUT_DIR}/matrix-status.tsv"
 VERIFY_SCRIPT="${ROOT_DIR}/scripts/verify_postrun.py"
-COMPOSE_FILE="${ROOT_DIR}/docker-compose.lab.yml"
+COMPOSE_FILE="${ROOT_DIR}/lab/full/docker-compose.yml"
 if [ -n "${PYTHON_BIN:-}" ]; then
   PYTHON_BIN="${PYTHON_BIN}"
 elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
