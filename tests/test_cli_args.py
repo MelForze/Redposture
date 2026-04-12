@@ -124,6 +124,11 @@ def test_elastic_help_sections_are_present() -> None:
     assert "--user" in help_text
 
 
+def test_help_documents_implicit_target_file_precedence() -> None:
+    help_text = _command_help("registry")
+    assert "treated as target files" in help_text
+
+
 @pytest.mark.parametrize(
     ("command", "sections"),
     [
@@ -1674,6 +1679,16 @@ def test_postgres_debug_flag_is_long_only() -> None:
 
     args = parse_args(["postgres", "-t", "10.0.0.7", "--debug"])
     assert args.debug is True
+
+
+def test_postgres_no_color_flag_is_parsed() -> None:
+    args = parse_args(["postgres", "-t", "10.0.0.7", "--no-color"])
+    assert args.no_color is True
+
+
+def test_elastic_help_includes_no_color_option() -> None:
+    help_text = _command_help("elastic")
+    assert "--no-color" in help_text
 
 
 def test_postgres_rejects_short_database_flag() -> None:

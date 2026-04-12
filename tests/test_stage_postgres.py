@@ -480,6 +480,56 @@ def test_run_postgres_stage_additional_output_and_error_paths(
     )
 
 
+def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(postgres, "Console", _ConsoleCapture)
+    monkeypatch.setattr(postgres, "collect_scan_ports", lambda *_args, **_kwargs: [5432, 25432, 25433, 25434, 25435])
+    monkeypatch.setattr(postgres, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+
+    show_progress_flags: list[bool] = []
+
+    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+        show_progress_flags.append(bool(kwargs["show_progress"]))
+        kwargs["emit_line"]("POSTGRES\t127.0.0.1\t5432\t[*] Postgres Database")
+        return 1, 0, 0, 1, 0, 0
+
+    monkeypatch.setattr(postgres, "audit_postgres_targets", fake_audit_targets)
+
+    progress_totals: list[int] = []
+    progress_advanced: list[int] = []
+    progress_closed = 0
+
+    class DummyProgressBar:
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            del enabled, leave
+            progress_totals.append(total)
+
+        def advance(self, amount: int = 1) -> None:
+            progress_advanced.append(amount)
+
+        def close(self) -> None:
+            nonlocal progress_closed
+            progress_closed += 1
+
+    monkeypatch.setattr(postgres, "ProgressBar", DummyProgressBar)
+
+    rc = postgres.run_postgres_stage(
+        _postgres_args(
+            username="postgres",
+            password="postgres",
+            show_databases=True,
+        ),
+        logger=object(),  # type: ignore[arg-type]
+    )
+    assert rc == 0
+    assert show_progress_flags == [False, False, False, False, False]
+    assert progress_totals == [5]
+    assert sum(progress_advanced) == 5
+    assert progress_closed == 1
+
+
 def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     dumped_tables: list[str] = []
     dumped_columns_queries: list[str] = []
@@ -1639,3 +1689,285 @@ def test_audit_postgres_targets_emits_detect_status_and_all_detail_sections(monk
     assert any("[*] Dump Table appdb.public.users" in line for line in lines)
     assert any("[*] Execute Command" in line for line in lines)
     assert any("[*] SQL Query" in line for line in lines)
+
+
+def test_call_audit_postgres_host_with_stage_debug_adds_stage_telemetry(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **_kwargs):
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "is_postgres": True,
+            "status": "valid_credentials",
+            "auth_required": True,
+            "provided_credentials": True,
+            "defcreds_enabled": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(postgres, "_audit_postgres_host", fake_audit)
+    debug_lines: list[str] = []
+    result = postgres._call_audit_postgres_host_with_stage_debug(
+        "127.0.0.1",
+        5432,
+        1.0,
+        1,
+        "postgres",
+        "postgres",
+        False,
+        "postgres",
+        False,
+        False,
+        False,
+        False,
+        [],
+        {},
+        [],
+        False,
+        None,
+        None,
+        None,
+        run_deep_checks=True,
+        debug=True,
+        debug_emit=debug_lines.append,
+    )
+    assert isinstance(result.get("stages"), list)
+    assert result.get("stage_durations_ms") is not None
+    assert any("stage_trace stage_name=detect_protocol" in line for line in debug_lines)
+
+
+def test_audit_postgres_targets_emits_two_pass_debug_markers(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_stage_call(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        username: str | None,
+        password: str | None,
+        defcreds: bool,
+        database: str | None,
+        show_databases: bool,
+        show_tables: bool,
+        show_row_counts: bool,
+        show_columns: bool,
+        table_targets: list[str],
+        table_targets_by_database: dict[str | None, list[str]],
+        table_columns: list[str],
+        dump_table_rows: bool,
+        dump_row_limit: int | None,
+        execute_command: str | None,
+        sql_command: str | None,
+        *,
+        run_deep_checks: bool,
+        debug: bool,
+        debug_emit,
+    ) -> dict[str, object]:
+        _ = (
+            port,
+            timeout,
+            retries,
+            username,
+            password,
+            defcreds,
+            database,
+            show_databases,
+            show_tables,
+            show_row_counts,
+            show_columns,
+            table_targets,
+            table_targets_by_database,
+            table_columns,
+            dump_table_rows,
+            dump_row_limit,
+            execute_command,
+            sql_command,
+            debug,
+            debug_emit,
+        )
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": 5432,
+            "is_postgres": True,
+            "status": "valid_credentials",
+            "auth_required": True,
+            "provided_credentials": True,
+            "defcreds_enabled": False,
+            "show_databases": bool(run_deep_checks),
+            "show_tables": False,
+            "show_columns": False,
+            "table_columns_info": [],
+            "table_dumps": [],
+            "database_names": ["appdb"] if run_deep_checks else None,
+            "database_count": 1 if run_deep_checks else None,
+            "error": None,
+            "debug_events": [],
+            "debug_events_streamed": True,
+            "stages": [],
+            "stage_durations_ms": {},
+            "stage_attempts": {},
+            "stage_failed_at": None,
+        }
+
+    monkeypatch.setattr(postgres, "_call_audit_postgres_host_with_stage_debug", fake_stage_call)
+    debug_lines: list[str] = []
+    emitted: list[str] = []
+    totals = audit_postgres_targets(
+        hosts=["127.0.0.1"],
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username="postgres",
+        password="postgres",
+        defcreds=False,
+        database="postgres",
+        show_databases=True,
+        show_tables=False,
+        show_row_counts=False,
+        show_columns=False,
+        table_targets=[],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=False,
+        dump_row_limit=None,
+        execute_command=None,
+        sql_command=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=emitted.append,
+        debug_emit=debug_lines.append,
+        show_progress=False,
+    )
+    assert totals == (1, 0, 0, 1, 0, 0)
+    assert any("pass=1 detect start total=1" in line for line in debug_lines)
+    assert any("stage2_gate=run reason=status=valid_credentials" in line for line in debug_lines)
+    assert any("pass=2 deep complete processed=1" in line for line in debug_lines)
+
+
+def test_postgres_execute_and_query_helper_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert postgres._pg_text("a\nb") == "a\\nb"
+
+    query_calls: list[str] = []
+
+    def fake_query_rows(_sock: object, query: str):
+        query_calls.append(query)
+        if query.startswith("CREATE TEMP TABLE"):
+            return [], None
+        if query.startswith("COPY "):
+            return [], None
+        if query.startswith("SELECT line FROM"):
+            return [["line-1"], [None], ["line-2"]], None
+        if query.startswith("DROP TABLE IF EXISTS"):
+            return [], None
+        if query == "select x from t":
+            return [["1", None], [], ["3", "ok"]], None
+        return [], "query error"
+
+    monkeypatch.setattr(postgres, "_pg_query_rows", fake_query_rows)
+    out, err = postgres._pg_try_execute_command(object(), "id", max_lines=2)
+    assert err is None
+    assert out == ["line-1", "", "line-2"]
+    assert any(call.startswith("DROP TABLE IF EXISTS") for call in query_calls)
+
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: ([], "boom"))
+    out, err = postgres._pg_try_execute_command(object(), "id")
+    assert out is None and err == "boom"
+
+    monkeypatch.setattr(
+        postgres,
+        "_pg_query_rows",
+        lambda *_args, **_kwargs: (
+            [["1", None], [], ["3", "ok"]],
+            None,
+        ),
+    )
+    sql_out, sql_err = postgres._pg_try_query_sql(object(), "select x from t", max_rows=2)
+    assert sql_err is None
+    assert sql_out == ["1 | NULL", "", "<truncated:1>"]
+
+
+def test_postgres_remote_command_and_sql_retry_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("redposture_core.stage_postgres._retry_delay", lambda _i: 0.0)
+
+    class _Conn(_DummySocket):
+        pass
+
+    monkeypatch.setattr("redposture_core.stage_postgres.socket.create_connection", lambda *_a, **_k: _Conn())
+    monkeypatch.setattr(postgres, "_pg_startup_and_auth", lambda *_a, **_k: _PgSession(True, "cleartext", "16.0"))
+    monkeypatch.setattr(postgres, "_pg_send_terminate", lambda *_a, **_k: None)
+    monkeypatch.setattr(postgres, "_pg_try_execute_command", lambda *_a, **_k: (["ok"], None))
+    monkeypatch.setattr(postgres, "_pg_try_query_sql", lambda *_a, **_k: (["1"], None))
+
+    exec_out, exec_err = postgres._pg_execute_remote_command(
+        "127.0.0.1", 5432, 1.0, 0, "postgres", None, "postgres", "id"
+    )
+    assert exec_err is None and exec_out == ["ok"]
+    sql_out, sql_err = postgres._pg_execute_sql_query(
+        "127.0.0.1", 5432, 1.0, 0, "postgres", None, "postgres", "select 1"
+    )
+    assert sql_err is None and sql_out == ["1"]
+
+    attempts = {"n": 0}
+
+    def flaky_connection(*_a, **_k):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise OSError("temporary fail")
+        return _Conn()
+
+    monkeypatch.setattr("redposture_core.stage_postgres.socket.create_connection", flaky_connection)
+    exec_out, exec_err = postgres._pg_execute_remote_command(
+        "127.0.0.1", 5432, 1.0, 1, "postgres", None, "postgres", "id"
+    )
+    assert exec_err is None and exec_out == ["ok"]
+    assert attempts["n"] == 2
+
+    monkeypatch.setattr(
+        postgres,
+        "_pg_startup_and_auth",
+        lambda *_a, **_k: (_ for _ in ()).throw(_PgAuditError("auth denied", detected=True, auth_required=True)),
+    )
+    exec_out, exec_err = postgres._pg_execute_remote_command(
+        "127.0.0.1", 5432, 1.0, 0, "postgres", None, "postgres", "id"
+    )
+    assert exec_out is None and exec_err == "auth denied"
+
+
+def test_postgres_table_query_helpers_and_colored_renderer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_a, **_k: ([['{"id":1}']], None))
+    display, rows, err = postgres._pg_query_table_rows(object(), "public.users", columns=["id"], max_rows=5)
+    assert (display, rows, err) == ("public.users", ['{"id":1}'], None)
+
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_a, **_k: ([], "permission denied"))
+    display, rows, err = postgres._pg_query_table_rows(object(), "public.users")
+    assert display == "public.users" and rows is None and err == "permission denied"
+
+    monkeypatch.setattr(postgres, "_pg_query_scalar_int", lambda *_a, **_k: (42, None))
+    assert postgres._pg_query_table_row_count(object(), "public.users") == ("public.users", 42, None)
+    monkeypatch.setattr(postgres, "_pg_query_scalar_int", lambda *_a, **_k: (None, "denied"))
+    assert postgres._pg_query_table_row_count(object(), "public.users") == ("public.users", None, "denied")
+    assert postgres._pg_query_table_row_count(object(), "bad-name") == (
+        "bad-name",
+        None,
+        "unsupported table identifier: bad-name",
+    )
+
+    class _Painter:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, text: str, color: str, _stream: object) -> str:
+            return f"<{color}>{text}</{color}>"
+
+        def plain(self, line: str) -> None:
+            self.lines.append(line)
+
+    painter = _Painter()
+    assert postgres._render_colored_postgres_line(painter, "NOPE") is False
+    assert postgres._render_colored_postgres_line(
+        painter,
+        "POSTGRES\t127.0.0.1\t5432\t [+] anonymous access (auth required:False) "
+        "(superuser:True) (execute:False) (read:unknown) (DBs:2)",
+    )
+    assert painter.lines and "auth required:False" in painter.lines[0]

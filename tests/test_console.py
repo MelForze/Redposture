@@ -4,7 +4,7 @@ import sys
 
 import pytest
 
-from redposture_core.console import Console
+from redposture_core.console import Console, set_console_no_color
 
 
 def test_paint_returns_plain_text_for_unknown_color() -> None:
@@ -61,3 +61,23 @@ def test_debug_outputs_only_when_enabled(capsys: pytest.CaptureFixture[str]) -> 
     console_on.debug("visible")
     out_on = capsys.readouterr().out
     assert "visible" in out_on
+
+
+def test_set_console_no_color_disables_ansi_rendering() -> None:
+    set_console_no_color(True)
+    try:
+        console = Console(debug=False)
+        rendered = console._paint("hello", "green", stream=sys.stdout)
+        assert rendered == "hello"
+    finally:
+        set_console_no_color(False)
+
+
+def test_console_constructor_no_color_overrides_global() -> None:
+    set_console_no_color(True)
+    try:
+        console = Console(debug=False, no_color=False)
+        rendered = console._paint("hello", "green", stream=sys.stdout)
+        assert "\x1b[" in rendered
+    finally:
+        set_console_no_color(False)

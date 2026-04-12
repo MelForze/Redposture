@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from redposture_core import stage_collect as collect
 from redposture_core.logger import AttemptLogger
 from redposture_core.stage_collect import run_collect_stage
 
@@ -34,6 +35,88 @@ def _base_args(**overrides: object) -> argparse.Namespace:
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def test_collect_helper_functions_cover_checkpoint_and_filters(tmp_path: Path) -> None:
+    args = _base_args(
+        output=str(tmp_path / "collect.txt"),
+        save_responses_dir=str(tmp_path / "raw"),
+        checkpoint_file=str(tmp_path / "explicit.ckpt"),
+    )
+    assert collect._resolve_collect_checkpoint_path(args) == str(tmp_path / "explicit.ckpt")
+
+    args_no_explicit = _base_args(output=str(tmp_path / "collect.txt"), save_responses_dir=str(tmp_path / "raw"))
+    assert collect._resolve_collect_checkpoint_path(args_no_explicit).endswith("collect.txt.checkpoint.jsonl")
+
+    args_only_save = _base_args(output=None, save_responses_dir=str(tmp_path / "raw"))
+    assert collect._resolve_collect_checkpoint_path(args_only_save).endswith("collect.checkpoint.jsonl")
+
+    assert collect._materialize_collect_endpoint("/x/{pprof_seconds}/{trace_seconds}", 11, 4) == "/x/11/4"
+
+    endpoints = collect._build_collect_endpoints(
+        ["/debug/vars", "/debug/vars", "/debug/pprof/profile?seconds={pprof_seconds}"],
+        deep=True,
+        pprof_seconds=9,
+        trace_seconds=3,
+    )
+    assert "/debug/vars" in endpoints
+    assert "/debug/pprof/profile?seconds=9" in endpoints
+    assert len(endpoints) == len(set(endpoints))
+
+    aliases = collect._collect_exporter_alias_map(
+        [{"name": "redis_exporter"}, {"name": "pgbackrest_exporter"}, {"name": "custom"}]
+    )
+    assert aliases["redis"] == "redis_exporter"
+    assert aliases["pgbackrest"] == "pgbackrest_exporter"
+    assert aliases["custom"] == "custom"
+
+    selected = collect._parse_collect_exporter_filter(
+        "redis,pgbackrest_exporter",
+        [{"name": "redis_exporter"}, {"name": "pgbackrest_exporter"}],
+    )
+    assert selected == {"redis_exporter", "pgbackrest_exporter"}
+
+    with pytest.raises(ValueError):
+        collect._parse_collect_exporter_filter("unknown", [{"name": "redis_exporter"}])
+
+    filtered_discovery, filtered_collect = collect._filter_collect_exporter_profiles(
+        discovery_exporters=[{"name": "redis_exporter"}, {"name": "postgres_exporter"}],
+        collect_exporters=[{"name": "redis_exporter"}, {"name": "postgres_exporter"}],
+        selected_exporter_names={"redis_exporter"},
+    )
+    assert filtered_discovery == [{"name": "redis_exporter"}]
+    assert filtered_collect == [{"name": "redis_exporter"}]
+
+
+def test_collect_load_completed_jobs_parses_valid_rows_and_warns_on_open_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ckpt = tmp_path / "collect.ckpt.jsonl"
+    ckpt.write_text(
+        "\n".join(
+            [
+                json.dumps({"host": "10.0.0.1", "exporter": "redis_exporter", "port": 9121, "endpoint": "/metrics"}),
+                '{"host":"10.0.0.2","exporter":"node_exporter","port":"bad","endpoint":"/debug/vars"}',
+                "not-json",
+                json.dumps({"host": "", "exporter": "x", "port": 1, "endpoint": "/e"}),
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    jobs = collect._load_collect_completed_jobs(str(ckpt))
+    assert ("10.0.0.1", "redis_exporter", 9121, "/metrics") in jobs
+    assert len(jobs) == 1
+
+    missing = collect._load_collect_completed_jobs(str(tmp_path / "missing.jsonl"))
+    assert missing == set()
+
+    console = collect.Console(debug=False)
+    warn_jobs = collect._load_collect_completed_jobs(str(tmp_path), console=console)
+    assert warn_jobs == set()
+    out = capsys.readouterr().out
+    assert "failed to load collect checkpoint" in out
 
 
 def test_collect_stage_runs_scan_before_collect(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -802,3 +885,132 @@ def test_collect_stage_json_output_is_not_polluted_by_validate_txt_rows(
     contents = output_path.read_text(encoding="utf-8")
     assert '"exporter": "elasticsearch_exporter"' in contents
     assert "VALIDATE" not in contents
+
+
+def test_collect_stage_argument_and_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    rc = run_collect_stage(_base_args(timeout=0), AttemptLogger())
+    assert rc == 2
+    rc = run_collect_stage(_base_args(retries=-1), AttemptLogger())
+    assert rc == 2
+
+    monkeypatch.setattr("redposture_core.stage_collect.collect_scan_target_specs", lambda *_a, **_k: [])
+    rc = run_collect_stage(_base_args(), AttemptLogger())
+    assert rc == 2
+
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.collect_scan_target_specs",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad targets")),
+    )
+    rc = run_collect_stage(_base_args(), AttemptLogger())
+    assert rc == 2
+
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.collect_scan_target_specs",
+        lambda *_a, **_k: [argparse.Namespace(host="10.0.0.1", scheme=None, explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.load_profiles",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("profiles fail")),
+    )
+    rc = run_collect_stage(_base_args(), AttemptLogger())
+    assert rc == 2
+
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.load_profiles",
+        lambda *_a, **_k: {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/vars"],
+        },
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.collect_scan_ports",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad ports")),
+    )
+    rc = run_collect_stage(_base_args(ports="bad"), AttemptLogger())
+    assert rc == 2
+
+
+def test_collect_stage_explicit_port_groups_and_collect_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
+    target_specs = [
+        argparse.Namespace(host="10.0.0.1", scheme=None, explicit_port=19100),
+        argparse.Namespace(host="10.0.0.2", scheme=None, explicit_port=19101),
+    ]
+    scan_calls: list[list[int]] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        ports = kwargs.get("custom_ports")
+        assert isinstance(ports, list)
+        scan_calls.append([int(ports[0])])
+        port = int(ports[0])
+        host = "10.0.0.1" if port == 19100 else "10.0.0.2"
+        return 1, 1, {host: [{"exporter": "redis_exporter", "port": port}]}
+
+    monkeypatch.setattr("redposture_core.stage_collect.collect_scan_target_specs", lambda *_a, **_k: target_specs)
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.load_profiles",
+        lambda *_a, **_k: {
+            "discovery_exporters": [{"name": "redis_exporter", "port": 9121}],
+            "collect_exporters": [{"name": "redis_exporter", "port": 9121}],
+            "collect_debug_endpoints": ["/debug/vars"],
+        },
+    )
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.collect_exporter_debug_data",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("collect write fail")),
+    )
+
+    rc = run_collect_stage(_base_args(targets="ignored"), AttemptLogger())
+    assert rc == 2
+    assert scan_calls == [[19100], [19101]]
+
+
+def test_collect_stage_debug_emits_staged_markers(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/vars"],
+        }
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return 1, 1, {"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]}
+
+    def fake_collect(*_args: object, **_kwargs: object) -> tuple[int, int]:
+        return 1, 1
+
+    class _NoopValidator:
+        def __init__(self, *, input_format: str, max_lines: int) -> None:
+            _ = (input_format, max_lines)
+
+        def feed(self, record: dict[str, object]) -> None:
+            _ = record
+
+        def finish(
+            self,
+            *,
+            show: bool,
+            fail_on_creds: bool,
+            debug: bool,
+            console: object,
+            source: str,
+            records_total: int | None = None,
+        ) -> int:
+            _ = (show, fail_on_creds, debug, console, source, records_total)
+            return 0
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+    monkeypatch.setattr("redposture_core.stage_collect.ValidationRecordAccumulator", _NoopValidator)
+
+    rc = run_collect_stage(_base_args(debug=True), AttemptLogger())
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "pass=1 detect start total=1" in out
+    assert "pass=2 deep start total=1" in out
+    assert "stage2_gate=run reason=detected=1" in out
+    assert "stage_timing_summary status=ok attempts=1/1" in out

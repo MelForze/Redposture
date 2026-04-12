@@ -21,13 +21,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import iter_completed_with_progress
+from .progress import ProgressBar
 from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 _PROXMOX_API_PREFIX = "/api2/json"
@@ -40,6 +40,11 @@ _ADD_USER_PASSWORD_LENGTH = 20
 _ADD_USER_PASSWORD_ALPHABET = string.ascii_letters + string.digits
 _ADD_USER_PRIV_ROLE = "Administrator"
 _ADD_USER_PRIV_PATH = "/"
+_STAGE_DETECT_PROTOCOL = "detect_protocol"
+_STAGE_AUTH_INFERENCE = "auth_inference_credentials"
+_STAGE_ACCESS_CAPABILITIES = "access_capabilities"
+_STAGE_DATA = "data"
+_PROXMOX_DEEP_STATUSES = {"token_ok", "insufficient_privileges"}
 
 _SENSITIVE_KEY_TOKENS = (
     "password",
@@ -2009,6 +2014,7 @@ def _stream_proxmox_status(
     record: dict[str, Any],
     output_format: str,
     suppress_fail_status_lines: bool,
+    emit_detect_line: bool = True,
 ) -> None:
     host = str(record.get("host") or "-")
     port = int(record.get("port") or 0)
@@ -2016,12 +2022,176 @@ def _stream_proxmox_status(
     with lock:
         if key in status_emitted:
             return
-        if bool(record.get("is_proxmox")):
+        if emit_detect_line and bool(record.get("is_proxmox")):
             _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
         suppress_status = suppress_fail_status_lines and output_format == "txt" and _is_suppressed_fail_record(record)
         if not suppress_status:
             _emit_line(out_fh, emit_line, _format_record(record, output_format))
         status_emitted.add(key)
+
+
+def _call_audit_proxmox_host_with_stage_debug(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    pve_api_token: str,
+    use_https: bool,
+    insecure: bool,
+    proxy: _ProxyConfig | None,
+    *,
+    discover_creds: bool,
+    show_nodes: bool,
+    show_users: bool,
+    add_user: str | None,
+    run_deep_checks: bool,
+    debug: bool,
+    debug_emit: Callable[[str], None] | None,
+    on_status_ready: Callable[[dict[str, Any]], None] | None = None,
+    on_discovered_url: Callable[[str], None] | None = None,
+    on_credential_finding: Callable[[dict[str, str]], None] | None = None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    record = _audit_proxmox_host(
+        host,
+        port,
+        timeout,
+        retries,
+        pve_api_token,
+        use_https,
+        insecure,
+        proxy,
+        discover_creds=discover_creds if run_deep_checks else False,
+        show_nodes=show_nodes if run_deep_checks else False,
+        show_users=show_users if run_deep_checks else False,
+        add_user=add_user if run_deep_checks else None,
+        on_status_ready=on_status_ready if run_deep_checks else None,
+        on_discovered_url=on_discovered_url if run_deep_checks else None,
+        on_credential_finding=on_credential_finding if run_deep_checks else None,
+    )
+
+    result: dict[str, Any] = dict(record)
+    debug_events: list[str] = []
+
+    def _debug(message: str) -> None:
+        if not debug:
+            return
+        debug_events.append(message)
+        if debug_emit is not None:
+            debug_emit(f"{host}:{port} {message}")
+
+    attempts = max(1, retries + 1)
+    status = str(result.get("status") or "fail")
+    is_proxmox = bool(result.get("is_proxmox"))
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    if attempts > 1 and status == "fail":
+        _debug(
+            f"retry_decision stage={_STAGE_DETECT_PROTOCOL} attempt=1/{attempts} "
+            f"backoff={_retry_delay(0):.2f}s reason=error"
+        )
+
+    stages: list[dict[str, Any]] = []
+
+    def _push_stage(stage_name: str, stage_result: str, stage_error: str | None = None, duration_ms: int = 0) -> None:
+        entry = {
+            "stage_name": stage_name,
+            "attempt": 1,
+            "duration_ms": int(max(0, duration_ms)),
+            "result": stage_result,
+            "error": stage_error or None,
+        }
+        stages.append(entry)
+        _debug(
+            f"stage_trace stage_name={stage_name} attempt=1 duration_ms={entry['duration_ms']} "
+            f"result={stage_result} error={entry['error'] or '-'}"
+        )
+
+    detect_result = "ok" if is_proxmox else ("error" if status == "fail" else "skip")
+    detect_error = str(result.get("error") or "") if detect_result == "error" else None
+    _push_stage(_STAGE_DETECT_PROTOCOL, detect_result, detect_error, 0)
+
+    auth_result = "ok" if is_proxmox and status in _PROXMOX_DEEP_STATUSES.union({"auth_failed"}) else detect_result
+    _push_stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
+
+    if run_deep_checks and status in _PROXMOX_DEEP_STATUSES:
+        _push_stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
+        data_result = "error" if status == "fail" and result.get("error") else "ok"
+        _push_stage(
+            _STAGE_DATA,
+            data_result,
+            str(result.get("error") or "") if data_result == "error" else None,
+            elapsed_ms,
+        )
+    else:
+        _push_stage(_STAGE_ACCESS_CAPABILITIES, "skip", "deep checks disabled", 0)
+        _push_stage(_STAGE_DATA, "skip", "deep checks disabled", 0)
+
+    stage_failed_at: str | None = None
+    for entry in stages:
+        if str(entry.get("result") or "") == "error":
+            stage_failed_at = str(entry.get("stage_name") or "")
+            break
+
+    stage_durations_ms = {str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in stages}
+    stage_attempts = {str(item.get("stage_name") or ""): attempts for item in stages}
+    _debug(
+        f"stage_timing_summary status={status} attempts=1/{attempts} "
+        f"detect_ms={stage_durations_ms.get(_STAGE_DETECT_PROTOCOL, 0)} "
+        f"auth_ms={stage_durations_ms.get(_STAGE_AUTH_INFERENCE, 0)} "
+        f"capabilities_ms={stage_durations_ms.get(_STAGE_ACCESS_CAPABILITIES, 0)} "
+        f"data_ms={stage_durations_ms.get(_STAGE_DATA, 0)} total_ms={elapsed_ms}"
+    )
+
+    result["stages"] = stages
+    result["stage_failed_at"] = stage_failed_at
+    result["stage_durations_ms"] = stage_durations_ms
+    result["stage_attempts"] = stage_attempts
+    result["debug_events"] = debug_events
+    result["debug_events_streamed"] = bool(debug and debug_emit is not None)
+    return result
+
+
+def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(detect_record)
+    merged.update(deep_record)
+
+    debug_events: list[str] = []
+    for source in (detect_record.get("debug_events"), deep_record.get("debug_events")):
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if isinstance(item, str) and item.strip():
+                debug_events.append(item)
+    merged["debug_events"] = debug_events
+    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
+        deep_record.get("debug_events_streamed")
+    )
+
+    stages: list[dict[str, Any]] = []
+    for source in (detect_record.get("stages"), deep_record.get("stages")):
+        if isinstance(source, list):
+            for entry in source:
+                if isinstance(entry, dict):
+                    stages.append(dict(entry))
+    merged["stages"] = stages
+
+    stage_durations: dict[str, int] = {}
+    for source in (detect_record.get("stage_durations_ms"), deep_record.get("stage_durations_ms")):
+        if isinstance(source, dict):
+            for key, value in source.items():
+                stage_durations[str(key)] = int(value or 0)
+    merged["stage_durations_ms"] = stage_durations
+
+    stage_attempts: dict[str, int] = {}
+    for source in (detect_record.get("stage_attempts"), deep_record.get("stage_attempts")):
+        if isinstance(source, dict):
+            for key, value in source.items():
+                stage_attempts[str(key)] = int(value or 0)
+    merged["stage_attempts"] = stage_attempts
+
+    merged["stage_failed_at"] = deep_record.get("stage_failed_at") or detect_record.get("stage_failed_at")
+    return merged
 
 
 def audit_proxmox_targets(
@@ -2044,6 +2214,8 @@ def audit_proxmox_targets(
     logger: AttemptLogger | None = None,
     append_output: bool = False,
     suppress_fail_status_lines: bool = False,
+    debug_emit: Callable[[str], None] | None = None,
+    show_progress: bool = True,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     token_ok = 0
@@ -2053,6 +2225,7 @@ def audit_proxmox_targets(
     credential_hits = 0
 
     out_fh: Any = None
+    progress: ProgressBar | None = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
@@ -2064,10 +2237,18 @@ def audit_proxmox_targets(
     streamed_statuses: set[tuple[str, int]] = set()
 
     try:
+        indexed_hosts = list(enumerate(hosts))
+        detect_records: dict[int, dict[str, Any]] = {}
+        deep_records: dict[int, dict[str, Any]] = {}
+        progress = ProgressBar("PROXMOX", len(indexed_hosts), enabled=show_progress, leave=True)
+
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
+
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            future_map = {
+            pass1_future_map = {
                 executor.submit(
-                    _audit_proxmox_host,
+                    _call_audit_proxmox_host_with_stage_debug,
                     host,
                     port,
                     timeout,
@@ -2080,112 +2261,199 @@ def audit_proxmox_targets(
                     show_nodes=show_nodes,
                     show_users=show_users,
                     add_user=add_user,
-                    on_discovered_url=(
-                        (
-                            lambda path, _host=host: _stream_proxmox_discovered_url(
-                                out_fh=out_fh,
-                                emit_line=emit_line,
-                                lock=output_lock,
-                                headers_seen=streamed_headers,
-                                urls_seen=streamed_urls,
-                                host=_host,
-                                port=port,
-                                use_https=use_https,
-                                path=path,
-                            )
-                        )
-                        if stream_discovery
-                        else None
-                    ),
-                    on_status_ready=(
-                        (
-                            lambda status_record: _stream_proxmox_status(
-                                out_fh=out_fh,
-                                emit_line=emit_line,
-                                lock=output_lock,
-                                status_emitted=streamed_statuses,
-                                record=status_record,
-                                output_format=output_format,
-                                suppress_fail_status_lines=suppress_fail_status_lines,
-                            )
-                        )
-                        if stream_discovery
-                        else None
-                    ),
-                    on_credential_finding=(
-                        (
-                            lambda finding, _host=host: _stream_proxmox_finding(
-                                out_fh=out_fh,
-                                emit_line=emit_line,
-                                lock=output_lock,
-                                findings_seen=streamed_findings,
-                                host=_host,
-                                port=port,
-                                finding=finding,
-                            )
-                        )
-                        if stream_discovery
-                        else None
-                    ),
-                ): host
-                for host in hosts
+                    run_deep_checks=False,
+                    debug=bool(debug_emit),
+                    debug_emit=debug_emit,
+                ): idx
+                for idx, host in indexed_hosts
             }
+            buffered_records: dict[int, dict[str, Any]] = {}
+            next_emit_idx = 0
+            for future in as_completed(pass1_future_map):
+                record_idx = int(pass1_future_map[future])
+                buffered_records[record_idx] = future.result()
+                progress.advance()
+                while next_emit_idx in buffered_records:
+                    detect_record = buffered_records.pop(next_emit_idx)
+                    detect_records[next_emit_idx] = detect_record
+                    if bool(detect_record.get("is_proxmox")) and output_format == "txt":
+                        _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
+                    next_emit_idx += 1
 
-            for future in iter_completed_with_progress(future_map, label="PROXMOX"):
-                record = future.result()
-                total += 1
+        deep_requested = bool(discover_creds or show_nodes or show_users or add_user)
+        deep_candidates: list[tuple[int, str]] = []
+        detected_count = 0
+        for idx, host in indexed_hosts:
+            detect_record = detect_records[idx]
+            detect_status = str(detect_record.get("status") or "fail")
+            if not bool(detect_record.get("is_proxmox")):
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_proxmox")
+                continue
+            detected_count += 1
+            if deep_requested and detect_status in _PROXMOX_DEEP_STATUSES:
+                deep_candidates.append((idx, host))
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
+            elif debug_emit is not None:
+                reason = "no_data_actions" if not deep_requested else f"status={detect_status}"
+                debug_emit(f"{host}:{port} stage2_gate=skip reason={reason}")
 
-                status = str(record.get("status") or "fail")
-                if status == "token_ok":
-                    token_ok += 1
-                elif status == "insufficient_privileges":
-                    insufficient += 1
-                elif status == "auth_failed":
-                    auth_failed += 1
-                else:
-                    fail += 1
-                credential_hits += int(record.get("credential_hits") or 0)
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect complete proxmox={detected_count} deep_candidates={len(deep_candidates)}")
+            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
 
-                with output_lock:
-                    host_key = (str(record.get("host") or "-"), int(record.get("port") or port))
-                    if host_key not in streamed_statuses:
-                        if bool(record.get("is_proxmox")):
-                            _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
-                        suppress_status = (
-                            suppress_fail_status_lines and output_format == "txt" and _is_suppressed_fail_record(record)
-                        )
-                        if not suppress_status:
-                            _emit_line(out_fh, emit_line, _format_record(record, output_format))
-                    if not stream_discovery:
-                        for detail_line in _format_discovered_urls_detail_records(record, output_format):
-                            _emit_line(out_fh, emit_line, detail_line)
-                    for detail_line in _format_add_user_detail_records(record, output_format):
-                        _emit_line(out_fh, emit_line, detail_line)
-                    for detail_line in _format_nodes_detail_records(record, output_format):
-                        _emit_line(out_fh, emit_line, detail_line)
-                    for detail_line in _format_users_detail_records(record, output_format):
-                        _emit_line(out_fh, emit_line, detail_line)
-                    if not stream_discovery:
-                        for detail_line in _format_findings_detail_records(record, output_format):
-                            _emit_line(out_fh, emit_line, detail_line)
+        progress.set_total(len(indexed_hosts) + len(deep_candidates))
+        if deep_candidates:
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+                pass2_future_map = {
+                    executor.submit(
+                        _call_audit_proxmox_host_with_stage_debug,
+                        host,
+                        port,
+                        timeout,
+                        retries,
+                        pve_api_token,
+                        use_https,
+                        insecure,
+                        proxy,
+                        discover_creds=discover_creds,
+                        show_nodes=show_nodes,
+                        show_users=show_users,
+                        add_user=add_user,
+                        run_deep_checks=True,
+                        debug=bool(debug_emit),
+                        debug_emit=debug_emit,
+                        on_discovered_url=(
+                            (
+                                lambda path, _host=host: _stream_proxmox_discovered_url(
+                                    out_fh=out_fh,
+                                    emit_line=emit_line,
+                                    lock=output_lock,
+                                    headers_seen=streamed_headers,
+                                    urls_seen=streamed_urls,
+                                    host=_host,
+                                    port=port,
+                                    use_https=use_https,
+                                    path=path,
+                                )
+                            )
+                            if stream_discovery
+                            else None
+                        ),
+                        on_status_ready=(
+                            (
+                                lambda status_record: _stream_proxmox_status(
+                                    out_fh=out_fh,
+                                    emit_line=emit_line,
+                                    lock=output_lock,
+                                    status_emitted=streamed_statuses,
+                                    record=status_record,
+                                    output_format=output_format,
+                                    suppress_fail_status_lines=suppress_fail_status_lines,
+                                    emit_detect_line=False,
+                                )
+                            )
+                            if stream_discovery
+                            else None
+                        ),
+                        on_credential_finding=(
+                            (
+                                lambda finding, _host=host: _stream_proxmox_finding(
+                                    out_fh=out_fh,
+                                    emit_line=emit_line,
+                                    lock=output_lock,
+                                    findings_seen=streamed_findings,
+                                    host=_host,
+                                    port=port,
+                                    finding=finding,
+                                )
+                            )
+                            if stream_discovery
+                            else None
+                        ),
+                    ): idx
+                    for idx, host in deep_candidates
+                }
+                for future in as_completed(pass2_future_map):
+                    deep_records[int(pass2_future_map[future])] = future.result()
+                    progress.advance()
 
-                if logger is not None:
-                    logger.log(
-                        "proxmox",
-                        (str(record.get("host") or "-"), int(record.get("port") or port)),
-                        phase="audit",
-                        status=record.get("status"),
-                        checked_endpoints=record.get("checked_endpoints"),
-                        successful_endpoints=record.get("successful_endpoints"),
-                        cap_adduser=record.get("cap_adduser"),
-                        cap_read=record.get("cap_read"),
-                        cap_modify=record.get("cap_modify"),
-                        cap_backup=record.get("cap_backup"),
-                        credential_hits=record.get("credential_hits"),
-                        error=record.get("error"),
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
+
+        if progress is not None:
+            progress.close()
+            progress = None
+
+        final_records: dict[int, dict[str, Any]] = {}
+        for idx, _host in indexed_hosts:
+            detect_record = detect_records[idx]
+            deep_record = deep_records.get(idx)
+            final_records[idx] = _merge_stage2_record(detect_record, deep_record) if deep_record else detect_record
+
+        for idx, _host in indexed_hosts:
+            record = final_records[idx]
+            total += 1
+
+            status = str(record.get("status") or "fail")
+            if status == "token_ok":
+                token_ok += 1
+            elif status == "insufficient_privileges":
+                insufficient += 1
+            elif status == "auth_failed":
+                auth_failed += 1
+            else:
+                fail += 1
+            credential_hits += int(record.get("credential_hits") or 0)
+
+            if debug_emit is not None and not bool(record.get("debug_events_streamed")):
+                for event in record.get("debug_events") or []:
+                    if isinstance(event, str) and event.strip():
+                        debug_emit(event)
+
+            with output_lock:
+                host_key = (str(record.get("host") or "-"), int(record.get("port") or port))
+                if host_key not in streamed_statuses:
+                    if bool(record.get("is_proxmox")) and output_format != "txt":
+                        _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
+                    suppress_status = (
+                        suppress_fail_status_lines and output_format == "txt" and _is_suppressed_fail_record(record)
                     )
+                    if not suppress_status:
+                        _emit_line(out_fh, emit_line, _format_record(record, output_format))
+                if not stream_discovery:
+                    for detail_line in _format_discovered_urls_detail_records(record, output_format):
+                        _emit_line(out_fh, emit_line, detail_line)
+                for detail_line in _format_add_user_detail_records(record, output_format):
+                    _emit_line(out_fh, emit_line, detail_line)
+                for detail_line in _format_nodes_detail_records(record, output_format):
+                    _emit_line(out_fh, emit_line, detail_line)
+                for detail_line in _format_users_detail_records(record, output_format):
+                    _emit_line(out_fh, emit_line, detail_line)
+                if not stream_discovery:
+                    for detail_line in _format_findings_detail_records(record, output_format):
+                        _emit_line(out_fh, emit_line, detail_line)
+
+            if logger is not None:
+                logger.log(
+                    "proxmox",
+                    (str(record.get("host") or "-"), int(record.get("port") or port)),
+                    phase="audit",
+                    status=record.get("status"),
+                    checked_endpoints=record.get("checked_endpoints"),
+                    successful_endpoints=record.get("successful_endpoints"),
+                    cap_adduser=record.get("cap_adduser"),
+                    cap_read=record.get("cap_read"),
+                    cap_modify=record.get("cap_modify"),
+                    cap_backup=record.get("cap_backup"),
+                    credential_hits=record.get("credential_hits"),
+                    error=record.get("error"),
+                )
 
     finally:
+        if progress is not None:
+            progress.close()
         if out_fh is not None:
             out_fh.close()
 
@@ -2258,6 +2526,15 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if args.debug:
             console.plain(line)
 
+    def emit_debug(message: str) -> None:
+        if not args.debug:
+            return
+        debug_method = getattr(console, "debug", None)
+        if callable(debug_method):
+            debug_method(message)
+            return
+        console.info(message)
+
     if args.debug and args.output_format == "txt":
         destination = "stdout" if stream_to_stdout else str(args.output)
         proxy_mode = "none" if proxy is None else f"{proxy.scheme}://{proxy.host}:{proxy.port}"
@@ -2274,6 +2551,12 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     auth_failed = 0
     failed = 0
     credential_hits = 0
+    outer_progress: ProgressBar | None = None
+    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+    if use_single_global_progress:
+        global_total = sum(len(group.hosts) for group in execution_groups)
+        outer_progress = ProgressBar("PROXMOX", global_total, enabled=True, leave=True)
+    group_progress_enabled = not use_single_global_progress
     try:
         for idx, group in enumerate(execution_groups):
             group_use_https = bool(args.https)
@@ -2299,6 +2582,8 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 logger=logger if args.debug else None,
                 append_output=idx > 0,
                 suppress_fail_status_lines=not bool(args.debug),
+                debug_emit=emit_debug if args.debug else None,
+                show_progress=group_progress_enabled,
             )
             total += part_total
             token_ok += part_ok
@@ -2306,9 +2591,14 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             auth_failed += part_auth_failed
             failed += part_failed
             credential_hits += part_hits
+            if outer_progress is not None:
+                outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process proxmox output: {exc}")
         return 2
+    finally:
+        if outer_progress is not None:
+            outer_progress.close()
 
     if args.debug and args.output_format == "txt":
         console.info(

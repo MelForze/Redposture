@@ -13,22 +13,24 @@ import shutil
 import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import iter_completed_with_progress
+from .progress import ProgressBar
 from .utils import (
     build_scan_execution_groups,
     collect_scan_ports,
     collect_scan_target_specs,
     collect_scan_targets,
+    is_signature_compat_typeerror,
     utc_now_iso,
 )
 
@@ -42,6 +44,11 @@ _CONSUL_REVSHELL_MAX_WAIT_SECONDS = 15.0
 _CONSUL_REVSHELL_SCHEDULER_SLACK_SECONDS = 2.0
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
+_STAGE_DETECT_PROTOCOL = "detect_protocol"
+_STAGE_AUTH_INFERENCE = "auth_inference_credentials"
+_STAGE_ACCESS_CAPABILITIES = "access_capabilities"
+_STAGE_DATA = "data"
+_THREAD_LOCAL_DEBUG_EMIT = threading.local()
 
 
 def _clip(text: str, width: int = 80) -> str:
@@ -54,6 +61,13 @@ def _clip(text: str, width: int = 80) -> str:
 
 def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
+
+
+def _get_thread_debug_emitter() -> Callable[[str], None] | None:
+    callback = getattr(_THREAD_LOCAL_DEBUG_EMIT, "callback", None)
+    if callable(callback):
+        return callback
+    return None
 
 
 def _friendly_error_text(value: str) -> str:
@@ -1812,7 +1826,7 @@ def _consul_script_revshell_cleanup(
     return result
 
 
-def _audit_consul_host(
+def _audit_consul_host_legacy(
     host: str,
     port: int,
     timeout: float,
@@ -2441,6 +2455,754 @@ def _audit_consul_host(
         "error": _friendly_error_text(last_error or "connection failed"),
         "elapsed_ms": None,
     }
+
+
+def _consul_service_status(
+    anonymous_scopes: dict[str, Any],
+    *,
+    auth_mode: str | None,
+    auth_valid: bool | None,
+    auth_required: bool,
+) -> str:
+    if auth_mode:
+        if auth_valid is True:
+            return "valid_credentials"
+        if auth_valid is False:
+            return "auth_required"
+        return "unknown_auth"
+    if _all_scopes_ok(anonymous_scopes) and not auth_required:
+        return "open_no_auth"
+    if _no_scopes_ok(anonymous_scopes) or auth_required:
+        return "auth_required"
+    return "unknown_auth"
+
+
+def _call_audit_consul_host_with_thread_debug(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    token: str | None,
+    username: str | None,
+    password: str | None,
+    do_ssrf: bool,
+    ssrf_urls: list[str],
+    show_keys: bool,
+    kv_key: str | None,
+    dump_requested: bool,
+    dump_all_requested: bool,
+    show_services: bool,
+    show_agents: bool,
+    show_checks: bool,
+    check_dump_id: str | None,
+    show_nodes: bool,
+    service_name: str | None,
+    service_dump_name: str | None,
+    agent_dump_name: str | None,
+    node_dump_name: str | None,
+    delete_service: bool,
+    service_args: str | None,
+    revshell_enabled: bool,
+    delete_revshell: bool,
+    revshell_listen: bool,
+    revshell_host: str | None,
+    revshell_port: int | None,
+    revshell_payload: str | None,
+    revshell_check_id: str | None,
+    preferred_scheme: str | None,
+    debug: bool,
+    run_deep_checks: bool,
+    debug_emit: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    def _invoke() -> dict[str, Any]:
+        try:
+            return _audit_consul_host(
+                host,
+                port,
+                timeout,
+                retries,
+                token=token,
+                username=username,
+                password=password,
+                do_ssrf=do_ssrf,
+                ssrf_urls=ssrf_urls,
+                show_keys=show_keys,
+                kv_key=kv_key,
+                dump_requested=dump_requested,
+                dump_all_requested=dump_all_requested,
+                show_services=show_services,
+                show_agents=show_agents,
+                show_checks=show_checks,
+                check_dump_id=check_dump_id,
+                show_nodes=show_nodes,
+                service_name=service_name,
+                service_dump_name=service_dump_name,
+                agent_dump_name=agent_dump_name,
+                node_dump_name=node_dump_name,
+                delete_service=delete_service,
+                service_args=service_args,
+                revshell_enabled=revshell_enabled,
+                delete_revshell=delete_revshell,
+                revshell_listen=revshell_listen,
+                revshell_host=revshell_host,
+                revshell_port=revshell_port,
+                revshell_payload=revshell_payload,
+                revshell_check_id=revshell_check_id,
+                preferred_scheme=preferred_scheme,
+                debug=debug,
+                run_deep_checks=run_deep_checks,
+            )
+        except TypeError as exc:
+            if not is_signature_compat_typeerror(exc, expected_keywords={"debug", "run_deep_checks"}):
+                raise
+            return _audit_consul_host(
+                host,
+                port,
+                timeout,
+                retries,
+                token=token,
+                username=username,
+                password=password,
+                do_ssrf=do_ssrf,
+                ssrf_urls=ssrf_urls,
+                show_keys=show_keys,
+                kv_key=kv_key,
+                dump_requested=dump_requested,
+                dump_all_requested=dump_all_requested,
+                show_services=show_services,
+                show_agents=show_agents,
+                show_checks=show_checks,
+                check_dump_id=check_dump_id,
+                show_nodes=show_nodes,
+                service_name=service_name,
+                service_dump_name=service_dump_name,
+                agent_dump_name=agent_dump_name,
+                node_dump_name=node_dump_name,
+                delete_service=delete_service,
+                service_args=service_args,
+                revshell_enabled=revshell_enabled,
+                delete_revshell=delete_revshell,
+                revshell_listen=revshell_listen,
+                revshell_host=revshell_host,
+                revshell_port=revshell_port,
+                revshell_payload=revshell_payload,
+                revshell_check_id=revshell_check_id,
+                preferred_scheme=preferred_scheme,
+            )
+
+    if debug_emit is None:
+        return _invoke()
+    _THREAD_LOCAL_DEBUG_EMIT.callback = debug_emit
+    try:
+        return _invoke()
+    finally:
+        try:
+            delattr(_THREAD_LOCAL_DEBUG_EMIT, "callback")
+        except AttributeError:
+            pass
+
+
+def _audit_consul_host(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    token: str | None,
+    username: str | None,
+    password: str | None,
+    do_ssrf: bool,
+    ssrf_urls: list[str],
+    show_keys: bool,
+    kv_key: str | None,
+    dump_requested: bool,
+    dump_all_requested: bool,
+    show_services: bool,
+    show_agents: bool,
+    show_checks: bool,
+    check_dump_id: str | None,
+    show_nodes: bool,
+    service_name: str | None,
+    service_dump_name: str | None,
+    agent_dump_name: str | None,
+    node_dump_name: str | None,
+    delete_service: bool,
+    service_args: str | None,
+    revshell_enabled: bool,
+    delete_revshell: bool,
+    revshell_listen: bool,
+    revshell_host: str | None,
+    revshell_port: int | None,
+    revshell_payload: str | None,
+    revshell_check_id: str | None,
+    preferred_scheme: str | None = None,
+    debug: bool = False,
+    run_deep_checks: bool = True,
+) -> dict[str, Any]:
+    attempts = max(1, retries + 1)
+    last_error = "connection failed"
+    debug_events: list[str] = []
+    stages: list[dict[str, Any]] = []
+    stage_durations_ms: dict[str, int] = {}
+    stage_attempts: dict[str, int] = {}
+    stage_failed_at: str | None = None
+    debug_events_streamed = False
+
+    def _debug(message: str) -> None:
+        nonlocal debug_events_streamed
+        if not debug:
+            return
+        debug_line = f"{host}:{port} {message}"
+        debug_events.append(debug_line)
+        emitter = _get_thread_debug_emitter()
+        if emitter is not None:
+            emitter(debug_line)
+            debug_events_streamed = True
+
+    def _debug_retry_decision(
+        stage_name: str,
+        *,
+        attempt: int,
+        max_attempts: int,
+        delay_s: float,
+        reason: str | None,
+    ) -> None:
+        reason_text = str(reason or "").strip() or "-"
+        _debug(
+            f"retry_decision stage={stage_name} attempt={attempt}/{max_attempts} "
+            f"backoff={delay_s:.2f}s reason={reason_text}"
+        )
+
+    def _stage_trace(
+        stage_name: str,
+        *,
+        attempt: int,
+        started_at: float,
+        result: str,
+        error: str | None = None,
+    ) -> None:
+        nonlocal stage_failed_at
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        stage_attempts[stage_name] = max(int(stage_attempts.get(stage_name, 0)), int(attempt))
+        stage_durations_ms[stage_name] = int(stage_durations_ms.get(stage_name, 0)) + duration_ms
+        entry = {
+            "stage_name": stage_name,
+            "attempt": int(attempt),
+            "duration_ms": int(duration_ms),
+            "result": str(result),
+            "error": str(error or "").strip() or None,
+        }
+        stages.append(entry)
+        if stage_failed_at is None and result in {"fail", "timeout"}:
+            stage_failed_at = stage_name
+        _debug(
+            f"stage_trace stage_name={stage_name} attempt={attempt} duration_ms={duration_ms} "
+            f"result={result} error={str(error or '-').strip() or '-'}"
+        )
+
+    def _emit_stage_timing_summary(*, status: str, attempts_done: int, max_attempts: int) -> None:
+        def _duration(stage_name: str) -> str:
+            raw = stage_durations_ms.get(stage_name)
+            if isinstance(raw, int):
+                return f"{raw}ms"
+            return "-"
+
+        def _attempt_count(stage_name: str) -> int:
+            raw = stage_attempts.get(stage_name)
+            return int(raw) if isinstance(raw, int) else 0
+
+        _debug(
+            f"stage_timing_summary status={status} attempts={attempts_done}/{max_attempts} "
+            f"detect={_duration(_STAGE_DETECT_PROTOCOL)} "
+            f"auth={_duration(_STAGE_AUTH_INFERENCE)} "
+            f"capabilities={_duration(_STAGE_ACCESS_CAPABILITIES)} "
+            f"data={_duration(_STAGE_DATA)} "
+            f"stage_attempts="
+            f"detect:{_attempt_count(_STAGE_DETECT_PROTOCOL)},"
+            f"auth:{_attempt_count(_STAGE_AUTH_INFERENCE)},"
+            f"capabilities:{_attempt_count(_STAGE_ACCESS_CAPABILITIES)},"
+            f"data:{_attempt_count(_STAGE_DATA)}"
+        )
+
+    def _record(payload: dict[str, Any], *, attempts_done: int, max_attempts: int) -> dict[str, Any]:
+        if debug:
+            _emit_stage_timing_summary(
+                status=str(payload.get("status") or "fail"),
+                attempts_done=attempts_done,
+                max_attempts=max_attempts,
+            )
+        record = dict(payload)
+        record["attempts"] = int(attempts_done)
+        record["max_attempts"] = int(max_attempts)
+        record["stages"] = list(stages)
+        record["stage_failed_at"] = stage_failed_at
+        record["stage_durations_ms"] = dict(stage_durations_ms)
+        record["stage_attempts"] = dict(stage_attempts)
+        record["debug_events"] = list(debug_events) if debug else []
+        record["debug_events_streamed"] = bool(debug_events_streamed)
+        return record
+
+    for attempt in range(attempts):
+        started = time.monotonic()
+        _debug(f"attempt={attempt + 1}/{attempts} start timeout={timeout}s")
+        stage1_started = time.monotonic()
+        try:
+            is_consul, scheme, insecure_effective, tls_auto_insecure, leader, probe_error = _probe_consul_scheme(
+                host,
+                port,
+                timeout,
+                preferred_scheme=preferred_scheme,
+            )
+            if not is_consul:
+                status = "fail" if probe_error else "not_consul"
+                _stage_trace(
+                    _STAGE_DETECT_PROTOCOL,
+                    attempt=attempt + 1,
+                    started_at=stage1_started,
+                    result=status,
+                    error=probe_error,
+                )
+                return _record(
+                    {
+                        "timestamp": utc_now_iso(),
+                        "host": host,
+                        "port": port,
+                        "is_consul": False,
+                        "status": status,
+                        "scheme": None,
+                        "insecure_effective": False,
+                        "tls_auto_insecure": False,
+                        "leader": None,
+                        "version": None,
+                        "anonymous_scopes": {},
+                        "auth_mode": None,
+                        "auth_valid": None,
+                        "auth_scopes": {},
+                        "auth_error": None,
+                        "anonymous_self_ok": None,
+                        "anonymous_self_error": None,
+                        "local_script_checks": None,
+                        "remote_script_checks": None,
+                        "rce": False,
+                        "ssrf_enabled": bool(do_ssrf),
+                        "ssrf_results": [],
+                        "script_revshell": None,
+                        "keys_requested": bool(show_keys),
+                        "kv_key_requested": kv_key,
+                        "dump_requested": bool(dump_requested),
+                        "dump_all_requested": bool(dump_all_requested),
+                        "kv_keys_list": None,
+                        "kv_keys_error": None,
+                        "kv_dump_items": None,
+                        "kv_dump_error": None,
+                        "services_list_requested": bool(show_services),
+                        "service_dump_name": service_dump_name,
+                        "services_list_source": None,
+                        "services_list": None,
+                        "services_list_error": None,
+                        "service_instances": None,
+                        "service_instances_errors": None,
+                        "agents_list_requested": bool(show_agents),
+                        "agent_dump_name": agent_dump_name,
+                        "agents_list_source": None,
+                        "agents_list": None,
+                        "agents_list_error": None,
+                        "checks_list_requested": bool(show_checks),
+                        "check_dump_id": check_dump_id,
+                        "checks_list_source": None,
+                        "checks_list": None,
+                        "checks_list_error": None,
+                        "nodes_list_requested": bool(show_nodes),
+                        "node_dump_name": node_dump_name,
+                        "nodes_list_source": None,
+                        "nodes_list": None,
+                        "nodes_list_error": None,
+                        "service_result": None,
+                        "service_args": service_args,
+                        "error": probe_error or "not a Consul API",
+                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "auth_required": None,
+                    },
+                    attempts_done=attempt + 1,
+                    max_attempts=attempts,
+                )
+
+            assert scheme is not None
+            _stage_trace(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                started_at=stage1_started,
+                result="ok",
+                error=None,
+            )
+
+            stage2_started = time.monotonic()
+            anonymous_scopes = _consul_access_matrix(
+                host, port, timeout, scheme=scheme, insecure=insecure_effective, headers=None
+            )
+            anonymous_self = _agent_self_probe(
+                host, port, timeout, scheme=scheme, insecure=insecure_effective, headers=None
+            )
+            auth_headers = _consul_headers(token, username, password)
+            auth_mode = None
+            auth_valid: bool | None = None
+            auth_error: str | None = None
+            auth_scopes: dict[str, Any] = {}
+            auth_self: dict[str, Any] | None = None
+            if token:
+                auth_mode = "token"
+            elif username is not None or password is not None:
+                auth_mode = "basic"
+
+            if auth_mode:
+                auth_scopes = _consul_access_matrix(
+                    host, port, timeout, scheme=scheme, insecure=insecure_effective, headers=auth_headers
+                )
+                auth_self = _agent_self_probe(
+                    host, port, timeout, scheme=scheme, insecure=insecure_effective, headers=auth_headers
+                )
+                auth_valid = _all_scopes_ok(auth_scopes) or bool(auth_self.get("ok"))
+                if auth_valid is False and _no_scopes_ok(auth_scopes):
+                    for scope_name in _CONSUL_SCOPE_NAMES:
+                        scope_item = auth_scopes.get(scope_name) or {}
+                        if scope_item.get("error"):
+                            auth_error = str(scope_item.get("error"))
+                            break
+                if auth_error is None and isinstance(auth_self, dict) and auth_self.get("error"):
+                    auth_error = str(auth_self.get("error"))
+
+            version = None
+            local_script_checks = None
+            remote_script_checks = None
+            for candidate in (anonymous_self, auth_self or {}):
+                if not isinstance(candidate, dict):
+                    continue
+                if (
+                    version is None
+                    and isinstance(candidate.get("version"), str)
+                    and str(candidate.get("version")).strip()
+                ):
+                    version = str(candidate.get("version")).strip()
+                if local_script_checks is None:
+                    local_script_checks = candidate.get("local_script_checks")
+                if remote_script_checks is None:
+                    remote_script_checks = candidate.get("remote_script_checks")
+            rce = bool(local_script_checks is True and remote_script_checks is True)
+            auth_required = (not _all_scopes_ok(anonymous_scopes)) or _anonymous_acl_denied_with_filtered_empty(
+                {"anonymous_self_ok": anonymous_self.get("ok"), "anonymous_self_error": anonymous_self.get("error")},
+                anonymous_scopes,
+            )
+            service_status = _consul_service_status(
+                anonymous_scopes,
+                auth_mode=auth_mode,
+                auth_valid=auth_valid,
+                auth_required=auth_required,
+            )
+            _stage_trace(
+                _STAGE_AUTH_INFERENCE,
+                attempt=attempt + 1,
+                started_at=stage2_started,
+                result=service_status,
+                error=auth_error,
+            )
+
+            base_record = {
+                "timestamp": utc_now_iso(),
+                "host": host,
+                "port": port,
+                "is_consul": True,
+                "status": service_status,
+                "scheme": scheme,
+                "insecure_effective": bool(insecure_effective),
+                "tls_auto_insecure": bool(tls_auto_insecure),
+                "leader": leader,
+                "version": version,
+                "anonymous_scopes": anonymous_scopes,
+                "auth_mode": auth_mode,
+                "auth_valid": auth_valid,
+                "auth_scopes": auth_scopes,
+                "auth_error": auth_error,
+                "anonymous_self_ok": anonymous_self.get("ok"),
+                "anonymous_self_error": anonymous_self.get("error"),
+                "local_script_checks": local_script_checks,
+                "remote_script_checks": remote_script_checks,
+                "rce": rce,
+                "ssrf_enabled": bool(do_ssrf),
+                "ssrf_results": [],
+                "script_revshell": None,
+                "keys_requested": bool(show_keys),
+                "kv_key_requested": kv_key,
+                "dump_requested": bool(dump_requested),
+                "dump_all_requested": bool(dump_all_requested),
+                "kv_keys_list": None,
+                "kv_keys_error": None,
+                "kv_dump_items": None,
+                "kv_dump_error": None,
+                "services_list_requested": bool(show_services),
+                "service_dump_name": service_dump_name,
+                "services_list_source": None,
+                "services_list": None,
+                "services_list_error": None,
+                "service_instances": None,
+                "service_instances_errors": None,
+                "agents_list_requested": bool(show_agents),
+                "agent_dump_name": agent_dump_name,
+                "agents_list_source": None,
+                "agents_list": None,
+                "agents_list_error": None,
+                "checks_list_requested": bool(show_checks),
+                "check_dump_id": check_dump_id,
+                "checks_list_source": None,
+                "checks_list": None,
+                "checks_list_error": None,
+                "nodes_list_requested": bool(show_nodes),
+                "node_dump_name": node_dump_name,
+                "nodes_list_source": None,
+                "nodes_list": None,
+                "nodes_list_error": None,
+                "service_result": None,
+                "service_args": service_args,
+                "error": None if service_status in {"open_no_auth", "valid_credentials"} else auth_error,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "auth_required": auth_required,
+            }
+
+            if not run_deep_checks:
+                _debug(f"attempt={attempt + 1}/{attempts} detect-only result={service_status}")
+                return _record(base_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+            if service_status not in {"open_no_auth", "valid_credentials"}:
+                return _record(base_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+            stage3_started = time.monotonic()
+            _stage_trace(
+                _STAGE_ACCESS_CAPABILITIES,
+                attempt=attempt + 1,
+                started_at=stage3_started,
+                result="ok",
+                error=None,
+            )
+
+            stage4_started = time.monotonic()
+            deep_record = _audit_consul_host_legacy(
+                host,
+                port,
+                timeout,
+                retries,
+                token=token,
+                username=username,
+                password=password,
+                do_ssrf=do_ssrf,
+                ssrf_urls=ssrf_urls,
+                show_keys=show_keys,
+                kv_key=kv_key,
+                dump_requested=dump_requested,
+                dump_all_requested=dump_all_requested,
+                show_services=show_services,
+                show_agents=show_agents,
+                show_checks=show_checks,
+                check_dump_id=check_dump_id,
+                show_nodes=show_nodes,
+                service_name=service_name,
+                service_dump_name=service_dump_name,
+                agent_dump_name=agent_dump_name,
+                node_dump_name=node_dump_name,
+                delete_service=delete_service,
+                service_args=service_args,
+                revshell_enabled=revshell_enabled,
+                delete_revshell=delete_revshell,
+                revshell_listen=revshell_listen,
+                revshell_host=revshell_host,
+                revshell_port=revshell_port,
+                revshell_payload=revshell_payload,
+                revshell_check_id=revshell_check_id,
+                preferred_scheme=preferred_scheme,
+            )
+            if not bool(deep_record.get("is_consul")):
+                deep_error = str(deep_record.get("error") or "deep check failed").strip()
+                _stage_trace(
+                    _STAGE_DATA,
+                    attempt=attempt + 1,
+                    started_at=stage4_started,
+                    result="fail",
+                    error=deep_error,
+                )
+                fallback_record = dict(base_record)
+                fallback_record["error"] = deep_error
+                fallback_record["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+                return _record(fallback_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+            _stage_trace(
+                _STAGE_DATA,
+                attempt=attempt + 1,
+                started_at=stage4_started,
+                result="ok",
+                error=None,
+            )
+            final_record = dict(deep_record)
+            if str(final_record.get("status") or "").strip() in {"", "ok"}:
+                final_record["status"] = service_status
+            final_record["auth_required"] = auth_required
+            final_record["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+            return _record(final_record, attempts_done=attempt + 1, max_attempts=attempts)
+        except (OSError, ValueError) as exc:
+            last_error = str(exc)
+            _stage_trace(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                started_at=stage1_started,
+                result="fail",
+                error=last_error,
+            )
+            if attempt >= attempts - 1:
+                break
+            delay = _retry_delay(attempt)
+            _debug_retry_decision(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                max_attempts=attempts,
+                delay_s=delay,
+                reason=last_error,
+            )
+            time.sleep(delay)
+
+    return _record(
+        {
+            "timestamp": utc_now_iso(),
+            "host": host,
+            "port": port,
+            "is_consul": False,
+            "status": "fail",
+            "scheme": None,
+            "insecure_effective": False,
+            "tls_auto_insecure": False,
+            "leader": None,
+            "version": None,
+            "anonymous_scopes": {},
+            "auth_mode": None,
+            "auth_valid": None,
+            "auth_scopes": {},
+            "auth_error": None,
+            "anonymous_self_ok": None,
+            "anonymous_self_error": None,
+            "local_script_checks": None,
+            "remote_script_checks": None,
+            "rce": False,
+            "ssrf_enabled": bool(do_ssrf),
+            "ssrf_results": [],
+            "keys_requested": bool(show_keys),
+            "kv_key_requested": kv_key,
+            "dump_requested": bool(dump_requested),
+            "dump_all_requested": bool(dump_all_requested),
+            "kv_keys_list": None,
+            "kv_keys_error": None,
+            "kv_dump_items": None,
+            "kv_dump_error": None,
+            "services_list_requested": bool(show_services),
+            "service_dump_name": service_dump_name,
+            "services_list_source": None,
+            "services_list": None,
+            "services_list_error": None,
+            "service_instances": None,
+            "service_instances_errors": None,
+            "agents_list_requested": bool(show_agents),
+            "agent_dump_name": agent_dump_name,
+            "agents_list_source": None,
+            "agents_list": None,
+            "agents_list_error": None,
+            "checks_list_requested": bool(show_checks),
+            "check_dump_id": check_dump_id,
+            "checks_list_source": None,
+            "checks_list": None,
+            "checks_list_error": None,
+            "nodes_list_requested": bool(show_nodes),
+            "node_dump_name": node_dump_name,
+            "nodes_list_source": None,
+            "nodes_list": None,
+            "nodes_list_error": None,
+            "service_result": None,
+            "service_args": service_args,
+            "script_revshell": None,
+            "auth_required": None,
+            "error": _friendly_error_text(last_error or "connection failed"),
+            "elapsed_ms": None,
+        },
+        attempts_done=attempts,
+        max_attempts=attempts,
+    )
+
+
+def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(detect_record)
+
+    detect_debug_events = detect_record.get("debug_events")
+    deep_debug_events = deep_record.get("debug_events")
+    merged_debug_events: list[str] = []
+    if isinstance(detect_debug_events, list):
+        for item in detect_debug_events:
+            if isinstance(item, str) and item.strip():
+                merged_debug_events.append(item)
+    if isinstance(deep_debug_events, list):
+        for item in deep_debug_events:
+            if isinstance(item, str) and item.strip():
+                merged_debug_events.append(item)
+    merged["debug_events"] = merged_debug_events
+    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
+        deep_record.get("debug_events_streamed")
+    )
+
+    deep_fields = (
+        "status",
+        "scheme",
+        "insecure_effective",
+        "tls_auto_insecure",
+        "leader",
+        "version",
+        "anonymous_scopes",
+        "auth_mode",
+        "auth_valid",
+        "auth_scopes",
+        "auth_error",
+        "anonymous_self_ok",
+        "anonymous_self_error",
+        "local_script_checks",
+        "remote_script_checks",
+        "rce",
+        "ssrf_results",
+        "script_revshell",
+        "kv_keys_list",
+        "kv_keys_error",
+        "kv_dump_items",
+        "kv_dump_error",
+        "services_list_source",
+        "services_list",
+        "services_list_error",
+        "service_instances",
+        "service_instances_errors",
+        "agents_list_source",
+        "agents_list",
+        "agents_list_error",
+        "checks_list_source",
+        "checks_list",
+        "checks_list_error",
+        "nodes_list_source",
+        "nodes_list",
+        "nodes_list_error",
+        "service_result",
+        "error",
+        "auth_required",
+        "elapsed_ms",
+        "attempts",
+        "max_attempts",
+        "stages",
+        "stage_failed_at",
+        "stage_durations_ms",
+        "stage_attempts",
+    )
+    for field in deep_fields:
+        merged[field] = deep_record.get(field)
+    return merged
 
 
 def _cx_prefix(record: dict[str, Any]) -> str:
@@ -3082,6 +3844,8 @@ def audit_consul_targets(
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
     preferred_scheme: str | None = None,
+    debug_emit: Callable[[str], None] | None = None,
+    show_progress: bool = True,
 ) -> tuple[int, int, int, bool]:
     total = 0
     detected = 0
@@ -3089,15 +3853,24 @@ def audit_consul_targets(
     revshell_registered_any = False
 
     out_fh: Any = None
+    progress: ProgressBar | None = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
+        indexed_hosts = list(enumerate(hosts))
+        detect_records: dict[int, dict[str, Any]] = {}
+        deep_records: dict[int, dict[str, Any]] = {}
+        progress = ProgressBar(_CONSUL_TAG, len(indexed_hosts), enabled=show_progress, leave=True)
+
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
+
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            future_map = {
+            pass1_future_map = {
                 executor.submit(
-                    _audit_consul_host,
+                    _call_audit_consul_host_with_thread_debug,
                     host,
                     port,
                     timeout,
@@ -3130,83 +3903,182 @@ def audit_consul_targets(
                     revshell_payload=revshell_payload,
                     revshell_check_id=revshell_check_id,
                     preferred_scheme=preferred_scheme,
-                ): host
-                for host in hosts
+                    debug=bool(debug_emit),
+                    run_deep_checks=False,
+                    debug_emit=debug_emit,
+                ): idx
+                for idx, host in indexed_hosts
             }
-            for future in iter_completed_with_progress(future_map, label="CONSUL"):
-                host_for_future = str(future_map.get(future) or "-")
-                try:
-                    record = future.result()
-                except Exception as exc:
-                    record = {
-                        "timestamp": utc_now_iso(),
-                        "host": host_for_future,
-                        "port": port,
-                        "is_consul": False,
-                        "status": "fail",
-                        "scheme": None,
-                        "version": None,
-                        "anonymous_scopes": {},
-                        "auth_mode": None,
-                        "auth_valid": None,
-                        "auth_scopes": {},
-                        "error": f"internal worker error: {exc}",
-                    }
-                total += 1
-                if bool(record.get("is_consul")):
-                    detected += 1
-                status = str(record.get("status") or "fail")
-                if status == "fail":
-                    failed += 1
-                script_revshell = record.get("script_revshell")
-                if (
-                    isinstance(script_revshell, dict)
-                    and str(script_revshell.get("action") or "").strip().lower() != "delete"
-                    and bool(script_revshell.get("registered"))
-                ):
-                    revshell_registered_any = True
+            buffered_records: dict[int, dict[str, Any]] = {}
+            next_emit_idx = 0
+            for future in as_completed(pass1_future_map):
+                record_idx = int(pass1_future_map[future])
+                buffered_records[record_idx] = future.result()
+                if progress is not None:
+                    progress.advance()
+                while next_emit_idx in buffered_records:
+                    detect_record = buffered_records.pop(next_emit_idx)
+                    detect_records[next_emit_idx] = detect_record
+                    if output_format == "txt":
+                        detect_status = str(detect_record.get("status") or "fail")
+                        suppress_timeout_detect_line = suppress_timeout_status_lines and detect_status == "fail"
+                        if not suppress_timeout_detect_line:
+                            record_for_output = dict(detect_record)
+                            if username is not None or password is not None:
+                                record_for_output["_username_display"] = username or ""
+                                record_for_output["_password_display"] = password or ""
+                            _emit_line(out_fh, emit_line, _detect_line(record_for_output, output_format))
+                    next_emit_idx += 1
 
-                record_out = dict(record)
-                if username is not None or password is not None:
-                    record_out["_username_display"] = username or ""
-                    record_out["_password_display"] = password or ""
+        deep_candidates: list[tuple[int, str]] = []
+        detected_count = 0
+        for idx, host in indexed_hosts:
+            detect_record = detect_records[idx]
+            detect_status = str(detect_record.get("status") or "fail")
+            if not bool(detect_record.get("is_consul")):
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_consul")
+                continue
+            detected_count += 1
+            if detect_status in {"open_no_auth", "valid_credentials"}:
+                deep_candidates.append((idx, host))
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
+            elif debug_emit is not None:
+                debug_emit(f"{host}:{port} stage2_gate=skip reason=status={detect_status}")
 
-                suppress_timeout_detect_line = (
-                    suppress_timeout_status_lines and output_format == "txt" and status == "fail"
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect complete consul={detected_count} deep_candidates={len(deep_candidates)}")
+
+        if progress is not None:
+            progress.set_total(len(indexed_hosts) + len(deep_candidates))
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
+
+        if deep_candidates:
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+                pass2_future_map = {
+                    executor.submit(
+                        _call_audit_consul_host_with_thread_debug,
+                        host,
+                        port,
+                        timeout,
+                        retries,
+                        token=token,
+                        username=username,
+                        password=password,
+                        do_ssrf=do_ssrf,
+                        ssrf_urls=ssrf_urls,
+                        show_keys=show_keys,
+                        kv_key=kv_key,
+                        dump_requested=dump_requested,
+                        dump_all_requested=dump_all_requested,
+                        show_services=show_services,
+                        show_agents=show_agents,
+                        show_checks=show_checks,
+                        check_dump_id=check_dump_id,
+                        show_nodes=show_nodes,
+                        service_name=service_name,
+                        service_dump_name=service_dump_name,
+                        agent_dump_name=agent_dump_name,
+                        node_dump_name=node_dump_name,
+                        delete_service=delete_service,
+                        service_args=service_args,
+                        revshell_enabled=revshell_enabled,
+                        delete_revshell=delete_revshell,
+                        revshell_listen=revshell_listen,
+                        revshell_host=revshell_host,
+                        revshell_port=revshell_port,
+                        revshell_payload=revshell_payload,
+                        revshell_check_id=revshell_check_id,
+                        preferred_scheme=preferred_scheme,
+                        debug=bool(debug_emit),
+                        run_deep_checks=True,
+                        debug_emit=debug_emit,
+                    ): idx
+                    for idx, host in deep_candidates
+                }
+                for future in as_completed(pass2_future_map):
+                    record_idx = int(pass2_future_map[future])
+                    deep_records[record_idx] = future.result()
+                    if progress is not None:
+                        progress.advance()
+
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
+
+        final_records: dict[int, dict[str, Any]] = {}
+        for idx in range(len(hosts)):
+            detect_record = detect_records[idx]
+            deep_record = deep_records.get(idx)
+            if deep_record is None:
+                final_records[idx] = detect_record
+            else:
+                final_records[idx] = _merge_stage2_record(detect_record, deep_record)
+
+        for idx in range(len(hosts)):
+            record = final_records[idx]
+            total += 1
+            if bool(record.get("is_consul")):
+                detected += 1
+            status = str(record.get("status") or "fail")
+            if status == "fail":
+                failed += 1
+
+            script_revshell = record.get("script_revshell")
+            if (
+                isinstance(script_revshell, dict)
+                and str(script_revshell.get("action") or "").strip().lower() != "delete"
+                and bool(script_revshell.get("registered"))
+            ):
+                revshell_registered_any = True
+
+            if debug_emit is not None and not bool(record.get("debug_events_streamed")):
+                for event in record.get("debug_events") or []:
+                    if isinstance(event, str) and event.strip():
+                        debug_emit(event)
+
+            record_out = dict(record)
+            if username is not None or password is not None:
+                record_out["_username_display"] = username or ""
+                record_out["_password_display"] = password or ""
+
+            if output_format != "txt":
+                _emit_line(out_fh, emit_line, _detect_line(record_out, output_format))
+
+            if output_format == "txt":
+                line = _summary_line(record_out)
+                suppress_anonymous_summary = (
+                    bool(str(record_out.get("auth_mode") or "").strip()) and record_out.get("auth_valid") is True
                 )
-                if not suppress_timeout_detect_line:
-                    _emit_line(out_fh, emit_line, _detect_line(record_out, output_format))
-                if output_format == "txt":
-                    line = _summary_line(record_out)
-                    suppress_anonymous_summary = (
-                        bool(str(record_out.get("auth_mode") or "").strip()) and record_out.get("auth_valid") is True
-                    )
-                    if line and not suppress_anonymous_summary:
-                        _emit_line(out_fh, emit_line, f"{_cx_prefix(record_out)} {line}")
-                    auth_line = _auth_summary_line(record_out)
-                    if auth_line:
-                        _emit_line(out_fh, emit_line, f"{_cx_prefix(record_out)} {auth_line}")
-                    for detail in _detail_lines(record_out, output_format, debug=(logger is not None)):
-                        _emit_line(out_fh, emit_line, detail)
+                if line and not suppress_anonymous_summary:
+                    _emit_line(out_fh, emit_line, f"{_cx_prefix(record_out)} {line}")
+                auth_line = _auth_summary_line(record_out)
+                if auth_line:
+                    _emit_line(out_fh, emit_line, f"{_cx_prefix(record_out)} {auth_line}")
+                for detail in _detail_lines(record_out, output_format, debug=(logger is not None)):
+                    _emit_line(out_fh, emit_line, detail)
 
-                if logger is not None:
-                    anon_scopes = record.get("anonymous_scopes", {})
-                    script_data = record.get("script_revshell")
-                    logger.log(
-                        "consul",
-                        (str(record.get("host") or "-"), int(record.get("port") or port)),
-                        phase="audit",
-                        status=record.get("status"),
-                        scheme=record.get("scheme"),
-                        version=record.get("version"),
-                        anon_kv=bool(anon_scopes.get("kv", {}).get("ok")),
-                        anon_services=bool(anon_scopes.get("services", {}).get("ok")),
-                        anon_agents=bool(anon_scopes.get("agents", {}).get("ok")),
-                        rce=bool(record.get("rce")),
-                        error=record.get("error"),
-                        revshell=bool(script_data and script_data.get("registered")),
-                    )
+            if logger is not None:
+                anon_scopes = record.get("anonymous_scopes", {})
+                script_data = record.get("script_revshell")
+                logger.log(
+                    "consul",
+                    (str(record.get("host") or "-"), int(record.get("port") or port)),
+                    phase="audit",
+                    status=record.get("status"),
+                    scheme=record.get("scheme"),
+                    version=record.get("version"),
+                    anon_kv=bool(anon_scopes.get("kv", {}).get("ok")),
+                    anon_services=bool(anon_scopes.get("services", {}).get("ok")),
+                    anon_agents=bool(anon_scopes.get("agents", {}).get("ok")),
+                    rce=bool(record.get("rce")),
+                    error=record.get("error"),
+                    revshell=bool(script_data and script_data.get("registered")),
+                )
     finally:
+        if progress is not None:
+            progress.close()
         if out_fh is not None:
             out_fh.close()
 
@@ -3423,6 +4295,15 @@ def run_consul_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if args.debug:
             console.plain(line)
 
+    def emit_debug(message: str) -> None:
+        if not args.debug:
+            return
+        debug_method = getattr(console, "debug", None)
+        if callable(debug_method):
+            debug_method(message)
+            return
+        console.info(message)
+
     if args.debug and args.output_format == "txt":
         auth_label = "token" if token else ("basic" if (username is not None or password is not None) else "none")
         console.info(
@@ -3444,6 +4325,13 @@ def run_consul_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     detected = 0
     failed = 0
     revshell_registered_any = False
+    outer_progress: ProgressBar | None = None
+
+    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+    if use_single_global_progress:
+        global_total = sum(len(group.hosts) for group in execution_groups)
+        outer_progress = ProgressBar(_CONSUL_TAG, global_total, enabled=True, leave=True)
+
     try:
         for idx, group in enumerate(execution_groups):
             part_total, part_detected, part_failed, part_revshell_registered = audit_consul_targets(
@@ -3486,14 +4374,21 @@ def run_consul_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 append_output=idx > 0,
                 suppress_timeout_status_lines=not bool(args.debug),
                 preferred_scheme=group.scheme_hint,
+                debug_emit=emit_debug if args.debug else None,
+                show_progress=not use_single_global_progress,
             )
             total += part_total
             detected += part_detected
             failed += part_failed
             revshell_registered_any = bool(revshell_registered_any or part_revshell_registered)
+            if outer_progress is not None:
+                outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process consul output: {exc}")
         return 2
+    finally:
+        if outer_progress is not None:
+            outer_progress.close()
 
     if stream_to_stdout and total > 0 and detected == 0 and failed == total and args.output_format == "txt":
         console.warn("all consul targets are unreachable; check host/port and network reachability")

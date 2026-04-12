@@ -24,7 +24,13 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import ProgressBar
-from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
+from .utils import (
+    build_scan_execution_groups,
+    collect_scan_ports,
+    collect_scan_target_specs,
+    is_signature_compat_typeerror,
+    utc_now_iso,
+)
 
 _ELASTIC_TAG = "ELASTIC"
 _DISCOVER_QUERY_SIZE = 10000
@@ -1782,7 +1788,9 @@ def _call_audit_elastic_host_with_thread_debug(
                 debug=debug,
                 run_deep_checks=run_deep_checks,
             )
-        except TypeError:
+        except TypeError as exc:
+            if not is_signature_compat_typeerror(exc, expected_keywords={"debug", "run_deep_checks"}):
+                raise
             return _audit_elastic_host(
                 host,
                 port,
@@ -3165,6 +3173,7 @@ def audit_elastic_targets(
     suppress_timeout_status_lines: bool = False,
     preferred_scheme: str | None = None,
     debug_emit: Callable[[str], None] | None = None,
+    show_progress: bool = True,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -3182,7 +3191,7 @@ def audit_elastic_targets(
         indexed_hosts = list(enumerate(hosts))
         detect_records: dict[int, dict[str, Any]] = {}
         deep_records: dict[int, dict[str, Any]] = {}
-        progress = ProgressBar(_ELASTIC_TAG, len(indexed_hosts), enabled=True, leave=True)
+        progress = ProgressBar(_ELASTIC_TAG, len(indexed_hosts), enabled=show_progress, leave=True)
 
         if debug_emit is not None:
             debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
@@ -3467,6 +3476,11 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     valid = 0
     auth_required = 0
     failed = 0
+    outer_progress: ProgressBar | None = None
+    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+    if use_single_global_progress:
+        global_total = sum(len(group.hosts) for group in execution_groups)
+        outer_progress = ProgressBar(_ELASTIC_TAG, global_total, enabled=True, leave=True)
 
     try:
         for idx, group in enumerate(execution_groups):
@@ -3493,15 +3507,21 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 suppress_timeout_status_lines=not bool(args.debug),
                 preferred_scheme=group.scheme_hint,
                 debug_emit=emit_debug if args.debug else None,
+                show_progress=not use_single_global_progress,
             )
             total += part_total
             open_no_auth += part_open
             valid += part_valid
             auth_required += part_auth
             failed += part_failed
+            if outer_progress is not None:
+                outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process elastic output: {exc}")
         return 2
+    finally:
+        if outer_progress is not None:
+            outer_progress.close()
 
     if (
         stream_to_stdout

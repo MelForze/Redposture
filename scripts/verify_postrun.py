@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from collections import Counter
@@ -96,6 +97,26 @@ _EXPECTED_LABELS = (
     "proxmox_url_override_https",
     "proxmox_multi_instance_urls",
 )
+
+_PROGRESS_EXPECTED_TARGETS = {
+    "exporters_scan": 48,
+    "registry_multi_instance_urls": 5,
+    "grafana_multi_instance_urls": 5,
+    "gitlab_multi_instance_urls": 5,
+    "consul_multi_instance_urls": 5,
+    "kubeapi_multi_instance_urls": 5,
+    "postgres_multi_ports": 5,
+    "clickhouse_multi_ports": 5,
+    "redis_multi_ports": 5,
+    "etcd_multi_instance_urls": 5,
+    "qdrant_multi_instance_urls": 5,
+    "elastic_multi_instance_urls": 5,
+    "kafka_multi_ports": 5,
+    "zookeeper_multi_ports": 5,
+    "proxmox_multi_instance_urls": 5,
+}
+
+_PROGRESS_LINE_RE = re.compile(r"Running redposture against (\d+) targets?")
 
 
 def _parse_status_file(path: Path) -> list[dict[str, str]]:
@@ -204,6 +225,68 @@ def _validate_json_artifacts(rows: list[dict[str, str]]) -> Counter[str]:
     return successful_modules
 
 
+def _progress_counts_from_log(text: str) -> list[int]:
+    return [int(match.group(1)) for match in _PROGRESS_LINE_RE.finditer(text)]
+
+
+def _infer_target_count_from_jsonl(text: str) -> int:
+    seen: set[tuple[str, int]] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        host = payload.get("host")
+        port = payload.get("port")
+        if isinstance(host, str) and isinstance(port, int):
+            seen.add((host, port))
+    return len(seen)
+
+
+def _validate_output_sanity(rows: list[dict[str, str]]) -> None:
+    for row in rows:
+        log_path = Path(row["log_path"])
+        if not log_path.exists():
+            raise SystemExit(f"missing run log file: {log_path}")
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+        label = row["label"]
+        module = row["module"]
+        is_debug_run = "debug" in label
+
+        # Non-debug regressions: debug trace markers must not leak into default runs.
+        if not is_debug_run and "stage_trace " in log_text:
+            raise SystemExit(f"unexpected debug stage_trace in non-debug run log for label '{label}'")
+
+        # Noise regression: agreed modules should not print noisy connection-failed row in successful default runs.
+        if row["exit_code"] == "0" and module in {"redis", "etcd", "kafka"} and not is_debug_run:
+            if "[!] connection failed err=" in log_text:
+                raise SystemExit(f"unexpected noisy connection failed line in non-debug log for label '{label}'")
+
+        expected_targets = _PROGRESS_EXPECTED_TARGETS.get(label)
+        if expected_targets is None or row["exit_code"] != "0":
+            continue
+        counts = _progress_counts_from_log(log_text)
+        if not counts:
+            # Some json/jsonl flows intentionally stream structured rows without rendering progress.
+            inferred_targets = _infer_target_count_from_jsonl(log_text)
+            if inferred_targets == expected_targets:
+                continue
+            raise SystemExit(f"missing progress row in log for label '{label}'")
+        if expected_targets not in counts:
+            raise SystemExit(
+                f"progress target count mismatch for label '{label}': expected {expected_targets}, got {counts}"
+            )
+        if expected_targets > 1 and 1 in counts:
+            raise SystemExit(f"progress regressed to single-target batches in label '{label}': counts={counts}")
+        if any(count != expected_targets for count in counts):
+            raise SystemExit(
+                f"progress target count mismatch for label '{label}': expected {expected_targets}, got {counts}"
+            )
+
+
 def _run_cli_check(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "redposture.py", *args],
@@ -257,6 +340,8 @@ def main() -> int:
     missing_modules = sorted(module for module in _EXPECTED_MODULES if module not in seen_modules)
     if missing_modules:
         raise SystemExit(f"matrix status is missing expected modules: {', '.join(missing_modules)}")
+
+    _validate_output_sanity(rows)
 
     missing_success = sorted(module for module in _EXPECTED_MODULES if successful_modules.get(module, 0) == 0)
     if missing_success:

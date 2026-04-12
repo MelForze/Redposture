@@ -6,9 +6,13 @@ import pytest
 
 from scripts.verify_postrun import (
     _EXPECTED_LABELS,
+    _PROGRESS_EXPECTED_TARGETS,
+    _infer_target_count_from_jsonl,
     _parse_status_file,
+    _progress_counts_from_log,
     _validate_expected_exits,
     _validate_expected_labels,
+    _validate_output_sanity,
 )
 
 
@@ -85,3 +89,153 @@ def test_validate_expected_labels_fails_when_missing_label() -> None:
 def test_validate_expected_labels_passes_with_full_label_set() -> None:
     rows = [{"module": "elastic", "label": label} for label in _EXPECTED_LABELS]
     _validate_expected_labels(rows)
+
+
+def test_progress_counts_from_log_parses_counts() -> None:
+    text = "Running redposture against 1 target\nsomething\nRunning redposture against 5 targets\n"
+    assert _progress_counts_from_log(text) == [1, 5]
+
+
+def test_infer_target_count_from_jsonl_counts_unique_host_port_pairs() -> None:
+    text = (
+        '{"host":"127.0.0.1","port":15000}\n'
+        '{"host":"127.0.0.1","port":15001}\n'
+        '{"host":"127.0.0.1","port":15000}\n'
+        "not-json\n"
+    )
+    assert _infer_target_count_from_jsonl(text) == 2
+
+
+def test_validate_output_sanity_detects_single_target_regression(tmp_path: Path) -> None:
+    log = tmp_path / "consul.log"
+    log.write_text(
+        "Running redposture against 1 target\nRunning redposture against 1 target\n",
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "module": "consul",
+            "label": "consul_multi_instance_urls",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": "-",
+            "log_path": str(log),
+        }
+    ]
+    with pytest.raises(SystemExit, match="progress target count mismatch|single-target batches"):
+        _validate_output_sanity(rows)
+
+
+def test_validate_output_sanity_rejects_debug_trace_leak(tmp_path: Path) -> None:
+    log = tmp_path / "elastic.log"
+    log.write_text("stage_trace stage_name=detect attempt=1 duration_ms=3 result=ok error=-\n", encoding="utf-8")
+    rows = [
+        {
+            "module": "elastic",
+            "label": "elastic_open",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": "-",
+            "log_path": str(log),
+        }
+    ]
+    with pytest.raises(SystemExit, match="unexpected debug stage_trace"):
+        _validate_output_sanity(rows)
+
+
+def test_validate_output_sanity_rejects_noisy_connection_failed_line(tmp_path: Path) -> None:
+    log = tmp_path / "redis.log"
+    log.write_text(
+        "REDIS 127.0.0.1 6379 [!] connection failed err=[Errno 111] Connection refused\n",
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "module": "redis",
+            "label": "redis_default",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": "-",
+            "log_path": str(log),
+        }
+    ]
+    with pytest.raises(SystemExit, match="unexpected noisy connection failed line"):
+        _validate_output_sanity(rows)
+
+
+def test_validate_output_sanity_passes_for_expected_multi_target_log(tmp_path: Path) -> None:
+    log = tmp_path / "kafka.log"
+    log.write_text("Running redposture against 5 targets\n", encoding="utf-8")
+    rows = [
+        {
+            "module": "kafka",
+            "label": "kafka_multi_ports",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": "-",
+            "log_path": str(log),
+        }
+    ]
+    _validate_output_sanity(rows)
+
+
+def test_validate_output_sanity_allows_repeated_same_progress_total(tmp_path: Path) -> None:
+    log = tmp_path / "consul.log"
+    log.write_text(
+        "Running redposture against 5 targets\nRunning redposture against 5 targets\n",
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "module": "consul",
+            "label": "consul_multi_instance_urls",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": "-",
+            "log_path": str(log),
+        }
+    ]
+    _validate_output_sanity(rows)
+
+
+def test_validate_output_sanity_rejects_mixed_progress_totals(tmp_path: Path) -> None:
+    log = tmp_path / "consul.log"
+    log.write_text(
+        "Running redposture against 5 targets\nRunning redposture against 4 targets\n",
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "module": "consul",
+            "label": "consul_multi_instance_urls",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": "-",
+            "log_path": str(log),
+        }
+    ]
+    with pytest.raises(SystemExit, match="progress target count mismatch"):
+        _validate_output_sanity(rows)
+
+
+def test_clickhouse_multi_ports_expected_targets_is_five() -> None:
+    assert _PROGRESS_EXPECTED_TARGETS["clickhouse_multi_ports"] == 5
+
+
+def test_validate_output_sanity_allows_multi_target_json_log_without_progress(tmp_path: Path) -> None:
+    log = tmp_path / "registry_multi.log"
+    log.write_text(
+        "\n".join(f'{{"host":"127.0.0.1","port":1500{i},"type":"detect"}}' for i in range(5)) + "\n",
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "module": "registry",
+            "label": "registry_multi_instance_urls",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": "-",
+            "log_path": str(log),
+        }
+    ]
+    _validate_output_sanity(rows)

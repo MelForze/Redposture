@@ -9,18 +9,25 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import iter_completed_with_progress
-from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
+from .progress import ProgressBar
+from .utils import (
+    build_scan_execution_groups,
+    collect_scan_ports,
+    collect_scan_target_specs,
+    is_signature_compat_typeerror,
+    utc_now_iso,
+)
 
 _REGISTRY_MANIFEST_ACCEPT = ",".join(
     (
@@ -38,6 +45,11 @@ _CONNECTION_REFUSED_PREFIX = "connection refused"
 _SUSPICIOUS_TEXT_RE = re.compile(
     r"(?i)(password|passwd|secret|token|api[_-]?key|access[_-]?key|aws[_-]?secret|private[_-]?key)"
 )
+_STAGE_DETECT_PROTOCOL = "detect_protocol"
+_STAGE_AUTH_INFERENCE = "auth_inference_credentials"
+_STAGE_ACCESS_CAPABILITIES = "access_capabilities"
+_STAGE_DATA = "data"
+_THREAD_LOCAL_DEBUG_EMIT = threading.local()
 
 
 def _clip(text: str, width: int = 72) -> str:
@@ -50,6 +62,13 @@ def _clip(text: str, width: int = 72) -> str:
 
 def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
+
+
+def _get_thread_debug_emitter() -> Callable[[str], None] | None:
+    callback = getattr(_THREAD_LOCAL_DEBUG_EMIT, "callback", None)
+    if callable(callback):
+        return callback
+    return None
 
 
 def _friendly_error_text(value: str) -> str:
@@ -1232,7 +1251,7 @@ def _extract_nexus_assets(components: list[dict[str, Any]]) -> list[dict[str, An
     return assets
 
 
-def _audit_registry_host(
+def _audit_registry_host_legacy(
     host: str,
     port: int,
     timeout: float,
@@ -1742,6 +1761,495 @@ def _audit_registry_host(
         "probe_status": None,
         "error": last_error or "connection failed",
     }
+
+
+def _call_audit_registry_host_with_thread_debug(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    username: str | None,
+    password: str | None,
+    token: str | None,
+    docker: bool,
+    show_images: bool,
+    show_tags: bool,
+    repository: str | None,
+    tag: str | None,
+    metadata: bool,
+    harbor: bool,
+    gitlab: bool,
+    nexus: bool,
+    assets: bool,
+    inspect: bool,
+    image: str | None,
+    download: bool,
+    download_dir: str,
+    console: Console,
+    debug: bool,
+    run_deep_checks: bool,
+    debug_emit: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    def _invoke() -> dict[str, Any]:
+        try:
+            return _audit_registry_host(
+                host,
+                port,
+                timeout,
+                retries,
+                username=username,
+                password=password,
+                token=token,
+                docker=docker,
+                show_images=show_images,
+                show_tags=show_tags,
+                repository=repository,
+                tag=tag,
+                metadata=metadata,
+                harbor=harbor,
+                gitlab=gitlab,
+                nexus=nexus,
+                assets=assets,
+                inspect=inspect,
+                image=image,
+                download=download,
+                download_dir=download_dir,
+                console=console,
+                debug=debug,
+                run_deep_checks=run_deep_checks,
+            )
+        except TypeError as exc:
+            if not is_signature_compat_typeerror(exc, expected_keywords={"debug", "run_deep_checks"}):
+                raise
+            return _audit_registry_host(
+                host,
+                port,
+                timeout,
+                retries,
+                username=username,
+                password=password,
+                token=token,
+                docker=docker,
+                show_images=show_images,
+                show_tags=show_tags,
+                repository=repository,
+                tag=tag,
+                metadata=metadata,
+                harbor=harbor,
+                gitlab=gitlab,
+                nexus=nexus,
+                assets=assets,
+                inspect=inspect,
+                image=image,
+                download=download,
+                download_dir=download_dir,
+                console=console,
+                debug=debug,
+            )
+
+    if debug_emit is None:
+        return _invoke()
+    _THREAD_LOCAL_DEBUG_EMIT.callback = debug_emit
+    try:
+        return _invoke()
+    finally:
+        try:
+            delattr(_THREAD_LOCAL_DEBUG_EMIT, "callback")
+        except AttributeError:
+            pass
+
+
+def _audit_registry_host(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    username: str | None,
+    password: str | None,
+    token: str | None,
+    docker: bool,
+    show_images: bool,
+    show_tags: bool,
+    repository: str | None,
+    tag: str | None,
+    metadata: bool,
+    harbor: bool,
+    gitlab: bool,
+    nexus: bool,
+    assets: bool,
+    inspect: bool,
+    image: str | None,
+    download: bool,
+    download_dir: str,
+    console: Console,
+    debug: bool,
+    run_deep_checks: bool = True,
+) -> dict[str, Any]:
+    attempts = max(1, retries + 1)
+    last_error: str | None = None
+    debug_events: list[str] = []
+    stages: list[dict[str, Any]] = []
+    stage_durations_ms: dict[str, int] = {}
+    stage_attempts: dict[str, int] = {}
+    stage_failed_at: str | None = None
+    debug_events_streamed = False
+
+    def _debug(message: str) -> None:
+        nonlocal debug_events_streamed
+        if not debug:
+            return
+        debug_line = f"{host}:{port} {message}"
+        debug_events.append(debug_line)
+        emitter = _get_thread_debug_emitter()
+        if emitter is not None:
+            emitter(debug_line)
+            debug_events_streamed = True
+
+    def _debug_retry_decision(
+        stage_name: str,
+        *,
+        attempt: int,
+        max_attempts: int,
+        delay_s: float,
+        reason: str | None,
+    ) -> None:
+        reason_text = str(reason or "").strip() or "-"
+        _debug(
+            f"retry_decision stage={stage_name} attempt={attempt}/{max_attempts} "
+            f"backoff={delay_s:.2f}s reason={reason_text}"
+        )
+
+    def _stage_trace(
+        stage_name: str,
+        *,
+        attempt: int,
+        started_at: float,
+        result: str,
+        error: str | None = None,
+    ) -> None:
+        nonlocal stage_failed_at
+        duration_ms = int((time.monotonic() - started_at) * 1000)
+        stage_attempts[stage_name] = max(int(stage_attempts.get(stage_name, 0)), int(attempt))
+        stage_durations_ms[stage_name] = int(stage_durations_ms.get(stage_name, 0)) + duration_ms
+        entry = {
+            "stage_name": stage_name,
+            "attempt": int(attempt),
+            "duration_ms": int(duration_ms),
+            "result": str(result),
+            "error": str(error or "").strip() or None,
+        }
+        stages.append(entry)
+        if stage_failed_at is None and result in {"fail", "timeout"}:
+            stage_failed_at = stage_name
+        _debug(
+            f"stage_trace stage_name={stage_name} attempt={attempt} duration_ms={duration_ms} "
+            f"result={result} error={str(error or '-').strip() or '-'}"
+        )
+
+    def _emit_stage_timing_summary(*, status: str, attempts_done: int, max_attempts: int) -> None:
+        def _duration(stage_name: str) -> str:
+            raw = stage_durations_ms.get(stage_name)
+            if isinstance(raw, int):
+                return f"{raw}ms"
+            return "-"
+
+        def _attempt_count(stage_name: str) -> int:
+            raw = stage_attempts.get(stage_name)
+            return int(raw) if isinstance(raw, int) else 0
+
+        _debug(
+            f"stage_timing_summary status={status} attempts={attempts_done}/{max_attempts} "
+            f"detect={_duration(_STAGE_DETECT_PROTOCOL)} "
+            f"auth={_duration(_STAGE_AUTH_INFERENCE)} "
+            f"capabilities={_duration(_STAGE_ACCESS_CAPABILITIES)} "
+            f"data={_duration(_STAGE_DATA)} "
+            f"stage_attempts="
+            f"detect:{_attempt_count(_STAGE_DETECT_PROTOCOL)},"
+            f"auth:{_attempt_count(_STAGE_AUTH_INFERENCE)},"
+            f"capabilities:{_attempt_count(_STAGE_ACCESS_CAPABILITIES)},"
+            f"data:{_attempt_count(_STAGE_DATA)}"
+        )
+
+    def _record(payload: dict[str, Any], *, attempts_done: int, max_attempts: int) -> dict[str, Any]:
+        if debug:
+            _emit_stage_timing_summary(
+                status=str(payload.get("status") or "fail"),
+                attempts_done=attempts_done,
+                max_attempts=max_attempts,
+            )
+        record = dict(payload)
+        record["attempts"] = int(attempts_done)
+        record["max_attempts"] = int(max_attempts)
+        record["stages"] = list(stages)
+        record["stage_failed_at"] = stage_failed_at
+        record["stage_durations_ms"] = dict(stage_durations_ms)
+        record["stage_attempts"] = dict(stage_attempts)
+        record["debug_events"] = list(debug_events) if debug else []
+        record["debug_events_streamed"] = bool(debug_events_streamed)
+        return record
+
+    for attempt in range(attempts):
+        _debug(f"attempt={attempt + 1}/{attempts} start timeout={timeout}s")
+        stage1_started = time.monotonic()
+        detect_record = _audit_registry_host_legacy(
+            host,
+            port,
+            timeout,
+            0,
+            username=username,
+            password=password,
+            token=token,
+            docker=False,
+            show_images=False,
+            show_tags=False,
+            repository=repository,
+            tag=tag,
+            metadata=False,
+            harbor=False,
+            gitlab=False,
+            nexus=False,
+            assets=False,
+            inspect=False,
+            image=image,
+            download=False,
+            download_dir=download_dir,
+            console=console,
+            debug=debug,
+        )
+        status = str(detect_record.get("status") or "fail")
+        if status in {"fail", "not_registry"}:
+            _stage_trace(
+                _STAGE_DETECT_PROTOCOL,
+                attempt=attempt + 1,
+                started_at=stage1_started,
+                result=status,
+                error=str(detect_record.get("error") or "").strip() or None,
+            )
+            if status == "fail":
+                last_error = str(detect_record.get("error") or "connection failed")
+                if attempt < attempts - 1:
+                    delay = _retry_delay(attempt)
+                    _debug_retry_decision(
+                        _STAGE_DETECT_PROTOCOL,
+                        attempt=attempt + 1,
+                        max_attempts=attempts,
+                        delay_s=delay,
+                        reason=last_error,
+                    )
+                    time.sleep(delay)
+                    continue
+            return _record(detect_record, attempts_done=attempt + 1, max_attempts=attempts)
+        _stage_trace(
+            _STAGE_DETECT_PROTOCOL,
+            attempt=attempt + 1,
+            started_at=stage1_started,
+            result="ok",
+            error=None,
+        )
+
+        stage2_started = time.monotonic()
+        _stage_trace(
+            _STAGE_AUTH_INFERENCE,
+            attempt=attempt + 1,
+            started_at=stage2_started,
+            result=status,
+            error=str(detect_record.get("error") or "").strip() or None,
+        )
+
+        if not run_deep_checks:
+            _debug(f"attempt={attempt + 1}/{attempts} detect-only result={status}")
+            return _record(detect_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+        if status not in {"open_no_auth", "valid_credentials"}:
+            return _record(detect_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+        stage3_started = time.monotonic()
+        _stage_trace(
+            _STAGE_ACCESS_CAPABILITIES,
+            attempt=attempt + 1,
+            started_at=stage3_started,
+            result="ok",
+            error=None,
+        )
+
+        stage4_started = time.monotonic()
+        deep_record = _audit_registry_host_legacy(
+            host,
+            port,
+            timeout,
+            0,
+            username=username,
+            password=password,
+            token=token,
+            docker=docker,
+            show_images=show_images,
+            show_tags=show_tags,
+            repository=repository,
+            tag=tag,
+            metadata=metadata,
+            harbor=harbor,
+            gitlab=gitlab,
+            nexus=nexus,
+            assets=assets,
+            inspect=inspect,
+            image=image,
+            download=download,
+            download_dir=download_dir,
+            console=console,
+            debug=debug,
+        )
+        deep_status = str(deep_record.get("status") or "fail")
+        deep_error = str(deep_record.get("error") or "").strip() or None
+        if deep_status == "fail":
+            _stage_trace(
+                _STAGE_DATA,
+                attempt=attempt + 1,
+                started_at=stage4_started,
+                result="fail",
+                error=deep_error,
+            )
+            last_error = deep_error or "deep stage failed"
+            if attempt < attempts - 1:
+                delay = _retry_delay(attempt)
+                _debug_retry_decision(
+                    _STAGE_DATA,
+                    attempt=attempt + 1,
+                    max_attempts=attempts,
+                    delay_s=delay,
+                    reason=last_error,
+                )
+                time.sleep(delay)
+                continue
+            return _record(deep_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+        _stage_trace(
+            _STAGE_DATA,
+            attempt=attempt + 1,
+            started_at=stage4_started,
+            result="ok",
+            error=None,
+        )
+        return _record(deep_record, attempts_done=attempt + 1, max_attempts=attempts)
+
+    return _record(
+        {
+            "timestamp": utc_now_iso(),
+            "host": host,
+            "port": port,
+            "is_registry": False,
+            "is_harbor": None,
+            "is_gitlab": None,
+            "is_nexus": None,
+            "status": "fail",
+            "auth_required": None,
+            "provided_credentials": bool(username and password),
+            "provided_username": username,
+            "provided_password": password if username and password else None,
+            "token_provided": bool(token),
+            "debug": debug,
+            "show_images": show_images,
+            "docker": docker,
+            "show_tags": show_tags,
+            "repository": str(repository or "").strip() or None,
+            "tag": str(tag or "").strip() or None,
+            "metadata": metadata,
+            "harbor": harbor,
+            "gitlab": gitlab,
+            "nexus": nexus,
+            "assets": assets,
+            "inspect": inspect,
+            "image": str(image or "").strip() or None,
+            "download": download,
+            "image_count": None,
+            "images": None,
+            "images_error": None,
+            "harbor_info": None,
+            "harbor_projects": None,
+            "harbor_repositories": None,
+            "harbor_artifacts": None,
+            "harbor_error": None,
+            "gitlab_info": None,
+            "gitlab_error": None,
+            "gitlab_repositories": None,
+            "gitlab_repository_details": None,
+            "selected_repository_tags": None,
+            "metadata_result": None,
+            "nexus_info": None,
+            "nexus_repositories": None,
+            "nexus_repository_details": None,
+            "nexus_assets": None,
+            "nexus_error": None,
+            "inspections": None,
+            "inspection_error": None,
+            "download_result": None,
+            "elapsed_ms": None,
+            "probe_status": None,
+            "error": _friendly_error_text(last_error or "connection failed"),
+        },
+        attempts_done=attempts,
+        max_attempts=attempts,
+    )
+
+
+def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(detect_record)
+
+    detect_debug_events = detect_record.get("debug_events")
+    deep_debug_events = deep_record.get("debug_events")
+    merged_debug_events: list[str] = []
+    if isinstance(detect_debug_events, list):
+        for item in detect_debug_events:
+            if isinstance(item, str) and item.strip():
+                merged_debug_events.append(item)
+    if isinstance(deep_debug_events, list):
+        for item in deep_debug_events:
+            if isinstance(item, str) and item.strip():
+                merged_debug_events.append(item)
+    merged["debug_events"] = merged_debug_events
+    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
+        deep_record.get("debug_events_streamed")
+    )
+
+    deep_fields = (
+        "status",
+        "auth_required",
+        "image_count",
+        "images",
+        "images_error",
+        "harbor_info",
+        "harbor_projects",
+        "harbor_repositories",
+        "harbor_artifacts",
+        "harbor_error",
+        "gitlab_info",
+        "gitlab_error",
+        "gitlab_repositories",
+        "gitlab_repository_details",
+        "selected_repository_tags",
+        "metadata_result",
+        "nexus_info",
+        "nexus_repositories",
+        "nexus_repository_details",
+        "nexus_assets",
+        "nexus_error",
+        "inspections",
+        "inspection_error",
+        "download_result",
+        "elapsed_ms",
+        "probe_status",
+        "error",
+        "attempts",
+        "max_attempts",
+        "stages",
+        "stage_failed_at",
+        "stage_durations_ms",
+        "stage_attempts",
+    )
+    for field in deep_fields:
+        merged[field] = deep_record.get(field)
+    return merged
 
 
 def _nxc_prefix(record: dict[str, Any]) -> str:
@@ -2424,6 +2932,8 @@ def audit_registry_targets(
     debug: bool,
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
+    debug_emit: Callable[[str], None] | None = None,
+    show_progress: bool = True,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -2433,6 +2943,7 @@ def audit_registry_targets(
     failed = 0
 
     out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8") if output_path else None
+    progress: ProgressBar | None = None
     write_lock = None
     if out_fh is not None:
         import threading
@@ -2448,10 +2959,18 @@ def audit_registry_targets(
             out_fh.flush()
 
     try:
+        indexed_hosts = list(enumerate(hosts))
+        detect_records: dict[int, dict[str, Any]] = {}
+        deep_records: dict[int, dict[str, Any]] = {}
+        progress = ProgressBar("REGISTRY", len(indexed_hosts), enabled=show_progress, leave=True)
+
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
+
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            futures = {
+            pass1_futures = {
                 pool.submit(
-                    _audit_registry_host,
+                    _call_audit_registry_host_with_thread_debug,
                     host,
                     port,
                     timeout,
@@ -2475,60 +2994,164 @@ def audit_registry_targets(
                     download_dir=download_dir,
                     console=console,
                     debug=debug,
-                ): host
-                for host in hosts
+                    run_deep_checks=False,
+                    debug_emit=debug_emit,
+                ): idx
+                for idx, host in indexed_hosts
             }
 
-            for future in iter_completed_with_progress(futures, label="REGISTRY"):
-                record = future.result()
-                total += 1
-                state = str(record.get("status") or "")
-                if state == "open_no_auth":
-                    open_no_auth += 1
-                elif state == "valid_credentials":
-                    valid += 1
-                elif state == "auth_required":
-                    auth_required += 1
-                elif state == "not_registry":
-                    not_registry += 1
-                else:
-                    failed += 1
+            buffered_records: dict[int, dict[str, Any]] = {}
+            next_emit_idx = 0
+            for future in as_completed(pass1_futures):
+                record_idx = int(pass1_futures[future])
+                buffered_records[record_idx] = future.result()
+                if progress is not None:
+                    progress.advance()
+                while next_emit_idx in buffered_records:
+                    detect_record = buffered_records.pop(next_emit_idx)
+                    detect_records[next_emit_idx] = detect_record
+                    if output_format == "txt" and bool(detect_record.get("is_registry")):
+                        detect_status = str(detect_record.get("status") or "")
+                        suppress_timeout_detect_line = suppress_timeout_status_lines and detect_status == "fail"
+                        if not suppress_timeout_detect_line:
+                            line = _format_detect_record(detect_record, output_format)
+                            emit_line(line)
+                            write_output(line)
+                    next_emit_idx += 1
 
-                output_lines: list[str] = []
-                if bool(record.get("is_registry")):
-                    output_lines.append(_format_detect_record(record, output_format))
-                suppress_auth_required_status_line = (
-                    output_format == "txt"
-                    and bool(record.get("is_registry"))
-                    and state == "auth_required"
-                    and not bool(record.get("provided_credentials"))
-                    and not bool(record.get("token_provided"))
+        deep_candidates: list[tuple[int, str]] = []
+        detected_count = 0
+        for idx, host in indexed_hosts:
+            detect_record = detect_records[idx]
+            detect_status = str(detect_record.get("status") or "")
+            if not bool(detect_record.get("is_registry")):
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_registry")
+                continue
+            detected_count += 1
+            if detect_status in {"open_no_auth", "valid_credentials"}:
+                deep_candidates.append((idx, host))
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
+            elif debug_emit is not None:
+                debug_emit(f"{host}:{port} stage2_gate=skip reason=status={detect_status}")
+
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect complete registry={detected_count} deep_candidates={len(deep_candidates)}")
+
+        if progress is not None:
+            progress.set_total(len(indexed_hosts) + len(deep_candidates))
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
+
+        if deep_candidates:
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                pass2_futures = {
+                    pool.submit(
+                        _call_audit_registry_host_with_thread_debug,
+                        host,
+                        port,
+                        timeout,
+                        retries,
+                        username=username,
+                        password=password,
+                        token=token,
+                        docker=docker,
+                        show_images=show_images,
+                        show_tags=show_tags,
+                        repository=repository,
+                        tag=tag,
+                        metadata=metadata,
+                        harbor=harbor,
+                        gitlab=gitlab,
+                        nexus=nexus,
+                        assets=assets,
+                        inspect=inspect,
+                        image=image,
+                        download=download,
+                        download_dir=download_dir,
+                        console=console,
+                        debug=debug,
+                        run_deep_checks=True,
+                        debug_emit=debug_emit,
+                    ): idx
+                    for idx, host in deep_candidates
+                }
+                for future in as_completed(pass2_futures):
+                    record_idx = int(pass2_futures[future])
+                    deep_records[record_idx] = future.result()
+                    if progress is not None:
+                        progress.advance()
+
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
+
+        final_records: dict[int, dict[str, Any]] = {}
+        for idx in range(len(hosts)):
+            detect_record = detect_records[idx]
+            deep_record = deep_records.get(idx)
+            if deep_record is None:
+                final_records[idx] = detect_record
+            else:
+                final_records[idx] = _merge_stage2_record(detect_record, deep_record)
+
+        for idx in range(len(hosts)):
+            record = final_records[idx]
+            total += 1
+            state = str(record.get("status") or "")
+            if state == "open_no_auth":
+                open_no_auth += 1
+            elif state == "valid_credentials":
+                valid += 1
+            elif state == "auth_required":
+                auth_required += 1
+            elif state == "not_registry":
+                not_registry += 1
+            else:
+                failed += 1
+
+            if debug_emit is not None and not bool(record.get("debug_events_streamed")):
+                for event in record.get("debug_events") or []:
+                    if isinstance(event, str) and event.strip():
+                        debug_emit(event)
+
+            output_lines: list[str] = []
+            if output_format != "txt" and bool(record.get("is_registry")):
+                output_lines.append(_format_detect_record(record, output_format))
+            suppress_auth_required_status_line = (
+                output_format == "txt"
+                and bool(record.get("is_registry"))
+                and state == "auth_required"
+                and not bool(record.get("provided_credentials"))
+                and not bool(record.get("token_provided"))
+            )
+            if not suppress_auth_required_status_line:
+                suppress_timeout_status_line = (
+                    suppress_timeout_status_lines and output_format == "txt" and state == "fail"
                 )
-                if not suppress_auth_required_status_line:
-                    suppress_timeout_status_line = (
-                        suppress_timeout_status_lines and output_format == "txt" and state == "fail"
-                    )
-                    if not suppress_timeout_status_line:
-                        output_lines.append(_format_record(record, output_format))
-                output_lines.extend(_format_detail_records(record, output_format))
+                if not suppress_timeout_status_line:
+                    output_lines.append(_format_record(record, output_format))
+            output_lines.extend(_format_detail_records(record, output_format))
 
-                for line in output_lines:
-                    emit_line(line)
-                    write_output(line)
+            for line in output_lines:
+                emit_line(line)
+                write_output(line)
 
-                if logger is not None:
-                    logger.log(
-                        "registry",
-                        (str(record.get("host") or "-"), int(record.get("port") or 0)),
-                        status=record.get("status"),
-                        auth_required=record.get("auth_required"),
-                        image_count=record.get("image_count"),
-                        is_harbor=record.get("is_harbor"),
-                        is_gitlab=record.get("is_gitlab"),
-                        is_nexus=record.get("is_nexus"),
-                        error=record.get("error"),
-                    )
+            if logger is not None:
+                logger.log(
+                    "registry",
+                    (str(record.get("host") or "-"), int(record.get("port") or 0)),
+                    status=record.get("status"),
+                    auth_required=record.get("auth_required"),
+                    image_count=record.get("image_count"),
+                    is_harbor=record.get("is_harbor"),
+                    is_gitlab=record.get("is_gitlab"),
+                    is_nexus=record.get("is_nexus"),
+                    error=record.get("error"),
+                )
     finally:
+        if progress is not None:
+            progress.close()
         if out_fh is not None:
             out_fh.close()
 
@@ -2625,6 +3248,15 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if args.debug:
             console.plain(line)
 
+    def emit_debug(message: str) -> None:
+        if not args.debug:
+            return
+        debug_method = getattr(console, "debug", None)
+        if callable(debug_method):
+            debug_method(message)
+            return
+        console.info(message)
+
     if args.debug and stream_to_stdout and args.output_format == "txt":
         mode_parts: list[str] = []
         if args.username and args.password:
@@ -2708,6 +3340,11 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     auth_required = 0
     not_registry = 0
     failed = 0
+    outer_progress: ProgressBar | None = None
+    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+    if use_single_global_progress:
+        global_total = sum(len(group.hosts) for group in execution_groups)
+        outer_progress = ProgressBar("REGISTRY", global_total, enabled=True, leave=True)
     try:
         for idx, group in enumerate(execution_groups):
             part_total, part_open, part_valid, part_auth, part_not_registry, part_failed = audit_registry_targets(
@@ -2741,6 +3378,8 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 debug=args.debug,
                 append_output=idx > 0,
                 suppress_timeout_status_lines=not bool(args.debug),
+                debug_emit=emit_debug if args.debug else None,
+                show_progress=not use_single_global_progress,
             )
             total += part_total
             open_no_auth += part_open
@@ -2748,9 +3387,14 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             auth_required += part_auth
             not_registry += part_not_registry
             failed += part_failed
+            if outer_progress is not None:
+                outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process registry output: {exc}")
         return 2
+    finally:
+        if outer_progress is not None:
+            outer_progress.close()
 
     if stream_to_stdout and total > 0 and open_no_auth == 0 and valid == 0 and auth_required == 0 and failed == total:
         if args.output_format == "txt":

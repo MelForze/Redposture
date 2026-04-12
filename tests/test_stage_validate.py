@@ -653,3 +653,23 @@ def test_validate_records_groups_duplicates_with_count_and_unique_summary(
     assert "Count: 2" in plain
     assert "SecondSecret-2026" in plain
     assert "credential_hits=2 unique_hits=1" in plain
+
+
+def test_validate_records_debug_emits_staged_markers(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "10.0.0.1",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--sasl.password=Sup3rS3cret2026\n",
+        }
+    ]
+
+    rc = run_validation_records(records, show=False, fail_on_creds=False, debug=True)
+    assert rc == 0
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", f"{capsys.readouterr().out}\n")
+    assert "pass=1 detect start total=1" in plain
+    assert "pass=2 deep start total=1" in plain
+    assert "stage2_gate=run reason=credential_hits>0" in plain
+    assert "stage_timing_summary status=hits attempts=1/1" in plain

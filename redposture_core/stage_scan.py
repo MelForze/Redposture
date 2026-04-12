@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from .console import Console
 from .logger import AttemptLogger
 from .profiles import load_profiles
+from .progress import ProgressBar
 from .scanner import scan_exporter_presence
 from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs
 
@@ -54,6 +56,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         return 2
 
     stream_to_stdout = not bool(args.output)
+    stage_started_at = time.monotonic()
 
     def _split_tabbed_tag(left: str) -> tuple[str, str]:
         parts = left.split("\t", 1)
@@ -101,16 +104,20 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
     if stream_to_stdout and args.output_format == "txt":
         ports_hint = f" ports={len(custom_ports)}(custom)" if custom_ports else ""
         console.info(
-            f"scan started: hosts={len(hosts)} timeout={args.timeout}s "
+            f"scan started: hosts={len(hosts)} targets={len(target_specs)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} format=txt{ports_hint}"
         )
     if not stream_to_stdout:
         ports_hint = f" ports={len(custom_ports)}(custom)" if custom_ports else ""
         console.info(
-            f"scan started: hosts={len(hosts)} timeout={args.timeout}s "
+            f"scan started: hosts={len(hosts)} targets={len(target_specs)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} "
             f"format={args.output_format} output={args.output}{ports_hint}"
         )
+
+    if args.debug:
+        console.debug(f"pass=1 detect start total={len(hosts)}")
+    detect_started_at = time.monotonic()
 
     has_explicit_port_targets = any(spec.explicit_port is not None for spec in target_specs)
     if not has_explicit_port_targets:
@@ -145,6 +152,11 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         found = 0
         found_by_host: dict[str, list[dict[str, object]]] = {host: [] for host in hosts}
         seen_hits: dict[str, set[tuple[str, int]]] = {host: set() for host in hosts}
+        use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+        outer_progress: ProgressBar | None = None
+        if use_single_global_progress:
+            global_total = sum(len(group.hosts) for group in execution_groups)
+            outer_progress = ProgressBar("SCAN", global_total, enabled=True, leave=True)
         try:
             for idx, group in enumerate(execution_groups):
                 part_checks, part_found, part_found_by_host = scan_exporter_presence(
@@ -159,10 +171,14 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
                     discovery_exporters=profiles["discovery_exporters"],
                     custom_ports=[group.port],
                     emit_summary=False,
+                    show_progress=not use_single_global_progress,
+                    progress_leave=False,
                     output_mode="a" if idx > 0 else "w",
                 )
                 checks += part_checks
                 found += part_found
+                if outer_progress is not None:
+                    outer_progress.advance(part_checks)
                 for host, hits in part_found_by_host.items():
                     for hit in hits:
                         exporter = str(hit.get("exporter") or "")
@@ -178,6 +194,28 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         except OSError as exc:
             console.error(f"failed to process scan output: {exc}")
             return 2
+        finally:
+            if outer_progress is not None:
+                outer_progress.close()
+
+    detect_ms = int((time.monotonic() - detect_started_at) * 1000)
+    deep_candidates = sum(1 for host in hosts if found_by_host.get(host))
+    if args.debug:
+        console.debug(f"pass=1 detect complete checks={checks} detected={found}")
+        console.debug(f"stage_trace stage_name=detect_protocol attempt=1 duration_ms={detect_ms} result=ok error=-")
+        console.debug(f"pass=2 deep start total={deep_candidates}")
+        for host in hosts:
+            host_hits = found_by_host.get(host, [])
+            if host_hits:
+                console.debug(f"{host} stage2_gate=run reason=detected={len(host_hits)}")
+            else:
+                console.debug(f"{host} stage2_gate=skip reason=detected=0")
+        console.debug(f"pass=2 deep complete processed={deep_candidates}")
+        console.debug("stage_trace stage_name=data attempt=1 duration_ms=0 result=ok error=-")
+        total_ms = int((time.monotonic() - stage_started_at) * 1000)
+        console.debug(
+            f"stage_timing_summary status=ok attempts=1/1 detect_ms={detect_ms} data_ms=0 total_ms={total_ms}"
+        )
 
     if stream_to_stdout:
         if args.output_format == "txt":
