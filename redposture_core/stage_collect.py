@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+import time
 from typing import Any, TextIO
 
 from .console import Console
@@ -182,6 +183,7 @@ def _filter_collect_exporter_profiles(
 
 def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     console = Console(debug=args.debug)
+    pipeline_started_at = time.monotonic()
 
     if args.timeout <= 0:
         console.error("--timeout must be > 0")
@@ -405,6 +407,10 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         finally:
             validate_console.close()
 
+    if args.debug:
+        console.debug(f"pass=1 detect start total={len(hosts)}")
+    detect_started_at = time.monotonic()
+
     has_explicit_port_targets = any(spec.explicit_port is not None for spec in target_specs)
     if not has_explicit_port_targets:
         try:
@@ -474,7 +480,18 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             console.error(f"failed to process collect discovery scan: {exc}")
             return 2
 
+    detect_ms = int((time.monotonic() - detect_started_at) * 1000)
+    deep_candidates = sum(1 for host in hosts if found_by_host.get(host))
     if args.debug:
+        console.debug(f"pass=1 detect complete checks={scan_checks} detected={scan_found}")
+        console.debug(f"stage_trace stage_name=detect_protocol attempt=1 duration_ms={detect_ms} result=ok error=-")
+        console.debug(f"pass=2 deep start total={deep_candidates}")
+        for host in hosts:
+            host_hits = list(found_by_host.get(host, []))
+            if host_hits:
+                console.debug(f"{host} stage2_gate=run reason=detected={len(host_hits)}")
+            else:
+                console.debug(f"{host} stage2_gate=skip reason=detected=0")
         for host in hosts:
             host_hits = list(found_by_host.get(host, []))
             console.debug(f"collect discovery host={host}: detected={len(host_hits)}")
@@ -482,8 +499,10 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     requests = 0
     success = 0
+    data_ms = 0
     collect_stats: dict[str, int] = {}
     if scan_found > 0:
+        data_started_at = time.monotonic()
         try:
             requests, success = collect_exporter_debug_data(
                 logger=logger if args.debug else None,
@@ -512,8 +531,16 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         except OSError as exc:
             console.error(f"failed to process collect output: {exc}")
             return 2
+        data_ms = int((time.monotonic() - data_started_at) * 1000)
 
     if scan_found <= 0:
+        if args.debug:
+            console.debug("pass=2 deep complete processed=0")
+            console.debug("stage_trace stage_name=data attempt=1 duration_ms=0 result=skip error=no_detected_exporters")
+            total_ms = int((time.monotonic() - pipeline_started_at) * 1000)
+            console.debug(
+                f"stage_timing_summary status=ok attempts=1/1 detect_ms={detect_ms} data_ms=0 total_ms={total_ms}"
+            )
         if args.output and args.output_format == "json":
             os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
             with open(args.output, "w", encoding="utf-8") as out_fh:
@@ -585,6 +612,13 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         )
         if args.debug:
             console.debug("debug mode enabled; detailed collect events emitted in text logs")
+    if args.debug:
+        console.debug(f"pass=2 deep complete processed={scan_found}")
+        console.debug(f"stage_trace stage_name=data attempt=1 duration_ms={data_ms} result=ok error=-")
+        total_ms = int((time.monotonic() - pipeline_started_at) * 1000)
+        console.debug(
+            f"stage_timing_summary status=ok attempts=1/1 detect_ms={detect_ms} data_ms={data_ms} total_ms={total_ms}"
+        )
     validate_rc = _finish_validation()
     if validate_rc == 2:
         return 2

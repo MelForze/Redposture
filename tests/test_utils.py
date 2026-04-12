@@ -11,6 +11,7 @@ from redposture_core.utils import (
     collect_scan_ports,
     collect_scan_target_specs,
     collect_scan_targets,
+    is_signature_compat_typeerror,
     normalize_ip_literal,
     normalize_scan_host,
     parse_proxmox_api_token_auth,
@@ -37,6 +38,13 @@ def test_collect_scan_targets_deduplicates_and_ignores_comments(tmp_path: Path) 
 
     hosts = collect_scan_targets(f"10.0.0.3,10.0.0.2,{hosts_file}")
     assert hosts == ["10.0.0.3", "10.0.0.2", "10.0.0.1"]
+
+
+def test_collect_scan_targets_keeps_file_precedence_when_token_matches_existing_file(tmp_path: Path) -> None:
+    host_like_file = tmp_path / "api.local"
+    host_like_file.write_text("10.10.10.10\n", encoding="utf-8")
+    hosts = collect_scan_targets(str(host_like_file))
+    assert hosts == ["10.10.10.10"]
 
 
 def test_collect_scan_targets_expands_cidr() -> None:
@@ -152,3 +160,22 @@ def test_parse_proxmox_api_token_auth_accepts_space_variant() -> None:
 
 def test_parse_proxmox_api_token_auth_rejects_other_schemes() -> None:
     assert parse_proxmox_api_token_auth("Basic dXNlcjpwYXNz") == (None, None)
+
+
+def test_is_signature_compat_typeerror_matches_expected_keywords() -> None:
+    exc = TypeError("got an unexpected keyword argument 'run_deep_checks'")
+    assert is_signature_compat_typeerror(exc, expected_keywords={"run_deep_checks"}) is True
+    assert is_signature_compat_typeerror(exc, expected_keywords={"debug"}) is False
+
+
+def test_is_signature_compat_typeerror_positional_mismatch_toggle() -> None:
+    exc = TypeError("takes 2 positional arguments but 3 were given")
+    assert is_signature_compat_typeerror(exc, expected_keywords={"run_deep_checks"}) is False
+    assert (
+        is_signature_compat_typeerror(
+            exc,
+            expected_keywords={"run_deep_checks"},
+            allow_positional_mismatch=True,
+        )
+        is True
+    )

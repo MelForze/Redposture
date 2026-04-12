@@ -1316,9 +1316,11 @@ def scan_exporters_and_trigger(
     trigger_exporters: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     log_trigger_events_only: bool = False,
     emit_trigger_event: Callable[[dict[str, Any]], None] | None = None,
+    emit_stage_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     exporters = list(trigger_exporters or SCAN_EXPORTERS)
     callback_list = list(dict.fromkeys(callback_targets))
+    pipeline_started_at = time.monotonic()
 
     total_detected = 0
     total_attempted = 0
@@ -1339,6 +1341,10 @@ def scan_exporters_and_trigger(
     detected_pairs: list[tuple[str, dict[str, Any]]] = []
 
     # Phase 1: detection for all target exporters.
+    detect_total = len(hosts) * len(exporters)
+    if emit_stage_event is not None:
+        emit_stage_event({"kind": "pass", "pass": "detect", "event": "start", "total": detect_total})
+    detect_started_at = time.monotonic()
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
         future_map = {
             executor.submit(
@@ -1366,8 +1372,53 @@ def scan_exporters_and_trigger(
                 if exporter_name in by_exporter:
                     by_exporter[exporter_name]["detected"] += 1
                 detected_pairs.append((host, exporter))
+    detect_ms = int((time.monotonic() - detect_started_at) * 1000)
+    if emit_stage_event is not None:
+        emit_stage_event(
+            {
+                "kind": "stage_trace",
+                "stage_name": "detect_protocol",
+                "attempt": 1,
+                "duration_ms": detect_ms,
+                "result": "ok",
+                "error": "-",
+            }
+        )
+        emit_stage_event(
+            {
+                "kind": "pass",
+                "pass": "detect",
+                "event": "complete",
+                "total": detect_total,
+                "detected_exporters": total_detected,
+                "deep_candidates": len(detected_pairs),
+            }
+        )
+        for host in hosts:
+            detected_count = int(by_host.get(host, {}).get("detected", 0))
+            if detected_count > 0:
+                emit_stage_event(
+                    {
+                        "kind": "gate",
+                        "host": host,
+                        "gate": "run",
+                        "reason": f"detected={detected_count}",
+                    }
+                )
+            else:
+                emit_stage_event(
+                    {
+                        "kind": "gate",
+                        "host": host,
+                        "gate": "skip",
+                        "reason": "detected=0",
+                    }
+                )
 
     # Phase 2: trigger callbacks only for detected exporters.
+    if emit_stage_event is not None:
+        emit_stage_event({"kind": "pass", "pass": "deep", "event": "start", "total": len(detected_pairs)})
+    deep_started_at = time.monotonic()
     with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
         future_map = {
             executor.submit(
@@ -1410,6 +1461,38 @@ def scan_exporters_and_trigger(
                     by_callback[target]["attempted"] += int(stats.get("attempted", 0))
                     by_callback[target]["success"] += int(stats.get("success", 0))
                     by_callback[target]["fail"] += int(stats.get("fail", 0))
+    deep_ms = int((time.monotonic() - deep_started_at) * 1000)
+    if emit_stage_event is not None:
+        emit_stage_event(
+            {
+                "kind": "stage_trace",
+                "stage_name": "data",
+                "attempt": 1,
+                "duration_ms": deep_ms,
+                "result": "ok",
+                "error": "-",
+            }
+        )
+        emit_stage_event(
+            {
+                "kind": "pass",
+                "pass": "deep",
+                "event": "complete",
+                "total": len(detected_pairs),
+                "processed": len(detected_pairs),
+            }
+        )
+        total_ms = int((time.monotonic() - pipeline_started_at) * 1000)
+        emit_stage_event(
+            {
+                "kind": "timing_summary",
+                "status": "ok",
+                "attempts": "1/1",
+                "detect_ms": detect_ms,
+                "data_ms": deep_ms,
+                "total_ms": total_ms,
+            }
+        )
 
     if logger is not None and not log_trigger_events_only:
         for host, detected in host_detected.items():

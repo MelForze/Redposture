@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR" || exit 1
+# Use engine socket context by default for local/CI consistency.
+export DOCKER_CONTEXT="${DOCKER_CONTEXT:-default}"
 
 OUT_DIR="${1:-/tmp/redposture_lab_matrix_$(date +%Y%m%d_%H%M%S)}"
 STATUS_FILE="${OUT_DIR}/matrix-status.tsv"

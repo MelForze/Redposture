@@ -62,6 +62,53 @@ def test_safe_slug_and_clone_url_with_token() -> None:
     assert unchanged == "git@gitlab.local:group/app.git"
 
 
+def test_safe_repo_relative_path_sanitizes_escape_segments() -> None:
+    assert gitlab._safe_repo_relative_path("../group//../../app") == "group/app"
+    assert gitlab._safe_repo_relative_path("/../../") == "item"
+
+
+def test_clone_project_sanitizes_path_traversal_destination(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    clone_root = tmp_path / "gitlab-clones"
+    clone_root.mkdir()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(gitlab.shutil, "which", lambda _name: "/usr/bin/git")
+
+    def fake_run(
+        cmd: list[str],
+        capture_output: bool,
+        text: bool,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        _ = (capture_output, text, timeout, check)
+        captured["cmd"] = list(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(gitlab.subprocess, "run", fake_run)
+    project = {
+        "id": 11,
+        "path_with_namespace": "../../escape/repo",
+        "http_url_to_repo": "https://gitlab.local/escape/repo.git",
+    }
+
+    result = gitlab._clone_project(
+        project,
+        "127.0.0.1",
+        8080,
+        use_https=False,
+        token=None,
+        clone_dir=str(clone_root),
+    )
+
+    assert result["status"] == "cloned"
+    command = captured.get("cmd")
+    assert isinstance(command, list)
+    dest_path = str(command[-1])
+    assert dest_path.startswith(str(clone_root))
+    assert ".." not in dest_path
+
+
 def test_format_record_for_statuses() -> None:
     base = {"host": "127.0.0.1", "port": 8080}
 
@@ -760,3 +807,77 @@ def test_audit_gitlab_targets_and_run_stage_paths(
         gitlab.run_gitlab_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
     )
     assert any("failed to process gitlab output" in msg for msg in fake_console.errors)
+
+
+def test_audit_gitlab_targets_emits_stage_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, tuple[str, ...], bool]] = []
+
+    def fake_audit(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        *,
+        use_https: bool,
+        token: str | None,
+        project_filters: list[str],
+        clone: bool,
+        clone_dir: str,
+        workers: int,
+    ) -> dict[str, object]:
+        _ = (port, timeout, retries, use_https, token, clone_dir, workers)
+        calls.append((host, tuple(project_filters), clone))
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": 8080,
+            "https": False,
+            "is_gitlab": True,
+            "status": "detected",
+            "login_page": True,
+            "version": "16.9.0",
+            "open_endpoints": [],
+            "public_projects": [],
+            "public_projects_error": None,
+            "project_filters": list(project_filters),
+            "token_provided": False,
+            "token_valid": None,
+            "token_user": None,
+            "token_projects": [],
+            "token_projects_error": None,
+            "token_access": [],
+            "clone_requested": clone,
+            "clone_scope": None,
+            "clone_dir": clone_dir if clone else None,
+            "clone_results": [],
+            "elapsed_ms": 5,
+            "error": None,
+        }
+
+    monkeypatch.setattr(gitlab, "_audit_gitlab_host", fake_audit)
+    debug_lines: list[str] = []
+    totals = gitlab.audit_gitlab_targets(
+        hosts=["127.0.0.1"],
+        port=8080,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        use_https=False,
+        token=None,
+        project_filters=["group/app"],
+        clone=True,
+        clone_dir="/tmp/gitlab-clones",
+        output_path=None,
+        output_format="txt",
+        emit_line=None,
+        logger=None,
+        append_output=False,
+        suppress_timeout_status_lines=False,
+        debug_emit=debug_lines.append,
+        show_progress=False,
+    )
+    assert totals == (1, 1, 0)
+    assert calls == [("127.0.0.1", (), False), ("127.0.0.1", ("group/app",), True)]
+    assert any(line.startswith("pass=1 detect start total=1") for line in debug_lines)
+    assert any("stage2_gate=run reason=status=detected" in line for line in debug_lines)
+    assert any("pass=2 deep complete processed=1" in line for line in debug_lines)

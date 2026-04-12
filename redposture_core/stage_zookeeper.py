@@ -21,7 +21,7 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import ProgressBar
-from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+from .utils import collect_scan_ports, collect_scan_targets, is_signature_compat_typeerror, utc_now_iso
 
 _ZK_PROTOCOL_VERSION = 0
 _ZK_PASSWD_DEFAULT = b"\x00" * 16
@@ -483,7 +483,7 @@ def _enumerate_znodes(
         )
 
     queue = deque(["/"])
-    visited = {"/"}
+    visited: set[str] | None = {"/"} if collect_paths else None
     listed_nodes: list[str] = []
     listed_meta: dict[str, dict[str, Any]] = {}
     total_count = 0
@@ -537,9 +537,10 @@ def _enumerate_znodes(
             full_path = _join_znode_path(parent, child)
             if _is_system_znode(full_path):
                 continue
-            if full_path in visited:
-                continue
-            visited.add(full_path)
+            if visited is not None:
+                if full_path in visited:
+                    continue
+                visited.add(full_path)
             total_count += 1
             if collect_paths and len(listed_nodes) < max_znodes:
                 listed_nodes.append(full_path)
@@ -621,7 +622,7 @@ def _enumerate_znodes_parallel(
     result_queue: Queue[dict[str, Any]] = Queue()
     stop_event = threading.Event()
 
-    queue_set = {"/"}
+    queue_set: set[str] | None = {"/"} if collect_paths else None
     listed_nodes: list[str] = []
     listed_meta: dict[str, dict[str, Any]] = {}
     total_count = 0
@@ -779,9 +780,10 @@ def _enumerate_znodes_parallel(
                 full_path = _join_znode_path(parent, child)
                 if _is_system_znode(full_path):
                     continue
-                if full_path in queue_set:
-                    continue
-                queue_set.add(full_path)
+                if queue_set is not None:
+                    if full_path in queue_set:
+                        continue
+                    queue_set.add(full_path)
                 total_count += 1
                 if collect_paths and len(listed_nodes) < max_znodes:
                     listed_nodes.append(full_path)
@@ -973,7 +975,9 @@ def _call_audit_host_with_thread_debug(
                 run_deep_checks,
                 enum_workers=enum_workers,
             )
-        except TypeError:
+        except TypeError as exc:
+            if not is_signature_compat_typeerror(exc, expected_keywords={"enum_workers"}):
+                raise
             # Backward-safe for patched tests/helpers with legacy signature.
             return _audit_zookeeper_host(
                 host,
@@ -1724,7 +1728,11 @@ def _audit_zookeeper_host(
                     auth_username=enum_auth_username,
                     auth_password=enum_auth_password,
                 )
-            except TypeError:
+            except TypeError as exc:
+                if not is_signature_compat_typeerror(
+                    exc, expected_keywords={"collect_paths", "enum_workers", "auth_username", "auth_password"}
+                ):
+                    raise
                 # Backward-safe for patched tests/helpers that may expose legacy signatures.
                 try:
                     listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
@@ -1733,14 +1741,20 @@ def _audit_zookeeper_host(
                         progress_hook,
                         collect_paths=collect_znode_paths,
                     )
-                except TypeError:
+                except TypeError as exc:
+                    if not is_signature_compat_typeerror(exc, expected_keywords={"collect_paths"}):
+                        raise
                     try:
                         listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
                             client,
                             max_znodes,
                             progress_hook,
                         )
-                    except TypeError:
+                    except TypeError as exc:
+                        if not is_signature_compat_typeerror(
+                            exc, expected_keywords={"progress_hook"}, allow_positional_mismatch=True
+                        ):
+                            raise
                         listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
                             client,
                             max_znodes,
@@ -2510,6 +2524,7 @@ def audit_zookeeper_targets(
     debug_emit: Callable[[str], None] | None = None,
     debug_stats: dict[str, Any] | None = None,
     enum_workers: int = 3,
+    show_progress: bool = True,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -2525,7 +2540,7 @@ def audit_zookeeper_targets(
 
     try:
         indexed_hosts = list(enumerate(hosts))
-        progress = ProgressBar("ZOOKEEPER", len(indexed_hosts), enabled=True, leave=True)
+        progress = ProgressBar("ZOOKEEPER", len(indexed_hosts), enabled=show_progress, leave=True)
         detect_records: dict[int, dict[str, Any]] = {}
         deep_records: dict[int, dict[str, Any]] = {}
         if debug_emit is not None:
@@ -2819,6 +2834,10 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     auth_required = 0
     failed = 0
     debug_stats: dict[str, Any] = {}
+    outer_progress: ProgressBar | None = None
+    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(ports) > 1
+    if use_single_global_progress:
+        outer_progress = ProgressBar("ZOOKEEPER", len(hosts) * len(ports), enabled=True, leave=True)
     try:
         for idx, audit_port in enumerate(ports):
             part_total, part_open, part_valid, part_auth, part_failed = audit_zookeeper_targets(
@@ -2842,15 +2861,21 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 debug_emit=emit_debug if args.debug else None,
                 debug_stats=debug_stats if args.debug else None,
                 enum_workers=enum_workers,
+                show_progress=not use_single_global_progress,
             )
             total += part_total
             open_no_auth += part_open
             valid += part_valid
             auth_required += part_auth
             failed += part_failed
+            if outer_progress is not None:
+                outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process zookeeper output: {exc}")
         return 2
+    finally:
+        if outer_progress is not None:
+            outer_progress.close()
 
     if stream_to_stdout:
         if (

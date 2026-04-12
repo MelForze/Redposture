@@ -7,6 +7,7 @@ import http.client
 import ipaddress
 import socket
 import ssl
+import threading
 import urllib.parse
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,6 +16,7 @@ from types import TracebackType
 from typing import Any
 
 _SOCKET_DEFAULT_TIMEOUT: Any = getattr(socket, "_GLOBAL_DEFAULT_TIMEOUT", object())
+_RAW_SOCKET_CREATE_CONNECTION = socket.create_connection
 
 
 @dataclass(frozen=True)
@@ -97,7 +99,7 @@ def _open_proxy_connection(
     source_address: tuple[str, int] | None,
 ) -> socket.socket:
     # Use system resolver/getaddrinfo via create_connection (IPv4 + IPv6).
-    return socket.create_connection(
+    return _RAW_SOCKET_CREATE_CONNECTION(
         (proxy.host, proxy.port),
         timeout=timeout,
         source_address=source_address,
@@ -256,22 +258,45 @@ def open_connection_via_proxy(
 class ProxySocketPatch:
     """Patch socket.create_connection globally to route through a proxy tunnel."""
 
+    _lock = threading.RLock()
+    _refcount = 0
+    _active_original_create_connection: Any = None
+    _stack: list[tuple[int, ProxyConfig]] = []
+
     def __init__(self, proxy: ProxyConfig | None) -> None:
         self._proxy = proxy
-        self._orig_create_connection = socket.create_connection
+        self._active = False
+
+    @classmethod
+    def _active_proxy(cls) -> ProxyConfig | None:
+        if not cls._stack:
+            return None
+        return cls._stack[-1][1]
+
+    @classmethod
+    def _patched_create_connection(
+        cls,
+        address: tuple[Any, ...],
+        timeout: object = _SOCKET_DEFAULT_TIMEOUT,
+        source_address: tuple[str, int] | None = None,
+    ) -> socket.socket:
+        with cls._lock:
+            proxy = cls._active_proxy()
+            original = cls._active_original_create_connection or _RAW_SOCKET_CREATE_CONNECTION
+        if proxy is None:
+            return original(address, timeout=timeout, source_address=source_address)
+        return open_connection_via_proxy(proxy, address, timeout=timeout, source_address=source_address)
 
     def __enter__(self) -> ProxySocketPatch:
         if self._proxy is None:
             return self
-
-        def _patched_create_connection(
-            address: tuple[Any, ...],
-            timeout: object = _SOCKET_DEFAULT_TIMEOUT,
-            source_address: tuple[str, int] | None = None,
-        ) -> socket.socket:
-            return open_connection_via_proxy(self._proxy, address, timeout=timeout, source_address=source_address)
-
-        socket.create_connection = _patched_create_connection  # type: ignore[assignment]
+        with self.__class__._lock:
+            if self.__class__._refcount == 0:
+                self.__class__._active_original_create_connection = socket.create_connection
+                socket.create_connection = self.__class__._patched_create_connection  # type: ignore[assignment]
+            self.__class__._stack.append((id(self), self._proxy))
+            self.__class__._refcount += 1
+            self._active = True
         return self
 
     def __exit__(
@@ -280,7 +305,22 @@ class ProxySocketPatch:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        socket.create_connection = self._orig_create_connection  # type: ignore[assignment]
+        if not self._active:
+            return
+        with self.__class__._lock:
+            for idx in range(len(self.__class__._stack) - 1, -1, -1):
+                if self.__class__._stack[idx][0] == id(self):
+                    self.__class__._stack.pop(idx)
+                    break
+            if self.__class__._refcount > 0:
+                self.__class__._refcount -= 1
+            if self.__class__._refcount == 0:
+                original = self.__class__._active_original_create_connection
+                if callable(original):
+                    socket.create_connection = original  # type: ignore[assignment]
+                self.__class__._active_original_create_connection = None
+                self.__class__._stack.clear()
+        self._active = False
 
 
 @contextmanager

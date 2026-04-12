@@ -665,6 +665,48 @@ def test_run_kafka_stage_debug_flow_passes_logger_and_append_output(monkeypatch:
     assert captured[0]["logger"] is not None
 
 
+def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
+    monkeypatch.setattr(kafka, "collect_scan_ports", lambda *_args, **_kwargs: [9092, 29092, 39092])
+    monkeypatch.setattr(kafka, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+
+    captured: list[dict[str, object]] = []
+
+    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs)
+        kwargs["emit_line"]("KAFKA\t127.0.0.1\t9092\t[*] Kafka Broker")
+        return 1, 0, 1, 0, 0
+
+    monkeypatch.setattr(kafka, "audit_kafka_targets", fake_audit_targets)
+
+    progress_totals: list[int] = []
+    progress_advances: list[int] = []
+
+    class _FakeProgressBar:
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            progress_totals.append(int(total))
+
+        def advance(self, amount: int = 1) -> None:
+            progress_advances.append(int(amount))
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(kafka, "ProgressBar", _FakeProgressBar)
+
+    rc = kafka.run_kafka_stage(
+        _kafka_args(show_topics=True, dump=True, topic="orders"),
+        logger=object(),  # type: ignore[arg-type]
+    )
+    assert rc == 0
+    assert len(captured) == 3
+    assert [bool(call["show_progress"]) for call in captured] == [False, False, False]
+    assert progress_totals == [3]
+    assert progress_advances == [1, 1, 1]
+
+
 def test_run_kafka_stage_txt_emit_line_and_error_path(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -701,3 +743,243 @@ def test_run_kafka_stage_txt_emit_line_and_error_path(
         for level, msg in _ConsoleCapture.instances[-1].messages
         if level == "error"
     )
+
+
+def test_call_audit_kafka_host_with_stage_debug_adds_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_audit(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 9092,
+            "is_kafka": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "show_topics": False,
+            "query_topic": None,
+            "dump": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(kafka, "_audit_kafka_host", fake_audit)
+    debug_lines: list[str] = []
+    result = kafka._call_audit_kafka_host_with_stage_debug(
+        "127.0.0.1",
+        9092,
+        1.0,
+        1,
+        None,
+        None,
+        False,
+        None,
+        False,
+        10,
+        run_deep_checks=True,
+        debug=True,
+        debug_emit=debug_lines.append,
+    )
+    assert isinstance(result.get("stages"), list)
+    assert result.get("stage_durations_ms") is not None
+    assert any("stage_trace stage_name=detect_protocol" in line for line in debug_lines)
+
+
+def test_audit_kafka_targets_emits_two_pass_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_stage_call(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        username: str | None,
+        password: str | None,
+        show_topics: bool,
+        query_topic: str | None,
+        dump: bool,
+        max_messages: int,
+        *,
+        run_deep_checks: bool,
+        debug: bool,
+        debug_emit,
+    ) -> dict[str, object]:
+        _ = (
+            port,
+            timeout,
+            retries,
+            username,
+            password,
+            show_topics,
+            query_topic,
+            dump,
+            max_messages,
+            debug,
+            debug_emit,
+        )
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": 9092,
+            "is_kafka": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "provided_credentials": False,
+            "show_topics": bool(run_deep_checks),
+            "query_topic": None,
+            "topic_count": 1,
+            "topics": ["orders"] if run_deep_checks else None,
+            "query_topic_value": None,
+            "dump": False,
+            "dump_topics": None,
+            "dump_results": None,
+            "dump_errors": None,
+            "topic_messages": None,
+            "topic_read_error": None,
+            "error": None,
+            "debug_events": [],
+            "debug_events_streamed": True,
+            "stages": [],
+            "stage_durations_ms": {},
+            "stage_attempts": {},
+            "stage_failed_at": None,
+        }
+
+    monkeypatch.setattr(kafka, "_call_audit_kafka_host_with_stage_debug", fake_stage_call)
+    debug_lines: list[str] = []
+    emitted: list[str] = []
+    totals = kafka.audit_kafka_targets(
+        hosts=["127.0.0.1"],
+        port=9092,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        show_topics=True,
+        query_topic=None,
+        dump=False,
+        max_messages=10,
+        output_path=None,
+        output_format="txt",
+        emit_line=emitted.append,
+        debug_emit=debug_lines.append,
+        show_progress=False,
+    )
+    assert totals == (1, 1, 0, 0, 0)
+    assert any("pass=1 detect start total=1" in line for line in debug_lines)
+    assert any("stage2_gate=run reason=status=open_no_auth" in line for line in debug_lines)
+    assert any("pass=2 deep complete processed=1" in line for line in debug_lines)
+
+
+def test_read_topic_messages_covers_non_auth_and_loop_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 0) == ([], None)
+
+    monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (False, None, "service is not kafka"))
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (None, "service is not kafka")
+
+    monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (True, None, None))
+    monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: (None, "metadata failed"))
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (None, "metadata failed")
+
+    monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: ({"topic_map": {}}, None))
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == ([], None)
+
+    monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: ({"topic_map": {"orders": 2}}, None))
+    monkeypatch.setattr(kafka, "_send_kafka_request", lambda *_args, **_kwargs: b"x")
+    offsets = iter([(10, None), (None, "offset denied")])
+    fetches = iter([([(10, "msg")], None)])
+    monkeypatch.setattr(kafka, "_parse_list_offsets_response", lambda *_args, **_kwargs: next(offsets))
+    monkeypatch.setattr(kafka, "_parse_fetch_response", lambda *_args, **_kwargs: next(fetches))
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (["p0@10 msg"], None)
+
+    offsets = iter([(10, None)])
+    fetches = iter([(None, "fetch failed")])
+    monkeypatch.setattr(kafka, "_parse_list_offsets_response", lambda *_args, **_kwargs: next(offsets))
+    monkeypatch.setattr(kafka, "_parse_fetch_response", lambda *_args, **_kwargs: next(fetches))
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (None, "fetch failed")
+
+
+def test_read_topic_messages_with_credentials_covers_auth_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (False, 2, "hs fail"))
+    assert kafka._read_topic_messages(
+        "127.0.0.1",
+        9092,
+        1.0,
+        "orders",
+        1,
+        username="alice",
+        password="secret",
+    ) == (None, "hs fail")
+
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (True, 2, None))
+    monkeypatch.setattr(kafka, "_sasl_authenticate_plain", lambda *_args, **_kwargs: (False, 3, "auth fail"))
+    assert kafka._read_topic_messages(
+        "127.0.0.1",
+        9092,
+        1.0,
+        "orders",
+        1,
+        username="alice",
+        password="secret",
+    ) == (None, "auth fail")
+
+
+def test_audit_kafka_via_sasl_fallback_branch_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (False, 2, "hs fail"))
+    assert (
+        kafka._audit_kafka_via_sasl_fallback(
+            host="127.0.0.1",
+            port=9092,
+            timeout=1.0,
+            username=None,
+            password=None,
+            show_topics=False,
+            query_topic=None,
+            dump=False,
+            max_messages=1,
+        )
+        is None
+    )
+
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (True, 2, None))
+    monkeypatch.setattr(kafka, "_sasl_authenticate_plain", lambda *_args, **_kwargs: (False, 3, "bad creds"))
+    denied = kafka._audit_kafka_via_sasl_fallback(
+        host="127.0.0.1",
+        port=9092,
+        timeout=1.0,
+        username="alice",
+        password="bad",
+        show_topics=False,
+        query_topic="orders",
+        dump=True,
+        max_messages=1,
+    )
+    assert isinstance(denied, dict)
+    assert denied["status"] == "auth_required"
+    assert denied["query_topic_value"] == "orders:<authentication required>"
+    assert denied["dump_error"] == "authentication required"
+    assert "bad creds" in str(denied["error"])
+
+    monkeypatch.setattr(kafka, "_sasl_authenticate_plain", lambda *_args, **_kwargs: (True, 3, None))
+    monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: ({"topic_map": {"orders": 1}}, None))
+    monkeypatch.setattr(kafka, "_read_dump_topics", lambda **_kwargs: ({"orders": ["p0@1 hello"]}, {}))
+    allowed = kafka._audit_kafka_via_sasl_fallback(
+        host="127.0.0.1",
+        port=9092,
+        timeout=1.0,
+        username="alice",
+        password="secret",
+        show_topics=True,
+        query_topic="orders",
+        dump=True,
+        max_messages=1,
+    )
+    assert isinstance(allowed, dict)
+    assert allowed["status"] == "valid_credentials"
+    assert allowed["topics"] == ["orders"]
+    assert allowed["topic_messages"] == ["p0@1 hello"]

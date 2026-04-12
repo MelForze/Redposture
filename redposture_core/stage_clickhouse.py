@@ -11,7 +11,7 @@ import re
 import sys
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -19,8 +19,8 @@ from uuid import UUID
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import iter_completed_with_progress
-from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+from .progress import ProgressBar
+from .utils import collect_scan_ports, collect_scan_targets, is_signature_compat_typeerror, utc_now_iso
 
 _CH_DEFAULT_NATIVE_PORT = 9000
 _CH_DEFAULT_HTTP_PORT = 8123
@@ -28,6 +28,16 @@ _CH_MAX_SQL_LINES = 500
 _CH_MAX_DUMP_ROWS = 100
 _CH_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _CH_EXEC_SCRIPT = "redposture_exec.sh"
+_STAGE_DETECT_PROTOCOL = "detect_protocol"
+_STAGE_AUTH_INFERENCE = "auth_inference_credentials"
+_STAGE_ACCESS_CAPABILITIES = "access_capabilities"
+_STAGE_DATA = "data"
+_CLICKHOUSE_DEEP_STATUSES = {
+    "open_no_auth",
+    "weak_default_creds",
+    "valid_credentials",
+    "invalid_credentials_anonymous",
+}
 
 
 @dataclass
@@ -231,7 +241,9 @@ def _open_clickhouse_client(
         }
         try:
             return driver_client(**kwargs)
-        except TypeError:
+        except TypeError as exc:
+            if not is_signature_compat_typeerror(exc, expected_keywords={"sync_request_timeout"}):
+                raise
             kwargs.pop("sync_request_timeout", None)
             return driver_client(**kwargs)
 
@@ -248,7 +260,9 @@ def _open_clickhouse_client(
         }
         try:
             return clickhouse_connect.get_client(**kwargs)
-        except TypeError:
+        except TypeError as exc:
+            if not is_signature_compat_typeerror(exc, expected_keywords={"connect_timeout"}):
+                raise
             kwargs.pop("connect_timeout", None)
             return clickhouse_connect.get_client(**kwargs)
 
@@ -1619,6 +1633,195 @@ def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) 
         emit_line(line)
 
 
+def _call_audit_clickhouse_host_with_stage_debug(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    username: str | None,
+    password: str | None,
+    defcreds: bool,
+    database: str,
+    protocol: str,
+    show_databases: bool,
+    show_tables: bool,
+    show_columns: bool,
+    table_targets: list[str],
+    table_columns: list[str],
+    dump_table_rows: bool,
+    execute_command: str | None,
+    sql_command: str | None,
+    *,
+    port_protocols: list[tuple[int, str]] | None,
+    run_deep_checks: bool,
+    debug: bool,
+    debug_emit: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    if port_protocols:
+        record = _audit_clickhouse_host_with_port_fallback(
+            host=host,
+            port_protocols=list(port_protocols),
+            timeout=timeout,
+            retries=retries,
+            username=username,
+            password=password,
+            defcreds=defcreds,
+            database=database,
+            show_databases=show_databases if run_deep_checks else False,
+            show_tables=show_tables if run_deep_checks else False,
+            show_columns=show_columns if run_deep_checks else False,
+            table_targets=list(table_targets) if run_deep_checks else [],
+            table_columns=list(table_columns) if run_deep_checks else [],
+            dump_table_rows=dump_table_rows if run_deep_checks else False,
+            execute_command=execute_command if run_deep_checks else None,
+            sql_command=sql_command if run_deep_checks else None,
+        )
+    else:
+        record = _audit_clickhouse_host(
+            host=host,
+            port=port,
+            timeout=timeout,
+            retries=retries,
+            username=username,
+            password=password,
+            defcreds=defcreds,
+            database=database,
+            protocol=protocol,
+            show_databases=show_databases if run_deep_checks else False,
+            show_tables=show_tables if run_deep_checks else False,
+            show_columns=show_columns if run_deep_checks else False,
+            table_targets=list(table_targets) if run_deep_checks else [],
+            table_columns=list(table_columns) if run_deep_checks else [],
+            dump_table_rows=dump_table_rows if run_deep_checks else False,
+            execute_command=execute_command if run_deep_checks else None,
+            sql_command=sql_command if run_deep_checks else None,
+        )
+
+    result: dict[str, Any] = dict(record)
+    debug_events: list[str] = []
+
+    def _debug(message: str) -> None:
+        if not debug:
+            return
+        debug_events.append(message)
+        if debug_emit is not None:
+            debug_emit(f"{host}:{int(result.get('port') or port)} {message}")
+
+    status = str(result.get("status") or "fail")
+    is_clickhouse = bool(result.get("is_clickhouse"))
+    attempts = max(1, retries + 1)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    if attempts > 1 and status == "fail":
+        _debug(
+            f"retry_decision stage={_STAGE_DETECT_PROTOCOL} attempt=1/{attempts} "
+            f"backoff={_retry_delay(0):.2f}s reason=error"
+        )
+
+    stages: list[dict[str, Any]] = []
+
+    def _push_stage(stage_name: str, stage_result: str, stage_error: str | None = None, duration_ms: int = 0) -> None:
+        entry = {
+            "stage_name": stage_name,
+            "attempt": 1,
+            "duration_ms": int(max(0, duration_ms)),
+            "result": stage_result,
+            "error": stage_error or None,
+        }
+        stages.append(entry)
+        _debug(
+            f"stage_trace stage_name={stage_name} attempt=1 duration_ms={entry['duration_ms']} "
+            f"result={stage_result} error={entry['error'] or '-'}"
+        )
+
+    detect_result = "ok" if is_clickhouse else ("error" if status == "fail" else "skip")
+    detect_error = str(result.get("error") or "") if detect_result == "error" else None
+    _push_stage(_STAGE_DETECT_PROTOCOL, detect_result, detect_error, 0)
+
+    auth_result = (
+        "ok" if is_clickhouse and status in _CLICKHOUSE_DEEP_STATUSES.union({"auth_required"}) else detect_result
+    )
+    _push_stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
+
+    if run_deep_checks and status in _CLICKHOUSE_DEEP_STATUSES:
+        _push_stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
+        data_result = "error" if status == "fail" and result.get("error") else "ok"
+        _push_stage(
+            _STAGE_DATA, data_result, str(result.get("error") or "") if data_result == "error" else None, elapsed_ms
+        )
+    else:
+        _push_stage(_STAGE_ACCESS_CAPABILITIES, "skip", "deep checks disabled", 0)
+        _push_stage(_STAGE_DATA, "skip", "deep checks disabled", 0)
+
+    stage_failed_at: str | None = None
+    for stage_entry in stages:
+        if str(stage_entry.get("result") or "") == "error":
+            stage_failed_at = str(stage_entry.get("stage_name") or "")
+            break
+
+    stage_durations_ms = {str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in stages}
+    stage_attempts = {str(item.get("stage_name") or ""): attempts for item in stages}
+
+    _debug(
+        f"stage_timing_summary status={status} attempts=1/{attempts} "
+        f"detect_ms={stage_durations_ms.get(_STAGE_DETECT_PROTOCOL, 0)} "
+        f"auth_ms={stage_durations_ms.get(_STAGE_AUTH_INFERENCE, 0)} "
+        f"capabilities_ms={stage_durations_ms.get(_STAGE_ACCESS_CAPABILITIES, 0)} "
+        f"data_ms={stage_durations_ms.get(_STAGE_DATA, 0)} total_ms={elapsed_ms}"
+    )
+
+    result["stages"] = stages
+    result["stage_failed_at"] = stage_failed_at
+    result["stage_durations_ms"] = stage_durations_ms
+    result["stage_attempts"] = stage_attempts
+    result["debug_events"] = debug_events
+    result["debug_events_streamed"] = bool(debug and debug_emit is not None)
+    return result
+
+
+def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(detect_record)
+    merged.update(deep_record)
+
+    debug_events: list[str] = []
+    for source in (detect_record.get("debug_events"), deep_record.get("debug_events")):
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if isinstance(item, str) and item.strip():
+                debug_events.append(item)
+    merged["debug_events"] = debug_events
+    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
+        deep_record.get("debug_events_streamed")
+    )
+
+    stages: list[dict[str, Any]] = []
+    for source in (detect_record.get("stages"), deep_record.get("stages")):
+        if isinstance(source, list):
+            for entry in source:
+                if isinstance(entry, dict):
+                    stages.append(dict(entry))
+    merged["stages"] = stages
+
+    stage_durations: dict[str, int] = {}
+    for source in (detect_record.get("stage_durations_ms"), deep_record.get("stage_durations_ms")):
+        if isinstance(source, dict):
+            for key, value in source.items():
+                stage_durations[str(key)] = int(value or 0)
+    merged["stage_durations_ms"] = stage_durations
+
+    stage_attempts: dict[str, int] = {}
+    for source in (detect_record.get("stage_attempts"), deep_record.get("stage_attempts")):
+        if isinstance(source, dict):
+            for key, value in source.items():
+                stage_attempts[str(key)] = int(value or 0)
+    merged["stage_attempts"] = stage_attempts
+
+    merged["stage_failed_at"] = deep_record.get("stage_failed_at") or detect_record.get("stage_failed_at")
+    return merged
+
+
 def audit_clickhouse_targets(
     hosts: list[str],
     port: int,
@@ -1646,6 +1849,8 @@ def audit_clickhouse_targets(
     append_output: bool,
     suppress_timeout_status_lines: bool = False,
     port_protocols: list[tuple[int, str]] | None = None,
+    debug_emit: Callable[[str], None] | None = None,
+    show_progress: bool = True,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -1659,35 +1864,95 @@ def audit_clickhouse_targets(
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
+    progress: ProgressBar | None = None
     try:
+        indexed_hosts = list(enumerate(hosts))
+        detect_records: dict[int, dict[str, Any]] = {}
+        deep_records: dict[int, dict[str, Any]] = {}
+        progress = ProgressBar("CLICKHOUSE", len(indexed_hosts), enabled=show_progress, leave=True)
+
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
+
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            if port_protocols:
-                future_map = {
+            pass1_future_map = {
+                executor.submit(
+                    _call_audit_clickhouse_host_with_stage_debug,
+                    host,
+                    port,
+                    timeout,
+                    retries,
+                    username,
+                    password,
+                    defcreds,
+                    database,
+                    protocol,
+                    show_databases,
+                    show_tables,
+                    show_columns,
+                    list(table_targets),
+                    list(table_columns),
+                    dump_table_rows,
+                    execute_command,
+                    sql_command,
+                    port_protocols=list(port_protocols) if port_protocols else None,
+                    run_deep_checks=False,
+                    debug=bool(debug_emit),
+                    debug_emit=debug_emit,
+                ): idx
+                for idx, host in indexed_hosts
+            }
+            buffered_records: dict[int, dict[str, Any]] = {}
+            next_emit_idx = 0
+            for future in as_completed(pass1_future_map):
+                record_idx = int(pass1_future_map[future])
+                buffered_records[record_idx] = future.result()
+                progress.advance()
+                while next_emit_idx in buffered_records:
+                    detect_record = buffered_records.pop(next_emit_idx)
+                    detect_records[next_emit_idx] = detect_record
+                    if bool(detect_record.get("is_clickhouse")) and output_format == "txt":
+                        _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
+                    next_emit_idx += 1
+
+        deep_requested = bool(
+            show_databases
+            or show_tables
+            or show_columns
+            or table_targets
+            or table_columns
+            or dump_table_rows
+            or execute_command
+            or sql_command
+        )
+        deep_candidates: list[tuple[int, str]] = []
+        detected_count = 0
+        for idx, host in indexed_hosts:
+            detect_record = detect_records[idx]
+            detect_status = str(detect_record.get("status") or "fail")
+            if not bool(detect_record.get("is_clickhouse")):
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_clickhouse")
+                continue
+            detected_count += 1
+            if deep_requested and detect_status in _CLICKHOUSE_DEEP_STATUSES:
+                deep_candidates.append((idx, host))
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
+            elif debug_emit is not None:
+                reason = "no_data_actions" if not deep_requested else f"status={detect_status}"
+                debug_emit(f"{host}:{port} stage2_gate=skip reason={reason}")
+
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect complete clickhouse={detected_count} deep_candidates={len(deep_candidates)}")
+            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
+
+        progress.set_total(len(indexed_hosts) + len(deep_candidates))
+        if deep_candidates:
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+                pass2_future_map = {
                     executor.submit(
-                        _audit_clickhouse_host_with_port_fallback,
-                        host,
-                        list(port_protocols),
-                        timeout,
-                        retries,
-                        username,
-                        password,
-                        defcreds,
-                        database,
-                        show_databases,
-                        show_tables,
-                        show_columns,
-                        list(table_targets),
-                        list(table_columns),
-                        dump_table_rows,
-                        execute_command,
-                        sql_command,
-                    ): host
-                    for host in hosts
-                }
-            else:
-                future_map = {
-                    executor.submit(
-                        _audit_clickhouse_host,
+                        _call_audit_clickhouse_host_with_stage_debug,
                         host,
                         port,
                         timeout,
@@ -1705,67 +1970,92 @@ def audit_clickhouse_targets(
                         dump_table_rows,
                         execute_command,
                         sql_command,
-                    ): host
-                    for host in hosts
+                        port_protocols=list(port_protocols) if port_protocols else None,
+                        run_deep_checks=True,
+                        debug=bool(debug_emit),
+                        debug_emit=debug_emit,
+                    ): idx
+                    for idx, host in deep_candidates
                 }
+                for future in as_completed(pass2_future_map):
+                    deep_records[int(pass2_future_map[future])] = future.result()
+                    progress.advance()
 
-            for future in iter_completed_with_progress(future_map, label="CLICKHOUSE"):
-                record = future.result()
-                total += 1
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
 
-                status = str(record.get("status") or "fail")
-                if status == "open_no_auth":
-                    open_no_auth += 1
-                elif status == "weak_default_creds":
-                    weak += 1
-                elif status == "valid_credentials":
-                    valid += 1
-                elif status == "auth_required":
-                    auth_required += 1
-                else:
-                    fail += 1
+        if progress is not None:
+            progress.close()
+            progress = None
 
-                if bool(record.get("is_clickhouse")) and status != "fail":
-                    _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
+        final_records: dict[int, dict[str, Any]] = {}
+        for idx, _host in indexed_hosts:
+            detect_record = detect_records[idx]
+            deep_record = deep_records.get(idx)
+            final_records[idx] = _merge_stage2_record(detect_record, deep_record) if deep_record else detect_record
 
-                for auth_line in _format_auth_attempt_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, auth_line)
+        for idx, _host in indexed_hosts:
+            record = final_records[idx]
+            total += 1
+            status = str(record.get("status") or "fail")
+            if status == "open_no_auth":
+                open_no_auth += 1
+            elif status == "weak_default_creds":
+                weak += 1
+            elif status == "valid_credentials":
+                valid += 1
+            elif status == "auth_required":
+                auth_required += 1
+            else:
+                fail += 1
 
-                suppress_timeout_status_line = suppress_timeout_status_lines and (status == "fail")
+            if debug_emit is not None and not bool(record.get("debug_events_streamed")):
+                for event in record.get("debug_events") or []:
+                    if isinstance(event, str) and event.strip():
+                        debug_emit(event)
 
-                if not suppress_timeout_status_line and _should_emit_status_line(record, output_format):
-                    _emit_line(out_fh, emit_line, _format_record(record, output_format))
+            if output_format != "txt" and bool(record.get("is_clickhouse")) and status != "fail":
+                _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
 
-                for line in _format_databases_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, line)
-                for line in _format_tables_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, line)
-                for line in _format_table_columns_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, line)
-                for line in _format_table_dump_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, line)
-                for line in _format_execute_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, line)
-                for line in _format_sql_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, line)
+            for auth_line in _format_auth_attempt_detail_records(record, output_format):
+                _emit_line(out_fh, emit_line, auth_line)
 
-                if logger is not None:
-                    logger.log(
-                        "clickhouse",
-                        (record.get("host"), record.get("port")),
-                        status=record.get("status"),
-                        auth_required=record.get("auth_required"),
-                        protocol=record.get("protocol"),
-                        attempted_credentials=record.get("attempted_credentials"),
-                        read=record.get("read_capability"),
-                        execute=record.get("execute_capability"),
-                        execute_ok=record.get("execute_ok"),
-                        admin=record.get("admin_capability"),
-                        database_count=record.get("database_count"),
-                        error=record.get("error"),
-                        elapsed_ms=record.get("elapsed_ms"),
-                    )
+            suppress_timeout_status_line = suppress_timeout_status_lines and (status == "fail")
+            if not suppress_timeout_status_line and _should_emit_status_line(record, output_format):
+                _emit_line(out_fh, emit_line, _format_record(record, output_format))
+
+            for line in _format_databases_detail_records(record, output_format):
+                _emit_line(out_fh, emit_line, line)
+            for line in _format_tables_detail_records(record, output_format):
+                _emit_line(out_fh, emit_line, line)
+            for line in _format_table_columns_detail_records(record, output_format):
+                _emit_line(out_fh, emit_line, line)
+            for line in _format_table_dump_detail_records(record, output_format):
+                _emit_line(out_fh, emit_line, line)
+            for line in _format_execute_detail_records(record, output_format):
+                _emit_line(out_fh, emit_line, line)
+            for line in _format_sql_detail_records(record, output_format):
+                _emit_line(out_fh, emit_line, line)
+
+            if logger is not None:
+                logger.log(
+                    "clickhouse",
+                    (record.get("host"), record.get("port")),
+                    status=record.get("status"),
+                    auth_required=record.get("auth_required"),
+                    protocol=record.get("protocol"),
+                    attempted_credentials=record.get("attempted_credentials"),
+                    read=record.get("read_capability"),
+                    execute=record.get("execute_capability"),
+                    execute_ok=record.get("execute_ok"),
+                    admin=record.get("admin_capability"),
+                    database_count=record.get("database_count"),
+                    error=record.get("error"),
+                    elapsed_ms=record.get("elapsed_ms"),
+                )
     finally:
+        if progress is not None:
+            progress.close()
         if out_fh is not None:
             out_fh.close()
 
@@ -2064,6 +2354,15 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
         if args.debug:
             console.plain(line)
 
+    def emit_debug(message: str) -> None:
+        if not args.debug:
+            return
+        debug_method = getattr(console, "debug", None)
+        if callable(debug_method):
+            debug_method(message)
+            return
+        console.info(message)
+
     if os_shell_mode:
         if args.output:
             console.error("--os-shell does not support --output; use --log instead")
@@ -2326,38 +2625,55 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
     valid = 0
     auth_required = 0
     failed = 0
+    outer_progress: ProgressBar | None = None
+    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(port_protocols) > 1
+    if use_single_global_progress:
+        outer_progress = ProgressBar("CLICKHOUSE", len(hosts) * len(port_protocols), enabled=True, leave=True)
 
     try:
-        total, open_no_auth, weak, valid, auth_required, failed = audit_clickhouse_targets(
-            hosts=hosts,
-            port=int(ports[0]) if ports else int(args.port),
-            timeout=args.timeout,
-            retries=args.retries,
-            workers=args.workers,
-            username=effective_username,
-            password=args.password,
-            defcreds=args.defcreds,
-            database=args.database,
-            protocol=raw_protocol,
-            show_databases=args.show_databases,
-            show_tables=args.show_tables,
-            show_columns=show_columns,
-            table_targets=table_targets,
-            table_columns=table_columns,
-            dump_table_rows=dump_table_rows,
-            execute_command=execute_command,
-            sql_command=sql_command,
-            output_path=args.output,
-            output_format=args.output_format,
-            emit_line=emit_line,
-            logger=logger if args.debug else None,
-            append_output=False,
-            suppress_timeout_status_lines=not bool(args.debug),
-            port_protocols=port_protocols,
-        )
+        for idx, (group_port, group_protocol) in enumerate(port_protocols):
+            part_total, part_open, part_weak, part_valid, part_auth, part_failed = audit_clickhouse_targets(
+                hosts=hosts,
+                port=int(group_port),
+                timeout=args.timeout,
+                retries=args.retries,
+                workers=args.workers,
+                username=effective_username,
+                password=args.password,
+                defcreds=args.defcreds,
+                database=args.database,
+                protocol=str(group_protocol),
+                show_databases=args.show_databases,
+                show_tables=args.show_tables,
+                show_columns=show_columns,
+                table_targets=table_targets,
+                table_columns=table_columns,
+                dump_table_rows=dump_table_rows,
+                execute_command=execute_command,
+                sql_command=sql_command,
+                output_path=args.output,
+                output_format=args.output_format,
+                emit_line=emit_line,
+                logger=logger if args.debug else None,
+                append_output=idx > 0,
+                suppress_timeout_status_lines=not bool(args.debug),
+                debug_emit=emit_debug if args.debug else None,
+                show_progress=not use_single_global_progress,
+            )
+            total += part_total
+            open_no_auth += part_open
+            weak += part_weak
+            valid += part_valid
+            auth_required += part_auth
+            failed += part_failed
+            if outer_progress is not None:
+                outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process clickhouse output: {exc}")
         return 2
+    finally:
+        if outer_progress is not None:
+            outer_progress.close()
 
     if stream_to_stdout:
         if args.debug and args.output_format == "txt":

@@ -208,11 +208,21 @@ def _add_output_flags(parser: argparse.ArgumentParser, *, short: bool = True) ->
             action="store_true",
             help="Enable verbose debug output.",
         )
+        parser.add_argument(
+            "--no-color",
+            action="store_true",
+            help="Disable ANSI colors in console output.",
+        )
         return
     parser.add_argument(
         "--debug",
         action="store_true",
         help="Enable verbose debug output.",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI colors in console output.",
     )
 
 
@@ -264,7 +274,8 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         metavar="targets",
         help=(
             "Targets list: dns/ip/cidr/http(s)://host[:port]/file (comma-separated). "
-            "URL path/query are ignored for target resolution. Files may contain targets per line."
+            "URL path/query are ignored for target resolution. Existing local file paths are treated as target files. "
+            "Files may contain targets per line."
         ),
     )
     parser.add_argument(

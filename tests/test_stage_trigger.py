@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from redposture_core import stage_trigger as trigger
 from redposture_core.console import Console
 from redposture_core.logger import AttemptLogger
 from redposture_core.stage_trigger import (
@@ -35,6 +36,84 @@ def _base_args(**overrides: object) -> argparse.Namespace:
     }
     values.update(overrides)
     return argparse.Namespace(**values)
+
+
+def test_trigger_small_helpers_cover_text_json_and_filters(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    assert trigger._clip_text("abcdef", 3) == "abc"
+    assert trigger._safe_int("42") == 42
+    assert trigger._safe_int("bad") is None
+    assert trigger._as_text("  x  ") == "x"
+    assert trigger._as_text("") is None
+
+    assert trigger._json_record_from_trigger_event({"phase": "detect_hit"}) is None
+    event = {
+        "phase": "callback_result",
+        "host": "10.0.0.1",
+        "exporter": "redis_exporter",
+        "exporter_port": "9121",
+        "callback_port": "6379",
+        "callback_target": "10.0.0.2",
+        "trigger_url": "http://x",
+        "target": "redis://x",
+        "success": True,
+        "probe_success": True,
+        "status": "200",
+    }
+    rec = trigger._json_record_from_trigger_event(event)
+    assert rec is not None
+    assert rec["status"] == "trigger_success"
+    assert rec["http_status"] == 200
+
+    out_file = tmp_path / "trigger_records.jsonl"
+    trigger._write_trigger_json_records(str(out_file), [rec])
+    assert out_file.exists()
+    assert out_file.read_text(encoding="utf-8").strip()
+
+    trigger._write_trigger_json_records(None, [rec])
+    stdout = capsys.readouterr().out
+    assert '"source_type": "trigger"' in stdout
+
+    assert trigger._parse_trigger_exporter_filter(None) == set()
+    assert trigger._parse_trigger_exporter_filter("redis,postgres_exporter") == {
+        "redis_exporter",
+        "postgres_exporter",
+    }
+    with pytest.raises(ValueError):
+        trigger._parse_trigger_exporter_filter("unknown")
+
+    assert trigger._parse_postgres_auth_modules(["a,b", "b", "c"]) == ["a", "b", "c"]
+    assert trigger._merge_trigger_query_auth_module("x=1&auth_module=old", "new") == "x=1&auth_module=new"
+
+    expanded = trigger._expand_trigger_exporters_postgres_auth_modules(
+        [{"name": "postgres_exporter", "trigger_query": "x=1"}, {"name": "redis_exporter"}],
+        ["scram", "md5"],
+    )
+    assert len(expanded) == 3
+    assert sum(1 for item in expanded if item["name"] == "postgres_exporter") == 2
+
+    filtered = trigger._filter_trigger_exporters(
+        [{"name": "redis_exporter"}, {"name": "postgres_exporter"}],
+        {"redis_exporter"},
+    )
+    assert filtered == [{"name": "redis_exporter"}]
+
+    overridden = trigger._override_trigger_exporter_ports([{"name": "redis_exporter", "port": 9121}], [19121, 29121])
+    assert [int(item["port"]) for item in overridden] == [19121, 29121]
+
+    assert trigger._callback_event_has_complete_creds({"username": "u", "password": "p"}) is True
+    assert trigger._callback_event_has_complete_creds({"username": "u", "password": ""}) is False
+    assert trigger._callback_event_remote_host({"remote_addr": "10.0.0.1:1234"}) == "10.0.0.1"
+
+
+def test_auto_adjust_listener_services_for_trigger_exporters() -> None:
+    console = Console(debug=True)
+    args = argparse.Namespace(with_listen=True, services="redis", debug=True)
+    trigger._auto_adjust_listener_services_for_trigger_exporters(args, {"postgres_exporter"}, console)
+    assert set(str(args.services).split(",")) == {"redis", "postgres"}
+
+    args_default = argparse.Namespace(with_listen=True, services="postgres,redis,proxmox,blackbox", debug=False)
+    trigger._auto_adjust_listener_services_for_trigger_exporters(args_default, {"redis_exporter"}, console)
+    assert args_default.services == "redis"
 
 
 def test_trigger_with_listen_starts_listeners_before_scan(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -912,3 +991,143 @@ def test_patch_with_listen_blackbox_target_preserves_credentials() -> None:
     exporters = [{"name": "blackbox_exporter", "target_fmt": "http://blackbox:blackbox@{our_host}"}]
     patched = _patch_trigger_exporters_for_with_listen(exporters, args)
     assert patched[0]["target_fmt"] == "http://blackbox:blackbox@{our_host}:19115"
+
+
+def test_trigger_stage_argument_and_validation_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    rc = run_trigger_stage(_base_args(timeout=0), AttemptLogger())
+    assert rc == 2
+    rc = run_trigger_stage(_base_args(retries=-1), AttemptLogger())
+    assert rc == 2
+    rc = run_trigger_stage(_base_args(with_listen=True, listen_seconds=-1), AttemptLogger())
+    assert rc == 2
+    rc = run_trigger_stage(_base_args(with_listen=False, check_credentials=True), AttemptLogger())
+    assert rc == 2
+
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.collect_scan_target_specs",
+        lambda *_a, **_k: [argparse.Namespace(host="10.0.0.1", scheme="https", explicit_port=9121)],
+    )
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", lambda *_a, **_k: {"trigger_exporters": []})
+    rc = run_trigger_stage(_base_args(), AttemptLogger())
+    assert rc == 2
+
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.collect_scan_target_specs",
+        lambda *_a, **_k: [argparse.Namespace(host="10.0.0.1", scheme=None, explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.load_profiles",
+        lambda *_a, **_k: {"trigger_exporters": [{"name": "redis_exporter", "port": 9121}]},
+    )
+    rc = run_trigger_stage(_base_args(trigger_exporters_filter="postgres"), AttemptLogger())
+    assert rc == 2
+
+    rc = run_trigger_stage(_base_args(postgres_auth_modules=["scram"]), AttemptLogger())
+    assert rc == 2
+
+
+def test_trigger_stage_target_parse_and_output_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.collect_scan_target_specs",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad targets")),
+    )
+    rc = run_trigger_stage(_base_args(), AttemptLogger())
+    assert rc == 2
+
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.collect_scan_target_specs",
+        lambda *_a, **_k: [argparse.Namespace(host="10.0.0.1", scheme=None, explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.load_profiles",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("profiles fail")),
+    )
+    rc = run_trigger_stage(_base_args(), AttemptLogger())
+    assert rc == 2
+
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", lambda *_a, **_k: {"trigger_exporters": []})
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.collect_scan_ports",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad ports")),
+    )
+    rc = run_trigger_stage(_base_args(ports="bad"), AttemptLogger())
+    assert rc == 2
+
+    monkeypatch.setattr("redposture_core.stage_trigger.collect_scan_ports", lambda *_a, **_k: [])
+    logger = AttemptLogger()
+    monkeypatch.setattr(
+        logger,
+        "set_text_output",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("cannot open")),
+    )
+    rc = run_trigger_stage(_base_args(output="trigger.txt"), logger)
+    assert rc == 2
+
+
+def test_trigger_stage_debug_emits_staged_markers(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {"trigger_exporters": [{"name": "redis_exporter", "port": 9121}]}
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        stage_cb = kwargs.get("emit_stage_event")
+        assert callable(stage_cb)
+        stage_cb({"kind": "pass", "pass": "detect", "event": "start", "total": 1})
+        stage_cb(
+            {
+                "kind": "pass",
+                "pass": "detect",
+                "event": "complete",
+                "total": 1,
+                "detected_exporters": 1,
+                "deep_candidates": 1,
+            }
+        )
+        stage_cb({"kind": "gate", "host": "10.0.0.1", "gate": "run", "reason": "detected=1"})
+        stage_cb({"kind": "pass", "pass": "deep", "event": "start", "total": 1})
+        stage_cb(
+            {
+                "kind": "stage_trace",
+                "stage_name": "data",
+                "attempt": 1,
+                "duration_ms": 12,
+                "result": "ok",
+                "error": "-",
+            }
+        )
+        stage_cb({"kind": "pass", "pass": "deep", "event": "complete", "total": 1, "processed": 1})
+        stage_cb(
+            {
+                "kind": "timing_summary",
+                "status": "ok",
+                "attempts": "1/1",
+                "detect_ms": 5,
+                "data_ms": 12,
+                "total_ms": 20,
+            }
+        )
+        return {
+            "detected_exporters": 1,
+            "attempted": 1,
+            "triggered": 1,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 1, "attempted": 1, "success": 1, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 1, "fail": 0}},
+            "by_exporter": {},
+        }
+
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.collect_scan_target_specs",
+        lambda *_a, **_k: [argparse.Namespace(host="10.0.0.1", scheme=None, explicit_port=None)],
+    )
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(_base_args(debug=True), AttemptLogger())
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "pass=1 detect start total=1" in out
+    assert "stage2_gate=run reason=detected=1" in out
+    assert "pass=2 deep complete processed=1" in out
+    assert "stage_timing_summary status=ok attempts=1/1" in out

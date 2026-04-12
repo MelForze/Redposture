@@ -564,6 +564,63 @@ def test_audit_redis_targets_suppresses_connection_refused_status_line_only(
     assert all("Connection refused" not in line for line in emitted)
 
 
+def test_audit_redis_targets_keeps_non_refused_fail_lines_when_suppression_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records = iter(
+        [
+            {
+                "timestamp": "2026-03-27T00:00:00Z",
+                "host": "127.0.0.1",
+                "port": 6379,
+                "is_redis": False,
+                "status": "fail",
+                "error": "protocol mismatch",
+                "auth_required": None,
+                "default_credentials": None,
+                "provided_credentials": False,
+                "provided_username": None,
+                "provided_password": None,
+                "provided_credentials_ok": None,
+                "defcreds_enabled": False,
+                "default_credentials_attempted": False,
+                "show_keys": False,
+                "dump_keys": False,
+                "query_key": None,
+                "key_count": None,
+                "keys": None,
+                "key_values": None,
+                "query_key_value": None,
+                "elapsed_ms": None,
+            }
+        ]
+    )
+    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))  # type: ignore[no-untyped-def]
+
+    emitted: list[str] = []
+    totals = redis_stage.audit_redis_targets(
+        hosts=["127.0.0.1"],
+        port=6379,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=emitted.append,
+        suppress_timeout_status_lines=True,
+        suppress_connection_refused_status_lines=True,
+    )
+
+    assert totals == (1, 0, 0, 0, 0, 1)
+    assert any("protocol mismatch" in line for line in emitted)
+
+
 @pytest.mark.parametrize("debug", [False, True])
 def test_run_redis_stage_connection_refused_suppression_matches_debug(
     monkeypatch: pytest.MonkeyPatch, debug: bool
@@ -603,3 +660,201 @@ def test_run_redis_stage_connection_refused_suppression_matches_debug(
     rc = redis_stage.run_redis_stage(args, _DummyLogger())
     assert rc == 0
     assert captured.get("suppress_connection_refused_status_lines") is (not debug)
+
+
+def test_run_redis_stage_non_debug_shows_unreachable_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(redis_stage, "audit_redis_targets", lambda *_args, **_kwargs: (1, 0, 0, 0, 0, 1))
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump=False,
+        key=None,
+        output=None,
+        output_format="txt",
+        port=6379,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+    )
+
+    class _DummyLogger:
+        def log(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+    rc = redis_stage.run_redis_stage(args, _DummyLogger())
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "all redis targets are unreachable" in captured.out
+
+
+def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_calls: list[dict[str, object]] = []
+
+    def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        captured_calls.append(kwargs)
+        return (1, 1, 0, 0, 0, 0)
+
+    monkeypatch.setattr(redis_stage, "audit_redis_targets", fake_audit_redis_targets)
+    monkeypatch.setattr(redis_stage, "collect_scan_ports", lambda *_args, **_kwargs: [6379, 26380, 26381])
+    monkeypatch.setattr(redis_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+
+    progress_totals: list[int] = []
+    progress_advances: list[int] = []
+
+    class _FakeProgressBar:
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            progress_totals.append(int(total))
+
+        def advance(self, amount: int = 1) -> None:
+            progress_advances.append(int(amount))
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(redis_stage, "ProgressBar", _FakeProgressBar)
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username="redis",
+        password="redis",
+        defcreds=False,
+        show_keys=True,
+        dump=False,
+        key=None,
+        output=None,
+        output_format="txt",
+        port=6379,
+        ports="6379,26380,26381",
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+    )
+
+    rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    assert [bool(call["show_progress"]) for call in captured_calls] == [False, False, False]
+    assert progress_totals == [3]
+    assert progress_advances == [1, 1, 1]
+
+
+def test_call_audit_redis_host_with_stage_debug_adds_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_audit(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 6379,
+            "is_redis": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "show_keys": False,
+            "dump_keys": False,
+            "query_key": None,
+            "error": None,
+        }
+
+    monkeypatch.setattr(redis_stage, "_audit_redis_host", fake_audit)
+    debug_lines: list[str] = []
+    result = redis_stage._call_audit_redis_host_with_stage_debug(
+        "127.0.0.1",
+        6379,
+        1.0,
+        1,
+        None,
+        None,
+        False,
+        False,
+        False,
+        None,
+        run_deep_checks=True,
+        debug=True,
+        debug_emit=debug_lines.append,
+    )
+    assert isinstance(result.get("stages"), list)
+    assert result.get("stage_durations_ms") is not None
+    assert result.get("stage_attempts") is not None
+    assert any("stage_trace stage_name=detect_protocol" in line for line in debug_lines)
+    assert any("stage_timing_summary status=open_no_auth" in line for line in debug_lines)
+
+
+def test_audit_redis_targets_emits_two_pass_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_stage_call(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        username: str | None,
+        password: str | None,
+        defcreds: bool,
+        show_keys: bool,
+        dump_keys: bool,
+        query_key: str | None,
+        *,
+        run_deep_checks: bool,
+        debug: bool,
+        debug_emit,  # type: ignore[no-untyped-def]
+    ) -> dict[str, object]:
+        _ = (port, timeout, retries, username, password, defcreds, show_keys, dump_keys, query_key, debug, debug_emit)
+        base = {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": 6379,
+            "is_redis": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "provided_credentials": False,
+            "default_credentials_attempted": False,
+            "show_keys": bool(run_deep_checks),
+            "dump_keys": False,
+            "query_key": None,
+            "keys": ["a"] if run_deep_checks else None,
+            "key_values": None,
+            "query_key_value": None,
+            "error": None,
+            "debug_events": [],
+            "debug_events_streamed": True,
+            "stages": [],
+            "stage_durations_ms": {},
+            "stage_attempts": {},
+            "stage_failed_at": None,
+        }
+        return base
+
+    monkeypatch.setattr(redis_stage, "_call_audit_redis_host_with_stage_debug", fake_stage_call)
+    debug_lines: list[str] = []
+    emitted: list[str] = []
+    totals = redis_stage.audit_redis_targets(
+        hosts=["127.0.0.1"],
+        port=6379,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=True,
+        dump_keys=False,
+        query_key=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=emitted.append,
+        debug_emit=debug_lines.append,
+        show_progress=False,
+    )
+    assert totals == (1, 1, 0, 0, 0, 0)
+    assert any("pass=1 detect start total=1" in line for line in debug_lines)
+    assert any("stage2_gate=run reason=status=open_no_auth" in line for line in debug_lines)
+    assert any("pass=2 deep complete processed=1" in line for line in debug_lines)

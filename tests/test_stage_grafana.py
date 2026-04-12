@@ -863,6 +863,79 @@ def test_audit_grafana_targets_and_run_stage_paths(
     assert any("failed to process grafana output" in msg for msg in fake_console.errors)
 
 
+def test_audit_grafana_targets_emits_stage_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, tuple[str, ...] | None]] = []
+
+    def fake_audit_host(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        username: str | None,
+        password: str | None,
+        defcreds: bool,
+        check_urls: list[str] | None,
+    ) -> dict[str, object]:
+        _ = (port, timeout, retries, username, password, defcreds)
+        calls.append((host, tuple(check_urls or [])))
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": 3000,
+            "is_grafana": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "server_version": "11.0.0",
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_credentials_ok": None,
+            "default_credentials": False,
+            "defcreds_enabled": False,
+            "attempted_credentials": 0,
+            "credentials_source": None,
+            "effective_username": None,
+            "effective_password": None,
+            "datasource_count": 0,
+            "datasources": [],
+            "auth_attempts": [],
+            "check_urls": check_urls,
+            "check_results": [],
+            "elapsed_ms": 5,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.stage_grafana._audit_grafana_host", fake_audit_host)
+    debug_lines: list[str] = []
+    totals = audit_grafana_targets(
+        hosts=["127.0.0.1"],
+        port=3000,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        check_urls=["http://127.0.0.1:9090/-/ready"],
+        show_datasources=True,
+        output_path=None,
+        output_format="txt",
+        emit_line=None,
+        logger=None,
+        append_output=False,
+        suppress_timeout_status_lines=False,
+        show_progress=False,
+        debug_emit=debug_lines.append,
+    )
+    assert totals == (1, 1, 0, 0, 0)
+    assert calls == [
+        ("127.0.0.1", ()),
+        ("127.0.0.1", ("http://127.0.0.1:9090/-/ready",)),
+    ]
+    assert any(line.startswith("pass=1 detect start total=1") for line in debug_lines)
+    assert any("stage2_gate=run reason=status=open_no_auth" in line for line in debug_lines)
+    assert any("pass=2 deep complete processed=1" in line for line in debug_lines)
+
+
 def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeConsole:
         def __init__(self, debug: bool = False) -> None:

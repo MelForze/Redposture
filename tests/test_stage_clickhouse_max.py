@@ -970,7 +970,9 @@ def test_run_clickhouse_stage_calls_audit_with_port_protocols(monkeypatch: pytes
     )
     assert exit_code == 0
     assert len(calls) == 1
-    assert calls[0]["port_protocols"] == [(9000, "native")]
+    assert calls[0]["port"] == 9000
+    assert calls[0]["protocol"] == "native"
+    assert "port_protocols" not in calls[0]
     assert calls[0]["suppress_timeout_status_lines"] is True
 
 
