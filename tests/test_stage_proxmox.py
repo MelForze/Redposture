@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
+import threading
+import urllib.error
+from types import SimpleNamespace
+
+import pytest
 
 from redposture_core.stage_proxmox import (
     _audit_proxmox_host,
+    _auth_header_value,
+    _cap_text,
+    _caps_suffix,
     _classify_auth_failure,
     _clean_value_text,
     _collect_nodes,
@@ -22,20 +31,77 @@ from redposture_core.stage_proxmox import (
     _format_nodes_detail_records,
     _format_record,
     _format_users_detail_records,
+    _friendly_error_text,
+    _generate_random_password,
+    _is_connection_refused_error,
+    _is_connection_timeout_error,
     _is_invalid_token_message,
     _is_permission_denied_message,
     _key_looks_sensitive,
     _looks_like_cloud_init_secret_blob,
+    _normalize_add_user_id,
     _parse_proxy_config,
+    _proxmox_request,
+    _proxmox_request_once,
     _ProxyConfig,
+    _recv_exact,
+    _request_via_http_proxy,
+    _request_via_socks_proxy,
     _socks5_open_tunnel,
+    _ssl_context,
+    _stream_proxmox_status,
     _value_looks_secret,
     audit_proxmox_targets,
+    run_proxmox_stage,
 )
 
 
 def _json_payload(data):
     return json.dumps({"data": data}, ensure_ascii=False).encode("utf-8")
+
+
+def test_proxmox_small_helpers_cover_auth_userid_caps_and_ssl() -> None:
+    assert _auth_header_value("abc123") == "PVEAPIToken=abc123"
+    assert _auth_header_value("PVEAPIToken=abc123") == "PVEAPIToken=abc123"
+
+    generated = _generate_random_password(0)
+    assert len(generated) == 1
+    assert generated.isalnum()
+
+    assert _normalize_add_user_id("scanner") == "scanner@pve"
+    assert _normalize_add_user_id("scanner@pam") == "scanner@pam"
+    assert _normalize_add_user_id("bad user") is None
+    assert _normalize_add_user_id("") is None
+
+    assert _cap_text(True) == "true"
+    assert _cap_text(False) == "false"
+    assert _cap_text(None) == "unknown"
+    suffix = _caps_suffix({"cap_adduser": True, "cap_read": False, "cap_modify": None, "cap_backup": True})
+    assert "(adduser:true)" in suffix
+    assert "(read:false)" in suffix
+    assert "(modify:unknown)" in suffix
+    assert "(backup:true)" in suffix
+
+    assert _ssl_context(use_https=False, insecure=False) is None
+    assert _ssl_context(use_https=True, insecure=True) is not None
+    assert _ssl_context(use_https=True, insecure=False) is not None
+
+
+def test_recv_exact_handles_complete_and_eof_cases() -> None:
+    class _Socket:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = list(chunks)
+
+        def recv(self, _size: int) -> bytes:
+            if not self._chunks:
+                return b""
+            return self._chunks.pop(0)
+
+    sock = _Socket([b"ab", b"cd"])
+    assert _recv_exact(sock, 4) == b"abcd"
+
+    with pytest.raises(ConnectionError):
+        _recv_exact(_Socket([b"a", b""]), 2)
 
 
 def test_proxmox_error_and_permission_helpers_cover_nested_payloads() -> None:
@@ -801,6 +867,12 @@ def test_parse_proxy_config_rejects_invalid_scheme() -> None:
     assert "unsupported proxy scheme" in str(error or "")
 
 
+def test_parse_proxy_config_requires_scheme() -> None:
+    proxy, error = _parse_proxy_config("127.0.0.1:8080")
+    assert proxy is None
+    assert "must include scheme" in str(error or "")
+
+
 def test_format_record_token_ok_caps_order_and_no_endpoints_findings() -> None:
     line = _format_record(
         {
@@ -840,6 +912,18 @@ def test_format_discovered_urls_detail_records_for_discover_creds() -> None:
     assert any(line.endswith("[*] Discovered URL") for line in lines)
     assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/access") for line in lines)
     assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/nodes") for line in lines)
+
+    no_urls = _format_discovered_urls_detail_records(
+        {
+            "host": "10.10.10.10",
+            "port": 8006,
+            "discover_creds": True,
+            "use_https": True,
+            "endpoint_results": [],
+        },
+        "txt",
+    )
+    assert any(line.endswith("[*] <none>") for line in no_urls)
 
 
 def test_proxmox_detail_renderers_cover_findings_nodes_users_text_and_json() -> None:
@@ -882,6 +966,43 @@ def test_format_record_covers_auth_and_fail_statuses() -> None:
     assert "connection failed err=boom" in _format_record(
         {"host": "127.0.0.1", "port": 8006, "status": "fail", "error": "boom"}, "txt"
     )
+
+
+def test_stream_proxmox_status_emits_detect_once_and_can_suppress_fail_line() -> None:
+    lines: list[str] = []
+    lock = threading.Lock()
+    emitted: set[tuple[str, int]] = set()
+
+    record = {
+        "host": "127.0.0.1",
+        "port": 8006,
+        "is_proxmox": True,
+        "status": "fail",
+        "error": "connection refused",
+    }
+    _stream_proxmox_status(
+        out_fh=None,
+        emit_line=lines.append,
+        lock=lock,
+        status_emitted=emitted,
+        record=record,
+        output_format="txt",
+        suppress_fail_status_lines=True,
+        emit_detect_line=True,
+    )
+    _stream_proxmox_status(
+        out_fh=None,
+        emit_line=lines.append,
+        lock=lock,
+        status_emitted=emitted,
+        record=record,
+        output_format="txt",
+        suppress_fail_status_lines=True,
+        emit_detect_line=True,
+    )
+
+    assert sum(1 for line in lines if "Proxmox API" in line) == 1
+    assert not any("connection failed" in line for line in lines)
 
 
 def test_audit_proxmox_targets_streams_discovery_and_suppresses_duplicate_status(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1008,6 +1129,102 @@ def test_audit_proxmox_targets_can_suppress_fail_status_lines(monkeypatch) -> No
     assert lines == []
 
 
+def test_audit_proxmox_targets_emits_stage_debug_markers(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, bool, bool, bool, str | None]] = []
+
+    def fake_audit(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        pve_api_token: str,
+        use_https: bool,
+        insecure: bool,
+        proxy,
+        *,
+        discover_creds: bool = False,
+        show_nodes: bool = False,
+        show_users: bool = False,
+        add_user: str | None = None,
+        on_status_ready=None,
+        on_discovered_url=None,
+        on_credential_finding=None,
+    ):
+        _ = (
+            port,
+            timeout,
+            retries,
+            pve_api_token,
+            use_https,
+            insecure,
+            proxy,
+            on_discovered_url,
+            on_credential_finding,
+        )
+        calls.append((host, discover_creds, show_nodes, show_users, add_user))
+        record = {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": 8006,
+            "is_proxmox": True,
+            "status": "token_ok",
+            "discover_creds": discover_creds,
+            "show_nodes": show_nodes,
+            "show_users": show_users,
+            "add_user": add_user,
+            "users": [],
+            "users_error": None,
+            "nodes": [],
+            "nodes_error": None,
+            "findings": [],
+            "credential_hits": 0,
+            "checked_endpoints": 1,
+            "successful_endpoints": 1,
+            "cap_adduser": False,
+            "cap_read": True,
+            "cap_modify": False,
+            "cap_backup": False,
+            "use_https": True,
+            "endpoint_results": [],
+            "error": None,
+        }
+        if on_status_ready is not None:
+            on_status_ready(record)
+        return record
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._audit_proxmox_host", fake_audit)
+    debug_lines: list[str] = []
+    totals = audit_proxmox_targets(
+        hosts=["127.0.0.1"],
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=False,
+        show_nodes=True,
+        show_users=False,
+        add_user=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=None,
+        suppress_fail_status_lines=False,
+        debug_emit=debug_lines.append,
+        show_progress=False,
+    )
+    assert totals == (1, 1, 0, 0, 0, 0)
+    assert calls == [
+        ("127.0.0.1", False, False, False, None),
+        ("127.0.0.1", False, True, False, None),
+    ]
+    assert any(line.startswith("pass=1 detect start total=1") for line in debug_lines)
+    assert any("stage2_gate=run reason=status=token_ok" in line for line in debug_lines)
+    assert any("pass=2 deep complete processed=1" in line for line in debug_lines)
+
+
 def test_audit_proxmox_unexpected_http_marks_not_detected(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def fake_request(*_args, **_kwargs):
         return 500, b'{"errors":"internal"}', {}, None
@@ -1075,3 +1292,385 @@ def test_socks5_open_tunnel_uses_socket_create_connection(monkeypatch) -> None: 
     assert error is None
     assert sock is not None
     assert calls == [(("::1", 1080), 1.5)]
+
+
+def test_proxmox_error_helpers_cover_tls_and_transport_cases() -> None:
+    assert _friendly_error_text("certificate verify failed") == "tls verification failed (try --insecure)"
+    assert _friendly_error_text("wrong version number") == "tls/http protocol mismatch"
+    assert _friendly_error_text("[Errno 111] Connection refused").startswith("connection refused")
+    assert _friendly_error_text("[Errno 110] timed out") == "connection timeout"
+    assert _friendly_error_text("[Errno -2] Name or service not known") == "dns lookup failed"
+    assert _friendly_error_text("[Errno 101] network is unreachable") == "network unreachable"
+    assert _is_connection_refused_error("connection refused (service is not listening on target port)") is True
+    assert _is_connection_timeout_error("connection timeout") is True
+
+
+def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _FakeConsole:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+            self.errors: list[str] = []
+            self.infos: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def info(self, message: str) -> None:
+            self.infos.append(message)
+
+        def plain(self, _message: str, color: str | None = None) -> None:
+            _ = color
+            return
+
+        def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+    fake_console = _FakeConsole(debug=True)
+    monkeypatch.setattr("redposture_core.stage_proxmox.Console", lambda debug=False: fake_console)
+
+    base_args = dict(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        pve_api_token="",
+        proxy=None,
+        port=8006,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        output=None,
+        output_format="txt",
+        discover_creds=False,
+        nodes=False,
+        show_nodes=False,
+        users=False,
+        show_users=False,
+        add_user="",
+        https=False,
+        insecure=True,
+    )
+
+    rc = run_proxmox_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 2
+    assert any("--pveapitoken is required" in item for item in fake_console.errors)
+
+    fake_console.errors.clear()
+    monkeypatch.setattr("redposture_core.stage_proxmox._parse_proxy_config", lambda _raw: (None, "invalid proxy"))
+    rc = run_proxmox_stage(
+        SimpleNamespace(**{**base_args, "pve_api_token": "monitor@pve!audit=token"}),
+        logger=SimpleNamespace(log=lambda *_a, **_k: None),
+    )
+    assert rc == 2
+    assert any("failed to parse --proxy: invalid proxy" in item for item in fake_console.errors)
+
+    fake_console.errors.clear()
+    monkeypatch.setattr("redposture_core.stage_proxmox._parse_proxy_config", lambda _raw: (None, None))
+    monkeypatch.setattr("redposture_core.stage_proxmox.collect_scan_ports", lambda *_a, **_k: [8006])
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox.collect_scan_target_specs",
+        lambda *_a, **_k: [
+            SimpleNamespace(host="host-http", scheme="http", explicit_port=8006),
+            SimpleNamespace(host="host-https", scheme="https", explicit_port=8443),
+        ],
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox.build_scan_execution_groups",
+        lambda *_a, **_k: [
+            SimpleNamespace(hosts=["host-http"], port=8006, scheme_hint="http"),
+            SimpleNamespace(hosts=["host-https"], port=8443, scheme_hint="https"),
+        ],
+    )
+
+    seen_https: list[bool] = []
+
+    def fake_audit_targets(*_args, **kwargs):
+        seen_https.append(bool(kwargs.get("use_https")))
+        hosts = list(kwargs.get("hosts") or [])
+        return len(hosts), 1, 0, 0, 0, 0
+
+    monkeypatch.setattr("redposture_core.stage_proxmox.audit_proxmox_targets", fake_audit_targets)
+
+    rc = run_proxmox_stage(
+        SimpleNamespace(**{**base_args, "debug": True, "pve_api_token": "monitor@pve!audit=token", "https": True}),
+        logger=SimpleNamespace(log=lambda *_a, **_k: None),
+    )
+    assert rc == 0
+    assert seen_https == [False, True]
+    assert any("proxmox audit complete:" in item for item in fake_console.infos)
+
+
+def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _FakeConsole:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+            self.errors: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def info(self, _message: str) -> None:
+            return
+
+        def plain(self, _message: str, color: str | None = None) -> None:
+            _ = color
+            return
+
+        def _paint(self, text: str, _color: str, _stream) -> str:
+            return text
+
+        def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+    fake_console = _FakeConsole()
+    monkeypatch.setattr("redposture_core.stage_proxmox.Console", lambda debug=False: fake_console)
+    monkeypatch.setattr("redposture_core.stage_proxmox._parse_proxy_config", lambda _raw: (None, None))
+    monkeypatch.setattr("redposture_core.stage_proxmox.collect_scan_ports", lambda *_a, **_k: [8006, 18061, 18062])
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox.collect_scan_target_specs",
+        lambda *_a, **_k: [SimpleNamespace(host="127.0.0.1", scheme="https", explicit_port=8006)],
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox.build_scan_execution_groups",
+        lambda *_a, **_k: [
+            SimpleNamespace(hosts=["127.0.0.1"], port=8006, scheme_hint="https"),
+            SimpleNamespace(hosts=["127.0.0.1"], port=18061, scheme_hint="https"),
+            SimpleNamespace(hosts=["127.0.0.1"], port=18062, scheme_hint="https"),
+        ],
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def fake_audit_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return (1, 1, 0, 0, 0, 0)
+
+    monkeypatch.setattr("redposture_core.stage_proxmox.audit_proxmox_targets", fake_audit_targets)
+
+    progress_totals: list[int] = []
+    progress_advances: list[int] = []
+
+    class _FakeProgressBar:
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            progress_totals.append(int(total))
+
+        def advance(self, amount: int = 1) -> None:
+            progress_advances.append(int(amount))
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr("redposture_core.stage_proxmox.ProgressBar", _FakeProgressBar)
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        pve_api_token="monitor@pve!audit=token",
+        proxy=None,
+        port=8006,
+        ports="8006,18061,18062",
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        output=None,
+        output_format="txt",
+        discover_creds=False,
+        nodes=True,
+        show_nodes=False,
+        users=False,
+        show_users=False,
+        add_user="",
+        https=True,
+        insecure=True,
+    )
+    rc = run_proxmox_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    assert not fake_console.errors
+    assert [bool(call["show_progress"]) for call in calls] == [False, False, False]
+    assert progress_totals == [3]
+    assert progress_advances == [1, 1, 1]
+
+
+def test_request_via_http_proxy_success_and_http_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _FakeResponse:
+        def __init__(self, status: int, body: bytes) -> None:
+            self.status = status
+            self._body = body
+            self.headers = {"Content-Type": "application/json"}
+
+        def read(self, _limit: int | None = None) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class _FakeOpener:
+        def __init__(self, mode: str) -> None:
+            self.mode = mode
+
+        def open(self, _request, timeout: float = 0.0):
+            _ = timeout
+            if self.mode == "ok":
+                return _FakeResponse(200, b'{"ok":1}')
+            if self.mode == "http_error":
+                raise urllib.error.HTTPError(
+                    "http://127.0.0.1:8006/api2/json/access",
+                    403,
+                    "forbidden",
+                    {"Content-Type": "application/json"},
+                    io.BytesIO(b'{"errors":"forbidden"}'),
+                )
+            raise urllib.error.URLError("connection refused")
+
+    proxy = _ProxyConfig(
+        scheme="http",
+        host="127.0.0.1",
+        port=8080,
+        username=None,
+        password=None,
+        raw_url="http://127.0.0.1:8080",
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox.urllib.request.build_opener", lambda *_a, **_k: _FakeOpener("ok")
+    )
+    status, payload, _headers, error = _request_via_http_proxy(
+        "127.0.0.1",
+        8006,
+        "/access",
+        1.0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=False,
+        insecure=True,
+        proxy=proxy,
+    )
+    assert (status, error) == (200, None)
+    assert payload == b'{"ok":1}'
+
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox.urllib.request.build_opener",
+        lambda *_a, **_k: _FakeOpener("http_error"),
+    )
+    status, payload, _headers, error = _request_via_http_proxy(
+        "127.0.0.1",
+        8006,
+        "/access",
+        1.0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=False,
+        insecure=True,
+        proxy=proxy,
+    )
+    assert status == 403
+    assert payload == b'{"errors":"forbidden"}'
+    assert error is None
+
+
+def test_request_via_socks_proxy_success_and_transport_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _DummySock:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+            self.closed = False
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        def close(self) -> None:
+            self.closed = True
+
+    proxy = _ProxyConfig(
+        scheme="socks5",
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks5://127.0.0.1:1080",
+    )
+    sock = _DummySock()
+    monkeypatch.setattr("redposture_core.stage_proxmox._socks5_open_tunnel", lambda *_a, **_k: (sock, None))
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox._read_http_response_from_socket",
+        lambda _sock: (200, b"{}", {"content-type": "application/json"}, None),
+    )
+    status, payload, _headers, error = _request_via_socks_proxy(
+        "127.0.0.1",
+        8006,
+        "/access",
+        1.0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=False,
+        insecure=True,
+        proxy=proxy,
+    )
+    assert (status, payload, error) == (200, b"{}", None)
+    assert sock.sent
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._socks5_open_tunnel", lambda *_a, **_k: (None, "proxy failed"))
+    status, _payload, _headers, error = _request_via_socks_proxy(
+        "127.0.0.1",
+        8006,
+        "/access",
+        1.0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=False,
+        insecure=True,
+        proxy=proxy,
+    )
+    assert status == 0
+    assert error == "proxy failed"
+
+
+def test_proxmox_request_once_and_retry_paths(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    proxy = _ProxyConfig(
+        scheme="http",
+        host="127.0.0.1",
+        port=8080,
+        username=None,
+        password=None,
+        raw_url="http://127.0.0.1:8080",
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox._request_via_http_proxy",
+        lambda *_a, **_k: (200, b"{}", {}, None),
+    )
+    status, payload, _headers, error = _proxmox_request_once(
+        "127.0.0.1",
+        8006,
+        "/access",
+        1.0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=False,
+        insecure=True,
+        proxy=proxy,
+    )
+    assert (status, payload, error) == (200, b"{}", None)
+
+    retry_calls = {"count": 0}
+
+    def fake_once(*_args, **_kwargs):
+        retry_calls["count"] += 1
+        if retry_calls["count"] == 1:
+            return 0, b"", {}, "connection timeout"
+        return 200, b'{"ok":1}', {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request_once", fake_once)
+    monkeypatch.setattr("redposture_core.stage_proxmox._retry_delay", lambda _attempt: 0.0)
+    status, payload, _headers, error = _proxmox_request(
+        "127.0.0.1",
+        8006,
+        "/access",
+        1.0,
+        1,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=False,
+        insecure=True,
+        proxy=None,
+    )
+    assert retry_calls["count"] == 2
+    assert (status, payload, error) == (200, b'{"ok":1}', None)

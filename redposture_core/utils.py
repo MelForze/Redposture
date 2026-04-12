@@ -5,11 +5,14 @@ from __future__ import annotations
 import base64
 import ipaddress
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from .constants import HTTP_METHOD_PREFIXES
+
+_UNEXPECTED_KWARG_RE = re.compile(r"(?:got an )?unexpected keyword argument ['\"](?P<kw>[^'\"]+)['\"]")
 
 
 def utc_now_iso() -> str:
@@ -65,6 +68,28 @@ def parse_proxmox_api_token_auth(header_value: str | None) -> tuple[str | None, 
         token_id, token_secret = token_blob, ""
     token_id = token_id.strip()
     return (token_id or None), token_secret
+
+
+def is_signature_compat_typeerror(
+    exc: TypeError,
+    *,
+    expected_keywords: set[str] | list[str] | tuple[str, ...],
+    allow_positional_mismatch: bool = False,
+) -> bool:
+    """Return True only for expected wrapper-compat TypeError keyword mismatches."""
+
+    message = str(exc or "")
+    if not message:
+        return False
+    if allow_positional_mismatch and ("positional argument" in message or "positional arguments" in message):
+        return True
+    match = _UNEXPECTED_KWARG_RE.search(message)
+    if match is None:
+        return False
+    keyword = str(match.group("kw") or "").strip()
+    if not keyword:
+        return False
+    return keyword in set(expected_keywords)
 
 
 def is_http_request_prefix(data: bytes) -> bool:

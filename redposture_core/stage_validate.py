@@ -7,6 +7,7 @@ import binascii
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
@@ -1398,6 +1399,7 @@ def run_validation(
     console: Console | None = None,
 ) -> int:
     out = console or Console(debug=debug)
+    pipeline_started_at = time.monotonic()
     path_obj = Path(input_path)
     if not path_obj.exists():
         out.error(f"input not found: {path_obj}")
@@ -1415,6 +1417,7 @@ def run_validation(
 
     if debug:
         out.info(f"validate started: input={path_obj} files={len(files)} format={input_format}")
+        out.debug(f"pass=1 detect start total={len(files)}")
 
     index_map: dict[str, dict[str, Any]] = {}
     if path_obj.is_dir():
@@ -1485,11 +1488,25 @@ def run_validation(
                 }
             )
 
+    detect_ms = int((time.monotonic() - pipeline_started_at) * 1000)
+    if debug:
+        out.debug(f"pass=1 detect complete files={len(files)} credential_hits={hit_count}")
+        out.debug(f"stage_trace stage_name=detect_protocol attempt=1 duration_ms={detect_ms} result=ok error=-")
+
     if debug and suppressed_hits > 0:
         rules_text = ",".join(f"{key}:{suppressed_rules[key]}" for key in sorted(suppressed_rules))
         out.debug(f"validate suppressed hits: count={suppressed_hits} rules={rules_text}")
 
     if hit_count <= 0:
+        if debug:
+            out.debug("pass=2 deep start total=0")
+            out.debug("stage2_gate=skip reason=credential_hits=0")
+            out.debug("pass=2 deep complete processed=0")
+            out.debug("stage_trace stage_name=data attempt=1 duration_ms=0 result=skip error=no_credential_hits")
+            total_ms = int((time.monotonic() - pipeline_started_at) * 1000)
+            out.debug(
+                f"stage_timing_summary status=clean attempts=1/1 detect_ms={detect_ms} data_ms=0 total_ms={total_ms}"
+            )
         _render_validate_complete_row(
             out,
             host="-",
@@ -1502,6 +1519,10 @@ def run_validation(
         return 0
 
     grouped_matches = _group_validate_matches(matches, group_counts)
+    render_started_at = time.monotonic()
+    if debug:
+        out.debug(f"pass=2 deep start total={len(grouped_matches)}")
+        out.debug("stage2_gate=run reason=credential_hits>0")
 
     if show:
         for item in grouped_matches:
@@ -1550,6 +1571,14 @@ def run_validation(
         unique_hits=unique_hits,
         ok=False,
     )
+    data_ms = int((time.monotonic() - render_started_at) * 1000)
+    if debug:
+        out.debug(f"pass=2 deep complete processed={len(grouped_matches)}")
+        out.debug(f"stage_trace stage_name=data attempt=1 duration_ms={data_ms} result=ok error=-")
+        total_ms = int((time.monotonic() - pipeline_started_at) * 1000)
+        out.debug(
+            f"stage_timing_summary status=hits attempts=1/1 detect_ms={detect_ms} data_ms={data_ms} total_ms={total_ms}"
+        )
     if fail_on_creds:
         return 1
     return 0
@@ -1594,6 +1623,7 @@ class ValidationRecordAccumulator:
         self._input_format = input_format
         self._max_lines = max_lines
         self._unlimited = max_lines <= 0
+        self._started_at = time.monotonic()
         self._record_no = 0
         self.total_lines = 0
         self.hit_count = 0
@@ -1667,14 +1697,31 @@ class ValidationRecordAccumulator:
         records_total: int | None = None,
     ) -> int:
         out = console or Console(debug=debug)
+        finish_started_at = time.monotonic()
         if debug:
             records_value = records_total if records_total is not None else self._record_no
             out.info(f"validate started: source={source} records={records_value} format={self._input_format}")
+            out.debug(f"pass=1 detect start total={records_value}")
+            detect_ms = int((finish_started_at - self._started_at) * 1000)
+            out.debug(f"pass=1 detect complete records={records_value} credential_hits={self.hit_count}")
+            out.debug(f"stage_trace stage_name=detect_protocol attempt=1 duration_ms={detect_ms} result=ok error=-")
             if self.suppressed_hits > 0:
                 rules_text = ",".join(f"{key}:{self._suppressed_rules[key]}" for key in sorted(self._suppressed_rules))
                 out.debug(f"validate suppressed hits: count={self.suppressed_hits} rules={rules_text}")
+        else:
+            detect_ms = 0
 
         if self.hit_count <= 0:
+            if debug:
+                out.debug("pass=2 deep start total=0")
+                out.debug("stage2_gate=skip reason=credential_hits=0")
+                out.debug("pass=2 deep complete processed=0")
+                out.debug("stage_trace stage_name=data attempt=1 duration_ms=0 result=skip error=no_credential_hits")
+                total_ms = int((time.monotonic() - self._started_at) * 1000)
+                out.debug(
+                    f"stage_timing_summary status=clean attempts=1/1 "
+                    f"detect_ms={detect_ms} data_ms=0 total_ms={total_ms}"
+                )
             _render_validate_complete_row(
                 out,
                 host="-",
@@ -1687,6 +1734,10 @@ class ValidationRecordAccumulator:
             return 0
 
         grouped_matches = _group_validate_matches(self.matches, self._group_counts)
+        render_started_at = time.monotonic()
+        if debug:
+            out.debug(f"pass=2 deep start total={len(grouped_matches)}")
+            out.debug("stage2_gate=run reason=credential_hits>0")
 
         if show:
             for item in grouped_matches:
@@ -1734,6 +1785,15 @@ class ValidationRecordAccumulator:
             unique_hits=len(self._group_counts),
             ok=False,
         )
+        if debug:
+            data_ms = int((time.monotonic() - render_started_at) * 1000)
+            out.debug(f"pass=2 deep complete processed={len(grouped_matches)}")
+            out.debug(f"stage_trace stage_name=data attempt=1 duration_ms={data_ms} result=ok error=-")
+            total_ms = int((time.monotonic() - self._started_at) * 1000)
+            out.debug(
+                f"stage_timing_summary status=hits attempts=1/1 "
+                f"detect_ms={detect_ms} data_ms={data_ms} total_ms={total_ms}"
+            )
         if fail_on_creds:
             return 1
         return 0

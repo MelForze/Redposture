@@ -48,3 +48,18 @@ def test_stage_selfcert_os_error(monkeypatch) -> None:
     monkeypatch.setattr("redposture_core.stage_selfcert.write_self_signed_cert_files", fake_write)
     rc = run_selfcert_stage(_args())
     assert rc == 1
+
+
+def test_stage_selfcert_debug_emits_staged_markers(monkeypatch, capsys) -> None:
+    def fake_write(cert_path: str, key_path: str, *, force: bool) -> tuple[str, str]:
+        _ = (force,)
+        return cert_path, key_path
+
+    monkeypatch.setattr("redposture_core.stage_selfcert.write_self_signed_cert_files", fake_write)
+    rc = run_selfcert_stage(_args(debug=True))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "pass=1 detect start total=1" in out
+    assert "pass=2 deep start total=1" in out
+    assert "stage2_gate=run reason=status=ready" in out
+    assert "stage_timing_summary status=ok attempts=1/1" in out

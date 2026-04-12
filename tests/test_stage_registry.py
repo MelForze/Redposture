@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import argparse
+import io
 import json
 import urllib.error
+from types import SimpleNamespace
 
 import pytest
 
@@ -436,11 +439,11 @@ def test_audit_registry_host_auth_required_without_access_builds_fallback_result
     )
 
     assert record["status"] == "auth_required"
-    assert record["images_error"] == "authentication required"
+    assert record["images_error"] is None
     assert record["selected_repository_tags"] is None
-    assert record["metadata_result"]["error"] == "cannot fetch metadata without registry access"
-    assert record["inspection_error"] == "cannot inspect images without registry access"
-    assert record["download_result"]["error"] == "registry access denied"
+    assert record["metadata_result"] is None
+    assert record["inspection_error"] is None
+    assert record["download_result"] is None
 
 
 def test_audit_registry_host_marks_non_registry_and_retries_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -506,6 +509,217 @@ def test_audit_registry_host_marks_non_registry_and_retries_failures(monkeypatch
     )
     assert failed["status"] == "fail"
     assert "connection refused" in str(failed["error"])
+
+
+def test_audit_registry_host_debug_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = {"count": 0}
+
+    def fake_legacy(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        calls["count"] += 1
+        show_images = bool(_kwargs.get("show_images"))
+        base = {
+            "timestamp": "2026-04-10T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 5000,
+            "is_registry": True,
+            "is_harbor": False,
+            "is_gitlab": False,
+            "is_nexus": False,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "token_provided": False,
+            "debug": True,
+            "show_images": show_images,
+            "docker": False,
+            "show_tags": False,
+            "repository": None,
+            "tag": None,
+            "metadata": False,
+            "harbor": False,
+            "gitlab": False,
+            "nexus": False,
+            "assets": False,
+            "inspect": False,
+            "image": None,
+            "download": False,
+            "image_count": 1 if show_images else None,
+            "images": ["repo/app:latest"] if show_images else None,
+            "images_error": None,
+            "harbor_info": None,
+            "harbor_projects": None,
+            "harbor_repositories": None,
+            "harbor_artifacts": None,
+            "harbor_error": None,
+            "gitlab_info": None,
+            "gitlab_error": None,
+            "gitlab_repositories": None,
+            "gitlab_repository_details": None,
+            "selected_repository_tags": None,
+            "metadata_result": None,
+            "nexus_info": None,
+            "nexus_repositories": None,
+            "nexus_repository_details": None,
+            "nexus_assets": None,
+            "nexus_error": None,
+            "inspections": None,
+            "inspection_error": None,
+            "download_result": None,
+            "elapsed_ms": 2,
+            "probe_status": 200,
+            "error": None,
+        }
+        return base
+
+    monkeypatch.setattr(registry, "_audit_registry_host_legacy", fake_legacy)
+
+    record = registry._audit_registry_host(
+        "127.0.0.1",
+        5000,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        token=None,
+        docker=False,
+        show_images=True,
+        show_tags=False,
+        repository=None,
+        tag=None,
+        metadata=False,
+        harbor=False,
+        gitlab=False,
+        nexus=False,
+        assets=False,
+        inspect=False,
+        image=None,
+        download=False,
+        download_dir="/tmp",
+        console=Console(),
+        debug=True,
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert calls["count"] >= 2
+    stage_names = [str(item.get("stage_name") or "") for item in record.get("stages") or [] if isinstance(item, dict)]
+    assert "detect_protocol" in stage_names
+    assert "auth_inference_credentials" in stage_names
+    assert "access_capabilities" in stage_names
+    assert "data" in stage_names
+    assert any("stage_timing_summary" in str(item) for item in (record.get("debug_events") or []))
+
+
+def test_audit_registry_targets_two_pass_gate_and_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_call(*_args, run_deep_checks: bool, **_kwargs):  # type: ignore[no-untyped-def]
+        host = str(_args[0])
+        base = {
+            "timestamp": "2026-04-10T00:00:00Z",
+            "host": host,
+            "port": 5000,
+            "is_registry": True,
+            "is_harbor": False,
+            "is_gitlab": False,
+            "is_nexus": False,
+            "auth_required": False,
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "token_provided": False,
+            "debug": False,
+            "show_images": False,
+            "docker": False,
+            "show_tags": False,
+            "repository": None,
+            "tag": None,
+            "metadata": False,
+            "harbor": False,
+            "gitlab": False,
+            "nexus": False,
+            "assets": False,
+            "inspect": False,
+            "image": None,
+            "download": False,
+            "image_count": None,
+            "images": None,
+            "images_error": None,
+            "harbor_info": None,
+            "harbor_projects": None,
+            "harbor_repositories": None,
+            "harbor_artifacts": None,
+            "harbor_error": None,
+            "gitlab_info": None,
+            "gitlab_error": None,
+            "gitlab_repositories": None,
+            "gitlab_repository_details": None,
+            "selected_repository_tags": None,
+            "metadata_result": None,
+            "nexus_info": None,
+            "nexus_repositories": None,
+            "nexus_repository_details": None,
+            "nexus_assets": None,
+            "nexus_error": None,
+            "inspections": None,
+            "inspection_error": None,
+            "download_result": None,
+            "elapsed_ms": 1,
+            "probe_status": 200,
+            "error": None,
+            "stages": [],
+            "stage_failed_at": None,
+            "stage_durations_ms": {},
+            "stage_attempts": {},
+            "debug_events": [],
+            "debug_events_streamed": False,
+        }
+        if not run_deep_checks:
+            if host == "10.0.0.1":
+                return {**base, "status": "open_no_auth"}
+            return {**base, "status": "auth_required", "auth_required": True}
+        return {**base, "status": "open_no_auth"}
+
+    monkeypatch.setattr(registry, "_call_audit_registry_host_with_thread_debug", fake_call)
+
+    emitted: list[str] = []
+    debug_lines: list[str] = []
+    totals = registry.audit_registry_targets(
+        hosts=["10.0.0.1", "10.0.0.2"],
+        port=5000,
+        timeout=1.0,
+        retries=0,
+        workers=2,
+        username=None,
+        password=None,
+        token=None,
+        docker=False,
+        show_images=False,
+        show_tags=False,
+        repository=None,
+        tag=None,
+        metadata=False,
+        harbor=False,
+        gitlab=False,
+        nexus=False,
+        assets=False,
+        inspect=False,
+        image=None,
+        download=False,
+        download_dir="/tmp",
+        output_path=None,
+        output_format="txt",
+        emit_line=emitted.append,
+        logger=None,
+        console=Console(),
+        debug=False,
+        debug_emit=debug_lines.append,
+    )
+
+    assert totals == (2, 1, 0, 1, 0, 0)
+    assert any("pass=1 detect start total=2" in line for line in debug_lines)
+    assert any("pass=2 deep start total=1" in line for line in debug_lines)
+    assert any("10.0.0.1:5000 stage2_gate=run reason=status=open_no_auth" in line for line in debug_lines)
+    assert any("10.0.0.2:5000 stage2_gate=skip reason=status=auth_required" in line for line in debug_lines)
 
 
 class _PlainConsole:
@@ -824,3 +1038,1056 @@ def test_plain_registry_renderers_and_target_dispatcher(monkeypatch: pytest.Monk
     assert len(output_lines) >= 2
     assert any(json.loads(line).get("detected") is True for line in output_lines)
     assert any("repo/app:latest" in line for line in output_lines + emitted)
+
+
+class _RegistryConsoleCapture:
+    instances: list[_RegistryConsoleCapture] = []
+
+    def __init__(self, debug: bool = False) -> None:
+        self.debug = debug
+        self.messages: list[tuple[str, str]] = []
+        type(self).instances.append(self)
+
+    def error(self, message: str) -> None:
+        self.messages.append(("error", message))
+
+    def warn(self, message: str) -> None:
+        self.messages.append(("warn", message))
+
+    def info(self, message: str) -> None:
+        self.messages.append(("info", message))
+
+    def plain(self, message: str, color: str | None = None) -> None:
+        _ = color
+        self.messages.append(("plain", message))
+
+    def render_tagged_payload_line(self, line: str, tag: str, payload_color: str | None = None) -> bool:
+        _ = (line, tag, payload_color)
+        return False
+
+
+def _registry_args(**overrides: object) -> argparse.Namespace:
+    data: dict[str, object] = {
+        "debug": False,
+        "timeout": 1.0,
+        "retries": 0,
+        "username": None,
+        "password": None,
+        "token": None,
+        "show_tags": False,
+        "repository": None,
+        "tag": None,
+        "metadata": False,
+        "assets": False,
+        "nexus": False,
+        "download": False,
+        "image": None,
+        "ports": None,
+        "port": 5000,
+        "docker": False,
+        "images": False,
+        "harbor": False,
+        "gitlab": False,
+        "inspect": False,
+        "targets": "127.0.0.1",
+        "hosts": None,
+        "hosts_file": None,
+        "output": None,
+        "output_format": "txt",
+        "workers": 1,
+        "download_dir": ".",
+    }
+    data.update(overrides)
+    return argparse.Namespace(**data)
+
+
+def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    http_error = urllib.error.HTTPError(
+        "http://registry.local/v2/",
+        401,
+        "Unauthorized",
+        {"WWW-Authenticate": "Bearer realm=token"},
+        io.BytesIO(b'{"errors":[{"code":"UNAUTHORIZED"}]}'),
+    )
+
+    def raise_http_error(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise http_error
+
+    monkeypatch.setattr(registry.urllib.request, "urlopen", raise_http_error)
+    status, body, headers, error = registry._http_request("registry.local", 5000, "GET", "/v2/", 1.0, headers={})
+    assert status == 401 and error is None
+    assert b"UNAUTHORIZED" in body
+    assert headers.get("www-authenticate", "").startswith("Bearer")
+
+    def raise_url_error(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise urllib.error.URLError(TimeoutError("timed out"))
+
+    monkeypatch.setattr(registry.urllib.request, "urlopen", raise_url_error)
+    status, body, headers, error = registry._http_request("registry.local", 5000, "GET", "/v2/", 1.0, headers={})
+    assert status == 0 and body == b"" and headers == {}
+    assert error == "connection timeout"
+
+    out_file = tmp_path / "blob.bin"
+    status, size, error = registry._http_download("registry.local", 5000, "/v2/blob", 1.0, str(out_file), headers={})
+    assert status == 0 and size == 0
+    assert error == "connection timeout"
+
+
+def test_registry_catalog_and_tags_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_http_request(
+        _host: str,
+        _port: int,
+        _method: str,
+        path: str,
+        _timeout: float,
+        *,
+        headers: dict[str, str],
+        body: bytes | None = None,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        _ = (headers, body)
+        if path == "/v2/_catalog?n=1000":
+            return 401, b"", {}, None
+        if path.startswith("/v2/repo/tags/list"):
+            return 404, b"", {}, None
+        return 500, b"oops", {}, None
+
+    monkeypatch.setattr(registry, "_http_request", fake_http_request)
+    repos, repos_error = registry._fetch_registry_catalog("registry.local", 5000, 1.0, headers={})
+    assert repos is None
+    assert repos_error == "authentication required"
+
+    tags, tags_error = registry._fetch_repository_tags("registry.local", 5000, "repo", 1.0, headers={})
+    assert tags == []
+    assert tags_error is None
+
+    tags2, tags_error2 = registry._fetch_repository_tags("registry.local", 5000, "repo2", 1.0, headers={})
+    assert tags2 is None
+    assert "returned status 500" in str(tags_error2)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    [
+        ({"timeout": 0}, "--timeout must be > 0"),
+        ({"retries": -1}, "--retries must be >= 0"),
+        ({"username": "a"}, "--username and --password must be set together"),
+        ({"username": "a", "password": "b", "token": "tok"}, "use either --token or --username/--password, not both"),
+        ({"show_tags": True}, "--show-tags requires --repository"),
+        ({"tag": "latest"}, "--tag requires --repository"),
+        ({"metadata": True, "repository": "repo"}, "--metadata requires --repository and --tag"),
+        ({"assets": True}, "--assets requires --nexus"),
+        ({"download": True}, "--download requires --image"),
+    ],
+)
+def test_run_registry_stage_validation_errors(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object], expected_error: str
+) -> None:
+    _RegistryConsoleCapture.instances.clear()
+    monkeypatch.setattr(registry, "Console", _RegistryConsoleCapture)
+    rc = registry.run_registry_stage(_registry_args(**overrides), logger=object())  # type: ignore[arg-type]
+    assert rc == 2
+    errors = [msg for level, msg in _RegistryConsoleCapture.instances[-1].messages if level == "error"]
+    assert any(expected_error in msg for msg in errors)
+
+
+def test_run_registry_stage_https_target_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    _RegistryConsoleCapture.instances.clear()
+    monkeypatch.setattr(registry, "Console", _RegistryConsoleCapture)
+    rc = registry.run_registry_stage(_registry_args(targets="https://registry.local:5000/v2/_catalog"), logger=object())  # type: ignore[arg-type]
+    assert rc == 2
+    errors = [msg for level, msg in _RegistryConsoleCapture.instances[-1].messages if level == "error"]
+    assert any("accepts only http:// URL targets" in msg for msg in errors)
+
+
+def test_run_registry_stage_debug_and_unreachable_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    _RegistryConsoleCapture.instances.clear()
+    monkeypatch.setattr(registry, "Console", _RegistryConsoleCapture)
+
+    monkeypatch.setattr(registry, "collect_scan_ports", lambda *_a, **_k: [15000, 15010])
+    monkeypatch.setattr(
+        registry,
+        "collect_scan_target_specs",
+        lambda *_a, **_k: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        registry,
+        "build_scan_execution_groups",
+        lambda *_a, **_k: [
+            SimpleNamespace(hosts=["127.0.0.1"], port=15000),
+            SimpleNamespace(hosts=["127.0.0.1"], port=15010),
+        ],
+    )
+    captured_kwargs: list[dict[str, object]] = []
+
+    def fake_audit_registry_targets(**kwargs):  # type: ignore[no-untyped-def]
+        captured_kwargs.append(kwargs)
+        # total=1, open=0, valid=0, auth=0, not_registry=0, fail=1
+        return 1, 0, 0, 0, 0, 1
+
+    monkeypatch.setattr(registry, "audit_registry_targets", fake_audit_registry_targets)
+    rc = registry.run_registry_stage(_registry_args(debug=True, docker=True, images=True), logger=object())  # type: ignore[arg-type]
+    assert rc == 0
+    assert len(captured_kwargs) == 2
+    assert captured_kwargs[0]["port"] == 15000
+    assert captured_kwargs[1]["port"] == 15010
+    messages = _RegistryConsoleCapture.instances[-1].messages
+    assert any(level == "info" and "registry audit started" in msg for level, msg in messages)
+    assert any(level == "warn" and "all registry targets are unreachable" in msg for level, msg in messages)
+
+
+def test_should_download_large_non_tty_and_prompt_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _WarnConsole:
+        def __init__(self) -> None:
+            self.warns: list[str] = []
+
+        def warn(self, message: str) -> None:
+            self.warns.append(message)
+
+    console = _WarnConsole()
+    monkeypatch.setattr(registry.sys.stdin, "isatty", lambda: False)
+    assert registry._should_download_large(1024 * 1024 * 512, "repo/app:latest", console) is False
+    assert any("download skipped" in message for message in console.warns)
+
+    monkeypatch.setattr(registry.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
+    assert registry._should_download_large(1024 * 1024 * 512, "repo/app:latest", console) is True
+
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+    assert registry._should_download_large(1024 * 1024 * 512, "repo/app:latest", console) is False
+
+    def _raise_eof(_prompt: str) -> str:
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _raise_eof)
+    assert registry._should_download_large(1024 * 1024 * 512, "repo/app:latest", console) is False
+
+
+def test_download_image_success_and_failure_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    console = Console()
+    missing_repo = registry._download_image(
+        "registry.local",
+        5000,
+        1.0,
+        headers={},
+        inspect_data={"image": "repo/app:latest", "repository": ""},
+        download_dir=str(tmp_path),
+        console=console,
+    )
+    assert missing_repo["status"] == "fail"
+
+    monkeypatch.setattr(registry, "_should_download_large", lambda *_a, **_k: False)
+    skipped = registry._download_image(
+        "registry.local",
+        5000,
+        1.0,
+        headers={},
+        inspect_data={"image": "repo/app:latest", "repository": "repo/app", "total_size": 999},
+        download_dir=str(tmp_path),
+        console=console,
+    )
+    assert skipped["status"] == "skipped"
+
+    monkeypatch.setattr(registry, "_should_download_large", lambda *_a, **_k: True)
+    calls: list[str] = []
+
+    def fake_http_download(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        out_path: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, int, str | None]:
+        _ = headers
+        calls.append(path)
+        with open(out_path, "wb") as fh:
+            fh.write(b"x")
+        return 200, 1, None
+
+    monkeypatch.setattr(registry, "_http_download", fake_http_download)
+    success = registry._download_image(
+        "registry.local",
+        5000,
+        1.0,
+        headers={},
+        inspect_data={
+            "image": "repo/app:latest",
+            "repository": "repo/app",
+            "total_size": 3,
+            "manifest_raw": '{"schemaVersion":2}',
+            "config_blob": {"arch": "amd64"},
+            "config_digest": "sha256:cfg",
+            "layers": [{"digest": "sha256:layer1"}, {"digest": "sha256:layer2"}],
+        },
+        download_dir=str(tmp_path),
+        console=console,
+    )
+    assert success["status"] == "ok"
+    assert success["size"] == 3
+    assert any("/blobs/sha256:cfg" in item for item in calls)
+    assert any("/blobs/sha256:layer1" in item for item in calls)
+
+    def fail_http_download(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        _out_path: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> tuple[int, int, str | None]:
+        _ = headers
+        if path.endswith("sha256:cfg"):
+            return 200, 1, None
+        if path.endswith("sha256:layer1"):
+            return 500, 0, None
+        return 0, 0, "broken pipe"
+
+    monkeypatch.setattr(registry, "_http_download", fail_http_download)
+    failed = registry._download_image(
+        "registry.local",
+        5000,
+        1.0,
+        headers={},
+        inspect_data={
+            "image": "repo/app:latest",
+            "repository": "repo/app",
+            "total_size": 3,
+            "config_digest": "sha256:cfg",
+            "layers": [{"digest": "sha256:layer1"}],
+        },
+        download_dir=str(tmp_path),
+        console=console,
+    )
+    assert failed["status"] == "fail"
+    assert "returned status 500" in str(failed["error"])
+
+
+def test_fetch_gitlab_info_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry, "_http_request", lambda *_a, **_k: (404, b"", {}, None))
+    info, error = registry._fetch_gitlab_info("registry.local", 5000, "", 1.0, headers={}, deep=False)
+    assert info is None
+    assert error == "not gitlab"
+
+    monkeypatch.setattr(registry, "_http_request", lambda *_a, **_k: (200, b"not-json", {}, None))
+    fallback_info, fallback_error = registry._fetch_gitlab_info(
+        "registry.local",
+        5000,
+        "",
+        1.0,
+        headers={},
+        deep=True,
+    )
+    assert fallback_error is None
+    assert fallback_info is not None
+    assert fallback_info["token_probe_status"] == "failed"
+
+    deep_info, deep_error = registry._fetch_gitlab_info(
+        "registry.local",
+        5000,
+        'Bearer realm="ftp://gitlab.local/jwt/auth",service="container_registry"',
+        1.0,
+        headers={},
+        deep=True,
+    )
+    assert deep_error is None
+    assert deep_info is not None
+    assert deep_info["token_probe_status"] == "skipped"
+
+    monkeypatch.setattr(registry, "_http_request_url", lambda *_a, **_k: (500, b"", {}, None))
+    deep_info2, deep_error2 = registry._fetch_gitlab_info(
+        "registry.local",
+        5000,
+        'Bearer realm="https://gitlab.local/jwt/auth",service="container_registry"',
+        1.0,
+        headers={},
+        deep=True,
+    )
+    assert deep_error2 is None
+    assert deep_info2 is not None
+    assert deep_info2["token_probe_status"] == "failed"
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (401, b"", "authentication required"),
+        (404, b"", "not nexus"),
+        (500, b"", "/service/rest/v1/status returned status 500"),
+        (200, b"not-json", "nexus status payload is invalid JSON"),
+        (200, b"[]", "nexus status payload is invalid"),
+    ],
+)
+def test_fetch_nexus_info_error_paths(monkeypatch: pytest.MonkeyPatch, status: int, body: bytes, expected: str) -> None:
+    monkeypatch.setattr(registry, "_http_request", lambda *_a, **_k: (status, body, {}, None))
+    info, error = registry._fetch_nexus_info("registry.local", 5000, 1.0, headers={})
+    assert info is None
+    assert error == expected
+
+
+def test_fetch_nexus_repositories_error_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(registry, "_http_request", lambda *_a, **_k: (200, b"{}", {}, None))
+    repos, error = registry._fetch_nexus_repositories("registry.local", 5000, 1.0, headers={})
+    assert repos is None
+    assert error == "nexus repositories payload is invalid"
+
+    monkeypatch.setattr(
+        registry,
+        "_http_request",
+        lambda *_a, **_k: (
+            200,
+            b'[{"name":"docker-hosted","format":"docker","type":"hosted"},{"name":"docker-hosted"}]',
+            {},
+            None,
+        ),
+    )
+    repos2, error2 = registry._fetch_nexus_repositories("registry.local", 5000, 1.0, headers={})
+    assert error2 is None
+    assert repos2 is not None
+    assert any(item.startswith("docker-hosted") for item in repos2)
+
+
+def test_render_colored_registry_line_paths() -> None:
+    class _PaintConsole:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, text: str, color: str, _stream) -> str:  # type: ignore[no-untyped-def]
+            return f"<{color}>{text}</{color}>"
+
+        def plain(self, message: str, color: str | None = None) -> None:
+            _ = color
+            self.lines.append(message)
+
+    console = _PaintConsole()
+    assert (
+        registry._render_colored_registry_line(
+            console,
+            "REGISTRY 127.0.0.1 5000 [*] Docker Registry Service (auth required:False) (images:2)",
+        )
+        is True
+    )
+    assert console.lines
+    assert "cyan" in console.lines[0]
+    assert "red" in console.lines[0]
+    assert registry._render_colored_registry_line(console, "OTHER\tline") is False
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "headers", "creds", "expected_state"),
+    [
+        (
+            403,
+            b'{"errors":[{"message":"authentication required"}]}',
+            {"docker-distribution-api-version": "registry/2.0"},
+            {"username": None, "password": None},
+            "auth_required",
+        ),
+        (
+            200,
+            b"{}",
+            {"docker-distribution-api-version": "registry/2.0"},
+            {"username": "admin", "password": "admin"},
+            "valid_credentials",
+        ),
+        (
+            403,
+            b'{"errors":[{"message":"forbidden"}]}',
+            {"docker-distribution-api-version": "registry/2.0"},
+            {"username": None, "password": None},
+            "unknown_auth",
+        ),
+    ],
+)
+def test_audit_registry_host_legacy_state_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    body: bytes,
+    headers: dict[str, str],
+    creds: dict[str, str | None],
+    expected_state: str,
+) -> None:
+    monkeypatch.setattr(registry, "_http_request", lambda *_a, **_k: (status, body, headers, None))
+    monkeypatch.setattr(registry, "_fetch_gitlab_info", lambda *_a, **_k: (None, "not gitlab"))
+    monkeypatch.setattr(registry, "_fetch_harbor_info", lambda *_a, **_k: (None, "not harbor"))
+    monkeypatch.setattr(registry, "_fetch_nexus_info", lambda *_a, **_k: (None, "not nexus"))
+
+    record = registry._audit_registry_host_legacy(
+        "127.0.0.1",
+        5000,
+        1.0,
+        0,
+        username=creds["username"],
+        password=creds["password"],
+        token=None,
+        docker=False,
+        show_images=True,
+        show_tags=True,
+        repository="repo/app",
+        tag="latest",
+        metadata=True,
+        harbor=False,
+        gitlab=False,
+        nexus=False,
+        assets=False,
+        inspect=False,
+        image=None,
+        download=False,
+        download_dir=".",
+        console=Console(),
+        debug=False,
+    )
+
+    assert record["status"] == expected_state
+    assert record["is_registry"] is True
+    if expected_state != "valid_credentials":
+        assert record["images_error"] in {None, "authentication required"}
+
+
+def test_audit_registry_host_legacy_inspect_and_download_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        registry,
+        "_http_request",
+        lambda *_a, **_k: (200, b"{}", {"docker-distribution-api-version": "registry/2.0"}, None),
+    )
+    monkeypatch.setattr(registry, "_fetch_gitlab_info", lambda *_a, **_k: (None, "not gitlab"))
+    monkeypatch.setattr(registry, "_fetch_harbor_info", lambda *_a, **_k: (None, "not harbor"))
+    monkeypatch.setattr(registry, "_fetch_nexus_info", lambda *_a, **_k: (None, "not nexus"))
+    monkeypatch.setattr(registry, "_fetch_registry_catalog", lambda *_a, **_k: ([], None))
+
+    record = registry._audit_registry_host_legacy(
+        "127.0.0.1",
+        5000,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        token=None,
+        docker=False,
+        show_images=False,
+        show_tags=False,
+        repository=None,
+        tag=None,
+        metadata=False,
+        harbor=False,
+        gitlab=False,
+        nexus=False,
+        assets=False,
+        inspect=True,
+        image=":bad",
+        download=True,
+        download_dir=".",
+        console=Console(),
+        debug=False,
+    )
+    assert record["status"] == "open_no_auth"
+    assert "invalid --image value" in str(record["inspection_error"])
+    assert isinstance(record["download_result"], dict)
+    assert record["download_result"]["status"] == "fail"
+
+
+def test_format_detail_records_presence_unknown_and_download_variants() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 5000,
+        "is_registry": True,
+        "debug": True,
+        "show_images": True,
+        "images": [],
+        "images_error": "catalog unavailable",
+        "harbor": True,
+        "is_harbor": None,
+        "harbor_info": None,
+        "harbor_error": "probe failed",
+        "gitlab": True,
+        "is_gitlab": False,
+        "gitlab_error": "",
+        "nexus": True,
+        "is_nexus": None,
+        "nexus_info": None,
+        "nexus_error": "nexus probe failed",
+        "show_tags": True,
+        "repository": "repo/app",
+        "selected_repository_tags": [],
+        "metadata": True,
+        "tag": "latest",
+        "metadata_result": {"error": "denied"},
+        "inspect": True,
+        "inspections": [{"image": "repo/app:latest", "error": "boom"}],
+        "inspection_error": "inspect failed",
+        "download": True,
+        "download_result": {"status": "skipped", "size": 10, "error": "non-interactive"},
+        "assets": False,
+    }
+    lines = registry._format_detail_records(record, "txt")
+    text = "\n".join(lines)
+    assert "[*] Show Images" in text
+    assert "catalog unavailable" in text
+    assert "Harbor presence unknown: probe failed" in text
+    assert "GitLab Container Registry not detected" in text
+    assert "Nexus presence unknown: nexus probe failed" in text
+    assert "Metadata repo/app:latest err=denied" in text
+    assert "Inspect repo/app:latest err=boom" in text
+    assert "Download skipped" in text
+
+
+def test_audit_registry_host_staged_retry_and_detect_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[bool, bool, bool]] = []
+    responses = iter(
+        [
+            {"status": "open_no_auth", "is_registry": True, "error": None},
+            {"status": "fail", "is_registry": True, "error": "deep failed"},
+            {"status": "open_no_auth", "is_registry": True, "error": None},
+            {"status": "open_no_auth", "is_registry": True, "error": None},
+        ]
+    )
+
+    def fake_legacy(*_args, show_images: bool, show_tags: bool, inspect: bool, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append((show_images, show_tags, inspect))
+        try:
+            item = dict(next(responses))
+        except StopIteration:
+            item = {"status": "open_no_auth", "is_registry": True, "error": None}
+        item.update(
+            {
+                "timestamp": "2026-04-10T00:00:00Z",
+                "host": "127.0.0.1",
+                "port": 5000,
+                "is_harbor": False,
+                "is_gitlab": False,
+                "is_nexus": False,
+                "auth_required": False,
+                "provided_credentials": False,
+                "provided_username": None,
+                "provided_password": None,
+                "token_provided": False,
+                "debug": True,
+                "show_images": show_images,
+                "docker": False,
+                "show_tags": show_tags,
+                "repository": None,
+                "tag": None,
+                "metadata": False,
+                "harbor": False,
+                "gitlab": False,
+                "nexus": False,
+                "assets": False,
+                "inspect": inspect,
+                "image": None,
+                "download": False,
+                "image_count": 0,
+                "images": [],
+                "images_error": None,
+                "harbor_info": None,
+                "harbor_projects": None,
+                "harbor_repositories": None,
+                "harbor_artifacts": None,
+                "harbor_error": None,
+                "gitlab_info": None,
+                "gitlab_error": None,
+                "gitlab_repositories": None,
+                "gitlab_repository_details": None,
+                "selected_repository_tags": None,
+                "metadata_result": None,
+                "nexus_info": None,
+                "nexus_repositories": None,
+                "nexus_repository_details": None,
+                "nexus_assets": None,
+                "nexus_error": None,
+                "inspections": None,
+                "inspection_error": None,
+                "download_result": None,
+                "elapsed_ms": 1,
+                "probe_status": 200,
+            }
+        )
+        return item
+
+    monkeypatch.setattr(registry, "_audit_registry_host_legacy", fake_legacy)
+    monkeypatch.setattr(registry, "_retry_delay", lambda _i: 0.0)
+
+    record = registry._audit_registry_host(
+        "127.0.0.1",
+        5000,
+        1.0,
+        1,
+        username=None,
+        password=None,
+        token=None,
+        docker=False,
+        show_images=True,
+        show_tags=True,
+        repository=None,
+        tag=None,
+        metadata=False,
+        harbor=False,
+        gitlab=False,
+        nexus=False,
+        assets=False,
+        inspect=True,
+        image=None,
+        download=False,
+        download_dir=".",
+        console=Console(),
+        debug=True,
+        run_deep_checks=True,
+    )
+    assert record["status"] == "open_no_auth"
+    assert record["attempts"] == 2
+    assert any("retry_decision stage=data" in event for event in record["debug_events"])
+
+    detect_only = registry._audit_registry_host(
+        "127.0.0.1",
+        5000,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        token=None,
+        docker=False,
+        show_images=False,
+        show_tags=False,
+        repository=None,
+        tag=None,
+        metadata=False,
+        harbor=False,
+        gitlab=False,
+        nexus=False,
+        assets=False,
+        inspect=False,
+        image=None,
+        download=False,
+        download_dir=".",
+        console=Console(),
+        debug=True,
+        run_deep_checks=False,
+    )
+    assert detect_only["status"] == "open_no_auth"
+    assert any("detect-only result=open_no_auth" in event for event in detect_only["debug_events"])
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected_error"),
+    [
+        (401, b"", "authentication required"),
+        (404, b"", "not harbor"),
+        (500, b"", "/api/v2.0/systeminfo returned status 500"),
+        (200, b"not-json", "harbor systeminfo payload is invalid JSON"),
+        (200, b"[]", "harbor systeminfo payload is invalid"),
+    ],
+)
+def test_fetch_harbor_info_error_paths(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: bytes, expected_error: str
+) -> None:
+    monkeypatch.setattr(registry, "_http_request", lambda *_a, **_k: (status, body, {}, None))
+    info, error = registry._fetch_harbor_info("registry.local", 5000, 1.0, headers={})
+    assert info is None
+    assert error == expected_error
+
+
+@pytest.mark.parametrize(
+    ("helper_name", "path_fragment"),
+    [
+        ("_fetch_harbor_projects", "/api/v2.0/projects"),
+        ("_fetch_harbor_repositories", "/api/v2.0/projects/library/repositories"),
+        ("_fetch_harbor_artifacts", "/api/v2.0/projects/library/repositories/library%2Fapp/artifacts"),
+    ],
+)
+def test_fetch_harbor_collection_helpers_error_paths(
+    monkeypatch: pytest.MonkeyPatch, helper_name: str, path_fragment: str
+) -> None:
+    def fake_http_request(
+        _host: str,
+        _port: int,
+        _method: str,
+        path: str,
+        _timeout: float,
+        *,
+        headers: dict[str, str],
+        body: bytes | None = None,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        _ = (headers, body)
+        assert path_fragment in path
+        return 200, b"{}", {}, None
+
+    monkeypatch.setattr(registry, "_http_request", fake_http_request)
+    helper = getattr(registry, helper_name)
+    if helper_name == "_fetch_harbor_projects":
+        result, error = helper("registry.local", 5000, 1.0, headers={})
+    elif helper_name == "_fetch_harbor_repositories":
+        result, error = helper("registry.local", 5000, "library", 1.0, headers={})
+    else:
+        result, error = helper("registry.local", 5000, "library", "library/app", 1.0, headers={})
+    assert result is None
+    assert "payload is invalid" in str(error)
+
+
+def test_http_request_url_and_render_colored_registry_line_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Resp:
+        status = 200
+        headers = {"X-Test": "ok"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+            _ = (exc_type, exc, tb)
+            return False
+
+        def read(self) -> bytes:
+            return b'{"token":"ok"}'
+
+    monkeypatch.setattr(registry.urllib.request, "urlopen", lambda *_a, **_k: _Resp())
+    status, body, headers, error = registry._http_request_url("https://auth.local/token", "GET", 1.0, headers={})
+    assert status == 200 and error is None
+    assert b'"token"' in body and headers["x-test"] == "ok"
+
+    http_error = urllib.error.HTTPError(
+        "https://auth.local/token",
+        401,
+        "Unauthorized",
+        {"WWW-Authenticate": 'Bearer realm="x"'},
+        io.BytesIO(b'{"errors":[{"message":"unauthorized"}]}'),
+    )
+    monkeypatch.setattr(registry.urllib.request, "urlopen", lambda *_a, **_k: (_ for _ in ()).throw(http_error))
+    status2, body2, headers2, error2 = registry._http_request_url("https://auth.local/token", "GET", 1.0, headers={})
+    assert status2 == 401 and error2 is None
+    assert b"unauthorized" in body2
+    assert "www-authenticate" in headers2
+
+    monkeypatch.setattr(
+        registry.urllib.request,
+        "urlopen",
+        lambda *_a, **_k: (_ for _ in ()).throw(urllib.error.URLError(TimeoutError("timed out"))),
+    )
+    status3, body3, headers3, error3 = registry._http_request_url("https://auth.local/token", "GET", 1.0, headers={})
+    assert status3 == 0 and body3 == b"" and headers3 == {}
+    assert error3 == "connection timeout"
+
+    class _ColorConsole:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, text: str, color: str, _stream) -> str:  # type: ignore[no-untyped-def]
+            return f"<{color}>{text}</{color}>"
+
+        def plain(self, line: str, color: str | None = None) -> None:
+            _ = color
+            self.lines.append(line)
+
+    color_console = _ColorConsole()
+    rendered = registry._render_colored_registry_line(
+        color_console,
+        "REGISTRY\t127.0.0.1\t5000\t [*] Docker Registry Service (auth required:True) (images:4)",
+    )
+    assert rendered is True
+    assert color_console.lines and "bright_green" in color_console.lines[0]
+    assert registry._render_colored_registry_line(color_console, "OTHER\t127\t5000\t[*] skip") is False
+
+
+def test_manifest_blob_and_metadata_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest_none, manifest_err = registry._fetch_manifest_payload(
+        "registry.local",
+        5000,
+        "repo/app",
+        "latest",
+        1.0,
+        headers={},
+        depth=5,
+    )
+    assert manifest_none is None
+    assert manifest_err == "manifest recursion depth exceeded"
+
+    monkeypatch.setattr(registry, "_http_request", lambda *_a, **_k: (200, b"not-json", {}, None))
+    manifest_none2, manifest_err2 = registry._fetch_manifest_payload(
+        "registry.local",
+        5000,
+        "repo/app",
+        "latest",
+        1.0,
+        headers={},
+    )
+    assert manifest_none2 is None
+    assert manifest_err2 == "manifest is not valid JSON"
+
+    blob_none, blob_err = registry._fetch_blob_json("registry.local", 5000, "repo/app", "sha256:cfg", 1.0, headers={})
+    assert blob_none is None
+    assert blob_err == "blob JSON payload is invalid"
+
+    invalid_meta = registry._extract_image_metadata("repo/app", "latest", {"manifest": []})
+    assert invalid_meta["error"] == "manifest payload is invalid"
+    assert invalid_meta["image"] == "repo/app:latest"
+
+
+def test_run_registry_stage_debug_file_output_logs_mode(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    _RegistryConsoleCapture.instances.clear()
+    monkeypatch.setattr(registry, "Console", _RegistryConsoleCapture)
+    monkeypatch.setattr(registry, "collect_scan_ports", lambda *_a, **_k: [5000])
+    monkeypatch.setattr(
+        registry,
+        "collect_scan_target_specs",
+        lambda *_a, **_k: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        registry,
+        "build_scan_execution_groups",
+        lambda *_a, **_k: [SimpleNamespace(hosts=["127.0.0.1"], port=5000, scheme_hint=None)],
+    )
+    monkeypatch.setattr(registry, "audit_registry_targets", lambda **_k: (1, 1, 0, 0, 0, 0))
+
+    out_file = tmp_path / "registry-out.jsonl"
+    rc = registry.run_registry_stage(
+        _registry_args(
+            debug=True,
+            output_format="json",
+            output=str(out_file),
+            token="tok",
+            images=True,
+            docker=True,
+            repository="repo/app",
+            show_tags=True,
+            tag="latest",
+            metadata=True,
+            harbor=True,
+            gitlab=True,
+            nexus=True,
+            assets=True,
+            inspect=True,
+            image="repo/app:latest",
+            download=True,
+        ),
+        logger=object(),  # type: ignore[arg-type]
+    )
+    assert rc == 0
+    infos = [msg for level, msg in _RegistryConsoleCapture.instances[-1].messages if level == "info"]
+    assert any("registry audit started" in msg and "format=json" in msg and "output=" in msg for msg in infos)
+
+
+def test_format_detail_records_branch_matrix_errors_and_download_variants() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 5000,
+        "is_registry": True,
+        "debug": True,
+        "show_images": True,
+        "images": [],
+        "images_error": "authentication required",
+        "harbor": True,
+        "is_harbor": None,
+        "harbor_error": "probe failed",
+        "gitlab": True,
+        "is_gitlab": True,
+        "gitlab_info": {"token_probe_status": "failed", "token_probe_error": "realm returned status 500"},
+        "gitlab_repositories": [],
+        "gitlab_repository_details": [],
+        "show_tags": True,
+        "repository": "repo/app",
+        "selected_repository_tags": [],
+        "metadata": True,
+        "tag": "latest",
+        "metadata_result": {"error": "manifest unavailable"},
+        "nexus": True,
+        "is_nexus": True,
+        "nexus_info": {},
+        "nexus_repository_details": [],
+        "assets": True,
+        "nexus_assets": [],
+        "nexus_error": "permission denied",
+        "inspect": True,
+        "image": "repo/app:latest",
+        "inspection_error": "inspect failed",
+        "inspections": [
+            {"image": "repo/app:latest", "error": "manifest denied"},
+            {
+                "image": "repo/app:2.0",
+                "layer_count": 0,
+                "total_size": 0,
+                "env": [],
+                "exposed_ports": [],
+                "labels": [],
+                "cmd": [],
+                "history": [],
+                "suspicious": ["TOKEN=secret"],
+            },
+        ],
+        "download": True,
+        "download_result": {"status": "skipped", "size": 1024, "error": "download not confirmed"},
+    }
+    lines = registry._format_detail_records(record, "txt")
+    joined = "\n".join(lines)
+    assert "[*] Show Images" in joined
+    assert "authentication required" in joined
+    assert "[!] Harbor presence unknown: probe failed" in joined
+    assert "GitLab Container Registry detected" in joined
+    assert "GitLab token probe status=failed" in joined
+    assert "realm returned status 500" in joined
+    assert "[*] Show Tags repo/app" in joined
+    assert "repo/app: authentication required" in joined
+    assert "Metadata repo/app:latest err=manifest unavailable" in joined
+    assert "Nexus Repository detected" in joined
+    assert "[*] Nexus Assets" in joined and "<no assets>" in joined
+    assert "permission denied" in joined
+    assert "inspect failed" in joined
+    assert "Inspect repo/app:latest err=manifest denied" in joined
+    assert "[*] Inspect repo/app:2.0 (layers:0) (size:0B)" in joined
+    assert "[!] Possible Secret Indicators" in joined
+    assert "Download skipped size=1.0KB reason=download not confirmed" in joined
+
+    record["download_result"] = {"status": "fail", "error": "layer download failed"}
+    lines2 = registry._format_detail_records(record, "txt")
+    assert any("Download failed err=layer download failed" in line for line in lines2)
+
+
+def test_run_registry_stage_multi_port_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    _RegistryConsoleCapture.instances.clear()
+    monkeypatch.setattr(registry, "Console", _RegistryConsoleCapture)
+    monkeypatch.setattr(registry, "collect_scan_ports", lambda *_a, **_k: [5000, 5001])
+    monkeypatch.setattr(
+        registry,
+        "collect_scan_target_specs",
+        lambda *_a, **_k: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        registry,
+        "build_scan_execution_groups",
+        lambda *_a, **_k: [
+            SimpleNamespace(hosts=["127.0.0.1"], port=5000, scheme_hint=None),
+            SimpleNamespace(hosts=["127.0.0.1"], port=5001, scheme_hint=None),
+        ],
+    )
+
+    class _FakeProgress:
+        instances: list[_FakeProgress] = []
+
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            self.total = total
+            self.advances: list[int] = []
+            self.closed = False
+            type(self).instances.append(self)
+
+        def advance(self, step: int = 1) -> None:
+            self.advances.append(int(step))
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(registry, "ProgressBar", _FakeProgress)
+    captured: list[dict[str, object]] = []
+
+    def fake_audit(**kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs)
+        return (len(kwargs["hosts"]), 1, 0, 0, 0, 0)
+
+    monkeypatch.setattr(registry, "audit_registry_targets", fake_audit)
+
+    rc = registry.run_registry_stage(_registry_args(), logger=object())  # type: ignore[arg-type]
+    assert rc == 0
+    assert len(captured) == 2
+    assert all(call["show_progress"] is False for call in captured)
+    assert len(_FakeProgress.instances) == 1
+    progress = _FakeProgress.instances[0]
+    assert progress.total == 2
+    assert progress.advances == [1, 1]
+    assert progress.closed is True

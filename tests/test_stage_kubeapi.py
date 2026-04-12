@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import ssl
+import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -836,6 +838,60 @@ def test_run_kubeapi_stage_debug_flow_passes_logger_and_append_output(monkeypatc
     assert captured[0]["logger"] is not None
 
 
+def test_run_kubeapi_stage_multi_group_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(kube, "Console", _ConsoleCapture)
+    monkeypatch.setattr(kube, "collect_scan_ports", lambda *_args, **_kwargs: [16443, 26443])
+    monkeypatch.setattr(
+        kube,
+        "collect_scan_target_specs",
+        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        kube,
+        "build_scan_execution_groups",
+        lambda *_args, **_kwargs: [
+            SimpleNamespace(hosts=["127.0.0.1"], port=16443, scheme_hint=None),
+            SimpleNamespace(hosts=["127.0.0.1"], port=26443, scheme_hint=None),
+        ],
+    )
+
+    class _FakeProgress:
+        instances: list[_FakeProgress] = []
+
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            self.total = total
+            self.advances: list[int] = []
+            self.closed = False
+            type(self).instances.append(self)
+
+        def advance(self, step: int = 1) -> None:
+            self.advances.append(int(step))
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(kube, "ProgressBar", _FakeProgress)
+
+    captured: list[dict[str, object]] = []
+
+    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs)
+        return (len(kwargs["hosts"]), 1, 0)
+
+    monkeypatch.setattr(kube, "audit_kubeapi_targets", fake_audit_targets)
+    rc = kube.run_kubeapi_stage(_kube_args(), logger=object())  # type: ignore[arg-type]
+    assert rc == 0
+    assert len(captured) == 2
+    assert all(call["show_progress"] is False for call in captured)
+    assert len(_FakeProgress.instances) == 1
+    progress = _FakeProgress.instances[0]
+    assert progress.total == 2
+    assert progress.advances == [1, 1]
+    assert progress.closed is True
+
+
 def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kube, "Console", _ConsoleCapture)
@@ -1059,3 +1115,565 @@ def test_audit_kubeapi_targets_two_pass_gate_and_debug_markers(monkeypatch: pyte
     assert any("pass=2 deep start total=1" in line for line in debug_lines)
     assert any("10.0.0.1:16443 stage2_gate=run reason=status=open_no_auth" in line for line in debug_lines)
     assert any("10.0.0.2:16443 stage2_gate=skip reason=status=auth_required" in line for line in debug_lines)
+
+
+def test_http_request_and_ws_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Resp:
+        def __init__(self, status: int, payload: bytes, headers: dict[str, str]) -> None:
+            self.status = status
+            self._payload = payload
+            self.headers = headers
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+            _ = (exc_type, exc, tb)
+            return None
+
+    monkeypatch.setattr(
+        kube.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: _Resp(200, b'{"ok":true}', {"Content-Type": "application/json"}),
+    )
+    status, payload, headers, error = kube._http_request(
+        "127.0.0.1",
+        16443,
+        "GET",
+        "/api",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+    )
+    assert (status, payload, headers, error) == (200, b'{"ok":true}', {"content-type": "application/json"}, None)
+
+    monkeypatch.setattr(
+        kube.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(urllib.error.URLError(OSError("operation not permitted"))),
+    )
+    status, payload, headers, error = kube._http_request(
+        "127.0.0.1",
+        16443,
+        "GET",
+        "/api",
+        1.0,
+        use_https=False,
+        insecure=False,
+        ca_file=None,
+    )
+    assert status == 0
+    assert payload == b""
+    assert headers == {}
+    assert "operation not permitted" in str(error or "").lower()
+
+    class _Sock:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = chunks
+            self.sent: list[bytes] = []
+            self.closed = False
+
+        def recv(self, size: int) -> bytes:
+            if not self.chunks:
+                return b""
+            current = self.chunks[0]
+            chunk = current[:size]
+            rest = current[size:]
+            if rest:
+                self.chunks[0] = rest
+            else:
+                self.chunks.pop(0)
+            return chunk
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        def settimeout(self, _timeout: float) -> None:
+            return None
+
+        def close(self) -> None:
+            self.closed = True
+
+    def _ws_frame(opcode: int, payload: bytes) -> bytes:
+        header = bytes([0x80 | opcode])
+        size = len(payload)
+        if size < 126:
+            return header + bytes([size]) + payload
+        return header + bytes([126]) + size.to_bytes(2, "big") + payload
+
+    monkeypatch.setattr(kube.os, "urandom", lambda n: b"a" * n)
+    sec_key = "YWFhYWFhYWFhYWFhYWFhYQ=="
+    accept = "3SC6TZx4582OZaOogPVxMx5CGS0="
+    handshake = (
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
+    ).encode("ascii")
+    success_sock = _Sock(
+        [
+            handshake,
+            _ws_frame(0x2, b"\x01hello\n"),
+            _ws_frame(0x2, b"\x02warn\n"),
+            _ws_frame(0x2, b'\x03{"status":"Success"}'),
+            _ws_frame(0x8, b""),
+        ]
+    )
+    monkeypatch.setattr(kube.socket, "create_connection", lambda *_args, **_kwargs: success_sock)
+    result = kube._kube_exec_ws(
+        "127.0.0.1",
+        16443,
+        "default",
+        "api",
+        "id",
+        1.0,
+        use_https=False,
+        insecure=False,
+        ca_file=None,
+    )
+    assert result["ok"] is True
+    assert result["stdout"] == "hello\n"
+    assert result["stderr"] == "warn\n"
+    assert result["exit_code"] == 0
+    assert "GET /api/v1/namespaces/default/pods/api/exec?" in success_sock.sent[0].decode("utf-8", errors="replace")
+    assert sec_key in success_sock.sent[0].decode("utf-8", errors="replace")
+
+    bad_handshake = _Sock([b"HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\n\r\nunauthorized"])
+    monkeypatch.setattr(kube.socket, "create_connection", lambda *_args, **_kwargs: bad_handshake)
+    denied = kube._kube_exec_ws(
+        "127.0.0.1",
+        16443,
+        "default",
+        "api",
+        "id",
+        1.0,
+        use_https=False,
+        insecure=False,
+        ca_file=None,
+    )
+    assert denied["ok"] is False
+    assert "handshake failed" in str(denied.get("error") or "")
+    assert "unauthorized" in str(denied.get("error") or "")
+
+
+def test_kube_low_level_error_context_and_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert kube._clip("abcdef", 3) == "abc"
+    assert kube._clip("abcdef", 2) == "ab"
+    assert kube._clip("abcdef", 0) == ""
+
+    assert kube._friendly_error_text("") == "connection failed"
+    assert kube._friendly_error_text("<urlopen error [Errno 111] Connection refused>") == (
+        "connection refused (service is not listening on target port)"
+    )
+    assert kube._friendly_error_text("[Errno 60] timeout") == "connection timeout"
+    assert kube._friendly_error_text("[Errno -2] Name or service not known") == "dns lookup failed"
+    assert kube._friendly_error_text("[Errno 101] No route to host") == "network unreachable"
+    assert kube._friendly_error_text("[Errno 1] custom detail") == "custom detail"
+
+    assert kube._friendly_error_from_exception(TimeoutError()) == "connection timeout"
+    assert kube._friendly_error_from_exception(urllib.error.URLError(OSError("operation not permitted"))) == (
+        "operation not permitted by local environment"
+    )
+    assert (
+        kube._is_connection_timeout_fail_record({"status": "fail", "error": "connection timeout after retry"}) is True
+    )
+    assert kube._is_connection_timeout_fail_record({"status": "fail", "error": "connection refused by peer"}) is True
+    assert kube._is_connection_timeout_fail_record({"status": "open_no_auth", "error": "connection timeout"}) is False
+    assert kube._is_connection_timeout_fail_record({"status": "fail", "error": "tls verification failed"}) is False
+
+    default_ctx = ssl.create_default_context()
+    monkeypatch.setattr(kube.ssl, "create_default_context", lambda cafile=None: default_ctx)
+    monkeypatch.setattr(kube.ssl, "_create_unverified_context", lambda: "UNVERIFIED")
+    assert kube._ssl_context(use_https=False, insecure=False, ca_file=None) is None
+    assert kube._ssl_context(use_https=True, insecure=True, ca_file=None) == "UNVERIFIED"
+    assert kube._ssl_context(use_https=True, insecure=False, ca_file="/tmp/ca.pem") is default_ctx
+
+    events: list[str] = []
+    kube._THREAD_LOCAL_DEBUG_EMIT.callback = events.append
+    callback = kube._get_thread_debug_emitter()
+    assert callable(callback)
+    callback("evt")
+    assert events == ["evt"]
+    kube._THREAD_LOCAL_DEBUG_EMIT.callback = "not-callable"
+    assert kube._get_thread_debug_emitter() is None
+    kube._THREAD_LOCAL_DEBUG_EMIT.callback = None
+
+
+def test_kube_list_items_error_and_pagination_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kube, "_api_get_json", lambda *_args, **_kwargs: (0, None, {}, "transport error"))
+    items, status, error = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/pods",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+    )
+    assert items is None
+    assert status == 0
+    assert error == "transport error"
+
+    monkeypatch.setattr(kube, "_api_get_json", lambda *_args, **_kwargs: (403, {"message": "forbidden"}, {}, None))
+    items, status, error = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/pods",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+    )
+    assert items is None
+    assert status == 403
+    assert "forbidden" in str(error or "").lower()
+
+    monkeypatch.setattr(kube, "_api_get_json", lambda *_args, **_kwargs: (200, ["not-dict"], {}, None))
+    items, status, error = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/pods",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+    )
+    assert items is None
+    assert status == 200
+    assert error == "invalid kubernetes list response"
+
+    monkeypatch.setattr(kube, "_api_get_json", lambda *_args, **_kwargs: (200, {"items": "bad"}, {}, None))
+    items, status, error = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/pods",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+    )
+    assert items is None
+    assert status == 200
+    assert error == "invalid kubernetes list items payload"
+
+    responses = iter(
+        [
+            (
+                200,
+                {"items": [{"metadata": {"name": "p1"}}], "metadata": {"continue": "token-1"}},
+                {},
+                None,
+            ),
+            (
+                200,
+                {"items": [{"metadata": {"name": "p2"}}], "metadata": {"continue": "token-2"}},
+                {},
+                None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(kube, "_KUBE_MAX_LIST_PAGES", 2)
+    monkeypatch.setattr(kube, "_api_get_json", lambda *_args, **_kwargs: next(responses))
+    items, status, error = kube._kube_list_items(
+        "127.0.0.1",
+        16443,
+        "/api/v1/pods",
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+    )
+    assert status == 200
+    assert isinstance(items, list)
+    assert len(items) == 2
+    assert error == "pagination limit exceeded"
+
+    assert kube._decode_secret_data_value("Zm9v") == "foo"
+    assert kube._decode_secret_data_value("AAECAw==").startswith("<binary-text:")
+    assert kube._decode_secret_data_value("AA==") == "<binary-text:1B>"
+    assert kube._decode_secret_data_value("%%%") == "<empty>"
+
+
+def test_kube_list_pods_and_secrets_namespace_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        kube,
+        "_kube_list_items",
+        lambda *_args, **_kwargs: (
+            [
+                {
+                    "metadata": {"namespace": "ns-a", "name": "pod-a"},
+                    "status": {"phase": "Running"},
+                    "spec": {"containers": [{"name": "c1"}, "skip"]},
+                }
+            ],
+            200,
+            None,
+        ),
+    )
+    pods, pods_error = kube._list_pods(
+        "127.0.0.1",
+        16443,
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        namespaces=[],
+    )
+    assert pods_error is None
+    assert pods == [{"namespace": "ns-a", "name": "pod-a", "phase": "Running", "containers": 1}]
+
+    monkeypatch.setattr(kube, "_kube_list_items", lambda *_args, **_kwargs: (None, 403, "forbidden"))
+    pods, pods_error = kube._list_pods(
+        "127.0.0.1",
+        16443,
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        namespaces=["finance"],
+    )
+    assert pods is None
+    assert pods_error == "finance: forbidden"
+
+    state = {"calls": 0}
+
+    def list_items_ns(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        *,
+        use_https: bool,
+        insecure: bool,
+        ca_file: str | None,
+        token: str | None = None,
+        username: str | None = None,
+        password: str | None = None,
+    ) -> tuple[list[dict[str, object]] | None, int, str | None]:
+        _ = (use_https, insecure, ca_file, token, username, password)
+        state["calls"] += 1
+        if "/pods" in path:
+            namespace = "finance" if "finance" in path else "ops"
+            return (
+                [
+                    {
+                        "metadata": {"name": f"pod-{namespace}"},
+                        "status": {"phase": "Pending"},
+                        "spec": {"containers": [{"name": "c1"}, {"name": "c2"}]},
+                    }
+                ],
+                200,
+                None,
+            )
+        if "/secrets" in path:
+            namespace = "finance" if "finance" in path else "ops"
+            return (
+                [
+                    {
+                        "metadata": {"name": f"sec-{namespace}"},
+                        "type": "Opaque",
+                        "data": {"password": "c2VjcmV0"},
+                    }
+                ],
+                200,
+                None,
+            )
+        raise AssertionError(path)
+
+    monkeypatch.setattr(kube, "_kube_list_items", list_items_ns)
+    pods, pods_error = kube._list_pods(
+        "127.0.0.1",
+        16443,
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        namespaces=["finance", "ops"],
+    )
+    assert pods_error is None
+    assert isinstance(pods, list)
+    assert len(pods) == 2
+    assert {item["namespace"] for item in pods} == {"finance", "ops"}
+    assert all(item["containers"] == 2 for item in pods)
+
+    secrets, secrets_error = kube._list_secrets(
+        "127.0.0.1",
+        16443,
+        1.0,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+        namespaces=["finance", "ops"],
+    )
+    assert secrets_error is None
+    assert isinstance(secrets, list)
+    assert len(secrets) == 2
+    assert all(item["type"] == "Opaque" for item in secrets)
+    assert all(item["data"]["password"] == "secret" for item in secrets)
+    assert state["calls"] >= 4
+
+
+def test_kube_status_summary_detail_and_renderer_branches() -> None:
+    assert kube._status_summary_line({"status": "fail"}) is None
+    assert kube._status_summary_line({"status": "not_kubeapi"}) is None
+    assert kube._status_summary_line({"status": "open_no_auth", "auth_mode": "none", "auth_required": True}) == (
+        "[-] authentication required"
+    )
+    assert "[+] anonymous access" in str(
+        kube._status_summary_line(
+            {
+                "status": "open_no_auth",
+                "auth_mode": "none",
+                "auth_required": False,
+                "show_namespaces": True,
+                "namespaces": ["a"],
+            }
+        )
+    )
+    assert "[+] token auth" in str(
+        kube._status_summary_line({"status": "auth_valid", "auth_mode": "token", "auth_valid": True})
+    )
+    assert "u:p auth failed" in str(
+        kube._status_summary_line(
+            {
+                "status": "auth_failed",
+                "auth_mode": "basic",
+                "auth_valid": False,
+                "auth_error": "forbidden",
+                "_username_display": "u",
+                "_password_display": "p",
+            }
+        )
+    )
+    assert "authentication check unavailable" in str(
+        kube._status_summary_line(
+            {"status": "auth_unknown", "auth_mode": "basic", "auth_valid": None, "auth_error": "unknown"}
+        )
+    )
+
+    detail_lines = kube._format_detail_records(
+        {
+            "host": "127.0.0.1",
+            "port": 16443,
+            "status": "auth_valid",
+            "show_namespaces": True,
+            "namespaces": [],
+            "namespaces_error": "",
+            "show_pods": True,
+            "pods": [],
+            "pods_error": "denied",
+            "show_secrets": True,
+            "secrets": [],
+            "secrets_error": "",
+            "namespace_filters": ["finance"],
+            "exec_result": {
+                "namespace": "finance",
+                "pod": "toolbox",
+                "command": "id",
+                "ok": False,
+                "stdout": "",
+                "stderr": "",
+                "error": "forbidden",
+                "exit_code": 126,
+            },
+        },
+        "txt",
+    )
+    assert any("<no namespaces>" in line for line in detail_lines)
+    assert any("pods unavailable" in line for line in detail_lines)
+    assert any("<no secrets>" in line for line in detail_lines)
+    assert any("exec failed" in line for line in detail_lines)
+    assert any("<no exec output>" in line for line in detail_lines)
+
+    class _Console:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, text: str, _color: str, _stream) -> str:
+            return text
+
+        def plain(self, line: str) -> None:
+            self.lines.append(line)
+
+    console = _Console()
+    assert kube._render_colored_kubeapi_line(console, "OTHER\tline") is False
+    assert (
+        kube._render_colored_kubeapi_line(
+            console,
+            "KUBEAPI\t127.0.0.1\t16443\t [+] token auth (namespaces:7) (pods:5) (secrets:2)",
+        )
+        is True
+    )
+    assert console.lines
+
+
+def test_kube_run_stage_and_audit_output_branches(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    class _Console:
+        instances: list[_Console] = []
+
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+            self.errors: list[str] = []
+            self.warns: list[str] = []
+            self.infos: list[str] = []
+            self.plains: list[str] = []
+            type(self).instances.append(self)
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def warn(self, message: str) -> None:
+            self.warns.append(message)
+
+        def info(self, message: str) -> None:
+            self.infos.append(message)
+
+        def plain(self, message: str, color: str | None = None) -> None:
+            _ = color
+            self.plains.append(message)
+
+        def render_tagged_payload_line(self, _line: str, _tag: str, payload_color: str | None = None) -> bool:
+            _ = payload_color
+            return False
+
+    monkeypatch.setattr(kube, "Console", _Console)
+    monkeypatch.setattr(kube, "collect_scan_ports", lambda _ports: [16443])
+    monkeypatch.setattr(
+        kube,
+        "collect_scan_target_specs",
+        lambda _targets: [SimpleNamespace(host="127.0.0.1", scheme="https", explicit_port=16443)],
+    )
+    monkeypatch.setattr(
+        kube,
+        "build_scan_execution_groups",
+        lambda _specs, _ports, include_scheme_in_key=True: [
+            SimpleNamespace(hosts=["127.0.0.1"], port=16443, scheme_hint="https")
+        ],
+    )
+
+    emitted: list[str] = []
+
+    def fake_audit(**kwargs):
+        kwargs["emit_line"]("KUBEAPI\t127.0.0.1\t16443\tpayload-line")
+        emitted.append("called")
+        return 1, 0, 1
+
+    monkeypatch.setattr(kube, "audit_kubeapi_targets", fake_audit)
+    args = _kube_args(
+        debug=True, output=str(tmp_path / "kube.jsonl"), output_format="json", token="tok", username="u", password="p"
+    )
+    rc = kube.run_kubeapi_stage(args, logger=SimpleNamespace(log=lambda *a, **k: None))
+    assert rc == 0
+    console = _Console.instances[-1]
+    assert any("--token is set; Basic auth credentials are ignored" in msg for msg in console.warns)
+    assert any("format=json output=" in msg for msg in console.infos)
+    assert emitted == ["called"]
+
+    monkeypatch.setattr(kube, "audit_kubeapi_targets", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    rc = kube.run_kubeapi_stage(args, logger=SimpleNamespace(log=lambda *a, **k: None))
+    assert rc == 2
+    assert any("failed to process kubeapi output" in msg for msg in _Console.instances[-1].errors)

@@ -847,3 +847,478 @@ def test_run_clickhouse_stage_rejects_sql_shell_with_output(monkeypatch: pytest.
     )
 
     assert clickhouse_stage.run_clickhouse_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+
+
+def test_call_audit_clickhouse_host_with_stage_debug_adds_stage_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_audit(*_args, **_kwargs):
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 9000,
+            "protocol": "native",
+            "is_clickhouse": True,
+            "status": "valid_credentials",
+            "auth_required": True,
+            "error": None,
+        }
+
+    monkeypatch.setattr(clickhouse_stage, "_audit_clickhouse_host", fake_audit)
+    debug_lines: list[str] = []
+    result = clickhouse_stage._call_audit_clickhouse_host_with_stage_debug(
+        "127.0.0.1",
+        9000,
+        1.0,
+        1,
+        "default",
+        "default",
+        False,
+        "default",
+        "native",
+        False,
+        False,
+        False,
+        [],
+        [],
+        False,
+        None,
+        None,
+        port_protocols=None,
+        run_deep_checks=True,
+        debug=True,
+        debug_emit=debug_lines.append,
+    )
+    assert isinstance(result.get("stages"), list)
+    assert result.get("stage_attempts") is not None
+    assert any("stage_trace stage_name=detect_protocol" in line for line in debug_lines)
+
+
+def test_run_clickhouse_stage_processes_all_ports_without_short_circuit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(clickhouse_stage, "_configure_clickhouse_loggers", lambda: None)
+    monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: object())
+    monkeypatch.setattr(clickhouse_stage, "collect_scan_ports", lambda _ports: [9000, 9001, 9002])
+    monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda _targets: ["127.0.0.1"])
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "_resolve_port_protocols",
+        lambda _proto, _port, _parsed: [(9000, "native"), (9001, "native"), (9002, "native")],
+    )
+
+    called_ports: list[int] = []
+
+    def fake_audit_clickhouse_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        called_ports.append(int(kwargs["port"]))
+        return (1, 0, 0, 0, 0, 0)
+
+    monkeypatch.setattr(clickhouse_stage, "audit_clickhouse_targets", fake_audit_clickhouse_targets)
+
+    progress_totals: list[int] = []
+    progress_advances: list[int] = []
+
+    class _FakeProgressBar:
+        def __init__(self, _name: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            progress_totals.append(int(total))
+
+        def advance(self, count: int = 1) -> None:
+            progress_advances.append(int(count))
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(clickhouse_stage, "ProgressBar", _FakeProgressBar)
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        port=9000,
+        ports="9000,9001,9002",
+        http=False,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        database="default",
+        show_databases=False,
+        show_tables=False,
+        show_columns=False,
+        tables=None,
+        columns=None,
+        dump=False,
+        execute=None,
+        sql_cmd=None,
+        os_shell=False,
+        sql_shell=False,
+        output=None,
+        output_format="txt",
+        log=None,
+    )
+
+    rc = clickhouse_stage.run_clickhouse_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    assert called_ports == [9000, 9001, 9002]
+    assert progress_totals == [3]
+    assert progress_advances == [1, 1, 1]
+
+
+def test_run_clickhouse_stage_multi_port_verbose_uses_single_global_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(clickhouse_stage, "_configure_clickhouse_loggers", lambda: None)
+    monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: object())
+    monkeypatch.setattr(clickhouse_stage, "collect_scan_ports", lambda _ports: [9000, 9001, 9002])
+    monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda _targets: ["127.0.0.1"])
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "_resolve_port_protocols",
+        lambda _proto, _port, _parsed: [(9000, "native"), (9001, "native"), (9002, "native")],
+    )
+
+    show_progress_flags: list[bool] = []
+
+    def fake_audit_clickhouse_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        show_progress_flags.append(bool(kwargs["show_progress"]))
+        return (1, 0, 0, 1, 0, 0)
+
+    monkeypatch.setattr(clickhouse_stage, "audit_clickhouse_targets", fake_audit_clickhouse_targets)
+
+    progress_totals: list[int] = []
+    progress_advances: list[int] = []
+
+    class _FakeProgressBar:
+        def __init__(self, _name: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            progress_totals.append(int(total))
+
+        def advance(self, count: int = 1) -> None:
+            progress_advances.append(int(count))
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(clickhouse_stage, "ProgressBar", _FakeProgressBar)
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username="default",
+        password="default",
+        defcreds=False,
+        port=9000,
+        ports="9000,9001,9002",
+        http=False,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        database="default",
+        show_databases=True,
+        show_tables=False,
+        show_columns=False,
+        tables=None,
+        columns=None,
+        dump=False,
+        execute=None,
+        sql_cmd=None,
+        os_shell=False,
+        sql_shell=False,
+        output=None,
+        output_format="txt",
+        log=None,
+    )
+
+    rc = clickhouse_stage.run_clickhouse_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    assert show_progress_flags == [False, False, False]
+    assert progress_totals == [3]
+    assert progress_advances == [1, 1, 1]
+
+
+def test_audit_clickhouse_targets_emits_two_pass_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_stage_call(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        username: str | None,
+        password: str | None,
+        defcreds: bool,
+        database: str,
+        protocol: str,
+        show_databases: bool,
+        show_tables: bool,
+        show_columns: bool,
+        table_targets: list[str],
+        table_columns: list[str],
+        dump_table_rows: bool,
+        execute_command: str | None,
+        sql_command: str | None,
+        *,
+        port_protocols: list[tuple[int, str]] | None,
+        run_deep_checks: bool,
+        debug: bool,
+        debug_emit,
+    ) -> dict[str, object]:
+        _ = (
+            port,
+            timeout,
+            retries,
+            username,
+            password,
+            defcreds,
+            database,
+            protocol,
+            show_databases,
+            show_tables,
+            show_columns,
+            table_targets,
+            table_columns,
+            dump_table_rows,
+            execute_command,
+            sql_command,
+            port_protocols,
+            debug,
+            debug_emit,
+        )
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": 9000,
+            "protocol": "native",
+            "is_clickhouse": True,
+            "status": "valid_credentials",
+            "auth_required": True,
+            "show_databases": bool(run_deep_checks),
+            "database_names": ["default"] if run_deep_checks else None,
+            "database_count": 1 if run_deep_checks else None,
+            "auth_attempts": [],
+            "table_columns_info": [],
+            "table_dumps": [],
+            "error": None,
+            "debug_events": [],
+            "debug_events_streamed": True,
+            "stages": [],
+            "stage_durations_ms": {},
+            "stage_attempts": {},
+            "stage_failed_at": None,
+        }
+
+    monkeypatch.setattr(clickhouse_stage, "_call_audit_clickhouse_host_with_stage_debug", fake_stage_call)
+    debug_lines: list[str] = []
+    emitted: list[str] = []
+    totals = clickhouse_stage.audit_clickhouse_targets(
+        hosts=["127.0.0.1"],
+        port=9000,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username="default",
+        password="default",
+        defcreds=False,
+        database="default",
+        protocol="native",
+        show_databases=True,
+        show_tables=False,
+        show_columns=False,
+        table_targets=[],
+        table_columns=[],
+        dump_table_rows=False,
+        execute_command=None,
+        sql_command=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=emitted.append,
+        logger=None,
+        append_output=False,
+        debug_emit=debug_lines.append,
+        show_progress=False,
+    )
+    assert totals == (1, 0, 0, 1, 0, 0)
+    assert any("pass=1 detect start total=1" in line for line in debug_lines)
+    assert any("stage2_gate=run reason=status=valid_credentials" in line for line in debug_lines)
+    assert any("pass=2 deep complete processed=1" in line for line in debug_lines)
+
+
+def test_clickhouse_helper_predicates_and_close_client() -> None:
+    assert clickhouse_stage._friendly_error_from_exception(TimeoutError("timed out")) == "connection timeout"
+    assert "connection refused" in clickhouse_stage._friendly_error_from_exception(
+        OSError("[Errno 111] Connection refused")
+    )
+    assert clickhouse_stage._is_timeout_error("request timeout") is True
+    assert clickhouse_stage._is_connection_refused_error("connection refused by peer") is True
+    assert clickhouse_stage._is_connection_timeout_fail_record({"status": "fail", "error": "timeout"}) is True
+    assert (
+        clickhouse_stage._is_connection_refused_fail_record({"status": "fail", "error": "connection refused"}) is True
+    )
+
+    assert clickhouse_stage._should_emit_status_line({"status": "open_no_auth"}, "txt") is True
+    assert (
+        clickhouse_stage._should_emit_status_line(
+            {"status": "auth_required", "attempted_credentials": 1, "auth_attempts": [{"ok": False}]},
+            "txt",
+        )
+        is False
+    )
+    assert clickhouse_stage._should_emit_status_line({"status": "auth_required"}, "json") is True
+
+    assert clickhouse_stage._is_auth_error("Code: 516. Authentication failed") is True
+    assert clickhouse_stage._looks_like_clickhouse_error("DB::Exception: Code: 102") is True
+
+    class _NativeClient:
+        closed = False
+
+        def disconnect(self) -> None:
+            self.closed = True
+
+    class _HttpClient:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    native = _NativeClient()
+    http = _HttpClient()
+    clickhouse_stage._close_client("native", native)
+    clickhouse_stage._close_client("http", http)
+    assert native.closed is True
+    assert http.closed is True
+
+
+def test_clickhouse_normalization_and_query_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert clickhouse_stage._normalize_table_targets(["db.users,db.users", "db.audit"]) == ["db.users", "db.audit"]
+    assert clickhouse_stage._split_table_name("users", "default") == ("default", "users")
+    assert clickhouse_stage._split_table_name("app.users", "default") == ("app", "users")
+    assert clickhouse_stage._split_table_name("bad-name", "default") == (None, None)
+
+    rows_iter = iter(
+        [
+            ([["default"], [], ["analytics"]], None),
+            ([["default", "users"], ["bad"], ["analytics", "events"]], None),
+            ([["id"], ["email"]], None),
+            ([["id"], ["email"], ["skip"]], None),
+        ]
+    )
+    monkeypatch.setattr(clickhouse_stage, "_query_rows", lambda *_args, **_kwargs: next(rows_iter))
+
+    session = _session()
+    assert clickhouse_stage._query_database_names(session) == (["default", "analytics"], None)
+    assert clickhouse_stage._query_readable_tables(session) == (["default.users", "analytics.events"], None)
+    assert clickhouse_stage._query_table_columns(session, "default", "users", only_columns=None) == (
+        ["id", "email"],
+        None,
+    )
+    assert clickhouse_stage._query_table_columns(session, "default", "users", only_columns=["email"]) == (
+        ["email"],
+        None,
+    )
+
+
+def test_clickhouse_capability_and_exec_sql_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert clickhouse_stage._normalize_execute_command(" id; ") == "id"
+    assert clickhouse_stage._quote_sql_literal("a'b\\c") == "'a\\'b\\\\c'"
+    assert "executable(" in clickhouse_stage._build_os_exec_query("id")
+
+    call_sql: list[str] = []
+
+    def fake_query_rows(_session: object, sql: str):
+        call_sql.append(sql)
+        if sql.startswith("SELECT name FROM system.databases"):
+            return [["default"]], None
+        if sql.startswith("SHOW GRANTS"):
+            return [["GRANT SELECT ON *.*"], ["GRANT ACCESS MANAGEMENT ON *.*"]], None
+        if sql == "SELECT name FROM system.tables LIMIT 1":
+            return [["users"]], None
+        if "redposture_exec_probe" in sql:
+            return [["ok"]], None
+        if sql == "select 1":
+            return [["1"], ["2"], ["3"]], None
+        if sql == "SYSTEM FLUSH LOGS":
+            return [["ok"]], None
+        return [], "oops"
+
+    monkeypatch.setattr(clickhouse_stage, "_query_rows", fake_query_rows)
+    session = _session()
+    read_cap, exec_cap, admin_cap, db_count, db_names, cap_error = clickhouse_stage._collect_capabilities(session)
+    assert (read_cap, exec_cap, admin_cap, db_count, db_names, cap_error) == (
+        True,
+        True,
+        True,
+        1,
+        ["default"],
+        None,
+    )
+
+    sql_out, sql_err = clickhouse_stage._run_sql_query(session, "select 1", max_lines=2)
+    assert sql_err is None
+    assert sql_out[-1] == "<output truncated at 2 lines>"
+
+    exec_out, exec_err = clickhouse_stage._run_execute_command(session, "SYSTEM FLUSH LOGS", max_lines=1)
+    assert exec_err is None
+    assert exec_out[-1] == "<output truncated at 1 lines>"
+
+    empty_out, empty_err = clickhouse_stage._run_execute_command(session, "   ")
+    assert empty_out == []
+    assert empty_err == "empty command"
+
+    # exercise operational session fallback to default DB
+    connect_calls: list[str] = []
+
+    def fake_connect_and_probe(
+        protocol: str,
+        host: str,
+        port: int,
+        timeout: float,
+        username: str,
+        password: str,
+        *,
+        database: str = "default",
+    ):
+        _ = (protocol, host, port, timeout, username, password)
+        connect_calls.append(database)
+        if database == "analytics":
+            return None, "unknown database analytics"
+        return _session(database="default"), None
+
+    monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_connect_and_probe)
+    op_session, op_error = clickhouse_stage._open_operational_session(
+        "native",
+        "127.0.0.1",
+        9000,
+        1.0,
+        "default",
+        "",
+        "analytics",
+    )
+    assert op_session is not None
+    assert "connected to default" in str(op_error)
+    assert connect_calls == ["analytics", "default"]
+
+
+def test_render_colored_clickhouse_line_smoke() -> None:
+    class _Painter:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def _paint(self, text: str, color: str, _stream: object) -> str:
+            return f"<{color}>{text}</{color}>"
+
+        def plain(self, line: str) -> None:
+            self.lines.append(line)
+
+    painter = _Painter()
+    assert clickhouse_stage._render_colored_clickhouse_line(painter, "NOPE") is False
+    rendered = clickhouse_stage._render_colored_clickhouse_line(
+        painter,
+        "CLICKHOUSE\t127.0.0.1\t9000\t [+] anonymous access (auth required:False) "
+        "(read:true) (execute:false) (admin:unknown) (DBs:2)",
+    )
+    assert rendered is True
+    assert painter.lines and "auth required:False" in painter.lines[0]

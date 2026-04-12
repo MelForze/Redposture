@@ -31,6 +31,7 @@ from .cli_args import (
     COMMAND_ZOOKEEPER,
     parse_args,
 )
+from .console import set_console_no_color
 from .logger import AttemptLogger
 from .network_proxy import parse_proxy_config, proxy_socket_context
 from .stage_clickhouse import run_clickhouse_stage
@@ -180,6 +181,7 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    set_console_no_color(bool(getattr(args, "no_color", False)))
     logger = AttemptLogger()
     log_path = str(getattr(args, "log", "") or "").strip()
     raw_proxy = str(getattr(args, "proxy", "") or "").strip()
@@ -200,4 +202,5 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
             return _run_command(args, logger)
     finally:
+        set_console_no_color(False)
         logger.close()

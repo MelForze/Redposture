@@ -93,7 +93,7 @@ def test_run_command_rejects_unsupported_commands(capsys) -> None:
 
 
 def test_main_returns_error_on_proxy_parse_failure(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
-    args = SimpleNamespace(command=COMMAND_GRAFANA, log="", proxy="http://proxy.local", debug=False)
+    args = SimpleNamespace(command=COMMAND_GRAFANA, log="", proxy="http://proxy.local", debug=False, no_color=False)
     monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
     monkeypatch.setattr(cli, "parse_proxy_config", lambda _raw: (None, "bad proxy"))
 
@@ -102,7 +102,7 @@ def test_main_returns_error_on_proxy_parse_failure(monkeypatch: pytest.MonkeyPat
 
 
 def test_main_ignores_proxy_parsing_for_proxmox(monkeypatch: pytest.MonkeyPatch) -> None:
-    args = SimpleNamespace(command=COMMAND_PROXMOX, log="", proxy="http://proxy.local", debug=False)
+    args = SimpleNamespace(command=COMMAND_PROXMOX, log="", proxy="http://proxy.local", debug=False, no_color=False)
     calls: list[str] = []
     monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
     monkeypatch.setattr(cli, "parse_proxy_config", lambda _raw: (_ for _ in ()).throw(AssertionError("unexpected")))
@@ -114,7 +114,7 @@ def test_main_ignores_proxy_parsing_for_proxmox(monkeypatch: pytest.MonkeyPatch)
 
 def test_main_tees_output_and_runs_command_on_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     log_path = tmp_path / "run.log"
-    args = SimpleNamespace(command=COMMAND_GRAFANA, log=str(log_path), proxy="", debug=False)
+    args = SimpleNamespace(command=COMMAND_GRAFANA, log=str(log_path), proxy="", debug=False, no_color=False)
     calls: list[str] = []
 
     monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
@@ -138,7 +138,7 @@ def test_main_returns_error_when_log_file_cannot_be_opened(
     monkeypatch: pytest.MonkeyPatch,
     capsys,
 ) -> None:
-    args = SimpleNamespace(command=COMMAND_GRAFANA, log="/tmp/redposture.log", proxy="", debug=False)
+    args = SimpleNamespace(command=COMMAND_GRAFANA, log="/tmp/redposture.log", proxy="", debug=False, no_color=False)
     monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
     monkeypatch.setattr(
         cli,
@@ -148,3 +148,15 @@ def test_main_returns_error_when_log_file_cannot_be_opened(
 
     assert cli.main(["grafana", "-t", "127.0.0.1"]) == 2
     assert "failed to open --log file '/tmp/redposture.log': permission denied" in capsys.readouterr().err
+
+
+def test_main_applies_and_resets_no_color_setting(monkeypatch: pytest.MonkeyPatch) -> None:
+    args = SimpleNamespace(command=COMMAND_GRAFANA, log="", proxy="", debug=False, no_color=True)
+    calls: list[bool] = []
+    monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
+    monkeypatch.setattr(cli, "_run_command", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(cli, "set_console_no_color", lambda enabled: calls.append(bool(enabled)))
+
+    assert cli.main(["grafana", "-t", "127.0.0.1", "--no-color"]) == 0
+    assert calls[0] is True
+    assert calls[-1] is False

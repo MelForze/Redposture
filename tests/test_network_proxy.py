@@ -141,7 +141,7 @@ def test_open_proxy_connection_uses_socket_create_connection(monkeypatch: pytest
         calls.append((address, timeout, source_address))
         return _DummySocket()
 
-    monkeypatch.setattr(np.socket, "create_connection", fake_create_connection)
+    monkeypatch.setattr(np, "_RAW_SOCKET_CREATE_CONNECTION", fake_create_connection)
 
     proxy = np.ProxyConfig(
         scheme="socks5",
@@ -155,6 +155,57 @@ def test_open_proxy_connection_uses_socket_create_connection(monkeypatch: pytest
 
     assert isinstance(sock, _DummySocket)
     assert calls == [(("::1", 1080), 2.5, ("0.0.0.0", 0))]
+
+
+def test_proxy_socket_patch_nested_contexts_restore_original(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, tuple[object, ...], object, object]] = []
+
+    class DummySock:
+        def close(self) -> None:
+            return
+
+    def fake_open_connection_via_proxy(
+        proxy: np.ProxyConfig,
+        address: tuple[object, ...],
+        timeout: object = np._SOCKET_DEFAULT_TIMEOUT,
+        source_address: tuple[str, int] | None = None,
+    ) -> DummySock:
+        calls.append((proxy.raw_url, address, timeout, source_address))
+        return DummySock()
+
+    monkeypatch.setattr(np, "open_connection_via_proxy", fake_open_connection_via_proxy)
+
+    original = socket.create_connection
+    proxy_a = np.ProxyConfig(
+        scheme="http",
+        host="127.0.0.1",
+        port=8080,
+        username=None,
+        password=None,
+        raw_url="http://127.0.0.1:8080",
+    )
+    proxy_b = np.ProxyConfig(
+        scheme="http",
+        host="127.0.0.1",
+        port=8081,
+        username=None,
+        password=None,
+        raw_url="http://127.0.0.1:8081",
+    )
+
+    with np.ProxySocketPatch(proxy_a):
+        assert socket.create_connection is not original
+        socket.create_connection(("a.example", 443), timeout=1.0)
+        with np.ProxySocketPatch(proxy_b):
+            socket.create_connection(("b.example", 443), timeout=2.0)
+        socket.create_connection(("c.example", 443), timeout=3.0)
+
+    assert socket.create_connection is original
+    assert [item[0] for item in calls] == [
+        "http://127.0.0.1:8080",
+        "http://127.0.0.1:8081",
+        "http://127.0.0.1:8080",
+    ]
 
 
 def test_resolve_timeout_handles_default_invalid_and_negative(monkeypatch: pytest.MonkeyPatch) -> None:

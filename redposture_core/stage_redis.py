@@ -10,12 +10,12 @@ import socket
 import sys
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import iter_completed_with_progress
+from .progress import ProgressBar, iter_completed_with_progress
 from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
 
 
@@ -700,6 +700,165 @@ def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) 
         emit_line(line)
 
 
+_REDIS_DEEP_STATUSES = {"open_no_auth", "weak_default_creds", "valid_credentials", "invalid_credentials_anonymous"}
+
+
+def _call_audit_redis_host_with_stage_debug(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    username: str | None,
+    password: str | None,
+    defcreds: bool,
+    show_keys: bool,
+    dump_keys: bool,
+    query_key: str | None,
+    *,
+    run_deep_checks: bool,
+    debug: bool,
+    debug_emit: Callable[[str], None] | None,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    record = _audit_redis_host(
+        host,
+        port,
+        timeout,
+        retries,
+        username,
+        password,
+        defcreds,
+        show_keys if run_deep_checks else False,
+        dump_keys if run_deep_checks else False,
+        query_key if run_deep_checks else None,
+    )
+
+    result: dict[str, Any] = dict(record)
+    debug_events: list[str] = []
+    existing_debug = result.get("debug_events")
+    if isinstance(existing_debug, list):
+        for item in existing_debug:
+            if isinstance(item, str) and item.strip():
+                debug_events.append(item)
+
+    def _debug(message: str) -> None:
+        if not debug:
+            return
+        debug_events.append(message)
+        if debug_emit is not None:
+            debug_emit(f"{host}:{port} {message}")
+
+    status = str(result.get("status") or "fail")
+    is_redis = bool(result.get("is_redis"))
+    attempts = max(1, retries + 1)
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    stages: list[dict[str, Any]] = []
+
+    def _push_stage(stage_name: str, stage_result: str, stage_error: str | None = None, duration_ms: int = 0) -> None:
+        entry = {
+            "stage_name": stage_name,
+            "attempt": 1,
+            "duration_ms": int(max(0, duration_ms)),
+            "result": stage_result,
+            "error": stage_error or None,
+        }
+        stages.append(entry)
+        _debug(
+            f"stage_trace stage_name={stage_name} attempt=1 duration_ms={entry['duration_ms']} "
+            f"result={stage_result} error={entry['error'] or '-'}"
+        )
+
+    detect_result = "ok" if is_redis else ("error" if status == "fail" else "skip")
+    _push_stage(
+        "detect_protocol", detect_result, str(result.get("error") or "") if detect_result == "error" else None, 0
+    )
+    _push_stage(
+        "auth_inference_credentials",
+        "ok" if status in _REDIS_DEEP_STATUSES.union({"auth_required"}) else ("error" if status == "fail" else "skip"),
+        None,
+        0,
+    )
+
+    if run_deep_checks and status in _REDIS_DEEP_STATUSES:
+        _push_stage("access_capabilities", "ok", None, 0)
+        data_result = "error" if (status == "fail" and result.get("error")) else "ok"
+        _push_stage("data", data_result, str(result.get("error") or "") if data_result == "error" else None, elapsed_ms)
+    else:
+        _push_stage("access_capabilities", "skip", "deep checks disabled", 0)
+        _push_stage("data", "skip", "deep checks disabled", 0)
+
+    stage_failed_at: str | None = None
+    for stage_entry in stages:
+        if str(stage_entry.get("result") or "") == "error":
+            stage_failed_at = str(stage_entry.get("stage_name") or "")
+            break
+
+    stage_durations_ms = {str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in stages}
+    stage_attempts = {str(item.get("stage_name") or ""): attempts for item in stages}
+
+    _debug(
+        f"stage_timing_summary status={status} attempts=1/{attempts} "
+        f"detect_ms={stage_durations_ms.get('detect_protocol', 0)} "
+        f"auth_ms={stage_durations_ms.get('auth_inference_credentials', 0)} "
+        f"capabilities_ms={stage_durations_ms.get('access_capabilities', 0)} "
+        f"data_ms={stage_durations_ms.get('data', 0)} "
+        f"total_ms={elapsed_ms}"
+    )
+
+    result["stages"] = stages
+    result["stage_failed_at"] = stage_failed_at
+    result["stage_durations_ms"] = stage_durations_ms
+    result["stage_attempts"] = stage_attempts
+    result["debug_events"] = debug_events
+    result["debug_events_streamed"] = bool(debug and debug_emit is not None)
+    result["attempts"] = 1
+    result["max_attempts"] = attempts
+    return result
+
+
+def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(detect_record)
+    merged.update(deep_record)
+
+    debug_events: list[str] = []
+    for source in (detect_record.get("debug_events"), deep_record.get("debug_events")):
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if isinstance(item, str) and item.strip():
+                debug_events.append(item)
+    merged["debug_events"] = debug_events
+    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
+        deep_record.get("debug_events_streamed")
+    )
+
+    stages: list[dict[str, Any]] = []
+    for source in (detect_record.get("stages"), deep_record.get("stages")):
+        if isinstance(source, list):
+            for entry in source:
+                if isinstance(entry, dict):
+                    stages.append(dict(entry))
+    merged["stages"] = stages
+
+    stage_durations: dict[str, int] = {}
+    for source in (detect_record.get("stage_durations_ms"), deep_record.get("stage_durations_ms")):
+        if isinstance(source, dict):
+            for key, value in source.items():
+                stage_durations[str(key)] = int(value or 0)
+    merged["stage_durations_ms"] = stage_durations
+
+    stage_attempts: dict[str, int] = {}
+    for source in (detect_record.get("stage_attempts"), deep_record.get("stage_attempts")):
+        if isinstance(source, dict):
+            for key, value in source.items():
+                stage_attempts[str(key)] = int(value or 0)
+    merged["stage_attempts"] = stage_attempts
+
+    merged["stage_failed_at"] = deep_record.get("stage_failed_at") or detect_record.get("stage_failed_at")
+    return merged
+
+
 def audit_redis_targets(
     hosts: list[str],
     port: int,
@@ -719,6 +878,8 @@ def audit_redis_targets(
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
     suppress_connection_refused_status_lines: bool = False,
+    debug_emit: Callable[[str], None] | None = None,
+    show_progress: bool = True,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -733,10 +894,17 @@ def audit_redis_targets(
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
+        indexed_hosts = list(enumerate(hosts))
+        detect_records: dict[int, dict[str, Any]] = {}
+        deep_records: dict[int, dict[str, Any]] = {}
+
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
+
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            future_map = {
+            pass1_future_map = {
                 executor.submit(
-                    _audit_redis_host,
+                    _call_audit_redis_host_with_stage_debug,
                     host,
                     port,
                     timeout,
@@ -747,72 +915,131 @@ def audit_redis_targets(
                     show_keys,
                     dump_keys,
                     query_key,
-                ): host
-                for host in hosts
+                    run_deep_checks=False,
+                    debug=bool(debug_emit),
+                    debug_emit=debug_emit,
+                ): idx
+                for idx, host in indexed_hosts
             }
-            for future in iter_completed_with_progress(future_map, label="REDIS"):
-                record = future.result()
-                total += 1
-                status = str(record.get("status") or "fail")
-                if status == "open_no_auth":
-                    open_no_auth += 1
-                elif status == "weak_default_creds":
-                    weak += 1
-                elif status == "valid_credentials":
-                    valid += 1
-                elif status == "auth_required":
-                    auth_required += 1
-                else:
-                    fail += 1
+            buffered_records: dict[int, dict[str, Any]] = {}
+            next_emit_idx = 0
+            for future in iter_completed_with_progress(pass1_future_map, label="REDIS", enabled=show_progress):
+                record_idx = int(pass1_future_map[future])
+                buffered_records[record_idx] = future.result()
+                while next_emit_idx in buffered_records:
+                    detect_record = buffered_records.pop(next_emit_idx)
+                    detect_records[next_emit_idx] = detect_record
+                    if bool(detect_record.get("is_redis")):
+                        _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
+                    next_emit_idx += 1
 
-                if bool(record.get("is_redis")):
-                    _emit_line(out_fh, emit_line, _format_detect_record(record, output_format))
+        deep_requested = bool(show_keys or dump_keys or query_key)
+        deep_candidates: list[tuple[int, str]] = []
+        detected_hosts = 0
+        for idx, host in indexed_hosts:
+            detect_record = detect_records[idx]
+            detect_status = str(detect_record.get("status") or "fail")
+            if not bool(detect_record.get("is_redis")):
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_redis")
+                continue
+            detected_hosts += 1
+            if deep_requested and detect_status in _REDIS_DEEP_STATUSES:
+                deep_candidates.append((idx, host))
+                if debug_emit is not None:
+                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
+            elif debug_emit is not None:
+                reason = "no_data_actions" if not deep_requested else f"status={detect_status}"
+                debug_emit(f"{host}:{port} stage2_gate=skip reason={reason}")
 
-                suppress_auth_required_status_line = (
-                    output_format == "txt"
-                    and bool(record.get("is_redis"))
-                    and status == "auth_required"
-                    and not bool(record.get("provided_credentials"))
-                    and not bool(record.get("default_credentials_attempted"))
-                )
-                suppress_timeout_status_line = (
-                    suppress_timeout_status_lines
-                    and output_format == "txt"
-                    and _is_connection_timeout_fail_record(record)
-                )
-                suppress_connection_refused_status_line = (
-                    suppress_connection_refused_status_lines
-                    and output_format == "txt"
-                    and _is_connection_refused_fail_record(record)
-                )
-                suppress_fail_status_line = (
-                    suppress_timeout_status_lines
-                    and suppress_connection_refused_status_lines
-                    and output_format == "txt"
-                    and status == "fail"
-                )
-                if (
-                    not suppress_auth_required_status_line
-                    and not suppress_timeout_status_line
-                    and not suppress_connection_refused_status_line
-                    and not suppress_fail_status_line
-                ):
-                    _emit_line(out_fh, emit_line, _format_record(record, output_format))
-                for keys_detail in _format_keys_detail_records(record, output_format):
-                    _emit_line(out_fh, emit_line, keys_detail)
+        if debug_emit is not None:
+            debug_emit(f"pass=1 detect complete redis={detected_hosts} deep_candidates={len(deep_candidates)}")
+            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
 
-                if logger is not None:
-                    logger.log(
-                        "redis",
-                        (str(record.get("host") or "-"), int(record.get("port") or port)),
-                        phase="audit",
-                        status=record.get("status"),
-                        auth_required=record.get("auth_required"),
-                        default_credentials=record.get("default_credentials"),
-                        provided_credentials_ok=record.get("provided_credentials_ok"),
-                        keys=record.get("keys"),
-                        error=record.get("error"),
-                    )
+        if deep_candidates:
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+                pass2_future_map = {
+                    executor.submit(
+                        _call_audit_redis_host_with_stage_debug,
+                        host,
+                        port,
+                        timeout,
+                        retries,
+                        username,
+                        password,
+                        defcreds,
+                        show_keys,
+                        dump_keys,
+                        query_key,
+                        run_deep_checks=True,
+                        debug=bool(debug_emit),
+                        debug_emit=debug_emit,
+                    ): idx
+                    for idx, host in deep_candidates
+                }
+                for future in as_completed(pass2_future_map):
+                    deep_records[int(pass2_future_map[future])] = future.result()
+
+        if debug_emit is not None:
+            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
+
+        for idx, _host in indexed_hosts:
+            detect_record = detect_records[idx]
+            emit_record = detect_record
+            if idx in deep_records:
+                emit_record = _merge_stage2_record(detect_record, deep_records[idx])
+
+            total += 1
+            status = str(emit_record.get("status") or "fail")
+            if status == "open_no_auth":
+                open_no_auth += 1
+            elif status == "weak_default_creds":
+                weak += 1
+            elif status == "valid_credentials":
+                valid += 1
+            elif status == "auth_required":
+                auth_required += 1
+            else:
+                fail += 1
+
+            suppress_auth_required_status_line = (
+                output_format == "txt"
+                and bool(emit_record.get("is_redis"))
+                and status == "auth_required"
+                and not bool(emit_record.get("provided_credentials"))
+                and not bool(emit_record.get("default_credentials_attempted"))
+            )
+            suppress_timeout_status_line = (
+                suppress_timeout_status_lines
+                and output_format == "txt"
+                and _is_connection_timeout_fail_record(emit_record)
+            )
+            suppress_connection_refused_status_line = (
+                suppress_connection_refused_status_lines
+                and output_format == "txt"
+                and _is_connection_refused_fail_record(emit_record)
+            )
+            if (
+                not suppress_auth_required_status_line
+                and not suppress_timeout_status_line
+                and not suppress_connection_refused_status_line
+            ):
+                _emit_line(out_fh, emit_line, _format_record(emit_record, output_format))
+            for keys_detail in _format_keys_detail_records(emit_record, output_format):
+                _emit_line(out_fh, emit_line, keys_detail)
+
+            if logger is not None:
+                logger.log(
+                    "redis",
+                    (str(emit_record.get("host") or "-"), int(emit_record.get("port") or port)),
+                    phase="audit",
+                    status=emit_record.get("status"),
+                    auth_required=emit_record.get("auth_required"),
+                    default_credentials=emit_record.get("default_credentials"),
+                    provided_credentials_ok=emit_record.get("provided_credentials_ok"),
+                    keys=emit_record.get("keys"),
+                    error=emit_record.get("error"),
+                )
 
     finally:
         if out_fh is not None:
@@ -873,6 +1100,15 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if args.debug:
             console.plain(line)
 
+    def emit_debug(message: str) -> None:
+        if not args.debug:
+            return
+        debug_method = getattr(console, "debug", None)
+        if callable(debug_method):
+            debug_method(message)
+            return
+        console.info(message)
+
     if args.debug and stream_to_stdout and args.output_format == "txt":
         mode_parts = ["count-keys"]
         if args.defcreds:
@@ -911,6 +1147,10 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     valid = 0
     auth_required = 0
     failed = 0
+    outer_progress: ProgressBar | None = None
+    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(ports) > 1
+    if use_single_global_progress:
+        outer_progress = ProgressBar("REDIS", len(hosts) * len(ports), enabled=True, leave=True)
     try:
         for idx, audit_port in enumerate(ports):
             part_total, part_open, part_weak, part_valid, part_auth, part_failed = audit_redis_targets(
@@ -932,6 +1172,8 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 append_output=idx > 0,
                 suppress_timeout_status_lines=not bool(args.debug),
                 suppress_connection_refused_status_lines=not bool(args.debug),
+                debug_emit=emit_debug if args.debug else None,
+                show_progress=not use_single_global_progress,
             )
             total += part_total
             open_no_auth += part_open
@@ -939,11 +1181,27 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             valid += part_valid
             auth_required += part_auth
             failed += part_failed
+            if outer_progress is not None:
+                outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process redis output: {exc}")
         return 2
+    finally:
+        if outer_progress is not None:
+            outer_progress.close()
 
     if stream_to_stdout:
+        if (
+            args.output_format == "txt"
+            and not args.debug
+            and total > 0
+            and open_no_auth == 0
+            and weak == 0
+            and valid == 0
+            and auth_required == 0
+            and failed == total
+        ):
+            console.warn("all redis targets are unreachable; check host/port, network reachability, and service status")
         if args.debug and args.output_format == "txt":
             console.info(
                 f"redis audit complete: total={total} anonymous={open_no_auth} "

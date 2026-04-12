@@ -13,6 +13,7 @@ from redposture_core.stage_zookeeper import (
     _ZK_ERR_OK,
     _ZK_ERR_RETRYABLE_ROOT_QUERY,
     _audit_zookeeper_host,
+    _call_audit_host_with_thread_debug,
     _decode_zk_buffer,
     _decode_zk_string,
     _encode_zk_string,
@@ -2122,6 +2123,87 @@ def test_run_zookeeper_stage_trims_and_forwards_credentials(monkeypatch: pytest.
     assert captured == {"username": "admin", "password": ""}
 
 
+def test_run_zookeeper_stage_multi_port_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeConsole:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+
+        def error(self, _message: str) -> None:
+            return
+
+        def warn(self, _message: str) -> None:
+            return
+
+        def info(self, _message: str) -> None:
+            return
+
+        def plain(self, _message: str, color: str | None = None) -> None:
+            _ = color
+            return
+
+        def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+    class _FakeProgress:
+        instances: list[_FakeProgress] = []
+
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            self.total = total
+            self.advances: list[int] = []
+            self.closed = False
+            type(self).instances.append(self)
+
+        def advance(self, step: int = 1) -> None:
+            self.advances.append(int(step))
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.Console", _FakeConsole)
+    monkeypatch.setattr("redposture_core.stage_zookeeper.ProgressBar", _FakeProgress)
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_args, **_kwargs: [2181, 2182])
+    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+
+    captured: list[dict[str, object]] = []
+
+    def _fake_audit(*_args, **kwargs):
+        captured.append(kwargs)
+        return (len(kwargs["hosts"]), 1, 0, 0, 0)
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", _fake_audit)
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        max_znodes=100,
+        username=None,
+        password=None,
+        port=2181,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        show_znodes=False,
+        dump=False,
+        znode=None,
+        output=None,
+        output_format="txt",
+        workers=1,
+        enum_workers=3,
+    )
+    rc = run_zookeeper_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    assert len(captured) == 2
+    assert all(call["show_progress"] is False for call in captured)
+    assert len(_FakeProgress.instances) == 1
+    progress = _FakeProgress.instances[0]
+    assert progress.total == 2
+    assert progress.advances == [1, 1]
+    assert progress.closed is True
+
+
 def test_probe_znode_create_delete_nodeexists_and_exceptions() -> None:
     class _NodeExistsClient:
         def __init__(self) -> None:
@@ -3539,3 +3621,60 @@ def test_run_stage_debug_summaries(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any("timings summary" in line for line in fake_console.debug_lines)
     assert any("auth inference summary" in line for line in fake_console.debug_lines)
     assert any("top errors" in line for line in fake_console.debug_lines)
+
+
+def test_call_audit_zookeeper_wrapper_fallbacks_for_legacy_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def fake_audit(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((args, dict(kwargs)))
+        if "enum_workers" in kwargs:
+            raise TypeError("got an unexpected keyword argument 'enum_workers'")
+        return {"status": "ok"}
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
+    result = _call_audit_host_with_thread_debug(
+        "127.0.0.1",
+        2181,
+        1.0,
+        0,
+        None,
+        None,
+        False,
+        False,
+        None,
+        100,
+        False,
+        True,
+        3,
+        None,
+    )
+
+    assert result == {"status": "ok"}
+    assert len(calls) == 2
+    assert calls[0][1]["enum_workers"] == 3
+    assert "enum_workers" not in calls[1][1]
+
+
+def test_call_audit_zookeeper_wrapper_propagates_unexpected_typeerror(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_audit(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        raise TypeError("boom")
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
+    with pytest.raises(TypeError, match="boom"):
+        _call_audit_host_with_thread_debug(
+            "127.0.0.1",
+            2181,
+            1.0,
+            0,
+            None,
+            None,
+            False,
+            False,
+            None,
+            100,
+            False,
+            True,
+            1,
+            None,
+        )

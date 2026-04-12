@@ -19,13 +19,22 @@ _COLORS = {
     "white": "1;97",
 }
 
+_FORCE_NO_COLOR = False
+
+
+def set_console_no_color(enabled: bool) -> None:
+    global _FORCE_NO_COLOR
+    _FORCE_NO_COLOR = bool(enabled)
+
 
 class Console:
-    def __init__(self, debug: bool = False) -> None:
+    def __init__(self, debug: bool = False, *, no_color: bool | None = None) -> None:
         self.debug_enabled = debug
+        self._no_color = _FORCE_NO_COLOR if no_color is None else bool(no_color)
 
     def _use_color(self, stream: TextIO) -> bool:
-        return True
+        _ = stream
+        return not self._no_color
 
     def _paint(self, text: str, color: str, stream: TextIO) -> str:
         if not self._use_color(stream):

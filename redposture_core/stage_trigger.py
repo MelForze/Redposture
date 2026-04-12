@@ -603,6 +603,60 @@ def _run_trigger_requests(
                 logger=logger,
             )
 
+    def _emit_stage_event(event: dict[str, Any]) -> None:
+        if not args.debug:
+            return
+        kind = str(event.get("kind") or "")
+        if kind == "pass":
+            pass_name = str(event.get("pass") or "")
+            event_name = str(event.get("event") or "")
+            total = int(event.get("total") or 0)
+            if pass_name == "detect" and event_name == "start":
+                console.debug(f"pass=1 detect start total={total}")
+                return
+            if pass_name == "detect" and event_name == "complete":
+                detected_exporters = int(event.get("detected_exporters") or 0)
+                deep_candidates = int(event.get("deep_candidates") or 0)
+                console.debug(
+                    f"pass=1 detect complete detected_exporters={detected_exporters} deep_candidates={deep_candidates}"
+                )
+                return
+            if pass_name == "deep" and event_name == "start":
+                console.debug(f"pass=2 deep start total={total}")
+                return
+            if pass_name == "deep" and event_name == "complete":
+                processed = int(event.get("processed") or 0)
+                console.debug(f"pass=2 deep complete processed={processed}")
+                return
+            return
+        if kind == "gate":
+            host = str(event.get("host") or "-")
+            gate = str(event.get("gate") or "skip")
+            reason = str(event.get("reason") or "-")
+            console.debug(f"{host} stage2_gate={gate} reason={reason}")
+            return
+        if kind == "stage_trace":
+            stage_name = str(event.get("stage_name") or "-")
+            attempt = int(event.get("attempt") or 1)
+            duration_ms = int(event.get("duration_ms") or 0)
+            result = str(event.get("result") or "ok")
+            error = str(event.get("error") or "-")
+            console.debug(
+                f"stage_trace stage_name={stage_name} attempt={attempt} duration_ms={duration_ms} "
+                f"result={result} error={error}"
+            )
+            return
+        if kind == "timing_summary":
+            status = str(event.get("status") or "ok")
+            attempts = str(event.get("attempts") or "1/1")
+            detect_ms = int(event.get("detect_ms") or 0)
+            data_ms = int(event.get("data_ms") or 0)
+            total_ms = int(event.get("total_ms") or 0)
+            console.debug(
+                f"stage_timing_summary status={status} attempts={attempts} "
+                f"detect_ms={detect_ms} data_ms={data_ms} total_ms={total_ms}"
+            )
+
     trigger_logger = logger if log_trigger_attempts else None
     summary = scan_exporters_and_trigger(
         logger=trigger_logger,
@@ -614,6 +668,7 @@ def _run_trigger_requests(
         trigger_exporters=trigger_exporters,
         log_trigger_events_only=not args.debug,
         emit_trigger_event=_emit_trigger_event if (args.with_listen or record_sink is not None) else None,
+        emit_stage_event=_emit_stage_event if args.debug else None,
     )
     attempted = int(summary.get("attempted", 0))
     display_success = int(summary.get("triggered", 0))
