@@ -15,14 +15,54 @@ from .constants import COLLECT_DEEP_ENDPOINT_TEMPLATES
 from .logger import AttemptLogger
 from .profiles import load_profiles
 from .scanner import collect_exporter_debug_data, scan_exporter_presence
-from .stage_validate import ValidationRecordAccumulator
+from .stage_validate import VALIDATION_PRECISION_COLLECT_STRICT, ValidationRecordAccumulator
 from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 COLLECT_VALIDATE_INPUT_FORMAT = "auto"
+COLLECT_VALIDATE_PRECISION_PROFILE = VALIDATION_PRECISION_COLLECT_STRICT
 COLLECT_VALIDATE_SHOW = True
 COLLECT_VALIDATE_MAX_LINES = 0
 COLLECT_VALIDATE_FAIL_ON_CREDS = False
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _collect_output_base_dir(args: argparse.Namespace) -> str:
+    output_path = str(getattr(args, "output", "") or "").strip()
+    if output_path:
+        return os.path.dirname(os.path.abspath(output_path)) or "."
+    return os.getcwd()
+
+
+def _write_unique_lines(path: str, values: list[str]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        for value in values:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            fh.write(text + "\n")
+
+
+def _write_vulnerable_targets_files(
+    *,
+    args: argparse.Namespace,
+    validator: ValidationRecordAccumulator,
+    console: Console,
+) -> None:
+    if not str(getattr(args, "output", "") or "").strip():
+        return
+    if not hasattr(validator, "vulnerable_targets_from_shown_hits"):
+        return
+    base_dir = _collect_output_base_dir(args)
+    ips_path = os.path.join(base_dir, "vulnerable_ips.txt")
+    urls_path = os.path.join(base_dir, "vulnerable_urls.txt")
+    hosts, urls = validator.vulnerable_targets_from_shown_hits()
+    _write_unique_lines(ips_path, hosts)
+    _write_unique_lines(urls_path, urls)
+    if bool(getattr(args, "debug", False)):
+        console.debug(
+            f"vulnerable targets written: hosts={len(hosts)} urls={len(urls)} ips_file={ips_path} urls_file={urls_path}"
+        )
 
 
 def _resolve_collect_checkpoint_path(args: argparse.Namespace) -> str:
@@ -254,6 +294,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     validator = ValidationRecordAccumulator(
         input_format=COLLECT_VALIDATE_INPUT_FORMAT,
         max_lines=COLLECT_VALIDATE_MAX_LINES,
+        precision_profile=COLLECT_VALIDATE_PRECISION_PROFILE,
     )
     collect_endpoints = _build_collect_endpoints(
         profiles["collect_debug_endpoints"],
@@ -584,6 +625,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             if args.debug:
                 console.debug("debug mode enabled; detailed collect events emitted in text logs")
         validate_rc = _finish_validation()
+        _write_vulnerable_targets_files(args=args, validator=validator, console=console)
         if validate_rc == 2:
             return 2
         if validate_rc == 1:
@@ -620,6 +662,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             f"stage_timing_summary status=ok attempts=1/1 detect_ms={detect_ms} data_ms={data_ms} total_ms={total_ms}"
         )
     validate_rc = _finish_validation()
+    _write_vulnerable_targets_files(args=args, validator=validator, console=console)
     if validate_rc == 2:
         return 2
     if validate_rc == 1:

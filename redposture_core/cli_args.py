@@ -551,6 +551,14 @@ def _configure_collect_parser(parser: argparse.ArgumentParser) -> None:
     _add_scan_host_flags(common)  # type: ignore[arg-type]
     _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(
+        "-oA",
+        "--output-all",
+        dest="output",
+        default=None,
+        metavar="file",
+        help="Alias for -o/--output (compatibility shorthand).",
+    )
+    common.add_argument(
         "-f",
         "--format",
         dest="output_format",
