@@ -213,6 +213,8 @@ def _parse_proxy_config(raw_proxy: str | None) -> tuple[_ProxyConfig | None, str
     value = str(raw_proxy or "").strip()
     if not value:
         return None, None
+    if "://" not in value:
+        return None, "proxy URL must include scheme (http:// or socks5://)"
 
     try:
         parsed = urllib.parse.urlsplit(value)

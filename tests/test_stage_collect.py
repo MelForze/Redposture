@@ -262,8 +262,8 @@ def test_collect_stage_appends_validate_output_to_txt_file(tmp_path: Path, monke
         return 1, 1
 
     class FakeAccumulator:
-        def __init__(self, *, input_format: str, max_lines: int) -> None:
-            _ = (input_format, max_lines)
+        def __init__(self, *, input_format: str, max_lines: int, precision_profile: str = "legacy") -> None:
+            _ = (input_format, max_lines, precision_profile)
 
         def feed(self, record: dict[str, object]) -> None:
             _ = record
@@ -313,8 +313,8 @@ def test_collect_stage_creates_output_file_for_validate_when_scan_finds_nothing(
         return 1, 0, {"10.0.0.1": []}
 
     class FakeAccumulator:
-        def __init__(self, *, input_format: str, max_lines: int) -> None:
-            _ = (input_format, max_lines)
+        def __init__(self, *, input_format: str, max_lines: int, precision_profile: str = "legacy") -> None:
+            _ = (input_format, max_lines, precision_profile)
 
         def feed(self, record: dict[str, object]) -> None:
             _ = record
@@ -361,8 +361,8 @@ def test_collect_stage_keeps_validate_summary_in_output_file_while_hiding_consol
         return 1, 0, {"10.0.0.1": []}
 
     class FakeAccumulator:
-        def __init__(self, *, input_format: str, max_lines: int) -> None:
-            _ = (input_format, max_lines)
+        def __init__(self, *, input_format: str, max_lines: int, precision_profile: str = "legacy") -> None:
+            _ = (input_format, max_lines, precision_profile)
 
         def feed(self, record: dict[str, object]) -> None:
             _ = record
@@ -458,11 +458,12 @@ def test_collect_stage_runs_validation_always(monkeypatch: pytest.MonkeyPatch) -
         return 1, 1
 
     class FakeAccumulator:
-        def __init__(self, *, input_format: str, max_lines: int) -> None:
+        def __init__(self, *, input_format: str, max_lines: int, precision_profile: str = "legacy") -> None:
             calls.append("validator_init")
             self._records: list[dict[str, object]] = []
             captured["input_format"] = input_format
             captured["max_lines"] = max_lines
+            captured["precision_profile"] = precision_profile
 
         def feed(self, record: dict[str, object]) -> None:
             calls.append("validator_feed")
@@ -503,6 +504,7 @@ def test_collect_stage_runs_validation_always(monkeypatch: pytest.MonkeyPatch) -
     assert captured["save_responses_dir"] == "collect_raw"
     assert captured["records_len"] == 1
     assert captured["input_format"] == "auto"
+    assert captured["precision_profile"] == "collect_strict"
     assert captured["show"] is True
     assert captured["max_lines"] == 0
     assert captured["fail_on_creds"] is False
@@ -658,9 +660,10 @@ def test_collect_stage_hides_validate_summary_line(
         return 1, 0, {"10.0.0.1": []}
 
     class FakeAccumulator:
-        def __init__(self, *, input_format: str, max_lines: int) -> None:
+        def __init__(self, *, input_format: str, max_lines: int, precision_profile: str = "legacy") -> None:
             _ = input_format
             _ = max_lines
+            _ = precision_profile
 
         def feed(self, record: dict[str, object]) -> None:
             _ = record
@@ -830,6 +833,235 @@ def test_collect_stage_appends_connection_string_validate_hits_to_txt_output(
     assert "es.uri=https://elastic:password@" in contents
 
 
+def test_collect_stage_suppresses_placeholder_connection_string_validate_hits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "collect_validate_placeholder.txt"
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/pprof/cmdline?debug=1"],
+        }
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return 1, 1, {"10.0.0.1": [{"exporter": "elasticsearch_exporter", "port": 9114}]}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        target = Path(str(kwargs["output_path"]))
+        target.write_text(
+            "COLLECT\t10.0.0.1\t9114\t[+] Elasticsearch Exporter url=http://10.0.0.1:9114/debug/pprof/cmdline?debug=1\n",
+            encoding="utf-8",
+        )
+        record_callback = kwargs.get("record_callback")
+        if callable(record_callback):
+            record_callback(
+                {
+                    "host": "10.0.0.1",
+                    "port": 9114,
+                    "exporter": "elasticsearch_exporter",
+                    "endpoint": "/debug/pprof/cmdline?debug=1",
+                    "body": "--es.uri=https://$ES_USERNAME:$ES_PASSWORD@elastic.mydomain.local\n",
+                }
+            )
+        return 1, 1
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+
+    rc = run_collect_stage(_base_args(output=str(output_path)), AttemptLogger())
+    assert rc == 0
+
+    contents = output_path.read_text(encoding="utf-8")
+    assert "COLLECT\t10.0.0.1\t9114\t[+] Elasticsearch Exporter" in contents
+    assert "Dump Validate Elasticsearch Exporter" not in contents
+    assert "conn creds" not in contents
+
+
+def test_collect_stage_summary_counts_only_shown_hits_after_score_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "collect_validate_mixed.txt"
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/pprof/cmdline?debug=1"],
+        }
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return 1, 1, {"10.0.0.1": [{"exporter": "elasticsearch_exporter", "port": 9114}]}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        target = Path(str(kwargs["output_path"]))
+        target.write_text(
+            "COLLECT\t10.0.0.1\t9114\t[+] Elasticsearch Exporter url=http://10.0.0.1:9114/debug/pprof/cmdline?debug=1\n",
+            encoding="utf-8",
+        )
+        record_callback = kwargs.get("record_callback")
+        if callable(record_callback):
+            record_callback(
+                {
+                    "host": "10.0.0.1",
+                    "port": 9114,
+                    "exporter": "elasticsearch_exporter",
+                    "endpoint": "/debug/pprof/cmdline?debug=1",
+                    "body": "--es.uri=https://$ES_USERNAME:$ES_PASSWORD@elastic.mydomain.local\n",
+                }
+            )
+            record_callback(
+                {
+                    "host": "10.0.0.1",
+                    "port": 9114,
+                    "exporter": "elasticsearch_exporter",
+                    "endpoint": "/debug/pprof/cmdline?debug=1",
+                    "body": "--es.uri=https://elastic:password@elastic.mydomain.local\n",
+                }
+            )
+        return 2, 2
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+
+    rc = run_collect_stage(_base_args(output=str(output_path)), AttemptLogger())
+    assert rc == 0
+
+    contents = output_path.read_text(encoding="utf-8")
+    assert "validate complete: lines=2 credential_hits=1 unique_hits=1" in contents
+
+
+def test_collect_stage_writes_vulnerable_targets_files_next_to_output_and_dedupes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "collect_validate_targets.txt"
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/pprof/cmdline?debug=1"],
+        }
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return 1, 1, {"10.0.0.1": [{"exporter": "elasticsearch_exporter", "port": 9114}]}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        target = Path(str(kwargs["output_path"]))
+        target.write_text(
+            "COLLECT\t10.0.0.1\t9114\t[+] Elasticsearch Exporter url=http://10.0.0.1:9114/debug/pprof/cmdline?debug=1\n",
+            encoding="utf-8",
+        )
+        record_callback = kwargs.get("record_callback")
+        if callable(record_callback):
+            # Gated out in collect_strict: placeholder credentials.
+            record_callback(
+                {
+                    "host": "10.0.0.1",
+                    "port": 9114,
+                    "exporter": "elasticsearch_exporter",
+                    "endpoint": "/debug/pprof/cmdline?debug=1",
+                    "body": "--es.uri=https://$ES_USERNAME:$ES_PASSWORD@elastic.mydomain.local\n",
+                }
+            )
+            # Shown hit (duplicate added twice to verify dedupe).
+            record_callback(
+                {
+                    "host": "10.0.0.1",
+                    "port": 9114,
+                    "exporter": "elasticsearch_exporter",
+                    "endpoint": "/debug/pprof/cmdline?debug=1",
+                    "body": "--es.uri=https://elastic:password@elastic.mydomain.local\n",
+                }
+            )
+            record_callback(
+                {
+                    "host": "10.0.0.1",
+                    "port": 9114,
+                    "exporter": "elasticsearch_exporter",
+                    "endpoint": "/debug/pprof/cmdline?debug=1",
+                    "body": "--es.uri=https://elastic:password@elastic.mydomain.local\n",
+                }
+            )
+            # Second shown target.
+            record_callback(
+                {
+                    "host": "collector.local",
+                    "port": 9308,
+                    "exporter": "kafka_exporter",
+                    "endpoint": "/debug/pprof/cmdline?debug=1",
+                    "body": (
+                        "--kafka.server kafka-1.internal:9093 "
+                        "--sasl.username metrics_collector "
+                        "--sasl.password Sup3rS3cret2026\n"
+                    ),
+                }
+            )
+        return 4, 4
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+
+    rc = run_collect_stage(_base_args(output=str(output_path)), AttemptLogger())
+    assert rc == 0
+
+    ips_file = tmp_path / "vulnerable_ips.txt"
+    urls_file = tmp_path / "vulnerable_urls.txt"
+    assert ips_file.exists()
+    assert urls_file.exists()
+
+    ips = [line.strip() for line in ips_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    urls = [line.strip() for line in urls_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert ips == ["10.0.0.1", "collector.local"]
+    assert urls == [
+        "http://10.0.0.1:9114/debug/pprof/cmdline?debug=1",
+        "http://collector.local:9308/debug/pprof/cmdline?debug=1",
+    ]
+
+
+def test_collect_stage_does_not_write_vulnerable_targets_without_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/vars"],
+        }
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return 1, 1, {"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        record_callback = kwargs.get("record_callback")
+        if callable(record_callback):
+            record_callback(
+                {
+                    "host": "10.0.0.1",
+                    "port": 9100,
+                    "exporter": "node_exporter",
+                    "endpoint": "/debug/vars",
+                    "body": "jdbc:postgresql://db.local/app?user=postgres&password=postgres\n",
+                }
+            )
+        return 1, 1
+
+    monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+
+    rc = run_collect_stage(_base_args(), AttemptLogger())
+    assert rc == 0
+    assert not (tmp_path / "vulnerable_ips.txt").exists()
+    assert not (tmp_path / "vulnerable_urls.txt").exists()
+
+
 def test_collect_stage_json_output_is_not_polluted_by_validate_txt_rows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -983,8 +1215,8 @@ def test_collect_stage_debug_emits_staged_markers(
         return 1, 1
 
     class _NoopValidator:
-        def __init__(self, *, input_format: str, max_lines: int) -> None:
-            _ = (input_format, max_lines)
+        def __init__(self, *, input_format: str, max_lines: int, precision_profile: str = "legacy") -> None:
+            _ = (input_format, max_lines, precision_profile)
 
         def feed(self, record: dict[str, object]) -> None:
             _ = record

@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from redposture_core.stage_validate import run_validation, run_validation_records
+from redposture_core.stage_validate import (
+    VALIDATION_PRECISION_COLLECT_STRICT,
+    VALIDATION_PRECISION_LEGACY,
+    run_validation,
+    run_validation_records,
+    scan_validation_hits,
+)
 
 
 def test_validate_detects_cred_marker(tmp_path: Path) -> None:
@@ -198,6 +204,332 @@ def test_validate_records_detects_url_basic_auth_without_explicit_keys() -> None
         }
     ]
     rc = run_validation_records(records, fail_on_creds=True)
+    assert rc == 1
+
+
+def test_validate_records_collect_strict_suppresses_placeholder_conn_string() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/vars",
+            "body": "https://$ES_USERNAME:$ES_PASSWORD@localhost:9200\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 0
+
+
+def test_validate_records_collect_strict_keeps_real_conn_string_detection() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/vars",
+            "body": "https://metrics:Sup3rS3cret-2026@localhost:9200\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 1
+
+
+def test_validate_records_collect_strict_suppresses_query_placeholder_secret() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/vars",
+            "body": "jdbc:postgresql://db.local/app?user=postgres&password=${DB_PASSWORD}\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 0
+
+
+def test_validate_records_collect_strict_suppresses_dummy_values() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9100,
+            "exporter": "node_exporter",
+            "endpoint": "/debug/vars",
+            "body": "password=changeme token=example\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 0
+
+
+def test_validate_records_collect_strict_suppresses_low_quality_token_value() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "[CRED] api_token=token\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 0
+
+
+def test_validate_records_collect_strict_keeps_high_quality_token_value() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "[CRED] api_token=A1b2C3d4E5f6G7h8I9j0K1l2\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 1
+
+
+def test_validate_records_collect_strict_deny_context_suppresses_medium_only_hit() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9100,
+            "exporter": "node_exporter",
+            "endpoint": "/debug/vars",
+            "body": "password=Sup3rS3cret2026 template example\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 0
+
+
+def test_validate_records_collect_strict_deny_context_penalizes_but_keeps_strong_hit() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/vars",
+            "body": "template https://elastic:password@elastic.local:9200\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 1
+
+
+def test_validate_records_collect_strict_cross_line_user_password_correlation() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9100,
+            "exporter": "node_exporter",
+            "endpoint": "/debug/vars",
+            "body": "username=metrics_collector\npassword=R34lSecurePass2026\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 1
+
+
+def test_validate_records_collect_strict_keeps_known_default_pair() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9187,
+            "exporter": "postgres_exporter",
+            "endpoint": "/debug/vars",
+            "body": "DATA_SOURCE_NAME=postgresql://postgres:postgres@db.local/app\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 1
+
+
+def test_validate_records_collect_strict_keeps_strong_signal_jwt() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9100,
+            "exporter": "node_exporter",
+            "endpoint": "/debug/vars",
+            "body": "token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aGVsbG8gd29ybGQ.c2lnbmF0dXJl\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 1
+
+
+def test_validate_records_collect_strict_metrics_gates_medium_only_hit() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9100,
+            "exporter": "postgres_exporter",
+            "endpoint": "/metrics",
+            "body": 'metric_name{password="Sup3rS3cret2026"} 1\n',
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 0
+
+
+def test_validate_records_collect_strict_metrics_accepts_strong_signal() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9187,
+            "exporter": "postgres_exporter",
+            "endpoint": "/metrics",
+            "body": "jdbc:postgresql://db.local/app?user=postgres&password=postgres\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 1
+
+
+def test_validate_records_collect_strict_debug_shows_score_and_gate(capsys: pytest.CaptureFixture[str]) -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9100,
+            "exporter": "postgres_exporter",
+            "endpoint": "/metrics",
+            "body": 'metric_name{password="Sup3rS3cret2026"} 1\n',
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        show=True,
+        fail_on_creds=False,
+        debug=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc == 0
+    output = re.sub(r"\x1b\[[0-9;]*m", "", f"{capsys.readouterr().out}\n")
+    assert "Score:" in output
+    assert "gated_non_debug=yes" in output
+    assert "Policy: metrics_profile" in output
+
+
+def test_scan_validation_hits_collect_strict_adds_cross_line_strong_correlation_signal() -> None:
+    body = "[CRED] leaked marker\nAuthorization: Basic bWV0cmljczpzM2NyM3Q=\n"
+    _line_count, hits = scan_validation_hits(
+        body,
+        input_format="txt",
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    reasons = [str(item.get("reason") or "") for item in hits]
+    assert any("correlated_with_strong" in reason for reason in reasons)
+
+
+def test_validate_records_collect_strict_cmdline_structured_split_variants() -> None:
+    spaced = [
+        {
+            "host": "127.0.0.1",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": (
+                "/usr/local/bin/kafka_exporter --kafka.server kafka-1.internal:9093 "
+                "--sasl.username metrics_collector --sasl.password Sup3rS3cret2026\n"
+            ),
+        }
+    ]
+    equals = [
+        {
+            "host": "127.0.0.1",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": (
+                "/usr/local/bin/kafka_exporter --kafka.server=kafka-1.internal:9093 "
+                "--sasl.username=metrics_collector --sasl.password=Sup3rS3cret2026\n"
+            ),
+        }
+    ]
+    rc_spaced = run_validation_records(
+        spaced,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    rc_equals = run_validation_records(
+        equals,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    assert rc_spaced == 1
+    assert rc_equals == 1
+
+
+def test_validate_records_legacy_still_detects_placeholder_conn_string() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/vars",
+            "body": "https://$ES_USERNAME:$ES_PASSWORD@localhost:9200\n",
+        }
+    ]
+    rc = run_validation_records(
+        records,
+        fail_on_creds=True,
+        precision_profile=VALIDATION_PRECISION_LEGACY,
+    )
     assert rc == 1
 
 
