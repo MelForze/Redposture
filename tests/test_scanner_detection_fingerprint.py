@@ -1,6 +1,38 @@
 from __future__ import annotations
 
+import threading
+import time
+
+from redposture_core import scanner
 from redposture_core.scanner import scan_exporter_presence
+
+
+def test_fetch_fingerprint_bodies_runs_endpoints_in_parallel(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
+        _ = (url, timeout, retries, kwargs)
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.03)
+            if "/debug/vars" in url:
+                return {"status": 200, "body": '{"name":"vars"}', "content_type": "application/json", "elapsed_ms": 1}
+            return {"status": 200, "body": "cmdline", "content_type": "text/plain", "elapsed_ms": 1}
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    vars_body, cmdline_body = scanner._fetch_fingerprint_bodies("127.0.0.1", 9100, timeout=1.0, retries=0)
+    assert vars_body == '{"name":"vars"}'
+    assert cmdline_body == "cmdline"
+    assert max_active >= 2
 
 
 def test_scan_uses_metrics_only_for_clear_winner(monkeypatch) -> None:  # type: ignore[no-untyped-def]
