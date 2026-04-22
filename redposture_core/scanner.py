@@ -63,7 +63,8 @@ _EXPORTER_DISPLAY_NAMES = {
 _COLLECT_PPROF_PREFLIGHT_MAX_TARGETS = 1000
 _HTTP_POOL_MAX_IDLE_TOTAL = 512
 _HTTP_POOL_MAX_IDLE_PER_HOST = 4
-_SCAN_MAX_INFLIGHT_FACTOR = 8
+_SCAN_MAX_INFLIGHT_FACTOR = 12
+_SCAN_MAX_INFLIGHT_HARD_CAP = 2048
 _SCAN_RESPONSE_BODY_MAX_BYTES = 256 * 1024
 _SCAN_FINGERPRINT_BODY_MAX_BYTES = 128 * 1024
 _WEAK_CANDIDATE_CONFIDENCE_SCORE = 50
@@ -715,18 +716,27 @@ def _select_fingerprint_candidates(candidates: list[dict[str, Any]]) -> list[dic
 
 
 def _fetch_fingerprint_bodies(host: str, port: int, timeout: float, retries: int) -> tuple[str, str]:
-    vars_result = http_get_details(
-        f"http://{host}:{port}/debug/vars",
-        timeout=timeout,
-        retries=retries,
-        max_bytes=_SCAN_FINGERPRINT_BODY_MAX_BYTES,
-    )
-    cmdline_result = http_get_details(
-        f"http://{host}:{port}/debug/pprof/cmdline?debug=1",
-        timeout=timeout,
-        retries=retries,
-        max_bytes=_SCAN_FINGERPRINT_BODY_MAX_BYTES,
-    )
+    vars_url = f"http://{host}:{port}/debug/vars"
+    cmdline_url = f"http://{host}:{port}/debug/pprof/cmdline?debug=1"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        vars_future = executor.submit(
+            http_get_details,
+            vars_url,
+            timeout,
+            retries,
+            max_bytes=_SCAN_FINGERPRINT_BODY_MAX_BYTES,
+        )
+        cmdline_future = executor.submit(
+            http_get_details,
+            cmdline_url,
+            timeout,
+            retries,
+            max_bytes=_SCAN_FINGERPRINT_BODY_MAX_BYTES,
+        )
+        vars_result = vars_future.result()
+        cmdline_result = cmdline_future.result()
+
     vars_body = str(vars_result.get("body") or "") if (vars_result.get("status") or 0) < 400 else ""
     cmdline_body = str(cmdline_result.get("body") or "") if (cmdline_result.get("status") or 0) < 400 else ""
     return vars_body, cmdline_body
@@ -978,6 +988,31 @@ def _scan_presence_port_task(
             "method": method,
         },
     )
+
+
+def _canonical_scan_host_key(host: str) -> str:
+    raw = str(host or "").strip()
+    if not raw:
+        return ""
+    return raw.rstrip(".").lower()
+
+
+def _build_scan_work_items(hosts: list[str], ports: list[int]) -> list[tuple[str, int]]:
+    items: list[tuple[str, int]] = []
+    seen: set[tuple[str, int]] = set()
+    for host in hosts:
+        host_display = str(host or "").strip()
+        host_key = _canonical_scan_host_key(host_display)
+        if not host_key:
+            continue
+        for port in ports:
+            port_value = int(port)
+            item_key = (host_key, port_value)
+            if item_key in seen:
+                continue
+            seen.add(item_key)
+            items.append((host_display, port_value))
+    return items
 
 
 def _collect_task(
@@ -1536,62 +1571,135 @@ def scan_exporter_presence(
         )
     total_checks = 0
     total_found = 0
-    found_by_host: dict[str, list[dict[str, Any]]] = {host: [] for host in hosts}
-    work_items = [(host, port) for host in hosts for port in ports]
+    found_by_host: dict[str, list[dict[str, Any]]] = {str(host): [] for host in hosts}
+    work_items = _build_scan_work_items(hosts, ports)
     max_workers = max(1, workers)
-    max_inflight = max(max_workers, max_workers * _SCAN_MAX_INFLIGHT_FACTOR)
+    max_inflight = max_workers * _SCAN_MAX_INFLIGHT_FACTOR
+    max_inflight = min(max_inflight, _SCAN_MAX_INFLIGHT_HARD_CAP)
+    max_inflight = max(max_workers, max_inflight)
 
     out_fh: Any = None
+    postprocess_queue: queue.Queue[Any] | None = None
+    postprocess_thread: threading.Thread | None = None
+    postprocess_stop = object()
+    postprocess_errors: list[BaseException] = []
+    postprocess_errors_lock = threading.Lock()
+
+    def _record_postprocess_error(exc: BaseException) -> None:
+        with postprocess_errors_lock:
+            if not postprocess_errors:
+                postprocess_errors.append(exc)
+
+    def _raise_postprocess_error() -> None:
+        if not postprocess_errors:
+            return
+        err = postprocess_errors[0]
+        if isinstance(err, Exception):
+            raise err
+        raise RuntimeError(str(err))
+
+    def _log_scan_record(record: dict[str, Any]) -> None:
+        if logger is None:
+            return
+        logger.log(
+            "scan",
+            (str(record["host"]), int(record["port"])),
+            exporter=str(record["exporter"]),
+            detected=bool(record["detected"]),
+            method=str(record["method"]),
+            status=record["status"],
+            error=record["error"],
+            output=output_path,
+        )
+
+    def _finalize_postprocess() -> None:
+        nonlocal postprocess_queue, postprocess_thread
+        if postprocess_queue is None:
+            return
+        postprocess_queue.join()
+        _raise_postprocess_error()
+        postprocess_queue.put(postprocess_stop)
+        postprocess_queue.join()
+        if postprocess_thread is not None:
+            postprocess_thread.join()
+            postprocess_thread = None
+        postprocess_queue = None
+        _raise_postprocess_error()
+
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, output_mode, encoding="utf-8")
+    if out_fh is not None or logger is not None:
+        postprocess_queue = queue.Queue()
+
+        def _scan_postprocess_worker() -> None:
+            while True:
+                payload = postprocess_queue.get()
+                try:
+                    if payload is postprocess_stop:
+                        return
+                    line, record = payload
+                    if out_fh is not None:
+                        out_fh.write(line + "\n")
+                    _log_scan_record(record)
+                except BaseException as exc:  # pragma: no cover - safety belt
+                    _record_postprocess_error(exc)
+                finally:
+                    postprocess_queue.task_done()
+
+        postprocess_thread = threading.Thread(target=_scan_postprocess_worker, daemon=True)
+        postprocess_thread.start()
 
     try:
         progress = ProgressBar("SCAN", len(work_items), enabled=show_progress, leave=progress_leave)
         try:
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                pending: dict[Future[Any], tuple[str, int]] = {}
-                work_queue: deque[tuple[str, int]] = deque(work_items)
+            pool = _HTTPConnectionPool(
+                max_idle_total=max(max_workers * 16, _HTTP_POOL_MAX_IDLE_TOTAL),
+                max_idle_per_host=max(_HTTP_POOL_MAX_IDLE_PER_HOST, min(max_workers, 8)),
+            )
+            with _activate_http_pool(pool):
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    pending: dict[Future[Any], tuple[str, int]] = {}
+                    work_queue: deque[tuple[str, int]] = deque(work_items)
 
-                while work_queue or pending:
-                    while work_queue and len(pending) < max_inflight:
-                        host, port = work_queue.popleft()
-                        future = executor.submit(_scan_presence_port_task, host, port, exporters, timeout, retries)
-                        pending[future] = (host, port)
+                    while work_queue or pending:
+                        while work_queue and len(pending) < max_inflight:
+                            host, port = work_queue.popleft()
+                            future = executor.submit(_scan_presence_port_task, host, port, exporters, timeout, retries)
+                            pending[future] = (host, port)
 
-                    if not pending:
-                        continue
+                        if not pending:
+                            continue
 
-                    done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                    for future in done:
-                        host, port = pending.pop(future)
-                        try:
-                            record, hit = future.result()
-                        except Exception as exc:
-                            record, hit = _build_scan_error_record(host, port, exc), None
+                        done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            host, port = pending.pop(future)
+                            try:
+                                record, hit = future.result()
+                            except Exception as exc:
+                                record, hit = _build_scan_error_record(host, port, exc), None
 
-                        total_checks += 1
-                        if hit is not None:
-                            total_found += 1
-                            found_by_host[str(record["host"])].append(hit)
+                            total_checks += 1
+                            if hit is not None:
+                                total_found += 1
+                                found_by_host.setdefault(str(record["host"]), []).append(hit)
 
-                        progress.pause_for_output()
-                        _emit_line(out_fh, emit_line, _format_scan_record(record, output_format))
-                        progress.advance()
+                            line = _format_scan_record(record, output_format)
+                            progress.pause_for_output()
+                            if emit_line is not None:
+                                emit_line(line)
+                            progress.advance()
 
-                        if logger is not None:
-                            logger.log(
-                                "scan",
-                                (str(record["host"]), int(record["port"])),
-                                exporter=str(record["exporter"]),
-                                detected=bool(record["detected"]),
-                                method=str(record["method"]),
-                                status=record["status"],
-                                error=record["error"],
-                                output=output_path,
-                            )
+                            if postprocess_queue is not None:
+                                postprocess_queue.put((line, record))
+                                _raise_postprocess_error()
+                            else:
+                                if out_fh is not None:
+                                    out_fh.write(line + "\n")
+                                _log_scan_record(record)
         finally:
             progress.close()
+        _finalize_postprocess()
 
         if emit_summary:
             summary = {
@@ -1607,6 +1715,7 @@ def scan_exporter_presence(
             }
             _emit_line(out_fh, emit_line, _format_scan_record(summary, output_format))
     finally:
+        _finalize_postprocess()
         if out_fh is not None:
             out_fh.close()
 
