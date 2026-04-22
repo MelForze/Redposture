@@ -283,3 +283,55 @@ def test_scan_exporter_presence_handles_unexpected_task_exception(monkeypatch) -
     failed = next(item for item in records if item.get("port") == 19410)
     assert failed["detected"] is False
     assert failed["error"] == "boom"
+
+
+def test_scan_exporter_presence_deduplicates_mixed_host_variants(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, int]] = []
+
+    def fake_scan_task(
+        host: str,
+        port: int,
+        _exporters: list[dict[str, object]],
+        _timeout: float,
+        _retries: int,
+    ) -> tuple[dict[str, object], dict[str, object] | None]:
+        calls.append((host, port))
+        return (
+            {
+                "timestamp": "now",
+                "host": host,
+                "exporter": "unknown",
+                "port": port,
+                "url": f"http://{host}:{port}/metrics",
+                "detected": False,
+                "method": "none",
+                "status": 404,
+                "marker_hit": None,
+                "elapsed_ms": 1,
+                "content_type": "text/plain",
+                "error": None,
+                "truncated": False,
+                "body": "",
+            },
+            None,
+        )
+
+    monkeypatch.setattr("redposture_core.scanner._scan_presence_port_task", fake_scan_task)
+
+    checks, found, by_host = scan_exporter_presence(
+        hosts=["EXAMPLE.local", "example.local", "example.local."],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        logger=None,
+        emit_line=None,
+        workers=2,
+        retries=0,
+        discovery_exporters=[{"name": "node_exporter", "port": 9100, "markers": ("node_exporter_build_info",)}],
+        custom_ports=[9100],
+    )
+
+    assert checks == 1
+    assert found == 0
+    assert calls == [("EXAMPLE.local", 9100)]
+    assert by_host["EXAMPLE.local"] == []

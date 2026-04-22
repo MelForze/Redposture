@@ -75,6 +75,16 @@ def test_collect_scan_target_specs_ignores_url_path_and_query() -> None:
     assert specs == [ScanTargetSpec(host="grafana.local", scheme="http", explicit_port=3000)]
 
 
+def test_collect_scan_target_specs_deduplicates_mixed_url_variants() -> None:
+    specs = collect_scan_target_specs(
+        "http://Example.local:9200/_cluster/health,http://example.local:9200/_cat/health?format=json,example.local"
+    )
+    assert specs == [
+        ScanTargetSpec(host="example.local", scheme="http", explicit_port=9200),
+        ScanTargetSpec(host="example.local", scheme=None, explicit_port=None),
+    ]
+
+
 def test_collect_scan_target_specs_handles_mixed_hosts_and_file(tmp_path: Path) -> None:
     hosts_file = tmp_path / "targets.txt"
     hosts_file.write_text(
