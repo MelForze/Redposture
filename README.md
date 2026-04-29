@@ -3,7 +3,7 @@
 RedPosture is a Python security CLI for:
 
 - exporter discovery / trigger / collect workflows (`exporters`)
-- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `clickhouse`, `redis`, `etcd`, `kafka`, `zookeeper`, `elastic`)
+- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `clickhouse`, `redis`, `etcd`, `kafka`, `zookeeper`, `elastic`, `grpc`)
 - listener-based callback capture for lab SSRF workflows
 
 Use only on systems you own or are explicitly authorized to assess.
@@ -43,6 +43,7 @@ redposture qdrant -h
 redposture kafka -h
 redposture zookeeper -h
 redposture elastic -h
+redposture grpc -h
 ```
 
 Common flags (most modules):
@@ -85,6 +86,9 @@ redposture exporters scan -t 127.0.0.1
 # Collect
 redposture exporters collect -t 127.0.0.1 --deep
 
+# Collect to file and write vulnerable target artifacts next to it
+redposture exporters collect -t 127.0.0.1 --deep -o collect.txt
+
 # Resume collect with checkpoint (skip already processed endpoint jobs)
 redposture exporters collect -t 127.0.0.1 --checkpoint-file /tmp/rp_collect.ckpt
 redposture exporters collect -t 127.0.0.1 --checkpoint-file /tmp/rp_collect.ckpt --resume
@@ -106,6 +110,7 @@ Note:
 - `snmp_exporter` default is `9117`; `clickhouse_exporter` is `9116`.
 - Canonical defaults include overlap pairs (`node_exporter/haproxy_exporter` on `9101`, `snmp_exporter/apache_exporter` on `9117`); scan classification is content-based, not port-only.
 - In the lab compose these conflict exporters are exposed on special ports to avoid collisions: `haproxy_exporter -> 19101`, `apache_exporter -> 19119`.
+- `exporters collect -o <file>` writes `vulnerable_ips.txt`, `vulnerable_urls.txt`, `vulnerable_users.txt`, `vulnerable_pass.txt`, `vulnerable_apikeys.txt`, and `vulnerable_findings.md` next to the output file.
 
 ```bash
 # Expanded lab matrix (standard + special + mirrors)
@@ -290,6 +295,31 @@ redposture elastic -t 127.0.0.1 --port 19200 --plugins
 
 # Basic auth
 redposture elastic -t 127.0.0.1 --port 19201 -u elastic -p 'ElasticRead!2026' --cluster
+```
+
+### gRPC
+
+```bash
+# Baseline detect + reflection + health (plaintext lab)
+redposture grpc -t 127.0.0.1 --port 50051
+
+# Auth-required TLS endpoint with bearer token
+redposture grpc -t 127.0.0.1 --port 50061 --token grpc-lab-token-2026
+
+# Auth-required endpoint with built-in default credentials
+redposture grpc -t 127.0.0.1 --port 50061 --defcreds
+
+# Unary invoke through discovered/reflection schema
+redposture grpc -t 127.0.0.1 --port 50051 --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+
+# Invoke with explicit protoset and metadata
+redposture grpc -t 127.0.0.1 --port 50051 --protoset ./health.protoset --invoke /grpc.health.v1.Health/Check --meta x-lab=1
+
+# Export discovered/schema methods as OpenAPI 3.1 JSON for testing workflows
+redposture grpc -t 127.0.0.1 --port 50051 --openapi ./grpc.openapi.json
+
+# gRPC-Web autodetect
+redposture grpc -t 127.0.0.1 --port 50071
 ```
 
 ### ZooKeeper

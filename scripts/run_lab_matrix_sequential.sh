@@ -290,6 +290,21 @@ run_elastic_cases() {
   run_text_case elastic elastic_debug_smoke 0 elastic -t 127.0.0.1 --port 19200 --debug
 }
 
+run_grpc_cases() {
+  run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051
+  run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --token "grpc-lab-token-2026"
+  run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --defcreds
+  run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055"
+  run_text_case grpc grpc_debug_smoke 0 grpc -t 127.0.0.1 --port 50051 --debug
+  local grpc_protoset="${OUT_DIR}/grpc_health.protoset"
+  "${PYTHON_BIN}" -c 'import sys; from google.protobuf import descriptor_pb2; from redposture_core.proto import grpc_health_pb2; ds=descriptor_pb2.FileDescriptorSet(); fd=ds.file.add(); fd.ParseFromString(grpc_health_pb2.DESCRIPTOR.serialized_pb); open(sys.argv[1], "wb").write(ds.SerializeToString())' "${grpc_protoset}"
+  run_case grpc grpc_invoke_health 0 grpc -t 127.0.0.1 --port 50051 --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+  run_case grpc grpc_proto_invoke 0 grpc -t 127.0.0.1 --port 50051 --proto redposture_core/proto/grpc_health.proto --proto-path redposture_core/proto --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+  run_case grpc grpc_protoset_invoke 0 grpc -t 127.0.0.1 --port 50051 --protoset "${grpc_protoset}" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+  run_case grpc grpc_openapi_export 0 grpc -t 127.0.0.1 --port 50051 --openapi "${OUT_DIR}/json/grpc_openapi.json"
+  run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071
+}
+
 run_kafka_cases() {
   run_case kafka kafka_open 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
   run_case kafka kafka_auth 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
@@ -334,6 +349,7 @@ run_service_block redis run_redis_cases
 run_service_block etcd run_etcd_cases
 run_service_block qdrant run_qdrant_cases
 run_service_block elastic run_elastic_cases
+run_service_block grpc run_grpc_cases
 run_service_block kafka run_kafka_cases
 run_service_block zookeeper run_zookeeper_cases
 run_service_block proxmox run_proxmox_cases

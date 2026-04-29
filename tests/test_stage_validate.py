@@ -8,6 +8,7 @@ import pytest
 from redposture_core.stage_validate import (
     VALIDATION_PRECISION_COLLECT_STRICT,
     VALIDATION_PRECISION_LEGACY,
+    ValidationRecordAccumulator,
     run_validation,
     run_validation_records,
     scan_validation_hits,
@@ -513,6 +514,87 @@ def test_validate_records_collect_strict_cmdline_structured_split_variants() -> 
     )
     assert rc_spaced == 1
     assert rc_equals == 1
+
+
+def test_collect_strict_vulnerable_credentials_extracts_wordlists_from_shown_hits() -> None:
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--es.uri=https://elastic:ElasticRead2026!@elastic.local:9200?api_key=ZXMtbGFiLWFwaS1rZXktMjAyNg==\n",
+        },
+        {
+            "host": "127.0.0.2",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": "--sasl.username metrics_collector --sasl.password Sup3rS3cret2026\n",
+        },
+        {
+            "host": "127.0.0.4",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/vars",
+            "body": (
+                '{\n  "sasl_username": "json_metrics",\n'
+                '  "sasl_password": "JsonPass2026!",\n'
+                '  "probe_url": "https://metrics_reader:ReaderPass2026!@kafka.local:9093"\n}\n'
+            ),
+        },
+        {
+            "host": "127.0.0.3",
+            "port": 9100,
+            "exporter": "node_exporter",
+            "endpoint": "/debug/vars",
+            "body": "Authorization: Bearer A1b2C3d4E5f6G7h8I9j0K1l2\n",
+        },
+    ]
+    accumulator = ValidationRecordAccumulator(
+        input_format="auto",
+        max_lines=0,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    for record in records:
+        accumulator.feed(record)
+
+    users, passwords, api_keys = accumulator.vulnerable_credentials_from_shown_hits()
+
+    assert users == ["elastic", "metrics_collector", "metrics_reader", "json_metrics"]
+    assert passwords == ["ElasticRead2026!", "Sup3rS3cret2026", "ReaderPass2026!", "JsonPass2026!"]
+    assert api_keys == [
+        "127.0.0.1:9114:ZXMtbGFiLWFwaS1rZXktMjAyNg==",
+        "127.0.0.3:9100:A1b2C3d4E5f6G7h8I9j0K1l2",
+    ]
+    assert accumulator.vulnerable_login_rows_from_shown_hits() == [
+        ("127.0.0.1", "elastic", "ElasticRead2026!"),
+        ("127.0.0.2", "metrics_collector", "Sup3rS3cret2026"),
+        ("127.0.0.4", "metrics_reader", "ReaderPass2026!"),
+        ("127.0.0.4", "json_metrics", "JsonPass2026!"),
+    ]
+    findings = accumulator.vulnerable_findings_from_shown_hits()
+    assert any(item["host"] == "127.0.0.1" and item["passwords"] == ["ElasticRead2026!"] for item in findings)
+    assert any(item["api_keys"] == ["127.0.0.3:9100:A1b2C3d4E5f6G7h8I9j0K1l2"] for item in findings)
+
+
+def test_collect_strict_vulnerable_credentials_ignore_gated_placeholder_values() -> None:
+    accumulator = ValidationRecordAccumulator(
+        input_format="auto",
+        max_lines=0,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    accumulator.feed(
+        {
+            "host": "127.0.0.1",
+            "port": 9114,
+            "exporter": "elasticsearch_exporter",
+            "endpoint": "/debug/vars",
+            "body": "https://$ES_USERNAME:$ES_PASSWORD@localhost:9200\npassword=changeme\n",
+        }
+    )
+
+    assert accumulator.vulnerable_credentials_from_shown_hits() == ([], [], [])
 
 
 def test_validate_records_legacy_still_detects_placeholder_conn_string() -> None:

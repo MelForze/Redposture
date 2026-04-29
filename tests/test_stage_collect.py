@@ -974,7 +974,7 @@ def test_collect_stage_writes_vulnerable_targets_files_next_to_output_and_dedupe
                     "port": 9114,
                     "exporter": "elasticsearch_exporter",
                     "endpoint": "/debug/pprof/cmdline?debug=1",
-                    "body": "--es.uri=https://elastic:password@elastic.mydomain.local\n",
+                    "body": "--es.uri=https://elastic:ElasticRead2026!@elastic.mydomain.local?api_key=ZXMtbGFiLWFwaS1rZXktMjAyNg==\n",
                 }
             )
             record_callback(
@@ -983,7 +983,7 @@ def test_collect_stage_writes_vulnerable_targets_files_next_to_output_and_dedupe
                     "port": 9114,
                     "exporter": "elasticsearch_exporter",
                     "endpoint": "/debug/pprof/cmdline?debug=1",
-                    "body": "--es.uri=https://elastic:password@elastic.mydomain.local\n",
+                    "body": "--es.uri=https://elastic:ElasticRead2026!@elastic.mydomain.local?api_key=ZXMtbGFiLWFwaS1rZXktMjAyNg==\n",
                 }
             )
             # Second shown target.
@@ -1000,6 +1000,16 @@ def test_collect_stage_writes_vulnerable_targets_files_next_to_output_and_dedupe
                     ),
                 }
             )
+            # API-key-only hit: should not be added to vulnerable_ips.txt.
+            record_callback(
+                {
+                    "host": "apikey-only.local",
+                    "port": 9100,
+                    "exporter": "node_exporter",
+                    "endpoint": "/debug/vars",
+                    "body": "Authorization: Bearer A1b2C3d4E5f6G7h8I9j0K1l2\n",
+                }
+            )
         return 4, 4
 
     monkeypatch.setattr("redposture_core.stage_collect.load_profiles", fake_load_profiles)
@@ -1011,16 +1021,43 @@ def test_collect_stage_writes_vulnerable_targets_files_next_to_output_and_dedupe
 
     ips_file = tmp_path / "vulnerable_ips.txt"
     urls_file = tmp_path / "vulnerable_urls.txt"
+    users_file = tmp_path / "vulnerable_users.txt"
+    pass_file = tmp_path / "vulnerable_pass.txt"
+    api_keys_file = tmp_path / "vulnerable_apikeys.txt"
+    findings_file = tmp_path / "vulnerable_findings.md"
     assert ips_file.exists()
     assert urls_file.exists()
+    assert users_file.exists()
+    assert pass_file.exists()
+    assert not (tmp_path / "vulnerable_passwords.txt").exists()
+    assert api_keys_file.exists()
+    assert findings_file.exists()
 
     ips = [line.strip() for line in ips_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     urls = [line.strip() for line in urls_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    users = [line.strip() for line in users_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    passwords = [line.strip() for line in pass_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    api_keys = [line.strip() for line in api_keys_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert ips == ["10.0.0.1", "collector.local"]
     assert urls == [
         "http://10.0.0.1:9114/debug/pprof/cmdline?debug=1",
+        "http://apikey-only.local:9100/debug/vars",
         "http://collector.local:9308/debug/pprof/cmdline?debug=1",
     ]
+    assert users == ["elastic", "metrics_collector"]
+    assert passwords == ["ElasticRead2026!", "Sup3rS3cret2026"]
+    assert list(zip(ips, users, passwords, strict=False)) == [
+        ("10.0.0.1", "elastic", "ElasticRead2026!"),
+        ("collector.local", "metrics_collector", "Sup3rS3cret2026"),
+    ]
+    assert api_keys == [
+        "10.0.0.1:9114:ZXMtbGFiLWFwaS1rZXktMjAyNg==",
+        "apikey-only.local:9100:A1b2C3d4E5f6G7h8I9j0K1l2",
+    ]
+    findings = findings_file.read_text(encoding="utf-8")
+    assert "# RedPosture Vulnerable Findings" in findings
+    assert "ElasticRead2026!" in findings
+    assert "apikey-only.local:9100:A1b2C3d4E5f6G7h8I9j0K1l2" in findings
 
 
 def test_collect_stage_does_not_write_vulnerable_targets_without_output(
@@ -1060,6 +1097,10 @@ def test_collect_stage_does_not_write_vulnerable_targets_without_output(
     assert rc == 0
     assert not (tmp_path / "vulnerable_ips.txt").exists()
     assert not (tmp_path / "vulnerable_urls.txt").exists()
+    assert not (tmp_path / "vulnerable_users.txt").exists()
+    assert not (tmp_path / "vulnerable_pass.txt").exists()
+    assert not (tmp_path / "vulnerable_apikeys.txt").exists()
+    assert not (tmp_path / "vulnerable_findings.md").exists()
 
 
 def test_collect_stage_json_output_is_not_polluted_by_validate_txt_rows(
