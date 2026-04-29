@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "4.4.8"
-description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper/Elasticsearch auditing"
+version = "4.8.3"
+description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper/Elasticsearch/gRPC auditing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -30,6 +30,9 @@ classifiers = [
 dependencies = [
   "clickhouse-connect>=0.8.0",
   "clickhouse-driver>=0.2.9",
+  "h2>=4.1.0",
+  "grpcio-tools>=1.74.0",
+  "protobuf>=7.34.1",
 ]
 
 [project.urls]
@@ -75,10 +78,12 @@ check_untyped_defs = true
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+extend-exclude = ["redposture_core/proto/*_pb2.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
 ignore = ["E501"]
+per-file-ignores = { "redposture_core/proto/*_pb2.py" = ["I001", "UP009"] }
 
 [tool.ruff.format]
 quote-style = "double"

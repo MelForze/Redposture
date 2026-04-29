@@ -10,6 +10,7 @@ from redposture_core.stage_elastic import _render_colored_elastic_line
 from redposture_core.stage_etcd import _render_colored_etcd_line
 from redposture_core.stage_gitlab import _render_colored_gitlab_line
 from redposture_core.stage_grafana import _render_colored_grafana_line
+from redposture_core.stage_grpc import _render_colored_grpc_line
 from redposture_core.stage_kafka import _render_colored_kafka_line
 from redposture_core.stage_kubeapi import _render_colored_kubeapi_line
 from redposture_core.stage_postgres import _render_colored_postgres_line
@@ -59,6 +60,7 @@ _Renderer = Callable[[_RecordingConsole, str], bool]
         (_render_colored_gitlab_line, "GITLAB"),
         (_render_colored_registry_line, "REGISTRY"),
         (_render_colored_proxmox_line, "PROXMOX"),
+        (_render_colored_grpc_line, "GRPC"),
     ],
 )
 def test_stage_colored_renderers_map_marker_colors(renderer: _Renderer, tag: str) -> None:
@@ -93,6 +95,7 @@ def test_stage_colored_renderers_map_marker_colors(renderer: _Renderer, tag: str
         _render_colored_gitlab_line,
         _render_colored_registry_line,
         _render_colored_proxmox_line,
+        _render_colored_grpc_line,
     ],
 )
 def test_stage_colored_renderers_ignore_other_service_tags(renderer: _Renderer) -> None:
@@ -243,3 +246,61 @@ def test_render_colored_proxmox_colors_capabilities_and_finding_payload() -> Non
     finding_line = "PROXMOX\t127.0.0.1\t8006\t [!] credential candidate reason=jwt path=$.token sample=abc"
     assert _render_colored_proxmox_line(console_finding, finding_line) is True
     assert _contains_paint(console_finding.paint_calls, "credential candidate reason=jwt", "orange")
+
+
+def test_render_colored_grpc_colors_status_and_protocol() -> None:
+    console = _RecordingConsole()
+    line = "GRPC\t127.0.0.1\t50051\t [*] gRPC Service (auth required:False) (transport:plaintext) (protocol:grpc-web)"
+    assert _render_colored_grpc_line(console, line) is True
+    assert _contains_paint(console.paint_calls, "(auth required:False)", "red")
+    assert _contains_paint(console.paint_calls, "(transport:plaintext)", "yellow")
+    assert _contains_paint(console.paint_calls, "(protocol:grpc-web)", "orange")
+
+
+def test_render_colored_grpc_detail_lines_color_entities_precisely() -> None:
+    console = _RecordingConsole()
+    line = "GRPC\t127.0.0.1\t50061\t service=grpc.health.v1.Health grpc=OK status=SERVING"
+    assert _render_colored_grpc_line(console, line) is True
+    assert _contains_paint(console.paint_calls, "service=grpc.health.v1.Health", "orange")
+    assert _contains_paint(console.paint_calls, "OK", "orange")
+    assert _contains_paint(console.paint_calls, "SERVING", "orange")
+    assert not _contains_paint(console.paint_calls, "grpc=OK", "bright_green")
+    assert not _contains_paint(console.paint_calls, "status=SERVING", "bright_green")
+    assert not _contains_paint(
+        console.paint_calls, "service=grpc.health.v1.Health grpc=OK status=SERVING", "bright_green"
+    )
+
+
+def test_render_colored_grpc_detail_lines_color_methods_files_and_results() -> None:
+    method_console = _RecordingConsole()
+    method_line = (
+        "GRPC\t127.0.0.1\t50051\t /grpc.health.v1.Health/Check "
+        "input=grpc.health.v1.HealthCheckRequest output=grpc.health.v1.HealthCheckResponse"
+    )
+    assert _render_colored_grpc_line(method_console, method_line) is True
+    assert _contains_paint(method_console.paint_calls, "/grpc.health.v1.Health/Check", "orange")
+
+    file_console = _RecordingConsole()
+    assert _render_colored_grpc_line(
+        file_console,
+        "GRPC\t127.0.0.1\t50051\t file=grpc_health/v1/health.proto package=grpc.health.v1 services=1",
+    )
+    assert _contains_paint(file_console.paint_calls, "file=grpc_health/v1/health.proto", "orange")
+
+    invoke_console = _RecordingConsole()
+    assert _render_colored_grpc_line(
+        invoke_console,
+        "GRPC\t127.0.0.1\t50051\t method=/grpc.health.v1.Health/Check result=ok grpc=OK elapsed_ms=1",
+    )
+    assert _contains_paint(invoke_console.paint_calls, "method=/grpc.health.v1.Health/Check", "orange")
+    assert _contains_paint(invoke_console.paint_calls, "ok", "orange")
+    assert _contains_paint(invoke_console.paint_calls, "OK", "orange")
+    assert not _contains_paint(invoke_console.paint_calls, "result=ok", "bright_green")
+    assert not _contains_paint(invoke_console.paint_calls, "grpc=OK", "bright_green")
+
+    response_console = _RecordingConsole()
+    assert _render_colored_grpc_line(
+        response_console,
+        'GRPC\t127.0.0.1\t50051\t response={"status": "SERVING"}',
+    )
+    assert _contains_paint(response_console.paint_calls, 'response={"status": "SERVING"}', "orange")

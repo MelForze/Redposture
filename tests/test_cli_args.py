@@ -7,6 +7,7 @@ import pytest
 from redposture_core.cli_args import (
     COMMAND_ELASTIC,
     COMMAND_EXPORTERS,
+    COMMAND_GRPC,
     COMMAND_QDRANT,
     COMMAND_SELFCERT,
     build_parser,
@@ -124,6 +125,21 @@ def test_elastic_help_sections_are_present() -> None:
     assert "--user" in help_text
 
 
+def test_grpc_help_sections_are_present() -> None:
+    help_text = _command_help(COMMAND_GRPC)
+    assert "\nCommon:\n" in help_text
+    assert "\nAuth:\n" in help_text
+    assert "\nInvoke / Metadata:\n" in help_text
+    assert "\nSchema:\n" in help_text
+    assert "\nExport:\n" in help_text
+    assert "--token value" in help_text
+    assert "--defcreds" in help_text
+    assert "--invoke /package.Service/Method" in help_text
+    assert "--proto file" in help_text
+    assert "--protoset file" in help_text
+    assert "--openapi path" in help_text
+
+
 def test_help_documents_implicit_target_file_precedence() -> None:
     help_text = _command_help("registry")
     assert "treated as target files" in help_text
@@ -147,6 +163,7 @@ def test_help_documents_implicit_target_file_precedence() -> None:
         ("etcd", ["Common", "Actions"]),
         ("qdrant", ["Common", "Auth", "Actions", "SSRF / Probes"]),
         ("elastic", ["Common", "Auth", "Actions"]),
+        ("grpc", ["Common", "Auth", "Invoke / Metadata", "Schema", "Export"]),
         ("kafka", ["Common", "Auth", "Actions"]),
         ("zookeeper", ["Common", "Auth", "Actions"]),
     ],
@@ -218,8 +235,69 @@ def test_postgres_help_shows_defaults_only_for_selected_flags() -> None:
     assert "Optional Postgres username for credential check. (default:" not in help_text
     assert "Optional Postgres password for credential check. (default:" not in help_text
     assert "Try default Postgres credentials postgres:postgres when auth is required. (default:" not in help_text
+
+
+def test_grpc_auth_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "grpc",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "50061",
+            "--token",
+            "grpc-lab-token-2026",
+            "--defcreds",
+        ]
+    )
+    assert args.command == "grpc"
+    assert args.port == 50061
+    assert args.token == "grpc-lab-token-2026"
+    assert args.defcreds is True
+
+
+def test_grpc_invoke_schema_export_flags_are_parsed() -> None:
+    args = parse_args(
+        [
+            "grpc",
+            "-t",
+            "127.0.0.1",
+            "--invoke",
+            "/grpc.health.v1.Health/Check",
+            "--data",
+            '{"service":""}',
+            "--meta",
+            "x-lab=1",
+            "--meta",
+            "x-trace=test",
+            "--proto",
+            "health.proto",
+            "--proto-path",
+            "proto",
+            "--protoset",
+            "health.protoset",
+            "--openapi",
+            "grpc.openapi.json",
+        ]
+    )
+    assert args.invoke == "/grpc.health.v1.Health/Check"
+    assert args.data == '{"service":""}'
+    assert args.meta == ["x-lab=1", "x-trace=test"]
+    assert args.proto == ["health.proto"]
+    assert args.proto_path == ["proto"]
+    assert args.protoset == ["health.protoset"]
+    assert args.openapi == "grpc.openapi.json"
+
+
+def test_grpc_username_password_pair_validation() -> None:
+    args = parse_args(["grpc", "-t", "127.0.0.1", "-u", "admin"])
+    assert args.username == "admin"
+    assert args.password is None
+
+
+def test_clickhouse_help_shows_defaults_only_for_selected_flags() -> None:
+    help_text = _command_help("clickhouse")
     assert "Show readable table names in output after successful access/auth. (default:" not in help_text
-    assert "Interactive SQL mode (single target). (default:" not in help_text
 
 
 def test_clickhouse_help_orders_show_columns_column_dump() -> None:
@@ -1885,9 +1963,13 @@ def test_collect_exporters_filter_is_parsed() -> None:
     assert args.collect_exporters_filter == "redis,postgres_exporter"
 
 
-def test_collect_output_all_alias_is_parsed() -> None:
-    args = parse_args(["exporters", "collect", "-t", "10.0.0.1", "-oA", "collect.txt"])
-    assert args.output == "collect.txt"
+def test_collect_rejects_removed_output_all_alias() -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["exporters", "collect", "-t", "10.0.0.1", "-oA"])
+    assert exc.value.code == 2
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["exporters", "collect", "-t", "10.0.0.1", "--output-all", "collect.txt"])
+    assert exc.value.code == 2
 
 
 def test_collect_rejects_removed_write_vulnerable_targets_flag() -> None:

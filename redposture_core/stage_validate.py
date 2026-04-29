@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 from .console import Console
 
@@ -1756,6 +1756,244 @@ def _normalize_reason_render(reason: str, sample: str) -> tuple[str, str, str]:
     )
 
 
+def _vulnerable_dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = _clean_value_text(value)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _vulnerable_username_allowed(value: Any) -> bool:
+    text = _clean_value_text(value)
+    if not _value_looks_identifier(text):
+        return False
+    return not _is_placeholder_value(text) and not _is_dummy_secret_value(text)
+
+
+def _vulnerable_secret_allowed(key: str, value: Any) -> bool:
+    return _value_looks_secret_for_key(
+        key,
+        value,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+        suppressed_value_counters=None,
+    )
+
+
+def _vulnerable_key_bucket(key: str) -> str:
+    normalized = _normalize_key_token(key)
+    if "apikey" in normalized or normalized in {"accesskey", "accesskeyid", "secretaccesskey"}:
+        return "api_keys"
+    if "token" in normalized or "bearer" in normalized or normalized in {"auth", "authorization"}:
+        return "api_keys"
+    if "password" in normalized or "passwd" in normalized or normalized.endswith("pwd") or "secret" in normalized:
+        return "passwords"
+    return "passwords"
+
+
+def _extract_vulnerable_credentials_from_text(text: str) -> tuple[list[str], list[str], list[str]]:
+    sample = str(text or "")
+    users: list[str] = []
+    passwords: list[str] = []
+    api_keys: list[str] = []
+
+    for match in _URL_CANDIDATE_RE.finditer(sample):
+        candidate = match.group(0).rstrip("),]")
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            continue
+        username = unquote(parsed.username or "")
+        password = unquote(parsed.password or "")
+        if (
+            username
+            and password
+            and (_vulnerable_secret_allowed("password", password) or _is_known_default_pair(username, password))
+        ):
+            if _vulnerable_username_allowed(username):
+                users.append(username)
+            passwords.append(password)
+        try:
+            query_items = parse_qsl(parsed.query, keep_blank_values=True)
+        except ValueError:
+            query_items = []
+        for key, value in query_items:
+            if _key_looks_username(key) and _vulnerable_username_allowed(value):
+                users.append(value)
+            if not _key_looks_sensitive(key) or not _vulnerable_secret_allowed(key, value):
+                continue
+            if _vulnerable_key_bucket(key) == "api_keys":
+                api_keys.append(value)
+            else:
+                passwords.append(value)
+
+    for match in _AUTH_BASIC_RE.finditer(sample):
+        decoded = _safe_decode_basic(str(match.group(1) or ""))
+        if not decoded or ":" not in decoded:
+            continue
+        username, password = decoded.split(":", 1)
+        if _vulnerable_secret_allowed("password", password) or _is_known_default_pair(username, password):
+            if _vulnerable_username_allowed(username):
+                users.append(username)
+            passwords.append(password)
+
+    for match in _AUTH_BEARER_RE.finditer(sample):
+        token = _clean_value_text(str(match.group(1) or ""))
+        if _value_looks_token_secret(
+            token,
+            precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+            suppressed_value_counters=None,
+        ):
+            api_keys.append(token)
+
+    for match in _JWT_RE.finditer(sample):
+        api_keys.append(str(match.group(0) or ""))
+
+    for match in _AWS_ACCESS_KEY_RE.finditer(sample):
+        api_keys.append(str(match.group(0) or ""))
+
+    redis_match = _REDIS_PASS_RE.search(sample)
+    if redis_match and _vulnerable_secret_allowed(str(redis_match.group(1)), str(redis_match.group(2))):
+        passwords.append(str(redis_match.group(2)))
+
+    for pattern in (_TEXT_GENERIC_KV_RE, _CMD_FLAG_GENERIC_RE):
+        for match in pattern.finditer(sample):
+            key = str(match.group(1) or "").strip()
+            value = _clean_value_text(str(match.group(2) or ""))
+            if not key or not value:
+                continue
+            if _key_looks_username(key) and _vulnerable_username_allowed(value):
+                users.append(value)
+            if not _key_looks_sensitive(key) or not _vulnerable_secret_allowed(key, value):
+                continue
+            if _vulnerable_key_bucket(key) == "api_keys":
+                api_keys.append(value)
+            else:
+                passwords.append(value)
+
+    return _vulnerable_dedupe(users), _vulnerable_dedupe(passwords), _vulnerable_dedupe(api_keys)
+
+
+def _extract_vulnerable_credentials_from_hit(hit: dict[str, str | int]) -> tuple[list[str], list[str], list[str]]:
+    body = str(hit.get("body") or "")
+    samples = [body] if body else [str(hit.get("sample") or "")]
+
+    users: list[str] = []
+    passwords: list[str] = []
+    api_keys: list[str] = []
+    for sample in samples:
+        sample_users, sample_passwords, sample_api_keys = _extract_vulnerable_credentials_from_text(sample)
+        users.extend(sample_users)
+        passwords.extend(sample_passwords)
+        api_keys.extend(sample_api_keys)
+    return _vulnerable_dedupe(users), _vulnerable_dedupe(passwords), _vulnerable_dedupe(api_keys)
+
+
+def _extract_vulnerable_login_pairs_from_text(text: str) -> list[tuple[str, str]]:
+    sample = str(text or "")
+    pairs: list[tuple[str, str]] = []
+    usernames: list[str] = []
+    passwords: list[str] = []
+
+    for match in _URL_CANDIDATE_RE.finditer(sample):
+        candidate = match.group(0).rstrip("),]")
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            continue
+        username = unquote(parsed.username or "")
+        password = unquote(parsed.password or "")
+        if (
+            username
+            and password
+            and _vulnerable_username_allowed(username)
+            and (_vulnerable_secret_allowed("password", password) or _is_known_default_pair(username, password))
+        ):
+            pairs.append((username, password))
+
+    for match in _AUTH_BASIC_RE.finditer(sample):
+        decoded = _safe_decode_basic(str(match.group(1) or ""))
+        if not decoded or ":" not in decoded:
+            continue
+        username, password = decoded.split(":", 1)
+        if _vulnerable_username_allowed(username) and (
+            _vulnerable_secret_allowed("password", password) or _is_known_default_pair(username, password)
+        ):
+            pairs.append((username, password))
+
+    for pattern in (_TEXT_GENERIC_KV_RE, _CMD_FLAG_GENERIC_RE):
+        for match in pattern.finditer(sample):
+            key = str(match.group(1) or "").strip()
+            value = _clean_value_text(str(match.group(2) or ""))
+            if not key or not value:
+                continue
+            if _key_looks_username(key) and _vulnerable_username_allowed(value):
+                usernames.append(value)
+            elif _key_looks_sensitive(key) and _vulnerable_secret_allowed(key, value):
+                bucket = _vulnerable_key_bucket(key)
+                if bucket == "passwords":
+                    passwords.append(value)
+
+    redis_match = _REDIS_PASS_RE.search(sample)
+    if redis_match and _vulnerable_secret_allowed(str(redis_match.group(1)), str(redis_match.group(2))):
+        passwords.append(str(redis_match.group(2)))
+
+    usernames = _vulnerable_dedupe(usernames)
+    passwords = _vulnerable_dedupe(passwords)
+    paired_passwords = {password for _username, password in pairs}
+    passwords = [password for password in passwords if password not in paired_passwords]
+    if passwords and usernames:
+        if len(usernames) == len(passwords):
+            pairs.extend(zip(usernames, passwords, strict=False))
+        else:
+            username = usernames[0] if usernames else ""
+            pairs.extend((username, password) for password in passwords)
+
+    result: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for username, password in pairs:
+        user_text = _clean_value_text(username)
+        password_text = _clean_value_text(password)
+        if not password_text:
+            continue
+        key = (user_text, password_text)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return result
+
+
+def _vulnerable_source_host_port(hit: dict[str, str | int]) -> tuple[str, str]:
+    host = str(hit.get("host") or "-").strip() or "-"
+    port = str(hit.get("port") or "-").strip() or "-"
+    return host, port
+
+
+def _vulnerable_source_api_keys(hit: dict[str, str | int], api_keys: list[str]) -> list[str]:
+    host, port = _vulnerable_source_host_port(hit)
+    return _vulnerable_dedupe([f"{host}:{port}:{api_key}" for api_key in api_keys])
+
+
+def _extract_vulnerable_login_pairs_from_hit(hit: dict[str, str | int]) -> list[tuple[str, str]]:
+    body = str(hit.get("body") or "")
+    samples = [body] if body else [str(hit.get("sample") or "")]
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for sample in samples:
+        for username, password in _extract_vulnerable_login_pairs_from_text(sample):
+            key = (_clean_value_text(username), _clean_value_text(password))
+            if key in seen:
+                continue
+            seen.add(key)
+            pairs.append(key)
+    return pairs
+
+
 def _sample_line_for_json_reasons(body: str, reasons: list[str]) -> str:
     lines = [line.strip() for line in body.splitlines() if line.strip()]
     if not lines:
@@ -2644,14 +2882,75 @@ class ValidationRecordAccumulator:
             host_text = str(host or "").strip()
             port_text = str(port or "").strip()
             endpoint_text = str(endpoint or "").strip()
-            if host_text and host_text != "-":
-                hosts.add(host_text)
             if not host_text or host_text == "-" or not port_text.isdigit():
                 continue
             if not endpoint_text.startswith("/"):
                 continue
             urls.add(f"http://{host_text}:{int(port_text)}{endpoint_text}")
+        hosts.update(row[0] for row in self.vulnerable_login_rows_from_shown_hits() if row[0] != "-")
         return sorted(hosts), sorted(urls)
+
+    def vulnerable_login_rows_from_shown_hits(self) -> list[tuple[str, str, str]]:
+        rows: list[tuple[str, str, str]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for hit in self.matches_shown:
+            host, _port = _vulnerable_source_host_port(hit)
+            for username, password in _extract_vulnerable_login_pairs_from_hit(hit):
+                row = (host, username, password)
+                if row in seen:
+                    continue
+                seen.add(row)
+                rows.append(row)
+        return rows
+
+    def vulnerable_credentials_from_shown_hits(self) -> tuple[list[str], list[str], list[str]]:
+        login_rows = self.vulnerable_login_rows_from_shown_hits()
+        users = [row[1] for row in login_rows]
+        passwords = [row[2] for row in login_rows]
+        api_keys: list[str] = []
+        for hit in self.matches_shown:
+            _hit_users, _hit_passwords, hit_api_keys = _extract_vulnerable_credentials_from_hit(hit)
+            api_keys.extend(_vulnerable_source_api_keys(hit, hit_api_keys))
+        return _vulnerable_dedupe(users), _vulnerable_dedupe(passwords), _vulnerable_dedupe(api_keys)
+
+    def vulnerable_findings_from_shown_hits(self) -> list[dict[str, object]]:
+        findings: list[dict[str, object]] = []
+        seen: set[tuple[str, str, str, str, str, str, str, str]] = set()
+        for hit in self.matches_shown:
+            users, passwords, api_keys = _extract_vulnerable_credentials_from_hit(hit)
+            source_api_keys = _vulnerable_source_api_keys(hit, api_keys)
+            if not users and not passwords and not source_api_keys:
+                continue
+            host, port = _vulnerable_source_host_port(hit)
+            endpoint = str(hit.get("endpoint") or "-").strip() or "-"
+            exporter = str(hit.get("exporter") or "-").strip() or "-"
+            reason = str(hit.get("reason") or "-").strip() or "-"
+            key = (
+                host,
+                port,
+                endpoint,
+                exporter,
+                reason,
+                ",".join(users),
+                ",".join(passwords),
+                ",".join(source_api_keys),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            findings.append(
+                {
+                    "host": host,
+                    "port": port,
+                    "endpoint": endpoint,
+                    "exporter": exporter,
+                    "reason": reason,
+                    "users": users,
+                    "passwords": passwords,
+                    "api_keys": source_api_keys,
+                }
+            )
+        return findings
 
     def feed(self, record: dict[str, Any]) -> None:
         self._record_no += 1
@@ -2711,6 +3010,7 @@ class ValidationRecordAccumulator:
                 "line_no": int(hit.get("line_no") or 1),
                 "reason": reason,
                 "sample": sample,
+                "body": body,
                 "host": host,
                 "port": port,
                 "exporter": exporter,
