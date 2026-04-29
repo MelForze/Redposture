@@ -28,6 +28,7 @@ COMMAND_KUBEAPI = "kubeapi"
 COMMAND_KAFKA = "kafka"
 COMMAND_ZOOKEEPER = "zookeeper"
 COMMAND_ELASTIC = "elastic"
+COMMAND_GRPC = "grpc"
 COMMAND_SELFCERT = "selfcert"
 COMMAND_EXPORTERS = "exporters"
 
@@ -550,14 +551,6 @@ def _configure_collect_parser(parser: argparse.ArgumentParser) -> None:
     _add_log_flag(common)
     _add_scan_host_flags(common)  # type: ignore[arg-type]
     _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
-    common.add_argument(
-        "-oA",
-        "--output-all",
-        dest="output",
-        default=None,
-        metavar="file",
-        help="Alias for -o/--output (compatibility shorthand).",
-    )
     common.add_argument(
         "-f",
         "--format",
@@ -1177,12 +1170,127 @@ def _configure_elastic_parser(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _configure_grpc_parser(parser: argparse.ArgumentParser) -> None:
+    common = parser.add_argument_group("Common")
+    auth = parser.add_argument_group("Auth")
+    invoke = parser.add_argument_group("Invoke / Metadata")
+    schema = parser.add_argument_group("Schema")
+    export = parser.add_argument_group("Export")
+
+    _add_output_flags(common)  # type: ignore[arg-type]
+    _add_log_flag(common)
+    _add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
+    common.add_argument(
+        "--port",
+        dest="port",
+        type=_port,
+        default=50051,
+        metavar="port",
+        help="gRPC port spec: single port, list/range, or file (examples: 50051, 50051,25052, ./ports.txt).",
+    )
+    _add_multi_ports_flag(common)
+    _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
+    common.add_argument(
+        "-f",
+        "--format",
+        dest="output_format",
+        choices=("json", "txt"),
+        default="txt",
+        help="gRPC audit output format for stdout/file.",
+    )
+
+    auth.add_argument(
+        "-u",
+        "--username",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Basic auth username (use with -p).",
+    )
+    auth.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Basic auth password (use with -u).",
+    )
+    auth.add_argument(
+        "--token",
+        dest="token",
+        default=None,
+        metavar="value",
+        help="Bearer token sent as Authorization: Bearer <value>.",
+    )
+    auth.add_argument(
+        "--defcreds",
+        action="store_true",
+        help="Try compact default basic/token credentials when auth is required.",
+    )
+
+    invoke.add_argument(
+        "--invoke",
+        dest="invoke",
+        default=None,
+        metavar="/package.Service/Method",
+        help="Invoke one unary gRPC method after detection/auth.",
+    )
+    invoke.add_argument(
+        "--data",
+        dest="data",
+        default=None,
+        metavar="json|@file",
+        help='JSON request body for --invoke (default: "{}"; @file reads JSON from disk).',
+    )
+    invoke.add_argument(
+        "--meta",
+        dest="meta",
+        action="append",
+        default=None,
+        metavar="key=value",
+        help="Additional request metadata header for --invoke (repeatable).",
+    )
+
+    schema.add_argument(
+        "--proto",
+        dest="proto",
+        action="append",
+        default=None,
+        metavar="file",
+        help="Proto file used as an additional schema source for invoke/OpenAPI (repeatable).",
+    )
+    schema.add_argument(
+        "--proto-path",
+        dest="proto_path",
+        action="append",
+        default=None,
+        metavar="dir",
+        help="Import path for --proto compilation (repeatable).",
+    )
+    schema.add_argument(
+        "--protoset",
+        dest="protoset",
+        action="append",
+        default=None,
+        metavar="file",
+        help="Compiled FileDescriptorSet schema source (repeatable).",
+    )
+
+    export.add_argument(
+        "--openapi",
+        dest="openapi",
+        default=None,
+        metavar="path",
+        help="Write an OpenAPI 3.1 JSON representation of discovered/schema gRPC methods.",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _NoColorArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Security toolkit for module-focused auditing (exporters, registry, grafana, proxmox, gitlab, "
-            "consul, kubeapi, postgres, clickhouse, redis, etcd, qdrant, elastic, kafka, zookeeper). "
+            "consul, kubeapi, postgres, clickhouse, redis, etcd, qdrant, elastic, kafka, zookeeper, grpc). "
             "Use '<module> -h' for grouped flags by topic."
         ),
     )
@@ -2014,6 +2122,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _configure_elastic_parser(elastic_parser)
 
+    grpc_parser = subparsers.add_parser(
+        COMMAND_GRPC,
+        help="Audit gRPC services with transport/auth/reflection/health checks.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "gRPC module fingerprints service transport (TLS/plaintext), checks auth requirements, "
+            "queries reflection services/method descriptors, and runs grpc.health.v1.Health checks."
+        ),
+    )
+    _configure_grpc_parser(grpc_parser)
+
     kafka_parser = subparsers.add_parser(
         COMMAND_KAFKA,
         help="Audit Kafka broker auth exposure and topic visibility.",
@@ -2208,10 +2327,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if raw_argv[0] == COMMAND_TRIGGER:
         parser.error("direct 'trigger' mode removed; use 'exporters trigger ...'")
 
+    if len(raw_argv) >= 2 and raw_argv[0] == COMMAND_EXPORTERS and raw_argv[1] == COMMAND_COLLECT:
+        if "-oA" in raw_argv or "--output-all" in raw_argv:
+            parser.error("exporters collect credential artifact bundle export was removed; use -o/--output")
+
     if raw_argv[0].startswith("-"):
         parser.error(
             "module command is required: exporters, registry, grafana, gitlab, consul, kubeapi, postgres, "
-            "clickhouse, redis, etcd, proxmox, qdrant, kafka, zookeeper, elastic, or --selfcert"
+            "clickhouse, redis, etcd, proxmox, qdrant, kafka, zookeeper, elastic, grpc, or --selfcert"
         )
 
     return parser.parse_args(raw_argv)

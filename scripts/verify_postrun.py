@@ -22,6 +22,7 @@ _EXPECTED_MODULES = (
     "etcd",
     "qdrant",
     "elastic",
+    "grpc",
     "kafka",
     "zookeeper",
     "proxmox",
@@ -87,6 +88,16 @@ _EXPECTED_LABELS = (
     "elastic_url_hint_https",
     "elastic_plugins_edge",
     "elastic_multi_instance_urls",
+    "grpc_open",
+    "grpc_auth_token",
+    "grpc_auth_defcreds",
+    "grpc_multi_ports",
+    "grpc_debug_smoke",
+    "grpc_invoke_health",
+    "grpc_proto_invoke",
+    "grpc_protoset_invoke",
+    "grpc_openapi_export",
+    "grpc_web_detect",
     "kafka_open",
     "kafka_auth",
     "kafka_multi_ports",
@@ -111,6 +122,7 @@ _PROGRESS_EXPECTED_TARGETS = {
     "etcd_multi_instance_urls": 5,
     "qdrant_multi_instance_urls": 5,
     "elastic_multi_instance_urls": 5,
+    "grpc_multi_ports": 5,
     "kafka_multi_ports": 5,
     "zookeeper_multi_ports": 5,
     "proxmox_multi_instance_urls": 5,
@@ -287,6 +299,34 @@ def _validate_output_sanity(rows: list[dict[str, str]]) -> None:
             )
 
 
+def _validate_openapi_artifacts(out_dir: Path, rows: list[dict[str, str]]) -> None:
+    labels = {row["label"] for row in rows if row["exit_code"] == "0"}
+    if "grpc_openapi_export" not in labels:
+        return
+    path = out_dir / "json" / "grpc_openapi.json"
+    if not path.exists() or path.stat().st_size == 0:
+        raise SystemExit(f"missing grpc OpenAPI artifact: {path}")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"invalid grpc OpenAPI artifact {path}: {exc}") from exc
+    if document.get("openapi") != "3.1.0":
+        raise SystemExit(f"grpc OpenAPI artifact has unexpected version: {document.get('openapi')}")
+    paths = document.get("paths")
+    if not isinstance(paths, dict) or "/grpc.health.v1.Health/Check" not in paths:
+        raise SystemExit("grpc OpenAPI artifact does not contain /grpc.health.v1.Health/Check")
+    operation = (
+        paths["/grpc.health.v1.Health/Check"].get("post")
+        if isinstance(paths.get("/grpc.health.v1.Health/Check"), dict)
+        else None
+    )
+    if not isinstance(operation, dict):
+        raise SystemExit("grpc OpenAPI health path does not contain a post operation")
+    for key in ("x-grpc-service", "x-grpc-method", "x-grpc-input-type", "x-grpc-output-type", "x-grpc-streaming"):
+        if key not in operation:
+            raise SystemExit(f"grpc OpenAPI operation is missing {key}")
+
+
 def _run_cli_check(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "redposture.py", *args],
@@ -303,6 +343,7 @@ def _cli_smoke_checks() -> None:
         ("exporters", "scan", "-h"),
         ("postgres", "-h"),
         ("elastic", "-h"),
+        ("grpc", "-h"),
     ]
     for args in checks:
         result = _run_cli_check(*args)
@@ -342,6 +383,7 @@ def main() -> int:
         raise SystemExit(f"matrix status is missing expected modules: {', '.join(missing_modules)}")
 
     _validate_output_sanity(rows)
+    _validate_openapi_artifacts(out_dir, rows)
 
     missing_success = sorted(module for module in _EXPECTED_MODULES if successful_modules.get(module, 0) == 0)
     if missing_success:

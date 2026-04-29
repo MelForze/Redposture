@@ -18,6 +18,7 @@ from .cli_args import (
     COMMAND_EXPORTERS,
     COMMAND_GITLAB,
     COMMAND_GRAFANA,
+    COMMAND_GRPC,
     COMMAND_KAFKA,
     COMMAND_KUBEAPI,
     COMMAND_POSTGRES,
@@ -41,6 +42,7 @@ from .stage_elastic import run_elastic_stage
 from .stage_etcd import run_etcd_stage
 from .stage_gitlab import run_gitlab_stage
 from .stage_grafana import run_grafana_stage
+from .stage_grpc import run_grpc_stage
 from .stage_kafka import run_kafka_stage
 from .stage_kubeapi import run_kubeapi_stage
 from .stage_postgres import run_postgres_stage
@@ -147,6 +149,9 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
 
     if args.command == COMMAND_ELASTIC:
         return run_elastic_stage(args, logger)
+
+    if args.command == COMMAND_GRPC:
+        return run_grpc_stage(args, logger)
 
     if args.command == COMMAND_QDRANT:
         return run_qdrant_stage(args, logger)

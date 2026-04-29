@@ -12,6 +12,7 @@ from scripts.verify_postrun import (
     _progress_counts_from_log,
     _validate_expected_exits,
     _validate_expected_labels,
+    _validate_openapi_artifacts,
     _validate_output_sanity,
 )
 
@@ -220,6 +221,56 @@ def test_validate_output_sanity_rejects_mixed_progress_totals(tmp_path: Path) ->
 
 def test_clickhouse_multi_ports_expected_targets_is_five() -> None:
     assert _PROGRESS_EXPECTED_TARGETS["clickhouse_multi_ports"] == 5
+
+
+def test_grpc_multi_ports_expected_targets_is_five() -> None:
+    assert _PROGRESS_EXPECTED_TARGETS["grpc_multi_ports"] == 5
+
+
+def test_grpc_expected_labels_include_feature_wave() -> None:
+    for label in (
+        "grpc_invoke_health",
+        "grpc_proto_invoke",
+        "grpc_protoset_invoke",
+        "grpc_openapi_export",
+        "grpc_web_detect",
+    ):
+        assert label in _EXPECTED_LABELS
+
+
+def test_validate_openapi_artifacts_checks_grpc_export(tmp_path: Path) -> None:
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+    (json_dir / "grpc_openapi.json").write_text(
+        """
+        {
+          "openapi": "3.1.0",
+          "paths": {
+            "/grpc.health.v1.Health/Check": {
+              "post": {
+                "x-grpc-service": "grpc.health.v1.Health",
+                "x-grpc-method": "Check",
+                "x-grpc-input-type": "grpc.health.v1.HealthCheckRequest",
+                "x-grpc-output-type": "grpc.health.v1.HealthCheckResponse",
+                "x-grpc-streaming": {"client": false, "server": false}
+              }
+            }
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "module": "grpc",
+            "label": "grpc_openapi_export",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": "-",
+            "log_path": "-",
+        }
+    ]
+    _validate_openapi_artifacts(tmp_path, rows)
 
 
 def test_validate_output_sanity_allows_multi_target_json_log_without_progress(tmp_path: Path) -> None:

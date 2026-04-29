@@ -43,6 +43,44 @@ def _write_unique_lines(path: str, values: list[str]) -> None:
             fh.write(text + "\n")
 
 
+def _write_lines(path: str, values: list[str]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        for value in values:
+            fh.write(str(value or "").strip() + "\n")
+
+
+def _markdown_cell(value: object) -> str:
+    if isinstance(value, list):
+        text = "<br>".join(str(item) for item in value if str(item or "").strip())
+    else:
+        text = str(value or "")
+    text = text.replace("|", "\\|").replace("\n", "<br>")
+    return text or "-"
+
+
+def _write_vulnerable_findings_markdown(path: str, findings: list[dict[str, object]]) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("# RedPosture Vulnerable Findings\n\n")
+        fh.write(f"- generated_at: {utc_now_iso()}\n")
+        fh.write(f"- findings: {len(findings)}\n\n")
+        fh.write("| Host | Port | Endpoint | Exporter | Users | Passwords | API keys | Reason |\n")
+        fh.write("| --- | --- | --- | --- | --- | --- | --- | --- |\n")
+        for finding in findings:
+            row = [
+                finding.get("host"),
+                finding.get("port"),
+                finding.get("endpoint"),
+                finding.get("exporter"),
+                finding.get("users"),
+                finding.get("passwords"),
+                finding.get("api_keys"),
+                finding.get("reason"),
+            ]
+            fh.write("| " + " | ".join(_markdown_cell(value) for value in row) + " |\n")
+
+
 def _write_vulnerable_targets_files(
     *,
     args: argparse.Namespace,
@@ -56,12 +94,38 @@ def _write_vulnerable_targets_files(
     base_dir = _collect_output_base_dir(args)
     ips_path = os.path.join(base_dir, "vulnerable_ips.txt")
     urls_path = os.path.join(base_dir, "vulnerable_urls.txt")
+    users_path = os.path.join(base_dir, "vulnerable_users.txt")
+    pass_path = os.path.join(base_dir, "vulnerable_pass.txt")
+    api_keys_path = os.path.join(base_dir, "vulnerable_apikeys.txt")
+    findings_path = os.path.join(base_dir, "vulnerable_findings.md")
     hosts, urls = validator.vulnerable_targets_from_shown_hits()
-    _write_unique_lines(ips_path, hosts)
     _write_unique_lines(urls_path, urls)
+    login_rows: list[tuple[str, str, str]] = []
+    if hasattr(validator, "vulnerable_login_rows_from_shown_hits"):
+        login_rows = validator.vulnerable_login_rows_from_shown_hits()
+    if login_rows:
+        _write_lines(ips_path, [row[0] for row in login_rows])
+        _write_lines(users_path, [row[1] for row in login_rows])
+        _write_lines(pass_path, [row[2] for row in login_rows])
+    else:
+        _write_unique_lines(ips_path, hosts)
+        _write_lines(users_path, [])
+        _write_lines(pass_path, [])
+    users: list[str] = []
+    passwords: list[str] = []
+    api_keys: list[str] = []
+    if hasattr(validator, "vulnerable_credentials_from_shown_hits"):
+        users, passwords, api_keys = validator.vulnerable_credentials_from_shown_hits()
+    _write_unique_lines(api_keys_path, api_keys)
+    findings: list[dict[str, object]] = []
+    if hasattr(validator, "vulnerable_findings_from_shown_hits"):
+        findings = validator.vulnerable_findings_from_shown_hits()
+    _write_vulnerable_findings_markdown(findings_path, findings)
     if bool(getattr(args, "debug", False)):
         console.debug(
-            f"vulnerable targets written: hosts={len(hosts)} urls={len(urls)} ips_file={ips_path} urls_file={urls_path}"
+            "vulnerable targets written: "
+            f"hosts={len(hosts)} urls={len(urls)} login_rows={len(login_rows)} users={len(users)} passwords={len(passwords)} "
+            f"api_keys={len(api_keys)} findings={len(findings)} ips_file={ips_path} urls_file={urls_path}"
         )
 
 
