@@ -20,7 +20,13 @@ from uuid import UUID
 from .console import Console
 from .logger import AttemptLogger
 from .progress import ProgressBar
-from .utils import collect_scan_ports, collect_scan_targets, is_signature_compat_typeerror, utc_now_iso
+from .utils import (
+    collect_scan_ports,
+    collect_scan_targets,
+    is_signature_compat_typeerror,
+    parse_username_password_credential_file,
+    utc_now_iso,
+)
 
 _CH_DEFAULT_NATIVE_PORT = 9000
 _CH_DEFAULT_HTTP_PORT = 8123
@@ -2258,9 +2264,19 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
     if args.retries < 0:
         console.error("--retries must be >= 0")
         return 2
-    if args.username and args.password is None:
+    try:
+        credential_file_entries = parse_username_password_credential_file(args.username, args.password)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
+    if credential_file_entries is None and args.username and args.password is None:
         console.error("--password is required when --username is set")
         return 2
+    credential_runs = (
+        [(entry.username, entry.password) for entry in credential_file_entries]
+        if credential_file_entries is not None
+        else [(args.username, args.password)]
+    )
 
     raw_protocol = "http" if bool(getattr(args, "http", False)) else "native"
 
@@ -2335,7 +2351,11 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
         return 2
 
     effective_username = args.username
-    if args.password is not None and not effective_username:
+    primary_password = args.password
+    if credential_file_entries is not None:
+        effective_username = credential_file_entries[0].username
+        primary_password = credential_file_entries[0].password
+    if primary_password is not None and not effective_username:
         effective_username = "default"
 
     stream_to_stdout = not bool(args.output)
@@ -2364,6 +2384,9 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
         console.info(message)
 
     if os_shell_mode:
+        if credential_file_entries is not None and len(credential_file_entries) != 1:
+            console.error("--os-shell requires a single credential pair")
+            return 2
         if args.output:
             console.error("--os-shell does not support --output; use --log instead")
             return 2
@@ -2389,7 +2412,7 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
             timeout=args.timeout,
             retries=args.retries,
             username=effective_username,
-            password=args.password,
+            password=primary_password,
             defcreds=args.defcreds,
             database=args.database,
             protocol=shell_scan_protocol,
@@ -2480,6 +2503,9 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
         return 0
 
     if sql_shell_mode:
+        if credential_file_entries is not None and len(credential_file_entries) != 1:
+            console.error("--sql-shell requires a single credential pair")
+            return 2
         if args.output:
             console.error("--sql-shell does not support --output; use --log instead")
             return 2
@@ -2505,7 +2531,7 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
             timeout=args.timeout,
             retries=args.retries,
             username=effective_username,
-            password=args.password,
+            password=primary_password,
             defcreds=args.defcreds,
             database=args.database,
             protocol=shell_scan_protocol,
@@ -2595,7 +2621,9 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
         return 0
 
     if args.debug and stream_to_stdout and args.output_format == "txt":
-        if args.password is not None:
+        if credential_file_entries is not None:
+            mode = f"credfile={len(credential_file_entries)}"
+        elif args.password is not None:
             mode = "provided-creds"
         elif args.defcreds:
             mode = "default-creds"
@@ -2607,7 +2635,9 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
             f"database={args.database} format=txt"
         )
     if args.debug and not stream_to_stdout:
-        if args.password is not None:
+        if credential_file_entries is not None:
+            mode = f"credfile={len(credential_file_entries)}"
+        elif args.password is not None:
             mode = "provided-creds"
         elif args.defcreds:
             mode = "default-creds"
@@ -2626,48 +2656,56 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
     auth_required = 0
     failed = 0
     outer_progress: ProgressBar | None = None
-    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(port_protocols) > 1
+    use_single_global_progress = (
+        stream_to_stdout and args.output_format == "txt" and (len(port_protocols) > 1 or len(credential_runs) > 1)
+    )
     if use_single_global_progress:
-        outer_progress = ProgressBar("CLICKHOUSE", len(hosts) * len(port_protocols), enabled=True, leave=True)
+        outer_progress = ProgressBar(
+            "CLICKHOUSE", len(hosts) * len(port_protocols) * len(credential_runs), enabled=True, leave=True
+        )
 
     try:
         for idx, (group_port, group_protocol) in enumerate(port_protocols):
-            part_total, part_open, part_weak, part_valid, part_auth, part_failed = audit_clickhouse_targets(
-                hosts=hosts,
-                port=int(group_port),
-                timeout=args.timeout,
-                retries=args.retries,
-                workers=args.workers,
-                username=effective_username,
-                password=args.password,
-                defcreds=args.defcreds,
-                database=args.database,
-                protocol=str(group_protocol),
-                show_databases=args.show_databases,
-                show_tables=args.show_tables,
-                show_columns=show_columns,
-                table_targets=table_targets,
-                table_columns=table_columns,
-                dump_table_rows=dump_table_rows,
-                execute_command=execute_command,
-                sql_command=sql_command,
-                output_path=args.output,
-                output_format=args.output_format,
-                emit_line=emit_line,
-                logger=logger if args.debug else None,
-                append_output=idx > 0,
-                suppress_timeout_status_lines=not bool(args.debug),
-                debug_emit=emit_debug if args.debug else None,
-                show_progress=not use_single_global_progress,
-            )
-            total += part_total
-            open_no_auth += part_open
-            weak += part_weak
-            valid += part_valid
-            auth_required += part_auth
-            failed += part_failed
-            if outer_progress is not None:
-                outer_progress.advance(part_total)
+            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
+                run_effective_username = run_username
+                if run_password is not None and not run_effective_username:
+                    run_effective_username = "default"
+                part_total, part_open, part_weak, part_valid, part_auth, part_failed = audit_clickhouse_targets(
+                    hosts=hosts,
+                    port=int(group_port),
+                    timeout=args.timeout,
+                    retries=args.retries,
+                    workers=args.workers,
+                    username=run_effective_username,
+                    password=run_password,
+                    defcreds=args.defcreds if credential_file_entries is None else False,
+                    database=args.database,
+                    protocol=str(group_protocol),
+                    show_databases=args.show_databases,
+                    show_tables=args.show_tables,
+                    show_columns=show_columns,
+                    table_targets=table_targets,
+                    table_columns=table_columns,
+                    dump_table_rows=dump_table_rows,
+                    execute_command=execute_command,
+                    sql_command=sql_command,
+                    output_path=args.output,
+                    output_format=args.output_format,
+                    emit_line=emit_line,
+                    logger=logger if args.debug else None,
+                    append_output=idx > 0 or cred_idx > 0,
+                    suppress_timeout_status_lines=not bool(args.debug),
+                    debug_emit=emit_debug if args.debug else None,
+                    show_progress=not use_single_global_progress,
+                )
+                total += part_total
+                open_no_auth += part_open
+                weak += part_weak
+                valid += part_valid
+                auth_required += part_auth
+                failed += part_failed
+                if outer_progress is not None:
+                    outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process clickhouse output: {exc}")
         return 2

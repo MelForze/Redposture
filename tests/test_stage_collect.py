@@ -1023,12 +1023,14 @@ def test_collect_stage_writes_vulnerable_targets_files_next_to_output_and_dedupe
     urls_file = tmp_path / "vulnerable_urls.txt"
     users_file = tmp_path / "vulnerable_users.txt"
     pass_file = tmp_path / "vulnerable_pass.txt"
+    user_pass_file = tmp_path / "vulnerable_user_pass.txt"
     api_keys_file = tmp_path / "vulnerable_apikeys.txt"
     findings_file = tmp_path / "vulnerable_findings.md"
     assert ips_file.exists()
     assert urls_file.exists()
     assert users_file.exists()
     assert pass_file.exists()
+    assert user_pass_file.exists()
     assert not (tmp_path / "vulnerable_passwords.txt").exists()
     assert api_keys_file.exists()
     assert findings_file.exists()
@@ -1037,6 +1039,7 @@ def test_collect_stage_writes_vulnerable_targets_files_next_to_output_and_dedupe
     urls = [line.strip() for line in urls_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     users = [line.strip() for line in users_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     passwords = [line.strip() for line in pass_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+    user_pass = [line.strip() for line in user_pass_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     api_keys = [line.strip() for line in api_keys_file.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert ips == ["10.0.0.1", "collector.local"]
     assert urls == [
@@ -1046,6 +1049,7 @@ def test_collect_stage_writes_vulnerable_targets_files_next_to_output_and_dedupe
     ]
     assert users == ["elastic", "metrics_collector"]
     assert passwords == ["ElasticRead2026!", "Sup3rS3cret2026"]
+    assert user_pass == ["elastic:ElasticRead2026!", "metrics_collector:Sup3rS3cret2026"]
     assert list(zip(ips, users, passwords, strict=False)) == [
         ("10.0.0.1", "elastic", "ElasticRead2026!"),
         ("collector.local", "metrics_collector", "Sup3rS3cret2026"),
@@ -1099,6 +1103,7 @@ def test_collect_stage_does_not_write_vulnerable_targets_without_output(
     assert not (tmp_path / "vulnerable_urls.txt").exists()
     assert not (tmp_path / "vulnerable_users.txt").exists()
     assert not (tmp_path / "vulnerable_pass.txt").exists()
+    assert not (tmp_path / "vulnerable_user_pass.txt").exists()
     assert not (tmp_path / "vulnerable_apikeys.txt").exists()
     assert not (tmp_path / "vulnerable_findings.md").exists()
 

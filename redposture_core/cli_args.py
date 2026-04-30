@@ -745,7 +745,7 @@ def _configure_kubeapi_parser(parser: argparse.ArgumentParser) -> None:
         dest="username",
         default=None,
         metavar="name",
-        help="Optional Kubernetes API username for Basic auth.",
+        help="Optional Kubernetes API username or credential file for Basic auth.",
     )
     auth.add_argument(
         "-p",
@@ -836,7 +836,7 @@ def _configure_consul_parser(parser: argparse.ArgumentParser) -> None:
         dest="username",
         default=None,
         metavar="name",
-        help="Basic auth username (for proxied/fronted Consul).",
+        help="Basic auth username or credential file (for proxied/fronted Consul).",
     )
     auth.add_argument(
         "-p",
@@ -1126,7 +1126,7 @@ def _configure_elastic_parser(parser: argparse.ArgumentParser) -> None:
         dest="username",
         default=None,
         metavar="name",
-        help="Basic auth username.",
+        help="Basic auth username or credential file.",
     )
     auth.add_argument(
         "-p",
@@ -1205,7 +1205,7 @@ def _configure_grpc_parser(parser: argparse.ArgumentParser) -> None:
         dest="username",
         default=None,
         metavar="name",
-        help="Basic auth username (use with -p).",
+        help="Basic auth username or credential file (use with -p for username-only files).",
     )
     auth.add_argument(
         "-p",
@@ -1372,7 +1372,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="username",
         default=None,
         metavar="name",
-        help="Optional Registry/Harbor/GitLab/Nexus username for Basic auth.",
+        help="Optional Registry/Harbor/GitLab/Nexus username or credential file for Basic auth.",
     )
     registry_auth.add_argument(
         "-p",
@@ -1546,7 +1546,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="username",
         default=None,
         metavar="name",
-        help="Optional Grafana username for credential check.",
+        help="Optional Grafana username or credential file for credential check.",
     )
     grafana_auth.add_argument(
         "-p",
@@ -1754,7 +1754,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="username",
         default=None,
         metavar="name",
-        help="Optional Postgres username for credential check.",
+        help="Optional Postgres username or credential file for credential check.",
     )
     postgres_auth.add_argument(
         "-p",
@@ -1894,7 +1894,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="username",
         default=None,
         metavar="name",
-        help="Optional ClickHouse username for credential check.",
+        help="Optional ClickHouse username or credential file for credential check.",
     )
     clickhouse_auth.add_argument(
         "-p",
@@ -2006,7 +2006,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="username",
         default=None,
         metavar="name",
-        help="Optional Redis username for credential check.",
+        help="Optional Redis username or credential file for credential check.",
     )
     redis_auth.add_argument(
         "-p",
@@ -2159,7 +2159,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="username",
         default=None,
         metavar="name",
-        help="Optional Kafka username for credential check (SASL/PLAIN).",
+        help="Optional Kafka username or credential file for credential check (SASL/PLAIN).",
     )
     kafka_auth.add_argument(
         "-p",
@@ -2245,7 +2245,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="username",
         default=None,
         metavar="name",
-        help="Optional ZooKeeper username for digest auth credential check.",
+        help="Optional ZooKeeper username or credential file for digest auth credential check.",
     )
     zookeeper_auth.add_argument(
         "-p",

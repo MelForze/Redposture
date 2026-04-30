@@ -96,6 +96,7 @@ def _write_vulnerable_targets_files(
     urls_path = os.path.join(base_dir, "vulnerable_urls.txt")
     users_path = os.path.join(base_dir, "vulnerable_users.txt")
     pass_path = os.path.join(base_dir, "vulnerable_pass.txt")
+    user_pass_path = os.path.join(base_dir, "vulnerable_user_pass.txt")
     api_keys_path = os.path.join(base_dir, "vulnerable_apikeys.txt")
     findings_path = os.path.join(base_dir, "vulnerable_findings.md")
     hosts, urls = validator.vulnerable_targets_from_shown_hits()
@@ -107,10 +108,12 @@ def _write_vulnerable_targets_files(
         _write_lines(ips_path, [row[0] for row in login_rows])
         _write_lines(users_path, [row[1] for row in login_rows])
         _write_lines(pass_path, [row[2] for row in login_rows])
+        _write_lines(user_pass_path, [f"{row[1]}:{row[2]}" for row in login_rows])
     else:
         _write_unique_lines(ips_path, hosts)
         _write_lines(users_path, [])
         _write_lines(pass_path, [])
+        _write_lines(user_pass_path, [])
     users: list[str] = []
     passwords: list[str] = []
     api_keys: list[str] = []

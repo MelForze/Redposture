@@ -16,7 +16,7 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import ProgressBar, iter_completed_with_progress
-from .utils import collect_scan_ports, collect_scan_targets, utc_now_iso
+from .utils import collect_scan_ports, collect_scan_targets, parse_username_password_credential_file, utc_now_iso
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -1057,9 +1057,19 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.retries < 0:
         console.error("--retries must be >= 0")
         return 2
-    if args.username and args.password is None:
+    try:
+        credential_file_entries = parse_username_password_credential_file(args.username, args.password)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
+    if credential_file_entries is None and args.username and args.password is None:
         console.error("--password is required when --username is set")
         return 2
+    credential_runs = (
+        [(entry.username, entry.password) for entry in credential_file_entries]
+        if credential_file_entries is not None
+        else [(args.username, args.password)]
+    )
     try:
         ports = collect_scan_ports(getattr(args, "ports", None))
     except ValueError as exc:
@@ -1111,7 +1121,9 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug and stream_to_stdout and args.output_format == "txt":
         mode_parts = ["count-keys"]
-        if args.defcreds:
+        if credential_file_entries is not None:
+            mode_parts.append(f"credfile={len(credential_file_entries)}")
+        elif args.defcreds:
             mode_parts.append("defcreds")
         if args.show_keys:
             mode_parts.append("show-keys")
@@ -1126,7 +1138,9 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         )
     if args.debug and not stream_to_stdout:
         mode_parts = ["count-keys"]
-        if args.defcreds:
+        if credential_file_entries is not None:
+            mode_parts.append(f"credfile={len(credential_file_entries)}")
+        elif args.defcreds:
             mode_parts.append("defcreds")
         if args.show_keys:
             mode_parts.append("show-keys")
@@ -1148,41 +1162,44 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     auth_required = 0
     failed = 0
     outer_progress: ProgressBar | None = None
-    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(ports) > 1
+    use_single_global_progress = (
+        stream_to_stdout and args.output_format == "txt" and (len(ports) > 1 or len(credential_runs) > 1)
+    )
     if use_single_global_progress:
-        outer_progress = ProgressBar("REDIS", len(hosts) * len(ports), enabled=True, leave=True)
+        outer_progress = ProgressBar("REDIS", len(hosts) * len(ports) * len(credential_runs), enabled=True, leave=True)
     try:
         for idx, audit_port in enumerate(ports):
-            part_total, part_open, part_weak, part_valid, part_auth, part_failed = audit_redis_targets(
-                hosts=hosts,
-                port=audit_port,
-                timeout=args.timeout,
-                retries=args.retries,
-                workers=args.workers,
-                username=args.username,
-                password=args.password,
-                defcreds=args.defcreds,
-                show_keys=args.show_keys,
-                dump_keys=dump_keys_flag,
-                query_key=args.key,
-                output_path=args.output,
-                output_format=args.output_format,
-                emit_line=emit_line,
-                logger=logger if args.debug else None,
-                append_output=idx > 0,
-                suppress_timeout_status_lines=not bool(args.debug),
-                suppress_connection_refused_status_lines=not bool(args.debug),
-                debug_emit=emit_debug if args.debug else None,
-                show_progress=not use_single_global_progress,
-            )
-            total += part_total
-            open_no_auth += part_open
-            weak += part_weak
-            valid += part_valid
-            auth_required += part_auth
-            failed += part_failed
-            if outer_progress is not None:
-                outer_progress.advance(part_total)
+            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
+                part_total, part_open, part_weak, part_valid, part_auth, part_failed = audit_redis_targets(
+                    hosts=hosts,
+                    port=audit_port,
+                    timeout=args.timeout,
+                    retries=args.retries,
+                    workers=args.workers,
+                    username=run_username,
+                    password=run_password,
+                    defcreds=args.defcreds if credential_file_entries is None else False,
+                    show_keys=args.show_keys,
+                    dump_keys=dump_keys_flag,
+                    query_key=args.key,
+                    output_path=args.output,
+                    output_format=args.output_format,
+                    emit_line=emit_line,
+                    logger=logger if args.debug else None,
+                    append_output=idx > 0 or cred_idx > 0,
+                    suppress_timeout_status_lines=not bool(args.debug),
+                    suppress_connection_refused_status_lines=not bool(args.debug),
+                    debug_emit=emit_debug if args.debug else None,
+                    show_progress=not use_single_global_progress,
+                )
+                total += part_total
+                open_no_auth += part_open
+                weak += part_weak
+                valid += part_valid
+                auth_required += part_auth
+                failed += part_failed
+                if outer_progress is not None:
+                    outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process redis output: {exc}")
         return 2

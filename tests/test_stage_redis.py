@@ -751,6 +751,68 @@ def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypa
     assert progress_advances == [1, 1, 1]
 
 
+def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    creds_file = tmp_path / "creds.txt"
+    creds_file.write_text("bad:bad\ngood:good\n", encoding="utf-8")
+    captured_calls: list[dict[str, object]] = []
+
+    def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        captured_calls.append(kwargs)
+        return (1, 0, 0, 1, 0, 0)
+
+    monkeypatch.setattr(redis_stage, "audit_redis_targets", fake_audit_redis_targets)
+    monkeypatch.setattr(redis_stage, "collect_scan_ports", lambda *_args, **_kwargs: [6379])
+    monkeypatch.setattr(redis_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+
+    progress_totals: list[int] = []
+    progress_advances: list[int] = []
+
+    class _FakeProgressBar:
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            progress_totals.append(int(total))
+
+        def advance(self, amount: int = 1) -> None:
+            progress_advances.append(int(amount))
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(redis_stage, "ProgressBar", _FakeProgressBar)
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=str(creds_file),
+        password=None,
+        defcreds=True,
+        show_keys=False,
+        dump=False,
+        key=None,
+        output=None,
+        output_format="txt",
+        port=6379,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+    )
+
+    rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
+
+    assert rc == 0
+    assert [(call["username"], call["password"]) for call in captured_calls] == [("bad", "bad"), ("good", "good")]
+    assert [call["defcreds"] for call in captured_calls] == [False, False]
+    assert [call["append_output"] for call in captured_calls] == [False, True]
+    assert [call["show_progress"] for call in captured_calls] == [False, False]
+    assert progress_totals == [2]
+    assert progress_advances == [1, 1]
+
+
 def test_call_audit_redis_host_with_stage_debug_adds_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_audit(*_args, **_kwargs):  # type: ignore[no-untyped-def]
         return {
