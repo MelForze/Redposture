@@ -15,6 +15,7 @@ from redposture_core.utils import (
     normalize_ip_literal,
     normalize_scan_host,
     parse_proxmox_api_token_auth,
+    parse_username_password_credential_file,
 )
 
 
@@ -189,3 +190,47 @@ def test_is_signature_compat_typeerror_positional_mismatch_toggle() -> None:
         )
         is True
     )
+
+
+def test_parse_username_password_credential_file_colon_mode(tmp_path: Path) -> None:
+    creds_file = tmp_path / "creds.txt"
+    creds_file.write_text("admin:secret\nuser:\nadmin:secret\n", encoding="utf-8")
+
+    creds = parse_username_password_credential_file(str(creds_file), None)
+
+    assert [(item.username, item.password, item.source) for item in creds or []] == [
+        ("admin", "secret", "file"),
+        ("user", "", "file"),
+    ]
+
+
+def test_parse_username_password_credential_file_username_only_mode(tmp_path: Path) -> None:
+    creds_file = tmp_path / "users.txt"
+    creds_file.write_text("admin\noperator\n", encoding="utf-8")
+
+    creds = parse_username_password_credential_file(str(creds_file), "shared")
+
+    assert [(item.username, item.password) for item in creds or []] == [("admin", "shared"), ("operator", "shared")]
+
+
+@pytest.mark.parametrize(
+    ("content", "password", "message"),
+    [
+        ("admin:secret\noperator\n", None, "mixed username"),
+        (":secret\n", None, "username must not be empty"),
+        ("admin\n", None, "-p/--password is required"),
+        ("admin:secret\n", "shared", "cannot be combined"),
+        ("\n# not a comment here?\n", None, "-p/--password is required"),
+    ],
+)
+def test_parse_username_password_credential_file_rejects_invalid_files(
+    tmp_path: Path,
+    content: str,
+    password: str | None,
+    message: str,
+) -> None:
+    creds_file = tmp_path / "bad.txt"
+    creds_file.write_text(content, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        parse_username_password_credential_file(str(creds_file), password)

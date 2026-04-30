@@ -26,6 +26,7 @@ from .utils import (
     collect_scan_ports,
     collect_scan_target_specs,
     is_signature_compat_typeerror,
+    parse_username_password_credential_file,
     utc_now_iso,
 )
 
@@ -3167,12 +3168,22 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.retries < 0:
         console.error("--retries must be >= 0")
         return 2
-    if bool(args.username) != bool(args.password):
+    try:
+        credential_file_entries = parse_username_password_credential_file(args.username, args.password)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
+    if credential_file_entries is None and bool(args.username) != bool(args.password):
         console.error("--username and --password must be set together")
         return 2
     if args.token and (args.username or args.password):
         console.error("use either --token or --username/--password, not both")
         return 2
+    credential_runs = (
+        [(entry.username, entry.password) for entry in credential_file_entries]
+        if credential_file_entries is not None
+        else [(args.username, args.password)]
+    )
     if args.show_tags and not str(args.repository or "").strip():
         console.error("--show-tags requires --repository")
         return 2
@@ -3259,7 +3270,9 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug and stream_to_stdout and args.output_format == "txt":
         mode_parts: list[str] = []
-        if args.username and args.password:
+        if credential_file_entries is not None:
+            mode_parts.append(f"credfile={len(credential_file_entries)}")
+        elif args.username and args.password:
             mode_parts.append("basic-auth")
         if args.token:
             mode_parts.append("bearer-token")
@@ -3297,7 +3310,9 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if args.debug and not stream_to_stdout:
         mode_parts = []
-        if args.username and args.password:
+        if credential_file_entries is not None:
+            mode_parts.append(f"credfile={len(credential_file_entries)}")
+        elif args.username and args.password:
             mode_parts.append("basic-auth")
         if args.token:
             mode_parts.append("bearer-token")
@@ -3341,54 +3356,57 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     not_registry = 0
     failed = 0
     outer_progress: ProgressBar | None = None
-    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+    use_single_global_progress = (
+        stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
+    )
     if use_single_global_progress:
-        global_total = sum(len(group.hosts) for group in execution_groups)
+        global_total = sum(len(group.hosts) for group in execution_groups) * len(credential_runs)
         outer_progress = ProgressBar("REGISTRY", global_total, enabled=True, leave=True)
     try:
         for idx, group in enumerate(execution_groups):
-            part_total, part_open, part_valid, part_auth, part_not_registry, part_failed = audit_registry_targets(
-                hosts=group.hosts,
-                port=group.port,
-                timeout=args.timeout,
-                retries=args.retries,
-                workers=args.workers,
-                username=args.username,
-                password=args.password,
-                token=args.token,
-                docker=args.docker,
-                show_images=args.images,
-                show_tags=args.show_tags,
-                repository=args.repository,
-                tag=args.tag,
-                metadata=args.metadata,
-                harbor=args.harbor,
-                gitlab=args.gitlab,
-                nexus=args.nexus,
-                assets=args.assets,
-                inspect=args.inspect,
-                image=args.image,
-                download=args.download,
-                download_dir=args.download_dir,
-                output_path=args.output,
-                output_format=args.output_format,
-                emit_line=emit_line,
-                logger=logger if args.debug else None,
-                console=console,
-                debug=args.debug,
-                append_output=idx > 0,
-                suppress_timeout_status_lines=not bool(args.debug),
-                debug_emit=emit_debug if args.debug else None,
-                show_progress=not use_single_global_progress,
-            )
-            total += part_total
-            open_no_auth += part_open
-            valid += part_valid
-            auth_required += part_auth
-            not_registry += part_not_registry
-            failed += part_failed
-            if outer_progress is not None:
-                outer_progress.advance(part_total)
+            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
+                part_total, part_open, part_valid, part_auth, part_not_registry, part_failed = audit_registry_targets(
+                    hosts=group.hosts,
+                    port=group.port,
+                    timeout=args.timeout,
+                    retries=args.retries,
+                    workers=args.workers,
+                    username=run_username,
+                    password=run_password,
+                    token=args.token,
+                    docker=args.docker,
+                    show_images=args.images,
+                    show_tags=args.show_tags,
+                    repository=args.repository,
+                    tag=args.tag,
+                    metadata=args.metadata,
+                    harbor=args.harbor,
+                    gitlab=args.gitlab,
+                    nexus=args.nexus,
+                    assets=args.assets,
+                    inspect=args.inspect,
+                    image=args.image,
+                    download=args.download,
+                    download_dir=args.download_dir,
+                    output_path=args.output,
+                    output_format=args.output_format,
+                    emit_line=emit_line,
+                    logger=logger if args.debug else None,
+                    console=console,
+                    debug=args.debug,
+                    append_output=idx > 0 or cred_idx > 0,
+                    suppress_timeout_status_lines=not bool(args.debug),
+                    debug_emit=emit_debug if args.debug else None,
+                    show_progress=not use_single_global_progress,
+                )
+                total += part_total
+                open_no_auth += part_open
+                valid += part_valid
+                auth_required += part_auth
+                not_registry += part_not_registry
+                failed += part_failed
+                if outer_progress is not None:
+                    outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process registry output: {exc}")
         return 2

@@ -29,6 +29,7 @@ from .utils import (
     collect_scan_ports,
     collect_scan_target_specs,
     is_signature_compat_typeerror,
+    parse_username_password_credential_file,
     utc_now_iso,
 )
 
@@ -3379,9 +3380,16 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.retries < 0:
         console.error("--retries must be >= 0")
         return 2
-    if bool(args.username) != bool(args.password):
-        console.error("-u and -p must be set together")
-        return 2
+    credential_file_entries = None
+    if not str(getattr(args, "apitoken", "") or "").strip():
+        try:
+            credential_file_entries = parse_username_password_credential_file(args.username, args.password)
+        except ValueError as exc:
+            console.error(str(exc))
+            return 2
+        if credential_file_entries is None and bool(args.username) != bool(args.password):
+            console.error("-u and -p must be set together")
+            return 2
 
     try:
         ports = collect_scan_ports(getattr(args, "ports", None))
@@ -3414,6 +3422,11 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.warn("--apitoken is set; basic credentials are ignored")
         username = None
         password = None
+    credential_runs = (
+        [(entry.username, entry.password) for entry in credential_file_entries]
+        if credential_file_entries is not None
+        else [(username, password)]
+    )
 
     show_endpoints = bool(getattr(args, "endpoints", False))
     show_plugins = bool(getattr(args, "plugins", False))
@@ -3450,6 +3463,8 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         mode_parts: list[str] = []
         if api_token:
             mode_parts.append("apikey")
+        elif credential_file_entries is not None:
+            mode_parts.append(f"credfile={len(credential_file_entries)}")
         elif username and password:
             mode_parts.append("basic")
         else:
@@ -3477,45 +3492,48 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     auth_required = 0
     failed = 0
     outer_progress: ProgressBar | None = None
-    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+    use_single_global_progress = (
+        stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
+    )
     if use_single_global_progress:
-        global_total = sum(len(group.hosts) for group in execution_groups)
+        global_total = sum(len(group.hosts) for group in execution_groups) * len(credential_runs)
         outer_progress = ProgressBar(_ELASTIC_TAG, global_total, enabled=True, leave=True)
 
     try:
         for idx, group in enumerate(execution_groups):
-            part_total, part_open, part_valid, part_auth, part_failed = audit_elastic_targets(
-                hosts=group.hosts,
-                port=group.port,
-                timeout=args.timeout,
-                retries=args.retries,
-                workers=args.workers,
-                username=username,
-                password=password,
-                api_token=api_token,
-                ca_file=getattr(args, "ca_file", None),
-                show_endpoints=show_endpoints,
-                show_plugins=show_plugins,
-                show_cluster=show_cluster,
-                show_users=show_users,
-                discover=discover,
-                output_path=args.output,
-                output_format=args.output_format,
-                emit_line=emit_line,
-                logger=logger if args.debug else None,
-                append_output=idx > 0,
-                suppress_timeout_status_lines=not bool(args.debug),
-                preferred_scheme=group.scheme_hint,
-                debug_emit=emit_debug if args.debug else None,
-                show_progress=not use_single_global_progress,
-            )
-            total += part_total
-            open_no_auth += part_open
-            valid += part_valid
-            auth_required += part_auth
-            failed += part_failed
-            if outer_progress is not None:
-                outer_progress.advance(part_total)
+            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
+                part_total, part_open, part_valid, part_auth, part_failed = audit_elastic_targets(
+                    hosts=group.hosts,
+                    port=group.port,
+                    timeout=args.timeout,
+                    retries=args.retries,
+                    workers=args.workers,
+                    username=run_username,
+                    password=run_password,
+                    api_token=api_token,
+                    ca_file=getattr(args, "ca_file", None),
+                    show_endpoints=show_endpoints,
+                    show_plugins=show_plugins,
+                    show_cluster=show_cluster,
+                    show_users=show_users,
+                    discover=discover,
+                    output_path=args.output,
+                    output_format=args.output_format,
+                    emit_line=emit_line,
+                    logger=logger if args.debug else None,
+                    append_output=idx > 0 or cred_idx > 0,
+                    suppress_timeout_status_lines=not bool(args.debug),
+                    preferred_scheme=group.scheme_hint,
+                    debug_emit=emit_debug if args.debug else None,
+                    show_progress=not use_single_global_progress,
+                )
+                total += part_total
+                open_no_auth += part_open
+                valid += part_valid
+                auth_required += part_auth
+                failed += part_failed
+                if outer_progress is not None:
+                    outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process elastic output: {exc}")
         return 2

@@ -28,7 +28,13 @@ from .console import Console
 from .logger import AttemptLogger
 from .progress import ProgressBar
 from .proto import grpc_health_pb2, grpc_reflection_pb2
-from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
+from .utils import (
+    build_scan_execution_groups,
+    collect_scan_ports,
+    collect_scan_target_specs,
+    parse_username_password_credential_file,
+    utc_now_iso,
+)
 
 _GRPC_TAG = "GRPC"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
@@ -2739,17 +2745,35 @@ def run_grpc_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.retries < 0:
         console.error("--retries must be >= 0")
         return 2
-    if bool(args.username) != bool(args.password):
-        console.error("-u and -p must be set together")
-        return 2
 
     token: str | None = getattr(args, "token", None)
     username: str | None = getattr(args, "username", None)
     password: str | None = getattr(args, "password", None)
+    credential_file_entries = None
     if token and (username or password):
         console.warn("--token takes precedence; provided -u/-p are ignored")
         username = None
         password = None
+    elif username is not None:
+        try:
+            credential_file_entries = parse_username_password_credential_file(username, password)
+        except ValueError as exc:
+            console.error(str(exc))
+            return 2
+        if credential_file_entries is None and bool(username) != bool(password):
+            console.error("-u and -p must be set together")
+            return 2
+        if credential_file_entries is not None:
+            username = credential_file_entries[0].username
+            password = credential_file_entries[0].password
+    elif bool(username) != bool(password):
+        console.error("-u and -p must be set together")
+        return 2
+    credential_runs = (
+        [(entry.username, entry.password) for entry in credential_file_entries]
+        if credential_file_entries is not None
+        else [(username, password)]
+    )
 
     try:
         metadata = _parse_metadata_items(getattr(args, "meta", None))
@@ -2814,6 +2838,8 @@ def run_grpc_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         mode_parts: list[str] = []
         if token:
             mode_parts.append("token")
+        if credential_file_entries is not None:
+            mode_parts.append(f"credfile={len(credential_file_entries)}")
         if username and password:
             mode_parts.append("basic")
         if args.defcreds:
@@ -2833,47 +2859,50 @@ def run_grpc_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     records: list[dict[str, Any]] = []
 
     outer_progress: ProgressBar | None = None
-    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+    use_single_global_progress = (
+        stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
+    )
     if use_single_global_progress:
-        global_total = sum(len(group.hosts) for group in execution_groups)
+        global_total = sum(len(group.hosts) for group in execution_groups) * len(credential_runs)
         outer_progress = ProgressBar(_GRPC_TAG, global_total, enabled=True, leave=True)
 
     try:
         for idx, group in enumerate(execution_groups):
-            part_total, part_open, part_valid, part_auth, part_not_grpc, part_failed = audit_grpc_targets(
-                hosts=group.hosts,
-                port=group.port,
-                timeout=args.timeout,
-                retries=args.retries,
-                workers=args.workers,
-                token=token,
-                username=username,
-                password=password,
-                defcreds=bool(args.defcreds),
-                output_path=args.output,
-                output_format=args.output_format,
-                emit_line=emit_line,
-                logger=logger if args.debug else None,
-                append_output=idx > 0,
-                suppress_timeout_status_lines=not bool(args.debug),
-                suppress_connection_refused_status_lines=not bool(args.debug),
-                preferred_scheme=group.scheme_hint,
-                debug_emit=emit_debug if args.debug else None,
-                show_progress=not use_single_global_progress,
-                schema_descriptor_bytes=explicit_descriptor_bytes,
-                invoke_path=getattr(args, "invoke", None),
-                invoke_request_json=invoke_request_json,
-                metadata=metadata,
-                record_sink=records,
-            )
-            total += part_total
-            open_no_auth += part_open
-            valid += part_valid
-            auth_required += part_auth
-            not_grpc += part_not_grpc
-            failed += part_failed
-            if outer_progress is not None:
-                outer_progress.advance(part_total)
+            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
+                part_total, part_open, part_valid, part_auth, part_not_grpc, part_failed = audit_grpc_targets(
+                    hosts=group.hosts,
+                    port=group.port,
+                    timeout=args.timeout,
+                    retries=args.retries,
+                    workers=args.workers,
+                    token=token,
+                    username=run_username,
+                    password=run_password,
+                    defcreds=bool(args.defcreds) if credential_file_entries is None else False,
+                    output_path=args.output,
+                    output_format=args.output_format,
+                    emit_line=emit_line,
+                    logger=logger if args.debug else None,
+                    append_output=idx > 0 or cred_idx > 0,
+                    suppress_timeout_status_lines=not bool(args.debug),
+                    suppress_connection_refused_status_lines=not bool(args.debug),
+                    preferred_scheme=group.scheme_hint,
+                    debug_emit=emit_debug if args.debug else None,
+                    show_progress=not use_single_global_progress,
+                    schema_descriptor_bytes=explicit_descriptor_bytes,
+                    invoke_path=getattr(args, "invoke", None),
+                    invoke_request_json=invoke_request_json,
+                    metadata=metadata,
+                    record_sink=records,
+                )
+                total += part_total
+                open_no_auth += part_open
+                valid += part_valid
+                auth_required += part_auth
+                not_grpc += part_not_grpc
+                failed += part_failed
+                if outer_progress is not None:
+                    outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process grpc output: {exc}")
         return 2

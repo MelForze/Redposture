@@ -110,7 +110,7 @@ Note:
 - `snmp_exporter` default is `9117`; `clickhouse_exporter` is `9116`.
 - Canonical defaults include overlap pairs (`node_exporter/haproxy_exporter` on `9101`, `snmp_exporter/apache_exporter` on `9117`); scan classification is content-based, not port-only.
 - In the lab compose these conflict exporters are exposed on special ports to avoid collisions: `haproxy_exporter -> 19101`, `apache_exporter -> 19119`.
-- `exporters collect -o <file>` writes `vulnerable_ips.txt`, `vulnerable_urls.txt`, `vulnerable_users.txt`, `vulnerable_pass.txt`, `vulnerable_apikeys.txt`, and `vulnerable_findings.md` next to the output file.
+- `exporters collect -o <file>` writes `vulnerable_ips.txt`, `vulnerable_urls.txt`, `vulnerable_users.txt`, `vulnerable_pass.txt`, `vulnerable_user_pass.txt`, `vulnerable_apikeys.txt`, and `vulnerable_findings.md` next to the output file.
 
 ```bash
 # Expanded lab matrix (standard + special + mirrors)
