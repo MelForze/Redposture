@@ -15,6 +15,67 @@ from .constants import HTTP_METHOD_PREFIXES
 _UNEXPECTED_KWARG_RE = re.compile(r"(?:got an )?unexpected keyword argument ['\"](?P<kw>[^'\"]+)['\"]")
 
 
+@dataclass(frozen=True)
+class UsernamePasswordCredential:
+    username: str
+    password: str
+    source: str = "file"
+
+
+def parse_username_password_credential_file(
+    username_value: str | None,
+    password_value: str | None,
+) -> list[UsernamePasswordCredential] | None:
+    """Parse -u/--username as a credential file when it points to an existing file."""
+
+    raw_username = str(username_value or "").strip()
+    if not raw_username or not os.path.isfile(raw_username):
+        return None
+
+    entries: list[tuple[str, str | None]] = []
+    has_colon = False
+    has_plain = False
+    with open(raw_username, encoding="utf-8") as fh:
+        for line_no, raw in enumerate(fh, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            if ":" in line:
+                has_colon = True
+                user, secret = line.split(":", 1)
+                user = user.strip()
+                if not user:
+                    raise ValueError(f"{raw_username}:{line_no}: username must not be empty")
+                entries.append((user, secret.strip()))
+            else:
+                has_plain = True
+                user = line.strip()
+                if not user:
+                    raise ValueError(f"{raw_username}:{line_no}: username must not be empty")
+                entries.append((user, None))
+
+    if not entries:
+        raise ValueError(f"{raw_username}: credential file is empty")
+    if has_colon and has_plain:
+        raise ValueError(f"{raw_username}: mixed username and username:password formats are not supported")
+    if has_colon and password_value is not None:
+        raise ValueError("-p/--password cannot be combined with username:password credential file")
+    if has_plain and password_value is None:
+        raise ValueError("-p/--password is required when -u points to a username-only file")
+
+    shared_password = "" if password_value is None else str(password_value)
+    result: list[UsernamePasswordCredential] = []
+    seen: set[tuple[str, str]] = set()
+    for username, password in entries:
+        secret = shared_password if password is None else password
+        key = (username, secret)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(UsernamePasswordCredential(username=username, password=secret))
+    return result
+
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 

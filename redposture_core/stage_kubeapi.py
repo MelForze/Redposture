@@ -28,6 +28,7 @@ from .utils import (
     collect_scan_ports,
     collect_scan_target_specs,
     is_signature_compat_typeerror,
+    parse_username_password_credential_file,
     utc_now_iso,
 )
 
@@ -2210,10 +2211,25 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     token = (getattr(args, "token", None) or "").strip() or None
     username = getattr(args, "username", None)
     password = getattr(args, "password", None)
+    credential_file_entries = None
     if token and (username is not None or password is not None):
         console.warn("--token is set; Basic auth credentials are ignored")
         username = None
         password = None
+    elif username is not None:
+        try:
+            credential_file_entries = parse_username_password_credential_file(username, password)
+        except ValueError as exc:
+            console.error(str(exc))
+            return 2
+        if credential_file_entries is not None:
+            username = credential_file_entries[0].username
+            password = credential_file_entries[0].password
+    credential_runs = (
+        [(entry.username, entry.password) for entry in credential_file_entries]
+        if credential_file_entries is not None
+        else [(username, password)]
+    )
 
     show_namespaces = bool(getattr(args, "namespaces", False))
     show_pods = bool(getattr(args, "pods", False))
@@ -2247,7 +2263,13 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.info(message)
 
     if args.debug and args.output_format == "txt":
-        target_auth = "token" if token else ("basic" if (username is not None or password is not None) else "none")
+        target_auth = (
+            "token"
+            if token
+            else f"credfile={len(credential_file_entries)}"
+            if credential_file_entries is not None
+            else ("basic" if (username is not None or password is not None) else "none")
+        )
         console.info(
             f"kubeapi audit started: hosts={len(hosts)} ports={len(execution_groups)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} https={args.https} insecure={args.insecure} "
@@ -2263,47 +2285,50 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     detected = 0
     failed = 0
     outer_progress: ProgressBar | None = None
-    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+    use_single_global_progress = (
+        stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
+    )
     if use_single_global_progress:
-        global_total = sum(len(group.hosts) for group in execution_groups)
+        global_total = sum(len(group.hosts) for group in execution_groups) * len(credential_runs)
         outer_progress = ProgressBar(_KUBE_TAG, global_total, enabled=True, leave=True)
     try:
         for idx, group in enumerate(execution_groups):
             group_use_https = bool(args.https)
             if group.scheme_hint in {"http", "https"}:
                 group_use_https = group.scheme_hint == "https"
-            part_total, part_detected, part_failed = audit_kubeapi_targets(
-                hosts=group.hosts,
-                port=group.port,
-                timeout=args.timeout,
-                retries=args.retries,
-                workers=args.workers,
-                use_https=group_use_https,
-                insecure=bool(args.insecure),
-                ca_file=getattr(args, "ca_file", None),
-                token=token,
-                username=username,
-                password=password,
-                show_namespaces=show_namespaces,
-                show_pods=show_pods,
-                show_secrets=show_secrets,
-                namespace_filters=namespace_filters,
-                exec_pod=exec_pod,
-                exec_command=exec_command,
-                output_path=args.output,
-                output_format=args.output_format,
-                emit_line=emit_line,
-                logger=logger if args.debug else None,
-                append_output=idx > 0,
-                suppress_timeout_status_lines=not bool(args.debug),
-                debug_emit=emit_debug if args.debug else None,
-                show_progress=not use_single_global_progress,
-            )
-            total += part_total
-            detected += part_detected
-            failed += part_failed
-            if outer_progress is not None:
-                outer_progress.advance(part_total)
+            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
+                part_total, part_detected, part_failed = audit_kubeapi_targets(
+                    hosts=group.hosts,
+                    port=group.port,
+                    timeout=args.timeout,
+                    retries=args.retries,
+                    workers=args.workers,
+                    use_https=group_use_https,
+                    insecure=bool(args.insecure),
+                    ca_file=getattr(args, "ca_file", None),
+                    token=token,
+                    username=run_username,
+                    password=run_password,
+                    show_namespaces=show_namespaces,
+                    show_pods=show_pods,
+                    show_secrets=show_secrets,
+                    namespace_filters=namespace_filters,
+                    exec_pod=exec_pod,
+                    exec_command=exec_command,
+                    output_path=args.output,
+                    output_format=args.output_format,
+                    emit_line=emit_line,
+                    logger=logger if args.debug else None,
+                    append_output=idx > 0 or cred_idx > 0,
+                    suppress_timeout_status_lines=not bool(args.debug),
+                    debug_emit=emit_debug if args.debug else None,
+                    show_progress=not use_single_global_progress,
+                )
+                total += part_total
+                detected += part_detected
+                failed += part_failed
+                if outer_progress is not None:
+                    outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process kubeapi output: {exc}")
         return 2
