@@ -25,6 +25,7 @@ from .utils import (
     build_scan_execution_groups,
     collect_scan_ports,
     collect_scan_target_specs,
+    filter_open_tcp_hosts_for_credential_file,
     is_signature_compat_typeerror,
     parse_username_password_credential_file,
     utc_now_iso,
@@ -3355,58 +3356,84 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     auth_required = 0
     not_registry = 0
     failed = 0
+    group_hosts_by_idx: dict[int, list[str]] = {idx: list(group.hosts) for idx, group in enumerate(execution_groups)}
+    if credential_file_entries is not None:
+        for idx, group in enumerate(execution_groups):
+            group_hosts_by_idx[idx] = filter_open_tcp_hosts_for_credential_file(
+                list(group.hosts),
+                int(group.port),
+                timeout=args.timeout,
+                workers=args.workers,
+                enabled=not bool(getattr(args, "proxy", None)),
+            )
+            if args.debug:
+                emit_debug(
+                    f"credential_prefilter port={int(group.port)} open={len(group_hosts_by_idx[idx])}/"
+                    f"{len(group.hosts)}"
+                )
     outer_progress: ProgressBar | None = None
     use_single_global_progress = (
         stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
     )
     if use_single_global_progress:
-        global_total = sum(len(group.hosts) for group in execution_groups) * len(credential_runs)
+        global_total = sum(len(group_hosts_by_idx[idx]) for idx, _group in enumerate(execution_groups)) * len(
+            credential_runs
+        )
         outer_progress = ProgressBar("REGISTRY", global_total, enabled=True, leave=True)
+    output_written = False
     try:
         for idx, group in enumerate(execution_groups):
-            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
-                part_total, part_open, part_valid, part_auth, part_not_registry, part_failed = audit_registry_targets(
-                    hosts=group.hosts,
-                    port=group.port,
-                    timeout=args.timeout,
-                    retries=args.retries,
-                    workers=args.workers,
-                    username=run_username,
-                    password=run_password,
-                    token=args.token,
-                    docker=args.docker,
-                    show_images=args.images,
-                    show_tags=args.show_tags,
-                    repository=args.repository,
-                    tag=args.tag,
-                    metadata=args.metadata,
-                    harbor=args.harbor,
-                    gitlab=args.gitlab,
-                    nexus=args.nexus,
-                    assets=args.assets,
-                    inspect=args.inspect,
-                    image=args.image,
-                    download=args.download,
-                    download_dir=args.download_dir,
-                    output_path=args.output,
-                    output_format=args.output_format,
-                    emit_line=emit_line,
-                    logger=logger if args.debug else None,
-                    console=console,
-                    debug=args.debug,
-                    append_output=idx > 0 or cred_idx > 0,
-                    suppress_timeout_status_lines=not bool(args.debug),
-                    debug_emit=emit_debug if args.debug else None,
-                    show_progress=not use_single_global_progress,
-                )
-                total += part_total
-                open_no_auth += part_open
-                valid += part_valid
-                auth_required += part_auth
-                not_registry += part_not_registry
-                failed += part_failed
-                if outer_progress is not None:
-                    outer_progress.advance(part_total)
+            audit_hosts = group_hosts_by_idx[idx]
+            if not audit_hosts:
+                continue
+            host_batches = [[host] for host in audit_hosts] if credential_file_entries is not None else [audit_hosts]
+            for host_batch in host_batches:
+                for run_username, run_password in credential_runs:
+                    part_total, part_open, part_valid, part_auth, part_not_registry, part_failed = (
+                        audit_registry_targets(
+                            hosts=host_batch,
+                            port=group.port,
+                            timeout=args.timeout,
+                            retries=args.retries,
+                            workers=args.workers,
+                            username=run_username,
+                            password=run_password,
+                            token=args.token,
+                            docker=args.docker,
+                            show_images=args.images,
+                            show_tags=args.show_tags,
+                            repository=args.repository,
+                            tag=args.tag,
+                            metadata=args.metadata,
+                            harbor=args.harbor,
+                            gitlab=args.gitlab,
+                            nexus=args.nexus,
+                            assets=args.assets,
+                            inspect=args.inspect,
+                            image=args.image,
+                            download=args.download,
+                            download_dir=args.download_dir,
+                            output_path=args.output,
+                            output_format=args.output_format,
+                            emit_line=emit_line,
+                            logger=logger if args.debug else None,
+                            console=console,
+                            debug=args.debug,
+                            append_output=output_written,
+                            suppress_timeout_status_lines=not bool(args.debug),
+                            debug_emit=emit_debug if args.debug else None,
+                            show_progress=not use_single_global_progress,
+                        )
+                    )
+                    total += part_total
+                    open_no_auth += part_open
+                    valid += part_valid
+                    auth_required += part_auth
+                    not_registry += part_not_registry
+                    failed += part_failed
+                    if outer_progress is not None:
+                        outer_progress.advance(part_total)
+                    output_written = True
     except OSError as exc:
         console.error(f"failed to process registry output: {exc}")
         return 2

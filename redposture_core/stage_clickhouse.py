@@ -23,6 +23,7 @@ from .progress import ProgressBar
 from .utils import (
     collect_scan_ports,
     collect_scan_targets,
+    filter_open_tcp_hosts_for_credential_file,
     is_signature_compat_typeerror,
     parse_username_password_credential_file,
     utc_now_iso,
@@ -2655,57 +2656,85 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
     valid = 0
     auth_required = 0
     failed = 0
+    hosts_by_port_protocol: dict[tuple[int, str], list[str]] = {
+        (int(port), str(protocol)): list(hosts) for port, protocol in port_protocols
+    }
+    if credential_file_entries is not None:
+        for group_port, group_protocol in port_protocols:
+            key = (int(group_port), str(group_protocol))
+            hosts_by_port_protocol[key] = filter_open_tcp_hosts_for_credential_file(
+                hosts,
+                int(group_port),
+                timeout=args.timeout,
+                workers=args.workers,
+            )
+            if args.debug:
+                emit_debug(
+                    f"credential_prefilter port={int(group_port)} protocol={group_protocol} "
+                    f"open={len(hosts_by_port_protocol[key])}/{len(hosts)}"
+                )
     outer_progress: ProgressBar | None = None
     use_single_global_progress = (
         stream_to_stdout and args.output_format == "txt" and (len(port_protocols) > 1 or len(credential_runs) > 1)
     )
     if use_single_global_progress:
         outer_progress = ProgressBar(
-            "CLICKHOUSE", len(hosts) * len(port_protocols) * len(credential_runs), enabled=True, leave=True
+            "CLICKHOUSE",
+            sum(len(hosts_by_port_protocol[(int(port), str(protocol))]) for port, protocol in port_protocols)
+            * len(credential_runs),
+            enabled=True,
+            leave=True,
         )
 
+    output_written = False
     try:
-        for idx, (group_port, group_protocol) in enumerate(port_protocols):
-            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
-                run_effective_username = run_username
-                if run_password is not None and not run_effective_username:
-                    run_effective_username = "default"
-                part_total, part_open, part_weak, part_valid, part_auth, part_failed = audit_clickhouse_targets(
-                    hosts=hosts,
-                    port=int(group_port),
-                    timeout=args.timeout,
-                    retries=args.retries,
-                    workers=args.workers,
-                    username=run_effective_username,
-                    password=run_password,
-                    defcreds=args.defcreds if credential_file_entries is None else False,
-                    database=args.database,
-                    protocol=str(group_protocol),
-                    show_databases=args.show_databases,
-                    show_tables=args.show_tables,
-                    show_columns=show_columns,
-                    table_targets=table_targets,
-                    table_columns=table_columns,
-                    dump_table_rows=dump_table_rows,
-                    execute_command=execute_command,
-                    sql_command=sql_command,
-                    output_path=args.output,
-                    output_format=args.output_format,
-                    emit_line=emit_line,
-                    logger=logger if args.debug else None,
-                    append_output=idx > 0 or cred_idx > 0,
-                    suppress_timeout_status_lines=not bool(args.debug),
-                    debug_emit=emit_debug if args.debug else None,
-                    show_progress=not use_single_global_progress,
-                )
-                total += part_total
-                open_no_auth += part_open
-                weak += part_weak
-                valid += part_valid
-                auth_required += part_auth
-                failed += part_failed
-                if outer_progress is not None:
-                    outer_progress.advance(part_total)
+        for group_port, group_protocol in port_protocols:
+            audit_hosts = hosts_by_port_protocol[(int(group_port), str(group_protocol))]
+            if not audit_hosts:
+                continue
+            host_batches = [[host] for host in audit_hosts] if credential_file_entries is not None else [audit_hosts]
+            for host_batch in host_batches:
+                for run_username, run_password in credential_runs:
+                    run_effective_username = run_username
+                    if run_password is not None and not run_effective_username:
+                        run_effective_username = "default"
+                    part_total, part_open, part_weak, part_valid, part_auth, part_failed = audit_clickhouse_targets(
+                        hosts=host_batch,
+                        port=int(group_port),
+                        timeout=args.timeout,
+                        retries=args.retries,
+                        workers=args.workers,
+                        username=run_effective_username,
+                        password=run_password,
+                        defcreds=args.defcreds if credential_file_entries is None else False,
+                        database=args.database,
+                        protocol=str(group_protocol),
+                        show_databases=args.show_databases,
+                        show_tables=args.show_tables,
+                        show_columns=show_columns,
+                        table_targets=table_targets,
+                        table_columns=table_columns,
+                        dump_table_rows=dump_table_rows,
+                        execute_command=execute_command,
+                        sql_command=sql_command,
+                        output_path=args.output,
+                        output_format=args.output_format,
+                        emit_line=emit_line,
+                        logger=logger if args.debug else None,
+                        append_output=output_written,
+                        suppress_timeout_status_lines=not bool(args.debug),
+                        debug_emit=emit_debug if args.debug else None,
+                        show_progress=not use_single_global_progress,
+                    )
+                    total += part_total
+                    open_no_auth += part_open
+                    weak += part_weak
+                    valid += part_valid
+                    auth_required += part_auth
+                    failed += part_failed
+                    if outer_progress is not None:
+                        outer_progress.advance(part_total)
+                    output_written = True
     except OSError as exc:
         console.error(f"failed to process clickhouse output: {exc}")
         return 2

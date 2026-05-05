@@ -210,6 +210,20 @@ def test_kafka_error_helpers_and_format_record_statuses() -> None:
     assert "[!] connection failed err=boom" in kafka._format_record({**base, "status": "fail", "error": "boom"}, "txt")
 
 
+def test_kafka_default_credential_runs_are_exact_and_deduplicated() -> None:
+    assert kafka._build_credential_runs(None, None, True) == [
+        ("admin", "admin"),
+        ("kafka", "kafka"),
+        ("kafka", "password"),
+    ]
+    assert kafka._build_credential_runs("kafka", "kafka", True) == [
+        ("kafka", "kafka"),
+        ("admin", "admin"),
+        ("kafka", "password"),
+    ]
+    assert kafka._build_credential_runs(None, None, False) == [(None, None)]
+
+
 def test_kafka_frame_reader_and_request_helpers_cover_edge_cases() -> None:
     assert kafka._friendly_error_text("[Errno 61] Connection refused") == (
         "connection refused (service is not listening on target port)"
@@ -705,6 +719,41 @@ def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypa
     assert [bool(call["show_progress"]) for call in captured] == [False, False, False]
     assert progress_totals == [3]
     assert progress_advances == [1, 1, 1]
+
+
+def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
+    monkeypatch.setattr(kafka, "collect_scan_ports", lambda *_args, **_kwargs: [9092])
+    monkeypatch.setattr(kafka, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+
+    captured: list[tuple[str | None, str | None]] = []
+
+    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+        captured.append((kwargs["username"], kwargs["password"]))
+        return 1, 0, 0, 1, 0
+
+    class _FakeProgressBar:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def advance(self, _amount: int = 1) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(kafka, "audit_kafka_targets", fake_audit_targets)
+    monkeypatch.setattr(kafka, "ProgressBar", _FakeProgressBar)
+
+    rc = kafka.run_kafka_stage(_kafka_args(defcreds=True), logger=object())  # type: ignore[arg-type]
+
+    assert rc == 0
+    assert captured == [
+        ("admin", "admin"),
+        ("kafka", "kafka"),
+        ("kafka", "password"),
+    ]
 
 
 def test_run_kafka_stage_txt_emit_line_and_error_path(

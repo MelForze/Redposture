@@ -6,6 +6,8 @@ import base64
 import ipaddress
 import os
 import re
+import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -440,3 +442,45 @@ def collect_scan_ports(ports: str | None) -> list[int]:
         _consume_token(token)
 
     return unique
+
+
+def filter_open_tcp_hosts_for_credential_file(
+    hosts: list[str],
+    port: int,
+    *,
+    timeout: float,
+    workers: int,
+    enabled: bool = True,
+) -> list[str]:
+    """Return hosts with an open TCP port before credential-file auth loops.
+
+    Credential files can contain many pairs. Without this prefilter every pair
+    repeats the same closed-port scan across the full target set. The helper is
+    intentionally TCP-only and fail-closed per host; modules should disable it
+    when a proxy transport must be honored.
+    """
+
+    if not enabled or not hosts:
+        return list(hosts)
+
+    indexed_hosts = list(enumerate(hosts))
+    open_by_index: dict[int, str] = {}
+
+    def _probe(host: str) -> bool:
+        try:
+            with socket.create_connection((host, int(port)), timeout=max(0.1, float(timeout))):
+                return True
+        except OSError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=max(1, int(workers))) as executor:
+        future_map = {executor.submit(_probe, host): (idx, host) for idx, host in indexed_hosts}
+        for future in as_completed(future_map):
+            idx, host = future_map[future]
+            try:
+                if bool(future.result()):
+                    open_by_index[idx] = host
+            except OSError:
+                continue
+
+    return [open_by_index[idx] for idx, _host in indexed_hosts if idx in open_by_index]

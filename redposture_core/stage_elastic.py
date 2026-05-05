@@ -28,6 +28,7 @@ from .utils import (
     build_scan_execution_groups,
     collect_scan_ports,
     collect_scan_target_specs,
+    filter_open_tcp_hosts_for_credential_file,
     is_signature_compat_typeerror,
     parse_username_password_credential_file,
     utc_now_iso,
@@ -101,6 +102,11 @@ _COMMON_ENDPOINT_PROBES = (
     "/_ingest/pipeline",
     "/_remote/info",
 )
+_ELASTIC_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
+    ("elastic", "changeme"),
+    ("elastic", "elastic"),
+    ("elastic", "password"),
+)
 
 
 def _clip(text: str, width: int = 96) -> str:
@@ -113,6 +119,27 @@ def _clip(text: str, width: int = 96) -> str:
 
 def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
+
+
+def _build_credential_runs(
+    username: str | None,
+    password: str | None,
+    defcreds: bool,
+) -> list[tuple[str | None, str | None]]:
+    runs: list[tuple[str | None, str | None]] = []
+    seen: set[tuple[str | None, str | None]] = set()
+    if username is not None and password is not None:
+        pair = (username, password)
+        runs.append(pair)
+        seen.add(pair)
+    if defcreds:
+        for user, secret in _ELASTIC_DEFAULT_CREDENTIALS:
+            pair = (user, secret)
+            if pair in seen:
+                continue
+            runs.append(pair)
+            seen.add(pair)
+    return runs or [(username, password)]
 
 
 def _get_thread_debug_emitter() -> Callable[[str], None] | None:
@@ -3422,10 +3449,11 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.warn("--apitoken is set; basic credentials are ignored")
         username = None
         password = None
+    defcreds = bool(getattr(args, "defcreds", False))
     credential_runs = (
         [(entry.username, entry.password) for entry in credential_file_entries]
         if credential_file_entries is not None
-        else [(username, password)]
+        else _build_credential_runs(username, password, defcreds if api_token is None else False)
     )
 
     show_endpoints = bool(getattr(args, "endpoints", False))
@@ -3467,6 +3495,8 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append(f"credfile={len(credential_file_entries)}")
         elif username and password:
             mode_parts.append("basic")
+        elif defcreds and api_token is None:
+            mode_parts.append("defcreds")
         else:
             mode_parts.append("anonymous")
         if show_endpoints:
@@ -3491,49 +3521,77 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     valid = 0
     auth_required = 0
     failed = 0
+    group_hosts_by_idx: dict[int, list[str]] = {idx: list(group.hosts) for idx, group in enumerate(execution_groups)}
+    if credential_file_entries is not None:
+        for idx, group in enumerate(execution_groups):
+            group_hosts_by_idx[idx] = filter_open_tcp_hosts_for_credential_file(
+                list(group.hosts),
+                int(group.port),
+                timeout=args.timeout,
+                workers=args.workers,
+                enabled=not bool(getattr(args, "proxy", None)),
+            )
+            if args.debug:
+                emit_debug(
+                    f"credential_prefilter port={int(group.port)} open={len(group_hosts_by_idx[idx])}/"
+                    f"{len(group.hosts)}"
+                )
     outer_progress: ProgressBar | None = None
     use_single_global_progress = (
         stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
     )
     if use_single_global_progress:
-        global_total = sum(len(group.hosts) for group in execution_groups) * len(credential_runs)
+        global_total = sum(len(group_hosts_by_idx[idx]) for idx, _group in enumerate(execution_groups)) * len(
+            credential_runs
+        )
         outer_progress = ProgressBar(_ELASTIC_TAG, global_total, enabled=True, leave=True)
 
+    output_written = False
     try:
         for idx, group in enumerate(execution_groups):
-            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
-                part_total, part_open, part_valid, part_auth, part_failed = audit_elastic_targets(
-                    hosts=group.hosts,
-                    port=group.port,
-                    timeout=args.timeout,
-                    retries=args.retries,
-                    workers=args.workers,
-                    username=run_username,
-                    password=run_password,
-                    api_token=api_token,
-                    ca_file=getattr(args, "ca_file", None),
-                    show_endpoints=show_endpoints,
-                    show_plugins=show_plugins,
-                    show_cluster=show_cluster,
-                    show_users=show_users,
-                    discover=discover,
-                    output_path=args.output,
-                    output_format=args.output_format,
-                    emit_line=emit_line,
-                    logger=logger if args.debug else None,
-                    append_output=idx > 0 or cred_idx > 0,
-                    suppress_timeout_status_lines=not bool(args.debug),
-                    preferred_scheme=group.scheme_hint,
-                    debug_emit=emit_debug if args.debug else None,
-                    show_progress=not use_single_global_progress,
-                )
-                total += part_total
-                open_no_auth += part_open
-                valid += part_valid
-                auth_required += part_auth
-                failed += part_failed
-                if outer_progress is not None:
-                    outer_progress.advance(part_total)
+            audit_hosts = group_hosts_by_idx[idx]
+            if not audit_hosts:
+                continue
+            host_batches = [[host] for host in audit_hosts] if len(credential_runs) > 1 else [audit_hosts]
+            for host_batch in host_batches:
+                deep_already_emitted = False
+                for run_username, run_password in credential_runs:
+                    run_show_deep = not deep_already_emitted
+                    part_total, part_open, part_valid, part_auth, part_failed = audit_elastic_targets(
+                        hosts=host_batch,
+                        port=group.port,
+                        timeout=args.timeout,
+                        retries=args.retries,
+                        workers=args.workers,
+                        username=run_username,
+                        password=run_password,
+                        api_token=api_token,
+                        ca_file=getattr(args, "ca_file", None),
+                        show_endpoints=show_endpoints and run_show_deep,
+                        show_plugins=show_plugins and run_show_deep,
+                        show_cluster=show_cluster and run_show_deep,
+                        show_users=show_users and run_show_deep,
+                        discover=discover and run_show_deep,
+                        output_path=args.output,
+                        output_format=args.output_format,
+                        emit_line=emit_line,
+                        logger=logger if args.debug else None,
+                        append_output=output_written,
+                        suppress_timeout_status_lines=not bool(args.debug),
+                        preferred_scheme=group.scheme_hint,
+                        debug_emit=emit_debug if args.debug else None,
+                        show_progress=not use_single_global_progress,
+                    )
+                    total += part_total
+                    open_no_auth += part_open
+                    valid += part_valid
+                    auth_required += part_auth
+                    failed += part_failed
+                    if outer_progress is not None:
+                        outer_progress.advance(part_total)
+                    if part_open > 0 or part_valid > 0:
+                        deep_already_emitted = True
+                    output_written = True
     except OSError as exc:
         console.error(f"failed to process elastic output: {exc}")
         return 2

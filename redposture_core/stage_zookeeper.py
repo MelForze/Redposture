@@ -24,6 +24,7 @@ from .progress import ProgressBar
 from .utils import (
     collect_scan_ports,
     collect_scan_targets,
+    filter_open_tcp_hosts_for_credential_file,
     is_signature_compat_typeerror,
     parse_username_password_credential_file,
     utc_now_iso,
@@ -2857,47 +2858,71 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     auth_required = 0
     failed = 0
     debug_stats: dict[str, Any] = {}
+    hosts_by_port: dict[int, list[str]] = {int(port): list(hosts) for port in ports}
+    if credential_file_entries is not None:
+        for audit_port in ports:
+            hosts_by_port[int(audit_port)] = filter_open_tcp_hosts_for_credential_file(
+                hosts,
+                int(audit_port),
+                timeout=args.timeout,
+                workers=args.workers,
+            )
+            if args.debug:
+                emit_debug(
+                    f"credential_prefilter port={int(audit_port)} open={len(hosts_by_port[int(audit_port)])}/"
+                    f"{len(hosts)}"
+                )
     outer_progress: ProgressBar | None = None
     use_single_global_progress = (
         stream_to_stdout and args.output_format == "txt" and (len(ports) > 1 or len(credential_runs) > 1)
     )
     if use_single_global_progress:
         outer_progress = ProgressBar(
-            "ZOOKEEPER", len(hosts) * len(ports) * len(credential_runs), enabled=True, leave=True
+            "ZOOKEEPER",
+            sum(len(hosts_by_port[int(port)]) for port in ports) * len(credential_runs),
+            enabled=True,
+            leave=True,
         )
+    output_written = False
     try:
-        for idx, audit_port in enumerate(ports):
-            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
-                part_total, part_open, part_valid, part_auth, part_failed = audit_zookeeper_targets(
-                    hosts=hosts,
-                    port=audit_port,
-                    timeout=args.timeout,
-                    retries=args.retries,
-                    workers=args.workers,
-                    username=run_username,
-                    password=run_password,
-                    show_znodes=show_znodes,
-                    dump=dump,
-                    query_znode=query_znode,
-                    max_znodes=args.max_znodes,
-                    output_path=args.output,
-                    output_format=args.output_format,
-                    emit_line=emit_line,
-                    logger=logger if args.debug else None,
-                    append_output=idx > 0 or cred_idx > 0,
-                    suppress_connection_refused_status_lines=not bool(args.debug),
-                    debug_emit=emit_debug if args.debug else None,
-                    debug_stats=debug_stats if args.debug else None,
-                    enum_workers=enum_workers,
-                    show_progress=not use_single_global_progress,
-                )
-                total += part_total
-                open_no_auth += part_open
-                valid += part_valid
-                auth_required += part_auth
-                failed += part_failed
-                if outer_progress is not None:
-                    outer_progress.advance(part_total)
+        for audit_port in ports:
+            audit_hosts = hosts_by_port[int(audit_port)]
+            if not audit_hosts:
+                continue
+            host_batches = [[host] for host in audit_hosts] if credential_file_entries is not None else [audit_hosts]
+            for host_batch in host_batches:
+                for run_username, run_password in credential_runs:
+                    part_total, part_open, part_valid, part_auth, part_failed = audit_zookeeper_targets(
+                        hosts=host_batch,
+                        port=audit_port,
+                        timeout=args.timeout,
+                        retries=args.retries,
+                        workers=args.workers,
+                        username=run_username,
+                        password=run_password,
+                        show_znodes=show_znodes,
+                        dump=dump,
+                        query_znode=query_znode,
+                        max_znodes=args.max_znodes,
+                        output_path=args.output,
+                        output_format=args.output_format,
+                        emit_line=emit_line,
+                        logger=logger if args.debug else None,
+                        append_output=output_written,
+                        suppress_connection_refused_status_lines=not bool(args.debug),
+                        debug_emit=emit_debug if args.debug else None,
+                        debug_stats=debug_stats if args.debug else None,
+                        enum_workers=enum_workers,
+                        show_progress=not use_single_global_progress,
+                    )
+                    total += part_total
+                    open_no_auth += part_open
+                    valid += part_valid
+                    auth_required += part_auth
+                    failed += part_failed
+                    if outer_progress is not None:
+                        outer_progress.advance(part_total)
+                    output_written = True
     except OSError as exc:
         console.error(f"failed to process zookeeper output: {exc}")
         return 2

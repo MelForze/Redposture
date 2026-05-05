@@ -44,6 +44,20 @@ def test_elastic_headers_prefer_apikey_over_basic() -> None:
     assert basic_headers["Authorization"].startswith("Basic ")
 
 
+def test_elastic_default_credential_runs_are_exact_and_deduplicated() -> None:
+    assert elastic_stage._build_credential_runs(None, None, True) == [
+        ("elastic", "changeme"),
+        ("elastic", "elastic"),
+        ("elastic", "password"),
+    ]
+    assert elastic_stage._build_credential_runs("elastic", "elastic", True) == [
+        ("elastic", "elastic"),
+        ("elastic", "changeme"),
+        ("elastic", "password"),
+    ]
+    assert elastic_stage._build_credential_runs(None, None, False) == [(None, None)]
+
+
 def test_detect_and_discover_helpers() -> None:
     payload = b'{"version":{"number":"8.12.1"},"tagline":"You Know, for Search"}'
     looks_like, version = _looks_like_elastic_root(200, payload, {"X-Elastic-Product": "Elasticsearch"})
@@ -1205,6 +1219,7 @@ def test_run_elastic_stage_validation_and_apikey_precedence(monkeypatch: pytest.
         workers=1,
         insecure=False,
         ca_file=None,
+        defcreds=False,
     )
     rc = run_elastic_stage(args_bad_pair, logger=SimpleNamespace(log=lambda *a, **k: None))
     assert rc == 2
@@ -1239,6 +1254,7 @@ def test_run_elastic_stage_validation_and_apikey_precedence(monkeypatch: pytest.
         workers=1,
         insecure=False,
         ca_file=None,
+        defcreds=True,
     )
 
     rc = run_elastic_stage(args, logger=SimpleNamespace(log=lambda *a, **k: None))
@@ -1247,6 +1263,61 @@ def test_run_elastic_stage_validation_and_apikey_precedence(monkeypatch: pytest.
     assert captured["password"] is None
     assert captured["api_token"] == "ZXM6bGFiLXRva2Vu"
     assert captured["show_plugins"] is False
+
+
+def test_run_elastic_stage_defcreds_expands_default_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[tuple[str | None, str | None]] = []
+
+    def fake_audit_targets(**kwargs):
+        captured.append((kwargs["username"], kwargs["password"]))
+        return 1, 0, 0, 1, 0
+
+    class _FakeProgressBar:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def advance(self, _amount: int = 1) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(elastic_stage, "audit_elastic_targets", fake_audit_targets)
+    monkeypatch.setattr(elastic_stage, "ProgressBar", _FakeProgressBar)
+
+    args = SimpleNamespace(
+        timeout=1.0,
+        retries=0,
+        port=9200,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        username=None,
+        password=None,
+        apitoken=None,
+        endpoints=False,
+        plugins=False,
+        cluster=False,
+        user=False,
+        discover=False,
+        output=None,
+        output_format="txt",
+        debug=False,
+        workers=1,
+        ca_file=None,
+        defcreds=True,
+        proxy=None,
+    )
+
+    rc = run_elastic_stage(args, logger=SimpleNamespace(log=lambda *a, **k: None))
+
+    assert rc == 0
+    assert captured == [
+        ("elastic", "changeme"),
+        ("elastic", "elastic"),
+        ("elastic", "password"),
+    ]
 
 
 def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
