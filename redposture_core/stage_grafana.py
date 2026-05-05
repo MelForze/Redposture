@@ -25,6 +25,7 @@ from .utils import (
     build_scan_execution_groups,
     collect_scan_ports,
     collect_scan_target_specs,
+    filter_open_tcp_hosts_for_credential_file,
     parse_username_password_credential_file,
     utc_now_iso,
 )
@@ -576,7 +577,7 @@ def _build_credential_candidates(
         candidates.append((user, password, "provided"))
         seen.add(pair)
     if defcreds:
-        defaults = (("admin", "admin"), ("admin", "prom-operator"))
+        defaults = (("admin", "admin"),)
         for user, secret in defaults:
             pair = (user, secret)
             if pair in seen:
@@ -1582,41 +1583,65 @@ def run_grafana_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     valid = 0
     auth_required = 0
     failed = 0
+    group_hosts_by_idx: dict[int, list[str]] = {idx: list(group.hosts) for idx, group in enumerate(execution_groups)}
+    if credential_file_entries is not None:
+        for idx, group in enumerate(execution_groups):
+            group_hosts_by_idx[idx] = filter_open_tcp_hosts_for_credential_file(
+                list(group.hosts),
+                int(group.port),
+                timeout=args.timeout,
+                workers=args.workers,
+                enabled=not bool(getattr(args, "proxy", None)),
+            )
+            if args.debug:
+                emit_debug(
+                    f"credential_prefilter port={int(group.port)} open={len(group_hosts_by_idx[idx])}/"
+                    f"{len(group.hosts)}"
+                )
     progress_bar: ProgressBar | None = None
     group_progress_enabled = len(execution_groups) <= 1 and len(credential_runs) <= 1
     if not group_progress_enabled and stream_to_stdout and args.output_format == "txt":
-        total_targets = sum(len(group.hosts) for group in execution_groups) * len(credential_runs)
+        total_targets = sum(len(group_hosts_by_idx[idx]) for idx, _group in enumerate(execution_groups)) * len(
+            credential_runs
+        )
         progress_bar = ProgressBar("GRAFANA", total_targets, leave=True)
+    output_written = False
     try:
         for idx, group in enumerate(execution_groups):
-            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
-                part_total, part_open, part_valid, part_auth, part_failed = audit_grafana_targets(
-                    hosts=group.hosts,
-                    port=group.port,
-                    timeout=args.timeout,
-                    retries=args.retries,
-                    workers=args.workers,
-                    username=run_username,
-                    password=run_password,
-                    defcreds=args.defcreds if credential_file_entries is None else False,
-                    check_urls=check_urls,
-                    show_datasources=args.show_datasources,
-                    output_path=args.output,
-                    output_format=args.output_format,
-                    emit_line=emit_line,
-                    logger=logger if args.debug else None,
-                    append_output=idx > 0 or cred_idx > 0,
-                    suppress_timeout_status_lines=not bool(args.debug),
-                    show_progress=group_progress_enabled,
-                    debug_emit=emit_debug if args.debug else None,
-                )
-                total += part_total
-                open_no_auth += part_open
-                valid += part_valid
-                auth_required += part_auth
-                failed += part_failed
-                if progress_bar is not None and part_total > 0:
-                    progress_bar.advance(part_total)
+            audit_hosts = group_hosts_by_idx[idx]
+            if not audit_hosts:
+                continue
+            host_batches = [[host] for host in audit_hosts] if credential_file_entries is not None else [audit_hosts]
+            for host_batch in host_batches:
+                for run_username, run_password in credential_runs:
+                    part_total, part_open, part_valid, part_auth, part_failed = audit_grafana_targets(
+                        hosts=host_batch,
+                        port=group.port,
+                        timeout=args.timeout,
+                        retries=args.retries,
+                        workers=args.workers,
+                        username=run_username,
+                        password=run_password,
+                        defcreds=args.defcreds if credential_file_entries is None else False,
+                        check_urls=check_urls,
+                        show_datasources=args.show_datasources,
+                        output_path=args.output,
+                        output_format=args.output_format,
+                        emit_line=emit_line,
+                        logger=logger if args.debug else None,
+                        append_output=output_written,
+                        suppress_timeout_status_lines=not bool(args.debug),
+                        show_progress=group_progress_enabled,
+                        debug_emit=emit_debug if args.debug else None,
+                    )
+                    total += part_total
+                    open_no_auth += part_open
+                    valid += part_valid
+                    auth_required += part_auth
+                    failed += part_failed
+                    if progress_bar is not None and part_total > 0:
+                        progress_bar.advance(part_total)
+                    output_written = True
     except OSError as exc:
         console.error(f"failed to process grafana output: {exc}")
         return 2

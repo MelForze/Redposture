@@ -578,6 +578,28 @@ def test_collect_strict_vulnerable_credentials_extracts_wordlists_from_shown_hit
     assert any(item["api_keys"] == ["127.0.0.3:9100:A1b2C3d4E5f6G7h8I9j0K1l2"] for item in findings)
 
 
+def test_collect_strict_vulnerable_login_pairs_strip_jsonish_cmdline_quotes() -> None:
+    accumulator = ValidationRecordAccumulator(
+        input_format="auto",
+        max_lines=0,
+        precision_profile=VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+    accumulator.feed(
+        {
+            "host": "127.0.0.1",
+            "port": 9308,
+            "exporter": "kafka_exporter",
+            "endpoint": "/debug/pprof/cmdline?debug=1",
+            "body": '("--sasl.username=exporter","--sasl.password=superpassword123456",)\n',
+        }
+    )
+
+    assert accumulator.vulnerable_login_rows_from_shown_hits() == [("127.0.0.1", "exporter", "superpassword123456")]
+    users, passwords, _api_keys = accumulator.vulnerable_credentials_from_shown_hits()
+    assert users == ["exporter"]
+    assert passwords == ["superpassword123456"]
+
+
 def test_collect_strict_vulnerable_credentials_ignore_gated_placeholder_values() -> None:
     accumulator = ValidationRecordAccumulator(
         input_format="auto",

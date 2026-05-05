@@ -17,7 +17,13 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import ProgressBar
-from .utils import collect_scan_ports, collect_scan_targets, parse_username_password_credential_file, utc_now_iso
+from .utils import (
+    collect_scan_ports,
+    collect_scan_targets,
+    filter_open_tcp_hosts_for_credential_file,
+    parse_username_password_credential_file,
+    utc_now_iso,
+)
 
 KAFKA_CLIENT_ID = "redposture"
 KAFKA_API_VERSIONS = 18
@@ -36,6 +42,11 @@ _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _KAFKA_DEEP_STATUSES = {"open_no_auth", "valid_credentials", "invalid_credentials_anonymous"}
+_KAFKA_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
+    ("admin", "admin"),
+    ("kafka", "kafka"),
+    ("kafka", "password"),
+)
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -48,6 +59,27 @@ def _clip(text: str, width: int = 64) -> str:
 
 def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
+
+
+def _build_credential_runs(
+    username: str | None,
+    password: str | None,
+    defcreds: bool,
+) -> list[tuple[str | None, str | None]]:
+    runs: list[tuple[str | None, str | None]] = []
+    seen: set[tuple[str | None, str | None]] = set()
+    if username is not None and password is not None:
+        pair = (username, password)
+        runs.append(pair)
+        seen.add(pair)
+    if defcreds:
+        for user, secret in _KAFKA_DEFAULT_CREDENTIALS:
+            pair = (user, secret)
+            if pair in seen:
+                continue
+            runs.append(pair)
+            seen.add(pair)
+    return runs or [(username, password)]
 
 
 def _friendly_error_text(value: str) -> str:
@@ -1895,10 +1927,11 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if credential_file_entries is None and bool(args.username) != bool(args.password):
         console.error("--username and --password must be set together")
         return 2
+    defcreds = bool(getattr(args, "defcreds", False))
     credential_runs = (
         [(entry.username, entry.password) for entry in credential_file_entries]
         if credential_file_entries is not None
-        else [(args.username, args.password)]
+        else _build_credential_runs(args.username, args.password, defcreds)
     )
     try:
         ports = collect_scan_ports(getattr(args, "ports", None))
@@ -1954,6 +1987,8 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append(f"credfile={len(credential_file_entries)}")
         elif args.username and args.password:
             mode_parts.append("provided-creds")
+        elif defcreds:
+            mode_parts.append("defcreds")
         if args.show_topics:
             mode_parts.append("show-topics")
         if args.topic:
@@ -1971,6 +2006,8 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append(f"credfile={len(credential_file_entries)}")
         elif args.username and args.password:
             mode_parts.append("provided-creds")
+        elif defcreds:
+            mode_parts.append("defcreds")
         if args.show_topics:
             mode_parts.append("show-topics")
         if args.topic:
@@ -1989,43 +2026,73 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     valid = 0
     auth_required = 0
     failed = 0
+    hosts_by_port: dict[int, list[str]] = {int(port): list(hosts) for port in ports}
+    if credential_file_entries is not None:
+        for audit_port in ports:
+            hosts_by_port[int(audit_port)] = filter_open_tcp_hosts_for_credential_file(
+                hosts,
+                int(audit_port),
+                timeout=args.timeout,
+                workers=args.workers,
+            )
+            if args.debug:
+                emit_debug(
+                    f"credential_prefilter port={int(audit_port)} open={len(hosts_by_port[int(audit_port)])}/"
+                    f"{len(hosts)}"
+                )
     outer_progress: ProgressBar | None = None
     use_single_global_progress = (
         stream_to_stdout and args.output_format == "txt" and (len(ports) > 1 or len(credential_runs) > 1)
     )
     if use_single_global_progress:
-        outer_progress = ProgressBar("KAFKA", len(hosts) * len(ports) * len(credential_runs), enabled=True, leave=True)
+        outer_progress = ProgressBar(
+            "KAFKA",
+            sum(len(hosts_by_port[int(port)]) for port in ports) * len(credential_runs),
+            enabled=True,
+            leave=True,
+        )
+    output_written = False
     try:
-        for idx, audit_port in enumerate(ports):
-            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
-                part_total, part_open, part_valid, part_auth, part_failed = audit_kafka_targets(
-                    hosts=hosts,
-                    port=audit_port,
-                    timeout=args.timeout,
-                    retries=args.retries,
-                    workers=args.workers,
-                    username=run_username,
-                    password=run_password,
-                    show_topics=args.show_topics,
-                    query_topic=args.topic,
-                    dump=args.dump,
-                    max_messages=args.max_messages,
-                    output_path=args.output,
-                    output_format=args.output_format,
-                    emit_line=emit_line,
-                    logger=logger if args.debug else None,
-                    append_output=idx > 0 or cred_idx > 0,
-                    suppress_connection_refused_status_lines=not bool(args.debug),
-                    debug_emit=emit_debug if args.debug else None,
-                    show_progress=not use_single_global_progress,
-                )
-                total += part_total
-                open_no_auth += part_open
-                valid += part_valid
-                auth_required += part_auth
-                failed += part_failed
-                if outer_progress is not None:
-                    outer_progress.advance(part_total)
+        for audit_port in ports:
+            audit_hosts = hosts_by_port[int(audit_port)]
+            if not audit_hosts:
+                continue
+            host_batches = [[host] for host in audit_hosts] if len(credential_runs) > 1 else [audit_hosts]
+            for host_batch in host_batches:
+                deep_already_emitted = False
+                for run_username, run_password in credential_runs:
+                    run_show_deep = not deep_already_emitted
+                    part_total, part_open, part_valid, part_auth, part_failed = audit_kafka_targets(
+                        hosts=host_batch,
+                        port=audit_port,
+                        timeout=args.timeout,
+                        retries=args.retries,
+                        workers=args.workers,
+                        username=run_username,
+                        password=run_password,
+                        show_topics=args.show_topics and run_show_deep,
+                        query_topic=args.topic if run_show_deep else None,
+                        dump=args.dump and run_show_deep,
+                        max_messages=args.max_messages,
+                        output_path=args.output,
+                        output_format=args.output_format,
+                        emit_line=emit_line,
+                        logger=logger if args.debug else None,
+                        append_output=output_written,
+                        suppress_connection_refused_status_lines=not bool(args.debug),
+                        debug_emit=emit_debug if args.debug else None,
+                        show_progress=not use_single_global_progress,
+                    )
+                    total += part_total
+                    open_no_auth += part_open
+                    valid += part_valid
+                    auth_required += part_auth
+                    failed += part_failed
+                    if outer_progress is not None:
+                        outer_progress.advance(part_total)
+                    if part_open > 0 or part_valid > 0:
+                        deep_already_emitted = True
+                    output_written = True
     except OSError as exc:
         console.error(f"failed to process kafka output: {exc}")
         return 2

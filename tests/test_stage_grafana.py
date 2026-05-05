@@ -111,9 +111,9 @@ def test_grafana_helper_parsers_and_auth_helpers() -> None:
     assert _build_credential_candidates("admin", "secret", True) == [
         ("admin", "secret", "provided"),
         ("admin", "admin", "default"),
-        ("admin", "prom-operator", "default"),
     ]
     assert _build_credential_candidates(None, None, False) == []
+    assert _build_credential_candidates(None, None, True) == [("admin", "admin", "default")]
 
 
 def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -274,16 +274,14 @@ def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypat
     )
 
     assert record["status"] == "invalid_credentials_anonymous"
-    assert int(record["attempted_credentials"]) == 2
+    assert int(record["attempted_credentials"]) == 1
     auth_attempts = record.get("auth_attempts")
     assert isinstance(auth_attempts, list)
     assert [f"{item.get('username')}:{item.get('password')}" for item in auth_attempts] == [
         "admin:admin",
-        "admin:prom-operator",
     ]
     detail_lines = _format_auth_attempt_detail_records(record, "txt")
     assert any("[-] admin:admin" in line for line in detail_lines)
-    assert any("[-] admin:prom-operator" in line for line in detail_lines)
     line = _format_record(record, "txt")
     assert "[-] credentials invalid (anonymous access)" in line
 
@@ -347,15 +345,14 @@ def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkey
     )
 
     assert record["status"] == "valid_credentials"
-    assert int(record["attempted_credentials"]) == 2
+    assert int(record["attempted_credentials"]) == 1
     assert record["credentials_source"] == "default"
     assert record["effective_username"] == "admin"
-    assert verify_calls == [("admin", "admin"), ("admin", "prom-operator")]
+    assert verify_calls == [("admin", "admin")]
     auth_attempts = record.get("auth_attempts")
     assert isinstance(auth_attempts, list)
-    assert len(auth_attempts) == 2
+    assert len(auth_attempts) == 1
     assert bool(auth_attempts[0].get("ok")) is True
-    assert bool(auth_attempts[1].get("ok")) is False
 
 
 def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -411,11 +408,10 @@ def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> 
     )
 
     assert record["status"] == "invalid_credentials_anonymous"
-    assert int(record["attempted_credentials"]) == 3
+    assert int(record["attempted_credentials"]) == 2
     assert verify_calls == [
         ("custom-user", "custom-pass"),
         ("admin", "admin"),
-        ("admin", "prom-operator"),
     ]
 
 
