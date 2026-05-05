@@ -28,7 +28,15 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .progress import ProgressBar
-from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
+from .utils import (
+    build_scan_execution_groups,
+    collect_scan_ports,
+    collect_scan_target_specs,
+    filter_open_tcp_hosts_for_credential_file,
+    is_signature_compat_typeerror,
+    parse_username_password_credential_file,
+    utc_now_iso,
+)
 
 _PROXMOX_API_PREFIX = "/api2/json"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
@@ -109,6 +117,12 @@ _OPAQUE_TOKEN_RE = re.compile(
 _BASE64_TEXT_RE = re.compile(r"\b[A-Za-z0-9+/]{20,}={0,2}\b")
 _PEM_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 _PERMISSION_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z][A-Za-z0-9_.-]*$")
+_PROXMOX_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
+    ("root@pam", "root"),
+    ("root@pam", "admin"),
+    ("root@pam", "password"),
+    ("root@pam", "proxmox"),
+)
 
 
 @dataclass(frozen=True)
@@ -257,6 +271,15 @@ def _auth_header_value(pve_api_token: str) -> str:
     return f"PVEAPIToken={token}"
 
 
+def _proxmox_auth_headers(pve_api_token: str, auth_headers: dict[str, str] | None = None) -> dict[str, str]:
+    if auth_headers is not None:
+        return dict(auth_headers)
+    token = str(pve_api_token or "").strip()
+    if not token:
+        return {}
+    return {"Authorization": _auth_header_value(token)}
+
+
 def _generate_random_password(length: int = _ADD_USER_PASSWORD_LENGTH) -> str:
     size = max(1, int(length))
     return "".join(secrets.choice(_ADD_USER_PASSWORD_ALPHABET) for _ in range(size))
@@ -390,6 +413,7 @@ def _request_via_socks_proxy(
     proxy: _ProxyConfig,
     method: str = "GET",
     data: bytes | None = None,
+    auth_headers: dict[str, str] | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     sock: socket.socket | None = None
     transport_sock: socket.socket | ssl.SSLSocket | None = None
@@ -415,9 +439,10 @@ def _request_via_socks_proxy(
             f"Host: {host_header}",
             "User-Agent: RedPosture/1.0",
             "Accept: application/json,text/plain,*/*",
-            f"Authorization: {_auth_header_value(pve_api_token)}",
             "Connection: close",
         ]
+        for key, value in _proxmox_auth_headers(pve_api_token, auth_headers).items():
+            header_lines.append(f"{key}: {value}")
         body = data if data else b""
         if body:
             header_lines.append("Content-Type: application/x-www-form-urlencoded")
@@ -452,6 +477,7 @@ def _request_via_http_proxy(
     proxy: _ProxyConfig,
     method: str = "GET",
     data: bytes | None = None,
+    auth_headers: dict[str, str] | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     scheme = "https" if use_https else "http"
     url = f"{scheme}://{host}:{port}{_PROXMOX_API_PREFIX}{path}"
@@ -460,8 +486,8 @@ def _request_via_http_proxy(
     request_headers = {
         "User-Agent": "RedPosture/1.0",
         "Accept": "application/json,text/plain,*/*",
-        "Authorization": _auth_header_value(pve_api_token),
     }
+    request_headers.update(_proxmox_auth_headers(pve_api_token, auth_headers))
     if body:
         request_headers["Content-Type"] = "application/x-www-form-urlencoded"
     request = urllib.request.Request(
@@ -501,6 +527,7 @@ def _proxmox_request_once(
     proxy: _ProxyConfig | None,
     method: str = "GET",
     form: dict[str, Any] | None = None,
+    auth_headers: dict[str, str] | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     request_method = str(method or "GET").upper()
     request_body = urllib.parse.urlencode(form or {}, doseq=True).encode("utf-8") if form else None
@@ -517,6 +544,7 @@ def _proxmox_request_once(
                 proxy=proxy,
                 method=request_method,
                 data=request_body,
+                auth_headers=auth_headers,
             )
         if proxy.scheme in {"socks5", "socks5h"}:
             return _request_via_socks_proxy(
@@ -530,6 +558,7 @@ def _proxmox_request_once(
                 proxy=proxy,
                 method=request_method,
                 data=request_body,
+                auth_headers=auth_headers,
             )
         return 0, b"", {}, "unsupported proxy scheme"
 
@@ -538,8 +567,8 @@ def _proxmox_request_once(
     request_headers = {
         "User-Agent": "RedPosture/1.0",
         "Accept": "application/json,text/plain,*/*",
-        "Authorization": _auth_header_value(pve_api_token),
     }
+    request_headers.update(_proxmox_auth_headers(pve_api_token, auth_headers))
     if request_body:
         request_headers["Content-Type"] = "application/x-www-form-urlencoded"
     request = urllib.request.Request(
@@ -579,6 +608,7 @@ def _proxmox_request(
     proxy: _ProxyConfig | None,
     method: str = "GET",
     form: dict[str, Any] | None = None,
+    auth_headers: dict[str, str] | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -594,6 +624,7 @@ def _proxmox_request(
             proxy=proxy,
             method=method,
             form=form,
+            auth_headers=auth_headers,
         )
         if error is None:
             return status, payload, response_headers, None
@@ -939,6 +970,98 @@ def _decode_base64_text(value: str) -> str | None:
     return text
 
 
+def _extract_api_data_dict(payload: bytes) -> dict[str, Any]:
+    parsed = _parse_json_payload(payload)
+    data = _unwrap_api_data(parsed)
+    return data if isinstance(data, dict) else {}
+
+
+def _login_proxmox_password(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    username: str,
+    password: str,
+    use_https: bool,
+    insecure: bool,
+    proxy: _ProxyConfig | None,
+) -> tuple[dict[str, str] | None, str | None]:
+    status, payload, _headers, error = _proxmox_request(
+        host,
+        port,
+        "/access/ticket",
+        timeout,
+        retries,
+        pve_api_token="",
+        use_https=use_https,
+        insecure=insecure,
+        proxy=proxy,
+        method="POST",
+        form={"username": username, "password": password},
+        auth_headers={},
+    )
+    if error:
+        return None, error
+    if status != 200:
+        return None, _extract_error_message(payload) or f"unexpected HTTP {status} from /access/ticket"
+    data = _extract_api_data_dict(payload)
+    ticket = str(data.get("ticket") or "").strip()
+    csrf = str(data.get("CSRFPreventionToken") or "").strip()
+    if not ticket:
+        return None, "missing Proxmox auth ticket"
+    headers = {"Cookie": f"PVEAuthCookie={ticket}"}
+    if csrf:
+        headers["CSRFPreventionToken"] = csrf
+    return headers, None
+
+
+def _resolve_proxmox_auth_headers(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    pve_api_token: str,
+    username: str | None,
+    password: str | None,
+    defcreds: bool,
+    use_https: bool,
+    insecure: bool,
+    proxy: _ProxyConfig | None,
+) -> tuple[dict[str, str], str, str | None, str | None, list[dict[str, str]]]:
+    token = str(pve_api_token or "").strip()
+    if token:
+        return _proxmox_auth_headers(token), "pveapitoken", None, None, []
+
+    candidates: list[tuple[str, str, str]] = []
+    if username is not None and password is not None:
+        candidates.append((str(username), str(password), "provided"))
+    if defcreds:
+        for user, secret in _PROXMOX_DEFAULT_CREDENTIALS:
+            if (user, secret, "defcreds") not in candidates:
+                candidates.append((user, secret, "defcreds"))
+
+    attempts: list[dict[str, str]] = []
+    for user, secret, source in candidates:
+        headers, _error = _login_proxmox_password(
+            host,
+            port,
+            timeout,
+            retries,
+            username=user,
+            password=secret,
+            use_https=use_https,
+            insecure=insecure,
+            proxy=proxy,
+        )
+        attempts.append({"username": user, "source": source, "ok": str(headers is not None)})
+        if headers is not None:
+            return headers, "password", user, secret, attempts
+    return {}, "password", None, None, attempts or [{"username": "-", "source": "none", "ok": "False"}]
+
+
 def _looks_like_cloud_init_secret_blob(value: str) -> bool:
     text = str(value or "")
     lower = text.lower()
@@ -1174,6 +1297,9 @@ def _audit_proxmox_host(
     insecure: bool,
     proxy: _ProxyConfig | None,
     *,
+    username: str | None = None,
+    password: str | None = None,
+    defcreds: bool = False,
     discover_creds: bool = False,
     show_nodes: bool = False,
     show_users: bool = False,
@@ -1189,6 +1315,19 @@ def _audit_proxmox_host(
     streamed_url_count = 0
     streamed_finding_count = 0
     requested_add_user = str(add_user or "").strip()
+    auth_headers, auth_method, auth_username, auth_password, auth_attempts = _resolve_proxmox_auth_headers(
+        host,
+        port,
+        timeout,
+        retries,
+        pve_api_token=pve_api_token,
+        username=username,
+        password=password,
+        defcreds=defcreds,
+        use_https=use_https,
+        insecure=insecure,
+        proxy=proxy,
+    )
 
     def flush_stream_buffers() -> None:
         nonlocal streamed_url_count, streamed_finding_count
@@ -1220,18 +1359,32 @@ def _audit_proxmox_host(
             "use_https": use_https,
             "insecure": insecure,
             "proxy": proxy,
+            "auth_headers": auth_headers,
         }
         if request_method != "GET" or form:
             request_kwargs["method"] = request_method
             request_kwargs["form"] = form
-        status, payload, _headers, error = _proxmox_request(
-            host,
-            port,
-            path,
-            timeout,
-            retries,
-            **request_kwargs,
-        )
+        try:
+            status, payload, _headers, error = _proxmox_request(
+                host,
+                port,
+                path,
+                timeout,
+                retries,
+                **request_kwargs,
+            )
+        except TypeError as exc:
+            if not is_signature_compat_typeerror(exc, expected_keywords={"auth_headers"}):
+                raise
+            request_kwargs.pop("auth_headers", None)
+            status, payload, _headers, error = _proxmox_request(
+                host,
+                port,
+                path,
+                timeout,
+                retries,
+                **request_kwargs,
+            )
         endpoint_results.append(
             {
                 "path": path,
@@ -1260,6 +1413,10 @@ def _audit_proxmox_host(
             "port": port,
             "is_proxmox": False,
             "status": "fail",
+            "auth_method": auth_method,
+            "auth_username": auth_username,
+            "auth_password": auth_password,
+            "auth_attempts": auth_attempts,
             "discover_creds": discover_creds,
             "use_https": use_https,
             "show_nodes": show_nodes,
@@ -1332,6 +1489,10 @@ def _audit_proxmox_host(
             "port": port,
             "is_proxmox": True,
             "status": auth_status,
+            "auth_method": auth_method,
+            "auth_username": auth_username,
+            "auth_password": auth_password,
+            "auth_attempts": auth_attempts,
             "discover_creds": discover_creds,
             "use_https": use_https,
             "show_nodes": show_nodes,
@@ -1372,6 +1533,10 @@ def _audit_proxmox_host(
             "port": port,
             "is_proxmox": False,
             "status": "fail",
+            "auth_method": auth_method,
+            "auth_username": auth_username,
+            "auth_password": auth_password,
+            "auth_attempts": auth_attempts,
             "discover_creds": discover_creds,
             "use_https": use_https,
             "show_nodes": show_nodes,
@@ -1495,6 +1660,10 @@ def _audit_proxmox_host(
         "port": port,
         "is_proxmox": True,
         "status": "token_ok",
+        "auth_method": auth_method,
+        "auth_username": auth_username,
+        "auth_password": auth_password,
+        "auth_attempts": auth_attempts,
         "cap_adduser": cap_adduser,
         "cap_read": cap_read,
         "cap_modify": cap_modify,
@@ -1603,6 +1772,10 @@ def _audit_proxmox_host(
         "port": port,
         "is_proxmox": True,
         "status": "token_ok",
+        "auth_method": auth_method,
+        "auth_username": auth_username,
+        "auth_password": auth_password,
+        "auth_attempts": auth_attempts,
         "discover_creds": discover_creds,
         "use_https": use_https,
         "show_nodes": show_nodes,
@@ -1662,6 +1835,10 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     prefix = _nxc_prefix(record)
     status = str(record.get("status") or "fail")
     if status == "token_ok":
+        if str(record.get("auth_method") or "") == "password":
+            username = str(record.get("auth_username") or "-")
+            password = str(record.get("auth_password") or "-")
+            return f"{prefix} [+] {username}:{password} {_caps_suffix(record)}"
         return f"{prefix} [+] token accepted {_caps_suffix(record)}"
     if status == "insufficient_privileges":
         return f"{prefix} [-] token valid but insufficient privileges {_caps_suffix(record)}"
@@ -2042,6 +2219,9 @@ def _call_audit_proxmox_host_with_stage_debug(
     insecure: bool,
     proxy: _ProxyConfig | None,
     *,
+    username: str | None,
+    password: str | None,
+    defcreds: bool,
     discover_creds: bool,
     show_nodes: bool,
     show_users: bool,
@@ -2054,23 +2234,47 @@ def _call_audit_proxmox_host_with_stage_debug(
     on_credential_finding: Callable[[dict[str, str]], None] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    record = _audit_proxmox_host(
-        host,
-        port,
-        timeout,
-        retries,
-        pve_api_token,
-        use_https,
-        insecure,
-        proxy,
-        discover_creds=discover_creds if run_deep_checks else False,
-        show_nodes=show_nodes if run_deep_checks else False,
-        show_users=show_users if run_deep_checks else False,
-        add_user=add_user if run_deep_checks else None,
-        on_status_ready=on_status_ready if run_deep_checks else None,
-        on_discovered_url=on_discovered_url if run_deep_checks else None,
-        on_credential_finding=on_credential_finding if run_deep_checks else None,
-    )
+    audit_kwargs: dict[str, Any] = {
+        "username": username,
+        "password": password,
+        "defcreds": defcreds,
+        "discover_creds": discover_creds if run_deep_checks else False,
+        "show_nodes": show_nodes if run_deep_checks else False,
+        "show_users": show_users if run_deep_checks else False,
+        "add_user": add_user if run_deep_checks else None,
+        "on_status_ready": on_status_ready if run_deep_checks else None,
+        "on_discovered_url": on_discovered_url if run_deep_checks else None,
+        "on_credential_finding": on_credential_finding if run_deep_checks else None,
+    }
+    try:
+        record = _audit_proxmox_host(
+            host,
+            port,
+            timeout,
+            retries,
+            pve_api_token,
+            use_https,
+            insecure,
+            proxy,
+            **audit_kwargs,
+        )
+    except TypeError as exc:
+        if not is_signature_compat_typeerror(exc, expected_keywords={"username", "password", "defcreds"}):
+            raise
+        audit_kwargs.pop("username", None)
+        audit_kwargs.pop("password", None)
+        audit_kwargs.pop("defcreds", None)
+        record = _audit_proxmox_host(
+            host,
+            port,
+            timeout,
+            retries,
+            pve_api_token,
+            use_https,
+            insecure,
+            proxy,
+            **audit_kwargs,
+        )
 
     result: dict[str, Any] = dict(record)
     debug_events: list[str] = []
@@ -2203,6 +2407,9 @@ def audit_proxmox_targets(
     retries: int,
     workers: int,
     pve_api_token: str,
+    username: str | None,
+    password: str | None,
+    defcreds: bool,
     use_https: bool,
     insecure: bool,
     proxy: _ProxyConfig | None,
@@ -2259,6 +2466,9 @@ def audit_proxmox_targets(
                     use_https,
                     insecure,
                     proxy,
+                    username=username,
+                    password=password,
+                    defcreds=defcreds,
                     discover_creds=discover_creds,
                     show_nodes=show_nodes,
                     show_users=show_users,
@@ -2319,6 +2529,9 @@ def audit_proxmox_targets(
                         use_https,
                         insecure,
                         proxy,
+                        username=username,
+                        password=password,
+                        defcreds=defcreds,
                         discover_creds=discover_creds,
                         show_nodes=show_nodes,
                         show_users=show_users,
@@ -2473,9 +2686,36 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
 
     pve_api_token = str(getattr(args, "pve_api_token", "") or "").strip()
-    if not pve_api_token:
-        console.error("--pveapitoken is required")
+    try:
+        credential_file_entries = parse_username_password_credential_file(
+            getattr(args, "username", None), getattr(args, "password", None)
+        )
+    except ValueError as exc:
+        console.error(str(exc))
         return 2
+    if credential_file_entries is None and bool(getattr(args, "username", None)) != bool(
+        getattr(args, "password", None)
+    ):
+        console.error("-u/--username and -p/--password must be provided together")
+        return 2
+    if pve_api_token and (
+        credential_file_entries is not None or getattr(args, "username", None) or getattr(args, "defcreds", False)
+    ):
+        console.warn("--pveapitoken takes precedence over username/password and --defcreds")
+        credential_file_entries = None
+    if (
+        not pve_api_token
+        and credential_file_entries is None
+        and not (getattr(args, "username", None) and getattr(args, "password", None))
+        and not bool(getattr(args, "defcreds", False))
+    ):
+        console.error("--pveapitoken, -u/-p, or --defcreds is required")
+        return 2
+    credential_runs = (
+        [(entry.username, entry.password) for entry in credential_file_entries]
+        if credential_file_entries is not None and not pve_api_token
+        else [(getattr(args, "username", None), getattr(args, "password", None))]
+    )
     proxy, proxy_error = _parse_proxy_config(getattr(args, "proxy", None))
     if proxy_error:
         console.error(f"failed to parse --proxy: {proxy_error}")
@@ -2540,11 +2780,20 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.debug and args.output_format == "txt":
         destination = "stdout" if stream_to_stdout else str(args.output)
         proxy_mode = "none" if proxy is None else f"{proxy.scheme}://{proxy.host}:{proxy.port}"
+        auth_mode = (
+            "pveapitoken"
+            if pve_api_token
+            else (
+                f"credfile={len(credential_file_entries)}"
+                if credential_file_entries is not None
+                else ("defcreds" if bool(getattr(args, "defcreds", False)) else "username_password")
+            )
+        )
         console.info(
             f"proxmox audit started: hosts={len(hosts)} ports={len(execution_groups)} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} https={bool(args.https)} insecure={bool(args.insecure)} "
             f"discover_creds={discover_creds} nodes={show_nodes} users={show_users} add_user={bool(add_user)} "
-            f"proxy={proxy_mode} output={destination}"
+            f"auth={auth_mode} proxy={proxy_mode} output={destination}"
         )
 
     total = 0
@@ -2553,48 +2802,83 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     auth_failed = 0
     failed = 0
     credential_hits = 0
+    group_hosts_by_idx: dict[int, list[str]] = {idx: list(group.hosts) for idx, group in enumerate(execution_groups)}
+    if credential_file_entries is not None and not pve_api_token:
+        for idx, group in enumerate(execution_groups):
+            prefilter_enabled = proxy is None
+            group_hosts_by_idx[idx] = filter_open_tcp_hosts_for_credential_file(
+                list(group.hosts),
+                int(group.port),
+                timeout=args.timeout,
+                workers=args.workers,
+                enabled=prefilter_enabled,
+            )
+            if args.debug:
+                emit_debug(
+                    f"credential_prefilter port={int(group.port)} open={len(group_hosts_by_idx[idx])}/"
+                    f"{len(group.hosts)} enabled={prefilter_enabled}"
+                )
     outer_progress: ProgressBar | None = None
-    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+    use_single_global_progress = (
+        stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
+    )
     if use_single_global_progress:
-        global_total = sum(len(group.hosts) for group in execution_groups)
+        global_total = sum(len(group_hosts_by_idx[idx]) for idx, _group in enumerate(execution_groups)) * len(
+            credential_runs
+        )
         outer_progress = ProgressBar("PROXMOX", global_total, enabled=True, leave=True)
     group_progress_enabled = not use_single_global_progress
+    output_written = False
     try:
         for idx, group in enumerate(execution_groups):
+            audit_hosts = group_hosts_by_idx[idx]
+            if not audit_hosts:
+                continue
             group_use_https = bool(args.https)
             if group.scheme_hint in {"http", "https"}:
                 group_use_https = group.scheme_hint == "https"
-            part_total, part_ok, part_insufficient, part_auth_failed, part_failed, part_hits = audit_proxmox_targets(
-                hosts=group.hosts,
-                port=group.port,
-                timeout=args.timeout,
-                retries=args.retries,
-                workers=args.workers,
-                pve_api_token=pve_api_token,
-                use_https=group_use_https,
-                insecure=bool(args.insecure),
-                proxy=proxy,
-                discover_creds=discover_creds,
-                show_nodes=show_nodes,
-                show_users=show_users,
-                add_user=add_user or None,
-                output_path=args.output,
-                output_format=args.output_format,
-                emit_line=emit_line,
-                logger=logger if args.debug else None,
-                append_output=idx > 0,
-                suppress_fail_status_lines=not bool(args.debug),
-                debug_emit=emit_debug if args.debug else None,
-                show_progress=group_progress_enabled,
-            )
-            total += part_total
-            token_ok += part_ok
-            insufficient += part_insufficient
-            auth_failed += part_auth_failed
-            failed += part_failed
-            credential_hits += part_hits
-            if outer_progress is not None:
-                outer_progress.advance(part_total)
+            host_batches = [[host] for host in audit_hosts] if credential_file_entries is not None else [audit_hosts]
+            for host_batch in host_batches:
+                for run_username, run_password in credential_runs:
+                    part_total, part_ok, part_insufficient, part_auth_failed, part_failed, part_hits = (
+                        audit_proxmox_targets(
+                            hosts=host_batch,
+                            port=group.port,
+                            timeout=args.timeout,
+                            retries=args.retries,
+                            workers=args.workers,
+                            pve_api_token=pve_api_token,
+                            username=run_username,
+                            password=run_password,
+                            defcreds=bool(getattr(args, "defcreds", False))
+                            if credential_file_entries is None
+                            else False,
+                            use_https=group_use_https,
+                            insecure=bool(args.insecure),
+                            proxy=proxy,
+                            discover_creds=discover_creds,
+                            show_nodes=show_nodes,
+                            show_users=show_users,
+                            add_user=add_user or None,
+                            output_path=args.output,
+                            output_format=args.output_format,
+                            emit_line=emit_line,
+                            logger=logger if args.debug else None,
+                            append_output=output_written,
+                            suppress_fail_status_lines=not bool(args.debug),
+                            debug_emit=emit_debug if args.debug else None,
+                            show_progress=group_progress_enabled,
+                        )
+                    )
+                    total += part_total
+                    token_ok += part_ok
+                    insufficient += part_insufficient
+                    auth_failed += part_auth_failed
+                    failed += part_failed
+                    credential_hits += part_hits
+                    if outer_progress is not None:
+                        outer_progress.advance(part_total)
+                    output_written = True
     except OSError as exc:
         console.error(f"failed to process proxmox output: {exc}")
         return 2

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core.stage_proxmox import (
+    _PROXMOX_DEFAULT_CREDENTIALS,
     _audit_proxmox_host,
     _auth_header_value,
     _cap_text,
@@ -58,6 +59,15 @@ from redposture_core.stage_proxmox import (
 
 def _json_payload(data):
     return json.dumps({"data": data}, ensure_ascii=False).encode("utf-8")
+
+
+def test_proxmox_default_credentials_are_exact() -> None:
+    assert _PROXMOX_DEFAULT_CREDENTIALS == (
+        ("root@pam", "root"),
+        ("root@pam", "admin"),
+        ("root@pam", "password"),
+        ("root@pam", "proxmox"),
+    )
 
 
 def test_proxmox_small_helpers_cover_auth_userid_caps_and_ssl() -> None:
@@ -351,6 +361,9 @@ def test_audit_proxmox_add_user_shows_error_when_creation_fails(monkeypatch) -> 
         timeout=1.0,
         retries=0,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -574,6 +587,9 @@ def test_audit_proxmox_returns_fail_on_network_error(monkeypatch) -> None:  # ty
         timeout=1.0,
         retries=0,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -614,6 +630,9 @@ def test_audit_proxmox_skips_credential_discovery_by_default(monkeypatch) -> Non
         timeout=1.0,
         retries=0,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -661,6 +680,9 @@ def test_audit_proxmox_skips_discovery_crawl_when_caps_are_false(monkeypatch) ->
         timeout=1.0,
         retries=0,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -721,6 +743,9 @@ def test_audit_proxmox_stream_callbacks_receive_urls_and_findings(monkeypatch) -
         timeout=1.0,
         retries=0,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -770,6 +795,9 @@ def test_audit_proxmox_denylist_ignores_csrfpreventiontoken(monkeypatch) -> None
         timeout=1.0,
         retries=0,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -827,6 +855,9 @@ def test_audit_proxmox_detects_uri_jwt_and_base64_cloud_init(monkeypatch) -> Non
         timeout=1.0,
         retries=0,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -1066,6 +1097,9 @@ def test_audit_proxmox_targets_streams_discovery_and_suppresses_duplicate_status
         retries=0,
         workers=1,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -1112,6 +1146,9 @@ def test_audit_proxmox_targets_can_suppress_fail_status_lines(monkeypatch) -> No
         retries=0,
         workers=1,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -1201,6 +1238,9 @@ def test_audit_proxmox_targets_emits_stage_debug_markers(monkeypatch) -> None:  
         retries=0,
         workers=1,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -1237,6 +1277,9 @@ def test_audit_proxmox_unexpected_http_marks_not_detected(monkeypatch) -> None: 
         timeout=1.0,
         retries=0,
         pve_api_token="monitor@pve!audit=token",
+        username=None,
+        password=None,
+        defcreds=False,
         use_https=True,
         insecure=True,
         proxy=None,
@@ -1318,6 +1361,9 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
         def info(self, message: str) -> None:
             self.infos.append(message)
 
+        def warn(self, message: str) -> None:
+            self.infos.append(message)
+
         def plain(self, _message: str, color: str | None = None) -> None:
             _ = color
             return
@@ -1354,7 +1400,7 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
 
     rc = run_proxmox_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 2
-    assert any("--pveapitoken is required" in item for item in fake_console.errors)
+    assert any("--pveapitoken, -u/-p, or --defcreds is required" in item for item in fake_console.errors)
 
     fake_console.errors.clear()
     monkeypatch.setattr("redposture_core.stage_proxmox._parse_proxy_config", lambda _raw: (None, "invalid proxy"))
@@ -1401,6 +1447,83 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
     assert any("proxmox audit complete:" in item for item in fake_console.infos)
 
 
+def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _FakeConsole:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+            self.errors: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+        def info(self, _message: str) -> None:
+            return
+
+        def warn(self, _message: str) -> None:
+            return
+
+        def plain(self, _message: str, color: str | None = None) -> None:
+            _ = color
+            return
+
+        def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
+    fake_console = _FakeConsole()
+    monkeypatch.setattr("redposture_core.stage_proxmox.Console", lambda debug=False: fake_console)
+    monkeypatch.setattr("redposture_core.stage_proxmox._parse_proxy_config", lambda _raw: (None, None))
+    monkeypatch.setattr("redposture_core.stage_proxmox.collect_scan_ports", lambda *_a, **_k: [8006])
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox.collect_scan_target_specs",
+        lambda *_a, **_k: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox.build_scan_execution_groups",
+        lambda *_a, **_k: [SimpleNamespace(hosts=["127.0.0.1"], port=8006, scheme_hint=None)],
+    )
+
+    calls: list[dict[str, object]] = []
+
+    def fake_audit_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(kwargs)
+        return (1, 1, 0, 0, 0, 0)
+
+    monkeypatch.setattr("redposture_core.stage_proxmox.audit_proxmox_targets", fake_audit_targets)
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        pve_api_token=None,
+        username="root@pam",
+        password="proxmox",
+        defcreds=True,
+        proxy=None,
+        port=8006,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        output=None,
+        output_format="txt",
+        discover_creds=False,
+        nodes=False,
+        show_nodes=False,
+        users=False,
+        show_users=False,
+        add_user="",
+        https=True,
+        insecure=True,
+    )
+
+    rc = run_proxmox_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+
+    assert rc == 0
+    assert not fake_console.errors
+    assert [(call["username"], call["password"], call["defcreds"]) for call in calls] == [("root@pam", "proxmox", True)]
+
+
 def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     class _FakeConsole:
         def __init__(self, debug: bool = False) -> None:
@@ -1411,6 +1534,9 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
             self.errors.append(message)
 
         def info(self, _message: str) -> None:
+            return
+
+        def warn(self, _message: str) -> None:
             return
 
         def plain(self, _message: str, color: str | None = None) -> None:

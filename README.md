@@ -148,7 +148,7 @@ redposture grafana -t 127.0.0.1 --defcreds --show-datasources
 
 `--defcreds` behavior:
 
-- always checks both default pairs in deterministic order: `admin:admin` then `admin:prom-operator`
+- checks `admin:admin`
 - prints per-credential result lines in `txt` output
 
 ### GitLab
@@ -251,9 +251,14 @@ redposture etcd -t 127.0.0.1 --dump
 # Lab mock (lab/full/docker-compose.yml service: proxmox-mock)
 redposture proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken 'audit@pve!redposture=pve-redposture-token-2026' --nodes --users
 
+# Default creds check
+redposture proxmox -t 127.0.0.1 --port 18006 --insecure --defcreds --nodes --users
+
 # Create user (admin token required, password is auto-generated, role Administrator on / is granted)
 redposture proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken 'admin@pve!root=pve-redposture-admin-2026' -add-user redposture_bot --users
 ```
+
+`--defcreds` checks `root@pam:root`, `root@pam:admin`, `root@pam:password`, `root@pam:proxmox`.
 
 ### Qdrant
 
@@ -274,12 +279,17 @@ redposture qdrant -t 127.0.0.1 --collection demo_vectors --ssrf-target host.dock
 # Baseline
 redposture kafka -t 127.0.0.1
 
+# Default creds check
+redposture kafka -t 127.0.0.1 --defcreds --show-topics
+
 # Topics
 redposture kafka -t 127.0.0.1 --show-topics
 
 # Topic dump
 redposture kafka -t 127.0.0.1 --topic audit.logs --dump
 ```
+
+`--defcreds` checks `admin:admin`, `kafka:kafka`, `kafka:password`.
 
 ### Elastic
 
@@ -295,7 +305,12 @@ redposture elastic -t 127.0.0.1 --port 19200 --plugins
 
 # Basic auth
 redposture elastic -t 127.0.0.1 --port 19201 -u elastic -p 'ElasticRead!2026' --cluster
+
+# Default creds check
+redposture elastic -t 127.0.0.1 --port 19201 --defcreds --endpoints
 ```
+
+`--defcreds` checks `elastic:changeme`, `elastic:elastic`, `elastic:password`.
 
 ### gRPC
 

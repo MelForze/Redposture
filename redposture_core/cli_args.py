@@ -1142,6 +1142,11 @@ def _configure_elastic_parser(parser: argparse.ArgumentParser) -> None:
         metavar="value",
         help="API key token sent as Authorization: ApiKey <value>.",
     )
+    auth.add_argument(
+        "--defcreds",
+        action="store_true",
+        help="Try default Elasticsearch credentials elastic:changeme, elastic:elastic, elastic:password.",
+    )
 
     actions.add_argument(
         "--endpoints",
@@ -1637,9 +1642,28 @@ def build_parser() -> argparse.ArgumentParser:
     proxmox_auth.add_argument(
         "--pveapitoken",
         dest="pve_api_token",
-        required=True,
+        default=None,
         metavar="value",
         help="Proxmox API token value: either '<user@realm!tokenid>=<secret>' or full 'PVEAPIToken=...'.",
+    )
+    proxmox_auth.add_argument(
+        "-u",
+        "--username",
+        default=None,
+        metavar="username|file",
+        help="Proxmox username, or a credential file with username:password pairs.",
+    )
+    proxmox_auth.add_argument(
+        "-p",
+        "--password",
+        default=None,
+        metavar="password",
+        help="Proxmox password for -u/--username.",
+    )
+    proxmox_auth.add_argument(
+        "--defcreds",
+        action="store_true",
+        help="Try a compact set of common Proxmox username/password pairs.",
     )
     proxmox_actions.add_argument(
         "--discover-creds",
@@ -2168,6 +2192,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="value",
         help="Optional Kafka password for credential check (SASL/PLAIN).",
+    )
+    kafka_auth.add_argument(
+        "--defcreds",
+        action="store_true",
+        help="Try default Kafka credentials admin:admin, kafka:kafka, kafka:password.",
     )
     kafka_actions.add_argument(
         "--show-topics",

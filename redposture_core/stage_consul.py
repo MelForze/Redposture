@@ -30,6 +30,7 @@ from .utils import (
     collect_scan_ports,
     collect_scan_target_specs,
     collect_scan_targets,
+    filter_open_tcp_hosts_for_credential_file,
     is_signature_compat_typeerror,
     parse_username_password_credential_file,
     utc_now_iso,
@@ -4347,67 +4348,91 @@ def run_consul_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     detected = 0
     failed = 0
     revshell_registered_any = False
+    group_hosts_by_idx: dict[int, list[str]] = {idx: list(group.hosts) for idx, group in enumerate(execution_groups)}
+    if credential_file_entries is not None:
+        for idx, group in enumerate(execution_groups):
+            group_hosts_by_idx[idx] = filter_open_tcp_hosts_for_credential_file(
+                list(group.hosts),
+                int(group.port),
+                timeout=args.timeout,
+                workers=args.workers,
+                enabled=not bool(getattr(args, "proxy", None)),
+            )
+            if args.debug:
+                emit_debug(
+                    f"credential_prefilter port={int(group.port)} open={len(group_hosts_by_idx[idx])}/"
+                    f"{len(group.hosts)}"
+                )
     outer_progress: ProgressBar | None = None
 
     use_single_global_progress = (
         stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
     )
     if use_single_global_progress:
-        global_total = sum(len(group.hosts) for group in execution_groups) * len(credential_runs)
+        global_total = sum(len(group_hosts_by_idx[idx]) for idx, _group in enumerate(execution_groups)) * len(
+            credential_runs
+        )
         outer_progress = ProgressBar(_CONSUL_TAG, global_total, enabled=True, leave=True)
 
+    output_written = False
     try:
         for idx, group in enumerate(execution_groups):
-            for cred_idx, (run_username, run_password) in enumerate(credential_runs):
-                part_total, part_detected, part_failed, part_revshell_registered = audit_consul_targets(
-                    hosts=group.hosts,
-                    port=group.port,
-                    timeout=args.timeout,
-                    retries=args.retries,
-                    workers=args.workers,
-                    token=token,
-                    username=run_username,
-                    password=run_password,
-                    do_ssrf=do_ssrf,
-                    ssrf_urls=ssrf_urls,
-                    show_keys=show_keys,
-                    kv_key=kv_key,
-                    dump_requested=dump_requested,
-                    dump_all_requested=dump_all_requested,
-                    show_services=show_services,
-                    show_agents=show_agents,
-                    show_checks=show_checks,
-                    check_dump_id=check_dump_id,
-                    show_nodes=show_nodes,
-                    service_name=service_name,
-                    service_dump_name=service_dump_name,
-                    agent_dump_name=agent_dump_name,
-                    node_dump_name=node_dump_name,
-                    delete_service=delete_service,
-                    service_args=service_args,
-                    revshell_enabled=revshell_enabled,
-                    delete_revshell=delete_revshell,
-                    revshell_listen=revshell_listen,
-                    revshell_host=revshell_host,
-                    revshell_port=revshell_port,
-                    revshell_payload=revshell_payload,
-                    revshell_check_id=revshell_check_id,
-                    output_path=args.output,
-                    output_format=args.output_format,
-                    emit_line=emit_line,
-                    logger=logger if args.debug else None,
-                    append_output=idx > 0 or cred_idx > 0,
-                    suppress_timeout_status_lines=not bool(args.debug),
-                    preferred_scheme=group.scheme_hint,
-                    debug_emit=emit_debug if args.debug else None,
-                    show_progress=not use_single_global_progress,
-                )
-                total += part_total
-                detected += part_detected
-                failed += part_failed
-                revshell_registered_any = bool(revshell_registered_any or part_revshell_registered)
-                if outer_progress is not None:
-                    outer_progress.advance(part_total)
+            audit_hosts = group_hosts_by_idx[idx]
+            if not audit_hosts:
+                continue
+            host_batches = [[host] for host in audit_hosts] if credential_file_entries is not None else [audit_hosts]
+            for host_batch in host_batches:
+                for run_username, run_password in credential_runs:
+                    part_total, part_detected, part_failed, part_revshell_registered = audit_consul_targets(
+                        hosts=host_batch,
+                        port=group.port,
+                        timeout=args.timeout,
+                        retries=args.retries,
+                        workers=args.workers,
+                        token=token,
+                        username=run_username,
+                        password=run_password,
+                        do_ssrf=do_ssrf,
+                        ssrf_urls=ssrf_urls,
+                        show_keys=show_keys,
+                        kv_key=kv_key,
+                        dump_requested=dump_requested,
+                        dump_all_requested=dump_all_requested,
+                        show_services=show_services,
+                        show_agents=show_agents,
+                        show_checks=show_checks,
+                        check_dump_id=check_dump_id,
+                        show_nodes=show_nodes,
+                        service_name=service_name,
+                        service_dump_name=service_dump_name,
+                        agent_dump_name=agent_dump_name,
+                        node_dump_name=node_dump_name,
+                        delete_service=delete_service,
+                        service_args=service_args,
+                        revshell_enabled=revshell_enabled,
+                        delete_revshell=delete_revshell,
+                        revshell_listen=revshell_listen,
+                        revshell_host=revshell_host,
+                        revshell_port=revshell_port,
+                        revshell_payload=revshell_payload,
+                        revshell_check_id=revshell_check_id,
+                        output_path=args.output,
+                        output_format=args.output_format,
+                        emit_line=emit_line,
+                        logger=logger if args.debug else None,
+                        append_output=output_written,
+                        suppress_timeout_status_lines=not bool(args.debug),
+                        preferred_scheme=group.scheme_hint,
+                        debug_emit=emit_debug if args.debug else None,
+                        show_progress=not use_single_global_progress,
+                    )
+                    total += part_total
+                    detected += part_detected
+                    failed += part_failed
+                    revshell_registered_any = bool(revshell_registered_any or part_revshell_registered)
+                    if outer_progress is not None:
+                        outer_progress.advance(part_total)
+                    output_written = True
     except OSError as exc:
         console.error(f"failed to process consul output: {exc}")
         return 2

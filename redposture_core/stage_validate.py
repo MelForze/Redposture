@@ -351,12 +351,16 @@ def _is_empty_or_masked(value: Any) -> bool:
 
 def _clean_value_text(value: Any) -> str:
     text = str(value if value is not None else "").strip()
-    if text.endswith(",") or text.endswith(";"):
+    while text and text[-1] in {",", ";", ")", "]"}:
         text = text[:-1].strip()
     if len(text) >= 2 and (
         (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'"))
     ):
         text = text[1:-1].strip()
+    while text and text[0] in {'"', "'", "(", "["}:
+        text = text[1:].strip()
+    while text and text[-1] in {'"', "'"}:
+        text = text[:-1].strip()
     return text
 
 

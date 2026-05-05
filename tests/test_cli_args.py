@@ -8,6 +8,7 @@ from redposture_core.cli_args import (
     COMMAND_ELASTIC,
     COMMAND_EXPORTERS,
     COMMAND_GRPC,
+    COMMAND_KAFKA,
     COMMAND_QDRANT,
     COMMAND_SELFCERT,
     build_parser,
@@ -1168,10 +1169,19 @@ def test_proxmox_flags_are_parsed() -> None:
     assert args.output == "proxmox_audit.jsonl"
 
 
-def test_proxmox_requires_pve_api_token() -> None:
-    with pytest.raises(SystemExit) as exc:
-        parse_args(["proxmox", "-t", "10.0.0.21"])
-    assert exc.value.code == 2
+def test_proxmox_auth_flags_are_optional_at_parse_time() -> None:
+    args = parse_args(["proxmox", "-t", "10.0.0.21"])
+    assert args.pve_api_token is None
+    assert args.username is None
+    assert args.password is None
+    assert args.defcreds is False
+
+
+def test_proxmox_username_password_and_defcreds_are_parsed() -> None:
+    args = parse_args(["proxmox", "-t", "10.0.0.21", "-u", "root@pam", "-p", "toor", "--defcreds"])
+    assert args.username == "root@pam"
+    assert args.password == "toor"
+    assert args.defcreds is True
 
 
 def test_proxmox_discover_creds_default_is_disabled() -> None:
@@ -1464,6 +1474,7 @@ def test_elastic_flags_are_parsed() -> None:
             "ElasticRead!2026",
             "--apitoken",
             "ZXM6bGFiLXRva2Vu",
+            "--defcreds",
             "--endpoints",
             "--plugins",
             "--cluster",
@@ -1486,6 +1497,7 @@ def test_elastic_flags_are_parsed() -> None:
     assert args.username == "elastic"
     assert args.password == "ElasticRead!2026"
     assert args.apitoken == "ZXM6bGFiLXRva2Vu"
+    assert args.defcreds is True
     assert args.endpoints is True
     assert args.plugins is True
     assert args.cluster is True
@@ -1505,6 +1517,12 @@ def test_elastic_rejects_insecure_flag() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args(["elastic", "-t", "10.0.0.71", "--insecure"])
     assert exc.value.code == 2
+
+
+def test_kafka_defcreds_flag_is_parsed() -> None:
+    args = parse_args(["kafka", "-t", "10.0.0.31", "--defcreds"])
+    assert args.command == COMMAND_KAFKA
+    assert args.defcreds is True
 
 
 def test_grafana_flags_are_parsed() -> None:
