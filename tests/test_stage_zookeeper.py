@@ -120,18 +120,18 @@ def test_zkclient_require_sock_and_next_xid() -> None:
 def test_zkclient_request_with_xid_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 0.5)
     client.sock = object()  # type: ignore[assignment]
-    monkeypatch.setattr("redposture_core.stage_zookeeper._send_frame", lambda *_a, **_k: None)
-    monkeypatch.setattr("redposture_core.stage_zookeeper._recv_frame", lambda *_a, **_k: b"\x00" * 15)
+    monkeypatch.setattr("redposture_core.clients.zookeeper._send_frame", lambda *_a, **_k: None)
+    monkeypatch.setattr("redposture_core.clients.zookeeper._recv_frame", lambda *_a, **_k: b"\x00" * 15)
     with pytest.raises(ValueError):
         client._request_with_xid(3, 1, b"")
 
     bad_xid_resp = struct.pack(">i", 4) + struct.pack(">q", 1) + struct.pack(">i", 0)
-    monkeypatch.setattr("redposture_core.stage_zookeeper._recv_frame", lambda *_a, **_k: bad_xid_resp)
+    monkeypatch.setattr("redposture_core.clients.zookeeper._recv_frame", lambda *_a, **_k: bad_xid_resp)
     with pytest.raises(ValueError):
         client._request_with_xid(3, 1, b"")
 
     good_resp = struct.pack(">i", 3) + struct.pack(">q", 2) + struct.pack(">i", -101) + b"payload"
-    monkeypatch.setattr("redposture_core.stage_zookeeper._recv_frame", lambda *_a, **_k: good_resp)
+    monkeypatch.setattr("redposture_core.clients.zookeeper._recv_frame", lambda *_a, **_k: good_resp)
     err, payload = client._request_with_xid(3, 1, b"")
     assert err == -101
     assert payload == b"payload"
@@ -2161,7 +2161,10 @@ def test_run_zookeeper_stage_multi_port_uses_single_global_progress(monkeypatch:
             self.closed = True
 
     monkeypatch.setattr("redposture_core.stage_zookeeper.Console", _FakeConsole)
-    monkeypatch.setattr("redposture_core.stage_zookeeper.ProgressBar", _FakeProgress)
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper.start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
+    )
     monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_args, **_kwargs: [2181, 2182])
     monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
@@ -2588,9 +2591,9 @@ def test_friendly_error_extra_branches_and_decode_edge_cases() -> None:
 def test_zkclient_more_branches_and_enumerate_edges(monkeypatch: pytest.MonkeyPatch) -> None:
     client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 1.0)
     client.sock = object()  # type: ignore[assignment]
-    monkeypatch.setattr("redposture_core.stage_zookeeper._send_frame", lambda *_a, **_k: None)
+    monkeypatch.setattr("redposture_core.clients.zookeeper._send_frame", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        "redposture_core.stage_zookeeper._recv_frame",
+        "redposture_core.clients.zookeeper._recv_frame",
         lambda *_a, **_k: struct.pack(">i", 1) + struct.pack(">q", 2) + struct.pack(">i", _ZK_ERR_OK),
     )
     err, payload = client._request(123)

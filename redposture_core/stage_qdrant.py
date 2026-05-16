@@ -7,21 +7,27 @@ import json
 import os
 import re
 import socket
-import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import ProgressBar
+from .rendering import CountColorRule, RegexColorRule, render_colored_marker_line
+from .stage_runtime import (
+    TwoPassAuditRunner,
+    merge_stage_records,
+    progress_total_from_groups,
+    should_use_global_progress,
+    start_audit_progress,
+    start_command_progress,
+)
 from .utils import (
     build_scan_execution_groups,
     collect_scan_ports,
@@ -1436,75 +1442,16 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
 
 
 def _render_colored_qdrant_line(console: Console, line: str) -> bool:
-    if not line.startswith(_QDRANT_TAG):
-        return False
-
-    marker_color = {
-        "[*]": "cyan",
-        "[+]": "bright_green",
-        "[-]": "red",
-        "[!]": "red",
-    }
-    for marker in ("[!]", "[-]", "[+]", "[*]"):
-        token = f" {marker} "
-        if token not in line:
-            continue
-
-        left, right = line.split(token, 1)
-        tag = _QDRANT_TAG
-        rest = left[len(tag) :] if left.startswith(tag) else left
-
-        spans: list[tuple[int, int, str]] = []
-        auth_true = "(auth required:True)"
-        auth_false = "(auth required:False)"
-        auth_unknown = "(auth required:unknown)"
-        idx_true = right.find(auth_true)
-        if idx_true >= 0:
-            spans.append((idx_true, idx_true + len(auth_true), "bright_green"))
-        idx_false = right.find(auth_false)
-        if idx_false >= 0:
-            spans.append((idx_false, idx_false + len(auth_false), "red"))
-        idx_unknown = right.find(auth_unknown)
-        if idx_unknown >= 0:
-            spans.append((idx_unknown, idx_unknown + len(auth_unknown), "yellow"))
-
-        collections_match = re.search(r"\(collections:(\d+)\)", right)
-        if collections_match:
-            value = collections_match.group(1).strip()
-            if value.isdigit() and int(value) > 0:
-                spans.append((collections_match.start(), collections_match.end(), "red"))
-        idor_true_match = re.search(r"\(idor:true\)", right, flags=re.IGNORECASE)
-        if idor_true_match:
-            spans.append((idor_true_match.start(), idor_true_match.end(), "red"))
-        for rce_match in re.finditer(r"RCE!", right):
-            spans.append((rce_match.start(), rce_match.end(), "orange"))
-
-        out_stream = sys.stdout
-        if not spans:
-            right_colored = console._paint(right, "white", out_stream)
-        else:
-            chunks: list[str] = []
-            cursor = 0
-            for start, end, color in sorted(spans, key=lambda item: item[0]):
-                if start < cursor:
-                    continue
-                if start > cursor:
-                    chunks.append(console._paint(right[cursor:start], "white", out_stream))
-                chunks.append(console._paint(right[start:end], color, out_stream))
-                cursor = end
-            if cursor < len(right):
-                chunks.append(console._paint(right[cursor:], "white", out_stream))
-            right_colored = "".join(chunks)
-
-        colored = (
-            f"{console._paint(tag, 'blue', out_stream)}"
-            f"{console._paint(rest, 'white', out_stream)} "
-            f"{console._paint(marker, marker_color[marker], out_stream)} "
-            f"{right_colored}"
-        )
-        console.plain(colored)
-        return True
-    return False
+    return render_colored_marker_line(
+        console,
+        line,
+        tag=_QDRANT_TAG,
+        regexes=(
+            RegexColorRule(r"(?i)\(idor:true\)", "red"),
+            RegexColorRule(r"RCE!", "orange"),
+        ),
+        counts=(CountColorRule("collections", "red"),),
+    )
 
 
 def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) -> None:
@@ -1626,45 +1573,7 @@ def _call_audit_qdrant_host_with_stage_debug(
 
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(detect_record)
-    merged.update(deep_record)
-
-    debug_events: list[str] = []
-    for source in (detect_record.get("debug_events"), deep_record.get("debug_events")):
-        if not isinstance(source, list):
-            continue
-        for item in source:
-            if isinstance(item, str) and item.strip():
-                debug_events.append(item)
-    merged["debug_events"] = debug_events
-    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
-        deep_record.get("debug_events_streamed")
-    )
-
-    stages: list[dict[str, Any]] = []
-    for source in (detect_record.get("stages"), deep_record.get("stages")):
-        if isinstance(source, list):
-            for entry in source:
-                if isinstance(entry, dict):
-                    stages.append(dict(entry))
-    merged["stages"] = stages
-
-    stage_durations: dict[str, int] = {}
-    for source in (detect_record.get("stage_durations_ms"), deep_record.get("stage_durations_ms")):
-        if isinstance(source, dict):
-            for key, value in source.items():
-                stage_durations[str(key)] = int(value or 0)
-    merged["stage_durations_ms"] = stage_durations
-
-    stage_attempts: dict[str, int] = {}
-    for source in (detect_record.get("stage_attempts"), deep_record.get("stage_attempts")):
-        if isinstance(source, dict):
-            for key, value in source.items():
-                stage_attempts[str(key)] = int(value or 0)
-    merged["stage_attempts"] = stage_attempts
-
-    merged["stage_failed_at"] = deep_record.get("stage_failed_at") or detect_record.get("stage_failed_at")
-    return merged
+    return merge_stage_records(detect_record, deep_record)
 
 
 def audit_qdrant_targets(
@@ -1687,7 +1596,7 @@ def audit_qdrant_targets(
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
-    show_progress: bool = True,
+    show_progress: bool = False,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -1700,108 +1609,77 @@ def audit_qdrant_targets(
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
-    progress: ProgressBar | None = None
+    progress = None
     try:
         indexed_hosts = list(enumerate(hosts))
-        detect_records: dict[int, dict[str, Any]] = {}
-        deep_records: dict[int, dict[str, Any]] = {}
-        progress = ProgressBar("QDRANT", len(indexed_hosts), enabled=show_progress, leave=True)
-
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
-
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            pass1_future_map = {
-                executor.submit(
-                    _call_audit_qdrant_host_with_stage_debug,
-                    host,
-                    port,
-                    timeout,
-                    retries,
-                    api_key=api_key,
-                    show_collections=show_collections,
-                    dump_requested=dump_requested,
-                    collection_name=collection_name,
-                    ssrf_urls=ssrf_urls,
-                    run_deep_checks=False,
-                    debug=bool(debug_emit),
-                    debug_emit=debug_emit,
-                ): idx
-                for idx, host in indexed_hosts
-            }
-            buffered_records: dict[int, dict[str, Any]] = {}
-            next_emit_idx = 0
-            for future in as_completed(pass1_future_map):
-                record_idx = int(pass1_future_map[future])
-                buffered_records[record_idx] = future.result()
-                progress.advance()
-                while next_emit_idx in buffered_records:
-                    detect_record = buffered_records.pop(next_emit_idx)
-                    detect_records[next_emit_idx] = detect_record
-                    if bool(detect_record.get("is_qdrant")) and output_format == "txt":
-                        _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
-                    next_emit_idx += 1
-
+        progress = start_audit_progress("QDRANT", len(indexed_hosts), enabled=show_progress, leave=True)
         deep_requested = bool(show_collections or dump_requested or collection_name or ssrf_urls)
-        deep_candidates: list[tuple[int, str]] = []
-        detected_count = 0
-        for idx, host in indexed_hosts:
-            detect_record = detect_records[idx]
+
+        def _detect_task(host: str) -> dict[str, Any]:
+            return _call_audit_qdrant_host_with_stage_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                api_key=api_key,
+                show_collections=show_collections,
+                dump_requested=dump_requested,
+                collection_name=collection_name,
+                ssrf_urls=ssrf_urls,
+                run_deep_checks=False,
+                debug=bool(debug_emit),
+                debug_emit=debug_emit,
+            )
+
+        def _deep_task(host: str) -> dict[str, Any]:
+            return _call_audit_qdrant_host_with_stage_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                api_key=api_key,
+                show_collections=show_collections,
+                dump_requested=dump_requested,
+                collection_name=collection_name,
+                ssrf_urls=ssrf_urls,
+                run_deep_checks=True,
+                debug=bool(debug_emit),
+                debug_emit=debug_emit,
+            )
+
+        def _emit_detect(detect_record: dict[str, Any]) -> None:
+            if bool(detect_record.get("is_qdrant")) and output_format == "txt":
+                _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
+
+        def _deep_gate(detect_record: dict[str, Any]) -> tuple[bool, str]:
             detect_status = str(detect_record.get("status") or "fail")
-            if not bool(detect_record.get("is_qdrant")):
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_qdrant")
-                continue
-            detected_count += 1
             if deep_requested and detect_status in _QDRANT_DEEP_STATUSES:
-                deep_candidates.append((idx, host))
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
-            elif debug_emit is not None:
-                reason = "no_data_actions" if not deep_requested else f"status={detect_status}"
-                debug_emit(f"{host}:{port} stage2_gate=skip reason={reason}")
+                return True, f"status={detect_status}"
+            reason = "no_data_actions" if not deep_requested else f"status={detect_status}"
+            return False, reason
 
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect complete qdrant={detected_count} deep_candidates={len(deep_candidates)}")
-            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
-
-        progress.set_total(len(indexed_hosts) + len(deep_candidates))
-        if deep_candidates:
-            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-                pass2_future_map = {
-                    executor.submit(
-                        _call_audit_qdrant_host_with_stage_debug,
-                        host,
-                        port,
-                        timeout,
-                        retries,
-                        api_key=api_key,
-                        show_collections=show_collections,
-                        dump_requested=dump_requested,
-                        collection_name=collection_name,
-                        ssrf_urls=ssrf_urls,
-                        run_deep_checks=True,
-                        debug=bool(debug_emit),
-                        debug_emit=debug_emit,
-                    ): idx
-                    for idx, host in deep_candidates
-                }
-                for future in as_completed(pass2_future_map):
-                    deep_records[int(pass2_future_map[future])] = future.result()
-                    progress.advance()
-
-        if debug_emit is not None:
-            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
+        pass_result = TwoPassAuditRunner(
+            label="QDRANT",
+            workers=workers,
+            debug_emit=debug_emit,
+            progress=progress,
+            detected_name="qdrant",
+        ).run(
+            indexed_hosts,
+            detect_task=_detect_task,
+            deep_task=_deep_task,
+            is_detected=lambda record: bool(record.get("is_qdrant")),
+            deep_gate=_deep_gate,
+            emit_detect=_emit_detect,
+            merge_records=_merge_stage2_record,
+            not_detected_reason="not_qdrant",
+        )
 
         if progress is not None:
             progress.close()
             progress = None
 
-        final_records: dict[int, dict[str, Any]] = {}
-        for idx, _host in indexed_hosts:
-            detect_record = detect_records[idx]
-            deep_record = deep_records.get(idx)
-            final_records[idx] = _merge_stage2_record(detect_record, deep_record) if deep_record else detect_record
+        final_records = pass_result.final_records
 
         for idx, _host in indexed_hosts:
             record = final_records[idx]
@@ -1964,11 +1842,11 @@ def run_qdrant_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     open_with_key = 0
     auth_required = 0
     failed = 0
-    outer_progress: ProgressBar | None = None
-    use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
+    outer_progress = None
+    use_single_global_progress = should_use_global_progress(args.output_format, len(execution_groups))
     if use_single_global_progress:
-        global_total = sum(len(group.hosts) for group in execution_groups)
-        outer_progress = ProgressBar("QDRANT", global_total, enabled=True, leave=True)
+        global_total = progress_total_from_groups(group.hosts for group in execution_groups)
+        outer_progress = start_command_progress(args, "QDRANT", global_total, enabled=True, leave=True)
     group_progress_enabled = not use_single_global_progress
     ssrf_listeners: list[dict[str, Any]] = []
     try:

@@ -2265,7 +2265,11 @@ def test_run_consul_stage_multi_port_uses_single_global_progress(monkeypatch: py
         def close(self) -> None:
             self.closed = True
 
-    monkeypatch.setattr(consul, "ProgressBar", _FakeProgress)
+    monkeypatch.setattr(
+        consul,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
+    )
 
     captured: list[dict[str, Any]] = []
 

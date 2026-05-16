@@ -4,9 +4,16 @@ from pathlib import Path
 
 import pytest
 
+from redposture_core.targeting import (
+    collect_scan_ports as collect_scan_ports_from_targeting,
+)
+from redposture_core.targeting import (
+    collect_scan_targets as collect_scan_targets_from_targeting,
+)
 from redposture_core.utils import (
     ScanExecutionGroup,
     ScanTargetSpec,
+    TargetParsePolicy,
     build_scan_execution_groups,
     collect_scan_ports,
     collect_scan_target_specs,
@@ -15,6 +22,7 @@ from redposture_core.utils import (
     normalize_ip_literal,
     normalize_scan_host,
     parse_proxmox_api_token_auth,
+    parse_scan_target_specs,
     parse_username_password_credential_file,
 )
 
@@ -39,6 +47,7 @@ def test_collect_scan_targets_deduplicates_and_ignores_comments(tmp_path: Path) 
 
     hosts = collect_scan_targets(f"10.0.0.3,10.0.0.2,{hosts_file}")
     assert hosts == ["10.0.0.3", "10.0.0.2", "10.0.0.1"]
+    assert collect_scan_targets_from_targeting(f"10.0.0.3,10.0.0.2,{hosts_file}") == hosts
 
 
 def test_collect_scan_targets_keeps_file_precedence_when_token_matches_existing_file(tmp_path: Path) -> None:
@@ -107,6 +116,20 @@ def test_collect_scan_target_specs_rejects_unsupported_url_scheme() -> None:
         collect_scan_target_specs("redis://10.0.0.1:6379")
 
 
+def test_parse_scan_target_specs_can_strip_or_reject_urls() -> None:
+    stripped = parse_scan_target_specs(
+        "https://api.local:9200/_cat/health",
+        policy=TargetParsePolicy(url_mode="strip"),
+    )
+    assert stripped == [ScanTargetSpec(host="api.local", scheme=None, explicit_port=None)]
+
+    with pytest.raises(ValueError, match="URL targets are not supported"):
+        parse_scan_target_specs(
+            "https://api.local:9200/_cat/health",
+            policy=TargetParsePolicy(url_mode="reject"),
+        )
+
+
 def test_build_scan_execution_groups_url_port_overrides_matrix() -> None:
     specs = [
         ScanTargetSpec(host="10.0.0.1", scheme=None, explicit_port=None),
@@ -134,6 +157,7 @@ def test_build_scan_execution_groups_can_group_by_scheme_hint() -> None:
 def test_collect_scan_ports_deduplicates_and_expands_ranges() -> None:
     ports = collect_scan_ports("9100,9115,9200-9202,9115")
     assert ports == [9100, 9115, 9200, 9201, 9202]
+    assert collect_scan_ports_from_targeting("9100,9115,9200-9202,9115") == ports
 
 
 def test_collect_scan_ports_accepts_single_port() -> None:

@@ -517,10 +517,12 @@ def test_search_index_builds_query_and_returns_full_source(monkeypatch: pytest.M
     assert captured["body"] == {
         "size": 10000,
         "query": {
-            "query_string": {
+            "simple_query_string": {
                 "query": "password OR secret",
+                "fields": ["*"],
                 "default_operator": "OR",
                 "analyze_wildcard": True,
+                "lenient": True,
             }
         },
     }
@@ -1283,7 +1285,11 @@ def test_run_elastic_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Mo
             return
 
     monkeypatch.setattr(elastic_stage, "audit_elastic_targets", fake_audit_targets)
-    monkeypatch.setattr(elastic_stage, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        elastic_stage,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     args = SimpleNamespace(
         timeout=1.0,
@@ -1359,7 +1365,11 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
             self.closed = True
 
     monkeypatch.setattr(elastic_stage, "Console", _Console)
-    monkeypatch.setattr(elastic_stage, "ProgressBar", _FakeProgress)
+    monkeypatch.setattr(
+        elastic_stage,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
+    )
     monkeypatch.setattr(elastic_stage, "collect_scan_ports", lambda *_a, **_k: [9200, 9201])
     monkeypatch.setattr(
         elastic_stage,
@@ -1408,6 +1418,128 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
     rc = run_elastic_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
     assert len(captured) == 2
+    assert all(call["show_progress"] is False for call in captured)
+    assert len(_FakeProgress.instances) == 1
+    progress = _FakeProgress.instances[0]
+    assert progress.total == 2
+    assert progress.advances == [1, 1]
+    assert progress.closed is True
+
+
+def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    class _Console:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+
+        def error(self, _message: str) -> None:
+            return
+
+        def warn(self, _message: str) -> None:
+            return
+
+        def info(self, _message: str) -> None:
+            return
+
+        def plain(self, _message: str, color: str | None = None) -> None:
+            _ = color
+            return
+
+        def render_tagged_payload_line(self, _line: str, _tag: str, payload_color: str | None = None) -> bool:
+            _ = payload_color
+            return False
+
+    class _FakeProgress:
+        instances: list[_FakeProgress] = []
+
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            self.total = int(total)
+            self.advances: list[int] = []
+            self.closed = False
+            type(self).instances.append(self)
+
+        def advance(self, step: int = 1) -> None:
+            self.advances.append(int(step))
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(elastic_stage, "Console", _Console)
+    monkeypatch.setattr(
+        elastic_stage,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
+    )
+    monkeypatch.setattr(elastic_stage, "collect_scan_ports", lambda *_a, **_k: [9200])
+    monkeypatch.setattr(
+        elastic_stage,
+        "collect_scan_target_specs",
+        lambda *_a, **_k: [
+            SimpleNamespace(host="10.0.0.1", scheme=None, explicit_port=None),
+            SimpleNamespace(host="10.0.0.2", scheme=None, explicit_port=None),
+        ],
+    )
+    monkeypatch.setattr(
+        elastic_stage,
+        "build_scan_execution_groups",
+        lambda *_a, **_k: [SimpleNamespace(hosts=["10.0.0.1", "10.0.0.2"], port=9200, scheme_hint=None)],
+    )
+    monkeypatch.setattr(
+        elastic_stage,
+        "filter_open_tcp_hosts_for_credential_file",
+        lambda hosts, *_a, **_k: list(hosts),
+    )
+
+    captured: list[dict[str, object]] = []
+
+    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs)
+        return (len(kwargs["hosts"]), 0, 0, 1, 0)
+
+    monkeypatch.setattr(elastic_stage, "audit_elastic_targets", fake_audit_targets)
+
+    creds_file = tmp_path / "creds.txt"
+    creds_file.write_text("alice:one\nbob:two\n", encoding="utf-8")
+    output_file = tmp_path / "elastic.txt"
+
+    args = SimpleNamespace(
+        timeout=1.0,
+        retries=0,
+        port=9200,
+        ports=None,
+        targets="targets.txt",
+        hosts=None,
+        hosts_file=None,
+        username=str(creds_file),
+        password=None,
+        apitoken=None,
+        endpoints=True,
+        plugins=False,
+        cluster=False,
+        user=False,
+        discover=False,
+        output=str(output_file),
+        output_format="txt",
+        debug=False,
+        workers=1,
+        ca_file=None,
+        proxy=None,
+        defcreds=False,
+    )
+
+    rc = run_elastic_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
+
+    assert rc == 0
+    assert [(call["hosts"], call["username"], call["password"]) for call in captured] == [
+        (["10.0.0.1"], None, None),
+        (["10.0.0.1"], "alice", "one"),
+        (["10.0.0.1"], "bob", "two"),
+        (["10.0.0.2"], None, None),
+        (["10.0.0.2"], "alice", "one"),
+        (["10.0.0.2"], "bob", "two"),
+    ]
     assert all(call["show_progress"] is False for call in captured)
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]

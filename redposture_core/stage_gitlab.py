@@ -8,18 +8,25 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import ProgressBar, iter_completed_with_progress
+from .rendering import CountColorRule, render_colored_marker_line
+from .scheduler import BoundedScheduler
+from .stage_runtime import (
+    TwoPassAuditRunner,
+    merge_stage_records,
+    progress_total_from_groups,
+    should_use_global_progress,
+    start_audit_progress,
+    start_command_progress,
+)
 from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
 
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
@@ -716,21 +723,23 @@ def _audit_gitlab_host(
                         token_projects = [
                             item for item in token_projects_all if _project_matches_filters(item, project_filters)
                         ]
-                        with ThreadPoolExecutor(max_workers=max(1, min(workers, 20))) as executor:
-                            future_map = {
-                                executor.submit(
-                                    _probe_project_capabilities,
-                                    host,
-                                    port,
-                                    timeout,
-                                    use_https=use_https,
-                                    token=token or "",
-                                    project=project,
-                                ): project
-                                for project in token_projects
-                            }
-                            for future in iter_completed_with_progress(future_map, label="GITLAB"):
-                                token_access.append(future.result())
+                        scheduler = BoundedScheduler[dict[str, Any], dict[str, Any]](
+                            max_workers=max(1, min(workers, 20)),
+                            max_inflight=max(1, min(workers, 20)) * 4,
+                        )
+
+                        def _probe_project(project: dict[str, Any]) -> dict[str, Any]:
+                            return _probe_project_capabilities(
+                                host,
+                                port,
+                                timeout,
+                                use_https=use_https,
+                                token=token or "",
+                                project=project,
+                            )
+
+                        for _project, access_record in scheduler.iter_completed(token_projects, _probe_project):
+                            token_access.append(access_record)
                         token_access.sort(key=lambda item: str(item.get("path_with_namespace") or ""))
 
             clone_candidates: list[dict[str, Any]] = []
@@ -1027,64 +1036,20 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
 
 
 def _render_colored_gitlab_line(console: Console, line: str) -> bool:
-    if not line.startswith("GITLAB"):
-        return False
-
-    marker_color = {
-        "[*]": "cyan",
-        "[+]": "bright_green",
-        "[-]": "red",
-        "[!]": "red",
-    }
-    for marker in ("[!]", "[-]", "[+]", "[*]"):
-        token = f" {marker} "
-        if token not in line:
-            continue
-        left, right = line.split(token, 1)
-        tag = "GITLAB"
-        rest = left[len(tag) :] if left.startswith(tag) else left
-
-        spans: list[tuple[int, int, str]] = []
-        projects_match = re.search(r"\(projects:(\d+)\)", right)
-        if projects_match and int(projects_match.group(1)) > 0:
-            spans.append((projects_match.start(), projects_match.end(), "red"))
-        login_true = "(login page:True)"
-        login_false = "(login page:False)"
-        idx_true = right.find(login_true)
-        if idx_true >= 0:
-            spans.append((idx_true, idx_true + len(login_true), "bright_green"))
-        idx_false = right.find(login_false)
-        if idx_false >= 0:
-            spans.append((idx_false, idx_false + len(login_false), "yellow"))
-        for fragment in ("(repo:True)", "(issues:True)", "(members:True)"):
-            idx = right.find(fragment)
-            if idx >= 0:
-                spans.append((idx, idx + len(fragment), "red"))
-
-        if not spans:
-            right_colored = console._paint(right, "white", sys.stdout)
-        else:
-            chunks: list[str] = []
-            cursor = 0
-            for start, end, color in sorted(spans, key=lambda item: item[0]):
-                if start < cursor:
-                    continue
-                if start > cursor:
-                    chunks.append(console._paint(right[cursor:start], "white", sys.stdout))
-                chunks.append(console._paint(right[start:end], color, sys.stdout))
-                cursor = end
-            if cursor < len(right):
-                chunks.append(console._paint(right[cursor:], "white", sys.stdout))
-            right_colored = "".join(chunks)
-
-        console.plain(
-            f"{console._paint(tag, 'blue', sys.stdout)}"
-            f"{console._paint(rest, 'white', sys.stdout)} "
-            f"{console._paint(marker, marker_color[marker], sys.stdout)} "
-            f"{right_colored}"
-        )
-        return True
-    return False
+    return render_colored_marker_line(
+        console,
+        line,
+        tag="GITLAB",
+        include_auth_required=False,
+        literals=(
+            ("(login page:True)", "bright_green"),
+            ("(login page:False)", "yellow"),
+            ("(repo:True)", "red"),
+            ("(issues:True)", "red"),
+            ("(members:True)", "red"),
+        ),
+        counts=(CountColorRule("projects", "red"),),
+    )
 
 
 def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) -> None:
@@ -1223,45 +1188,7 @@ def _call_audit_gitlab_host_with_stage_debug(
 
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(detect_record)
-    merged.update(deep_record)
-
-    debug_events: list[str] = []
-    for source in (detect_record.get("debug_events"), deep_record.get("debug_events")):
-        if not isinstance(source, list):
-            continue
-        for item in source:
-            if isinstance(item, str) and item.strip():
-                debug_events.append(item)
-    merged["debug_events"] = debug_events
-    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
-        deep_record.get("debug_events_streamed")
-    )
-
-    stages: list[dict[str, Any]] = []
-    for source in (detect_record.get("stages"), deep_record.get("stages")):
-        if isinstance(source, list):
-            for entry in source:
-                if isinstance(entry, dict):
-                    stages.append(dict(entry))
-    merged["stages"] = stages
-
-    stage_durations: dict[str, int] = {}
-    for source in (detect_record.get("stage_durations_ms"), deep_record.get("stage_durations_ms")):
-        if isinstance(source, dict):
-            for key, value in source.items():
-                stage_durations[str(key)] = int(value or 0)
-    merged["stage_durations_ms"] = stage_durations
-
-    stage_attempts: dict[str, int] = {}
-    for source in (detect_record.get("stage_attempts"), deep_record.get("stage_attempts")):
-        if isinstance(source, dict):
-            for key, value in source.items():
-                stage_attempts[str(key)] = int(value or 0)
-    merged["stage_attempts"] = stage_attempts
-
-    merged["stage_failed_at"] = deep_record.get("stage_failed_at") or detect_record.get("stage_failed_at")
-    return merged
+    return merge_stage_records(detect_record, deep_record)
 
 
 def audit_gitlab_targets(
@@ -1283,7 +1210,7 @@ def audit_gitlab_targets(
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
-    show_progress: bool = True,
+    show_progress: bool = False,
 ) -> tuple[int, int, int]:
     total = 0
     detected = 0
@@ -1294,113 +1221,83 @@ def audit_gitlab_targets(
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
-    progress: ProgressBar | None = None
+    progress = None
     try:
         indexed_hosts = list(enumerate(hosts))
-        detect_records: dict[int, dict[str, Any]] = {}
-        deep_records: dict[int, dict[str, Any]] = {}
-        progress = ProgressBar("GITLAB", len(indexed_hosts), enabled=show_progress, leave=True)
-
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
-
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            pass1_future_map = {
-                executor.submit(
-                    _call_audit_gitlab_host_with_stage_debug,
-                    host,
-                    port,
-                    timeout,
-                    retries,
-                    use_https=use_https,
-                    token=token,
-                    project_filters=project_filters,
-                    clone=clone,
-                    clone_dir=clone_dir,
-                    workers=workers,
-                    run_deep_checks=False,
-                    debug=bool(debug_emit),
-                    debug_emit=debug_emit,
-                ): idx
-                for idx, host in indexed_hosts
-            }
-            buffered_records: dict[int, dict[str, Any]] = {}
-            next_emit_idx = 0
-            for future in as_completed(pass1_future_map):
-                record_idx = int(pass1_future_map[future])
-                buffered_records[record_idx] = future.result()
-                progress.advance()
-                while next_emit_idx in buffered_records:
-                    detect_record = buffered_records.pop(next_emit_idx)
-                    detect_records[next_emit_idx] = detect_record
-                    if output_format == "txt":
-                        status = str(detect_record.get("status") or "fail")
-                        suppress_timeout_status_line = suppress_timeout_status_lines and status == "fail"
-                        if not suppress_timeout_status_line:
-                            _emit_line(out_fh, emit_line, _format_record(detect_record, output_format))
-                    next_emit_idx += 1
-
+        progress = start_audit_progress("GITLAB", len(indexed_hosts), enabled=show_progress, leave=True)
         deep_requested = bool(project_filters or clone or token)
-        deep_candidates: list[tuple[int, str]] = []
-        detected_count = 0
-        for idx, host in indexed_hosts:
-            detect_record = detect_records[idx]
+
+        def _detect_task(host: str) -> dict[str, Any]:
+            return _call_audit_gitlab_host_with_stage_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                use_https=use_https,
+                token=token,
+                project_filters=project_filters,
+                clone=clone,
+                clone_dir=clone_dir,
+                workers=workers,
+                run_deep_checks=False,
+                debug=bool(debug_emit),
+                debug_emit=debug_emit,
+            )
+
+        def _deep_task(host: str) -> dict[str, Any]:
+            return _call_audit_gitlab_host_with_stage_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                use_https=use_https,
+                token=token,
+                project_filters=project_filters,
+                clone=clone,
+                clone_dir=clone_dir,
+                workers=workers,
+                run_deep_checks=True,
+                debug=bool(debug_emit),
+                debug_emit=debug_emit,
+            )
+
+        def _emit_detect(detect_record: dict[str, Any]) -> None:
+            if output_format != "txt":
+                return
+            status = str(detect_record.get("status") or "fail")
+            suppress_timeout_status_line = suppress_timeout_status_lines and status == "fail"
+            if not suppress_timeout_status_line:
+                _emit_line(out_fh, emit_line, _format_record(detect_record, output_format))
+
+        def _deep_gate(detect_record: dict[str, Any]) -> tuple[bool, str]:
             detect_status = str(detect_record.get("status") or "fail")
-            if not bool(detect_record.get("is_gitlab")):
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_gitlab")
-                continue
-            detected_count += 1
             if deep_requested and detect_status in _GITLAB_DEEP_STATUSES:
-                deep_candidates.append((idx, host))
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
-            elif debug_emit is not None:
-                reason = "no_data_actions" if not deep_requested else f"status={detect_status}"
-                debug_emit(f"{host}:{port} stage2_gate=skip reason={reason}")
+                return True, f"status={detect_status}"
+            reason = "no_data_actions" if not deep_requested else f"status={detect_status}"
+            return False, reason
 
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect complete gitlab={detected_count} deep_candidates={len(deep_candidates)}")
-            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
-
-        progress.set_total(len(indexed_hosts) + len(deep_candidates))
-        if deep_candidates:
-            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-                pass2_future_map = {
-                    executor.submit(
-                        _call_audit_gitlab_host_with_stage_debug,
-                        host,
-                        port,
-                        timeout,
-                        retries,
-                        use_https=use_https,
-                        token=token,
-                        project_filters=project_filters,
-                        clone=clone,
-                        clone_dir=clone_dir,
-                        workers=workers,
-                        run_deep_checks=True,
-                        debug=bool(debug_emit),
-                        debug_emit=debug_emit,
-                    ): idx
-                    for idx, host in deep_candidates
-                }
-                for future in as_completed(pass2_future_map):
-                    deep_records[int(pass2_future_map[future])] = future.result()
-                    progress.advance()
-
-        if debug_emit is not None:
-            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
+        pass_result = TwoPassAuditRunner(
+            label="GITLAB",
+            workers=workers,
+            debug_emit=debug_emit,
+            progress=progress,
+            detected_name="gitlab",
+        ).run(
+            indexed_hosts,
+            detect_task=_detect_task,
+            deep_task=_deep_task,
+            is_detected=lambda record: bool(record.get("is_gitlab")),
+            deep_gate=_deep_gate,
+            emit_detect=_emit_detect,
+            merge_records=_merge_stage2_record,
+            not_detected_reason="not_gitlab",
+        )
 
         if progress is not None:
             progress.close()
             progress = None
 
-        final_records: dict[int, dict[str, Any]] = {}
-        for idx, _host in indexed_hosts:
-            detect_record = detect_records[idx]
-            deep_record = deep_records.get(idx)
-            final_records[idx] = _merge_stage2_record(detect_record, deep_record) if deep_record else detect_record
+        final_records = pass_result.final_records
 
         for idx, _host in indexed_hosts:
             record = final_records[idx]
@@ -1524,7 +1421,17 @@ def run_gitlab_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     total = 0
     detected = 0
     failed = 0
-    group_progress_enabled = len(execution_groups) <= 1
+    use_single_global_progress = should_use_global_progress(args.output_format, len(execution_groups))
+    group_progress_enabled = not use_single_global_progress
+    outer_progress = None
+    if use_single_global_progress:
+        outer_progress = start_command_progress(
+            args,
+            "GITLAB",
+            progress_total_from_groups(group.hosts for group in execution_groups),
+            enabled=True,
+            leave=True,
+        )
     try:
         for idx, group in enumerate(execution_groups):
             group_use_https = bool(getattr(args, "https", False))
@@ -1553,9 +1460,14 @@ def run_gitlab_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             total += part_total
             detected += part_detected
             failed += part_failed
+            if outer_progress is not None:
+                outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process gitlab output: {exc}")
         return 2
+    finally:
+        if outer_progress is not None:
+            outer_progress.close()
 
     if args.debug:
         summary = f"gitlab audit complete: total={total} detected={detected} fail={failed}"

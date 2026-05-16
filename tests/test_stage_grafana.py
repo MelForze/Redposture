@@ -1006,7 +1006,11 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
             nonlocal closed_count
             closed_count += 1
 
-    monkeypatch.setattr(grafana_stage, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        grafana_stage,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     args = SimpleNamespace(
         debug=False,

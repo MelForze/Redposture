@@ -722,7 +722,11 @@ def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypa
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(redis_stage, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        redis_stage,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     args = SimpleNamespace(
         debug=False,
@@ -785,7 +789,11 @@ def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(redis_stage, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        redis_stage,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     args = SimpleNamespace(
         debug=False,
@@ -850,7 +858,11 @@ def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pyte
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(redis_stage, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        redis_stage,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     args = SimpleNamespace(
         debug=False,

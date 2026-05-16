@@ -10,7 +10,6 @@ import os
 import re
 import socket
 import ssl
-import sys
 import threading
 import time
 import urllib.error
@@ -18,12 +17,19 @@ import urllib.parse
 import urllib.request
 import zlib
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import ProgressBar
+from .rendering import BooleanColorRule, render_colored_marker_line
+from .stage_runtime import (
+    LineOutputSink,
+    TwoPassAuditRunner,
+    progress_total_from_groups,
+    should_use_global_progress,
+    start_audit_progress,
+    start_command_progress,
+)
 from .utils import (
     build_scan_execution_groups,
     collect_scan_ports,
@@ -1619,10 +1625,12 @@ def _search_index(
     body = {
         "size": _DISCOVER_QUERY_SIZE,
         "query": {
-            "query_string": {
+            "simple_query_string": {
                 "query": query_string,
+                "fields": ["*"],
                 "default_operator": "OR",
                 "analyze_wildcard": True,
+                "lenient": True,
             }
         },
     }
@@ -3088,74 +3096,17 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
 
 
 def _render_colored_elastic_line(console: Console, line: str) -> bool:
-    if not line.startswith(_ELASTIC_TAG):
-        return False
-
-    marker_color = {
-        "[*]": "cyan",
-        "[+]": "bright_green",
-        "[-]": "red",
-        "[!]": "red",
-    }
-
-    for marker in ("[!]", "[-]", "[+]", "[*]"):
-        token = f" {marker} "
-        if token not in line:
-            continue
-
-        left, right = line.split(token, 1)
-        tag = _ELASTIC_TAG
-        rest = left[len(tag) :] if left.startswith(tag) else left
-
-        spans: list[tuple[int, int, str]] = []
-        for fragment, color in (
-            ("(auth required:True)", "bright_green"),
-            ("(auth required:False)", "red"),
-            ("(auth required:unknown)", "yellow"),
-        ):
-            idx = right.find(fragment)
-            if idx >= 0:
-                spans.append((idx, idx + len(fragment), color))
-
-        for capability in ("read", "write", "manage", "manage_security"):
-            match = re.search(rf"\({capability}:(True|False|unknown)\)", right)
-            if not match:
-                continue
-            value = match.group(1)
-            if value == "True":
-                color = "red"
-            elif value == "False":
-                color = "bright_green"
-            else:
-                color = "yellow"
-            spans.append((match.start(), match.end(), color))
-
-        if not spans:
-            right_colored = console._paint(right, "white", sys.stdout)
-        else:
-            chunks: list[str] = []
-            cursor = 0
-            for start, end, color in sorted(spans, key=lambda item: item[0]):
-                if start < cursor:
-                    continue
-                if start > cursor:
-                    chunks.append(console._paint(right[cursor:start], "white", sys.stdout))
-                chunks.append(console._paint(right[start:end], color, sys.stdout))
-                cursor = end
-            if cursor < len(right):
-                chunks.append(console._paint(right[cursor:], "white", sys.stdout))
-            right_colored = "".join(chunks)
-
-        rendered = (
-            f"{console._paint(tag, 'blue', sys.stdout)}"
-            f"{console._paint(rest, 'white', sys.stdout)} "
-            f"{console._paint(marker, marker_color[marker], sys.stdout)} "
-            f"{right_colored}"
-        )
-        console.plain(rendered)
-        return True
-
-    return False
+    return render_colored_marker_line(
+        console,
+        line,
+        tag=_ELASTIC_TAG,
+        booleans=(
+            BooleanColorRule("read"),
+            BooleanColorRule("write"),
+            BooleanColorRule("manage"),
+            BooleanColorRule("manage_security"),
+        ),
+    )
 
 
 def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) -> None:
@@ -3201,7 +3152,7 @@ def audit_elastic_targets(
     suppress_timeout_status_lines: bool = False,
     preferred_scheme: str | None = None,
     debug_emit: Callable[[str], None] | None = None,
-    show_progress: bool = True,
+    show_progress: bool = False,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -3210,126 +3161,89 @@ def audit_elastic_targets(
     failed = 0
 
     out_fh: Any = None
-    progress: ProgressBar | None = None
+    progress = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
         indexed_hosts = list(enumerate(hosts))
-        detect_records: dict[int, dict[str, Any]] = {}
-        deep_records: dict[int, dict[str, Any]] = {}
-        progress = ProgressBar(_ELASTIC_TAG, len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = start_audit_progress(_ELASTIC_TAG, len(indexed_hosts), enabled=show_progress, leave=True)
 
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
+        def _detect_task(host: str) -> dict[str, Any]:
+            return _call_audit_elastic_host_with_thread_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                username,
+                password,
+                api_token,
+                ca_file,
+                show_endpoints,
+                show_plugins,
+                show_cluster,
+                show_users,
+                discover,
+                preferred_scheme,
+                bool(debug_emit),
+                False,
+                debug_emit,
+            )
 
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            pass1_future_map = {
-                executor.submit(
-                    _call_audit_elastic_host_with_thread_debug,
-                    host,
-                    port,
-                    timeout,
-                    retries,
-                    username,
-                    password,
-                    api_token,
-                    ca_file,
-                    show_endpoints,
-                    show_plugins,
-                    show_cluster,
-                    show_users,
-                    discover,
-                    preferred_scheme,
-                    bool(debug_emit),
-                    False,
-                    debug_emit,
-                ): idx
-                for idx, host in indexed_hosts
-            }
-            buffered_records: dict[int, dict[str, Any]] = {}
-            next_emit_idx = 0
-            for future in as_completed(pass1_future_map):
-                record_idx = int(pass1_future_map[future])
-                buffered_records[record_idx] = future.result()
-                progress.advance()
-                while next_emit_idx in buffered_records:
-                    detect_record = buffered_records.pop(next_emit_idx)
-                    detect_records[next_emit_idx] = detect_record
-                    detect_status = str(detect_record.get("status") or "fail")
-                    suppress_timeout_detect_line = (
-                        suppress_timeout_status_lines and output_format == "txt" and detect_status == "fail"
-                    )
-                    if not suppress_timeout_detect_line:
-                        _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
-                    next_emit_idx += 1
+        def _deep_task(host: str) -> dict[str, Any]:
+            return _call_audit_elastic_host_with_thread_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                username,
+                password,
+                api_token,
+                ca_file,
+                show_endpoints,
+                show_plugins,
+                show_cluster,
+                show_users,
+                discover,
+                preferred_scheme,
+                bool(debug_emit),
+                True,
+                debug_emit,
+            )
 
-        deep_candidates: list[tuple[int, str]] = []
-        detected_count = 0
-        for idx, host in indexed_hosts:
-            detect_record = detect_records[idx]
+        def _emit_detect(detect_record: dict[str, Any]) -> None:
             detect_status = str(detect_record.get("status") or "fail")
-            if not bool(detect_record.get("is_elastic")):
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_elastic")
-                continue
-            detected_count += 1
+            suppress_timeout_detect_line = (
+                suppress_timeout_status_lines and output_format == "txt" and detect_status == "fail"
+            )
+            if not suppress_timeout_detect_line:
+                _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
+
+        def _deep_gate(detect_record: dict[str, Any]) -> tuple[bool, str]:
+            detect_status = str(detect_record.get("status") or "fail")
             if detect_status in {"open_no_auth", "valid_credentials"}:
-                deep_candidates.append((idx, host))
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
-            elif debug_emit is not None:
-                debug_emit(f"{host}:{port} stage2_gate=skip reason=status={detect_status}")
+                return True, f"status={detect_status}"
+            return False, f"status={detect_status}"
 
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect complete elastic={detected_count} deep_candidates={len(deep_candidates)}")
+        pass_result = TwoPassAuditRunner(
+            label=_ELASTIC_TAG,
+            workers=workers,
+            debug_emit=debug_emit,
+            progress=progress,
+            detected_name="elastic",
+        ).run(
+            indexed_hosts,
+            detect_task=_detect_task,
+            deep_task=_deep_task,
+            is_detected=lambda record: bool(record.get("is_elastic")),
+            deep_gate=_deep_gate,
+            emit_detect=_emit_detect,
+            merge_records=_merge_stage2_record,
+            not_detected_reason="not_elastic",
+        )
 
-        progress.set_total(len(indexed_hosts) + len(deep_candidates))
-        if debug_emit is not None:
-            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
-
-        if deep_candidates:
-            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-                pass2_future_map = {
-                    executor.submit(
-                        _call_audit_elastic_host_with_thread_debug,
-                        host,
-                        port,
-                        timeout,
-                        retries,
-                        username,
-                        password,
-                        api_token,
-                        ca_file,
-                        show_endpoints,
-                        show_plugins,
-                        show_cluster,
-                        show_users,
-                        discover,
-                        preferred_scheme,
-                        bool(debug_emit),
-                        True,
-                        debug_emit,
-                    ): idx
-                    for idx, host in deep_candidates
-                }
-                for future in as_completed(pass2_future_map):
-                    record_idx = int(pass2_future_map[future])
-                    deep_records[record_idx] = future.result()
-                    progress.advance()
-
-        if debug_emit is not None:
-            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
-
-        final_records: dict[int, dict[str, Any]] = {}
-        for idx in range(len(hosts)):
-            detect_record = detect_records[idx]
-            deep_record = deep_records.get(idx)
-            if deep_record is None:
-                final_records[idx] = detect_record
-            else:
-                final_records[idx] = _merge_stage2_record(detect_record, deep_record)
+        final_records = pass_result.final_records
 
         for idx in range(len(hosts)):
             record = final_records[idx]
@@ -3536,62 +3450,164 @@ def run_elastic_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     f"credential_prefilter port={int(group.port)} open={len(group_hosts_by_idx[idx])}/"
                     f"{len(group.hosts)}"
                 )
-    outer_progress: ProgressBar | None = None
+    outer_progress = None
     use_single_global_progress = (
-        stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
+        args.output_format == "txt" and credential_file_entries is not None
+    ) or should_use_global_progress(
+        args.output_format,
+        len(execution_groups),
+        len(credential_runs) if credential_file_entries is None else 1,
     )
     if use_single_global_progress:
-        global_total = sum(len(group_hosts_by_idx[idx]) for idx, _group in enumerate(execution_groups)) * len(
-            credential_runs
+        global_total = progress_total_from_groups(
+            group_hosts_by_idx.values(), 1 if credential_file_entries is not None else len(credential_runs)
         )
-        outer_progress = ProgressBar(_ELASTIC_TAG, global_total, enabled=True, leave=True)
+        outer_progress = start_command_progress(args, _ELASTIC_TAG, global_total, enabled=True, leave=True)
 
     output_written = False
+    output_sink = LineOutputSink(args.output, emit_line)
+
+    def run_elastic_capture(
+        host: str,
+        run_username: str | None,
+        run_password: str | None,
+        group_port: int,
+        group_scheme_hint: str | None,
+        *,
+        include_data: bool,
+    ) -> tuple[list[str], tuple[int, int, int, int, int]]:
+        lines: list[str] = []
+        counts = audit_elastic_targets(
+            hosts=[host],
+            port=group_port,
+            timeout=args.timeout,
+            retries=args.retries,
+            workers=args.workers,
+            username=run_username,
+            password=run_password,
+            api_token=api_token,
+            ca_file=getattr(args, "ca_file", None),
+            show_endpoints=show_endpoints and include_data,
+            show_plugins=show_plugins and include_data,
+            show_cluster=show_cluster and include_data,
+            show_users=show_users and include_data,
+            discover=discover and include_data,
+            output_path=None,
+            output_format=args.output_format,
+            emit_line=lines.append,
+            logger=logger if args.debug else None,
+            append_output=False,
+            suppress_timeout_status_lines=not bool(args.debug),
+            preferred_scheme=group_scheme_hint,
+            debug_emit=emit_debug if args.debug else None,
+            show_progress=False,
+        )
+        return lines, counts
+
     try:
-        for idx, group in enumerate(execution_groups):
-            audit_hosts = group_hosts_by_idx[idx]
-            if not audit_hosts:
-                continue
-            host_batches = [[host] for host in audit_hosts] if len(credential_runs) > 1 else [audit_hosts]
-            for host_batch in host_batches:
-                deep_already_emitted = False
-                for run_username, run_password in credential_runs:
-                    run_show_deep = not deep_already_emitted
-                    part_total, part_open, part_valid, part_auth, part_failed = audit_elastic_targets(
-                        hosts=host_batch,
-                        port=group.port,
-                        timeout=args.timeout,
-                        retries=args.retries,
-                        workers=args.workers,
-                        username=run_username,
-                        password=run_password,
-                        api_token=api_token,
-                        ca_file=getattr(args, "ca_file", None),
-                        show_endpoints=show_endpoints and run_show_deep,
-                        show_plugins=show_plugins and run_show_deep,
-                        show_cluster=show_cluster and run_show_deep,
-                        show_users=show_users and run_show_deep,
-                        discover=discover and run_show_deep,
-                        output_path=args.output,
-                        output_format=args.output_format,
-                        emit_line=emit_line,
-                        logger=logger if args.debug else None,
-                        append_output=output_written,
-                        suppress_timeout_status_lines=not bool(args.debug),
-                        preferred_scheme=group.scheme_hint,
-                        debug_emit=emit_debug if args.debug else None,
-                        show_progress=not use_single_global_progress,
+        if credential_file_entries is not None:
+            for idx, group in enumerate(execution_groups):
+                audit_hosts = group_hosts_by_idx[idx]
+                if not audit_hosts:
+                    continue
+                for host in audit_hosts:
+                    selected_lines, selected_counts = run_elastic_capture(
+                        host, None, None, int(group.port), group.scheme_hint, include_data=False
                     )
+                    selected_username: str | None = None
+                    selected_password: str | None = None
+                    base_total, base_open, base_valid, base_auth, base_failed = selected_counts
+
+                    if base_open == 0 and base_valid == 0 and base_auth > 0:
+                        for run_username, run_password in credential_runs:
+                            _attempt_lines, attempt_counts = run_elastic_capture(
+                                host,
+                                run_username,
+                                run_password,
+                                int(group.port),
+                                group.scheme_hint,
+                                include_data=False,
+                            )
+                            _attempt_total, attempt_open, attempt_valid, _attempt_auth, _attempt_failed = attempt_counts
+                            if attempt_open > 0 or attempt_valid > 0:
+                                selected_username = run_username
+                                selected_password = run_password
+                                break
+                    elif base_open > 0 or base_valid > 0:
+                        selected_username = None
+                        selected_password = None
+
+                    if (
+                        selected_username is not None
+                        or selected_password is not None
+                        or base_open > 0
+                        or base_valid > 0
+                    ):
+                        selected_lines, selected_counts = run_elastic_capture(
+                            host,
+                            selected_username,
+                            selected_password,
+                            int(group.port),
+                            group.scheme_hint,
+                            include_data=True,
+                        )
+
+                    output_sink.emit_many(selected_lines)
+                    output_written = output_sink.output_written
+                    part_total, part_open, part_valid, part_auth, part_failed = selected_counts
                     total += part_total
                     open_no_auth += part_open
                     valid += part_valid
                     auth_required += part_auth
                     failed += part_failed
                     if outer_progress is not None:
-                        outer_progress.advance(part_total)
-                    if part_open > 0 or part_valid > 0:
-                        deep_already_emitted = True
-                    output_written = True
+                        outer_progress.advance(1)
+                    _ = (base_total, base_failed)
+        else:
+            for idx, group in enumerate(execution_groups):
+                audit_hosts = group_hosts_by_idx[idx]
+                if not audit_hosts:
+                    continue
+                host_batches = [[host] for host in audit_hosts] if len(credential_runs) > 1 else [audit_hosts]
+                for host_batch in host_batches:
+                    deep_already_emitted = False
+                    for run_username, run_password in credential_runs:
+                        run_show_deep = not deep_already_emitted
+                        part_total, part_open, part_valid, part_auth, part_failed = audit_elastic_targets(
+                            hosts=host_batch,
+                            port=group.port,
+                            timeout=args.timeout,
+                            retries=args.retries,
+                            workers=args.workers,
+                            username=run_username,
+                            password=run_password,
+                            api_token=api_token,
+                            ca_file=getattr(args, "ca_file", None),
+                            show_endpoints=show_endpoints and run_show_deep,
+                            show_plugins=show_plugins and run_show_deep,
+                            show_cluster=show_cluster and run_show_deep,
+                            show_users=show_users and run_show_deep,
+                            discover=discover and run_show_deep,
+                            output_path=args.output,
+                            output_format=args.output_format,
+                            emit_line=emit_line,
+                            logger=logger if args.debug else None,
+                            append_output=output_written,
+                            suppress_timeout_status_lines=not bool(args.debug),
+                            preferred_scheme=group.scheme_hint,
+                            debug_emit=emit_debug if args.debug else None,
+                            show_progress=not use_single_global_progress,
+                        )
+                        total += part_total
+                        open_no_auth += part_open
+                        valid += part_valid
+                        auth_required += part_auth
+                        failed += part_failed
+                        if outer_progress is not None:
+                            outer_progress.advance(part_total)
+                        if part_open > 0 or part_valid > 0:
+                            deep_already_emitted = True
+                        output_written = True
     except OSError as exc:
         console.error(f"failed to process elastic output: {exc}")
         return 2

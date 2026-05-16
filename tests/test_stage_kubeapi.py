@@ -872,7 +872,11 @@ def test_run_kubeapi_stage_multi_group_uses_single_global_progress(monkeypatch: 
         def close(self) -> None:
             self.closed = True
 
-    monkeypatch.setattr(kube, "ProgressBar", _FakeProgress)
+    monkeypatch.setattr(
+        kube,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
+    )
 
     captured: list[dict[str, object]] = []
 

@@ -256,7 +256,10 @@ def test_run_scan_stage_explicit_url_targets_use_single_global_progress(
             nonlocal progress_closed
             progress_closed += 1
 
-    monkeypatch.setattr("redposture_core.stage_scan.ProgressBar", DummyProgressBar)
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.start_command_progress",
+        lambda _args, label, total, **kwargs: DummyProgressBar(label, total, **kwargs),
+    )
 
     rc = run_scan_stage(
         _args(

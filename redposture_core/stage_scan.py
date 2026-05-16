@@ -7,10 +7,10 @@ import sys
 import time
 
 from .console import Console
+from .exporters.discover import scan_exporter_presence
 from .logger import AttemptLogger
 from .profiles import load_profiles
-from .progress import ProgressBar
-from .scanner import scan_exporter_presence
+from .stage_runtime import progress_total_from_groups, should_use_global_progress, start_command_progress
 from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs
 
 
@@ -133,6 +133,8 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
                 retries=args.retries,
                 discovery_exporters=profiles["discovery_exporters"],
                 custom_ports=custom_ports or None,
+                show_progress=should_use_global_progress(args.output_format, len(hosts)),
+                progress_owner=getattr(args, "_progress_owner", None),
             )
         except OSError as exc:
             console.error(f"failed to process scan output: {exc}")
@@ -152,11 +154,11 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         found = 0
         found_by_host: dict[str, list[dict[str, object]]] = {host: [] for host in hosts}
         seen_hits: dict[str, set[tuple[str, int]]] = {host: set() for host in hosts}
-        use_single_global_progress = stream_to_stdout and args.output_format == "txt" and len(execution_groups) > 1
-        outer_progress: ProgressBar | None = None
+        use_single_global_progress = should_use_global_progress(args.output_format, len(execution_groups))
+        outer_progress = None
         if use_single_global_progress:
-            global_total = sum(len(group.hosts) for group in execution_groups)
-            outer_progress = ProgressBar("SCAN", global_total, enabled=True, leave=True)
+            global_total = progress_total_from_groups(group.hosts for group in execution_groups)
+            outer_progress = start_command_progress(args, "SCAN", global_total, enabled=True, leave=True)
         try:
             for idx, group in enumerate(execution_groups):
                 part_checks, part_found, part_found_by_host = scan_exporter_presence(
@@ -174,6 +176,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
                     show_progress=not use_single_global_progress,
                     progress_leave=False,
                     output_mode="a" if idx > 0 else "w",
+                    progress_owner=getattr(args, "_progress_owner", None),
                 )
                 checks += part_checks
                 found += part_found

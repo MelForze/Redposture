@@ -12,6 +12,8 @@ from redposture_core.stage_postgres import (
     _caps_suffix,
     _format_databases_detail_records,
     _format_execute_detail_records,
+    _format_os_read_detail_records,
+    _format_privesc_detail_records,
     _format_record,
     _format_sql_detail_records,
     _format_table_columns_detail_records,
@@ -20,6 +22,7 @@ from redposture_core.stage_postgres import (
     _format_tables_detail_records,
     _merge_query_error,
     _parse_bool,
+    _pg_collect_privesc_checks,
     _pg_display_table_name,
     _pg_group_table_targets,
     _pg_normalize_column_names,
@@ -30,6 +33,7 @@ from redposture_core.stage_postgres import (
     _pg_parse_table_reference,
     _pg_quote_ident,
     _pg_quote_literal,
+    _pg_try_read_server_file,
     _PgAuditError,
     _PgSession,
     _scram_client_final,
@@ -116,6 +120,7 @@ def _postgres_args(**overrides: object) -> argparse.Namespace:
         "output": None,
         "output_format": "txt",
         "execute": None,
+        "os_read": None,
         "sql_cmd": None,
         "database": None,
         "tables": [],
@@ -285,6 +290,78 @@ def test_collect_postgres_privileges_and_query_helpers(monkeypatch: pytest.Monke
     assert postgres._pg_query_accessible_databases(object()) == (["postgres", "appdb"], None)
 
 
+def test_postgres_os_read_prefers_pg_read_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    queries: list[str] = []
+
+    def fake_query(_sock, query: str):  # type: ignore[no-untyped-def]
+        queries.append(query)
+        return [["pg-host"]], None
+
+    monkeypatch.setattr(postgres, "_pg_query_rows", fake_query)
+
+    output, error, method, attempts = _pg_try_read_server_file(object(), "/etc/hostname")
+
+    assert output == ["pg-host"]
+    assert error is None
+    assert method == "pg_read_file"
+    assert attempts == [{"method": "pg_read_file", "ok": True, "error": None}]
+    assert queries == ["SELECT pg_read_file('/etc/hostname')"]
+
+
+def test_postgres_os_read_falls_back_to_lo_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    queries: list[str] = []
+
+    def fake_query(_sock, query: str):  # type: ignore[no-untyped-def]
+        queries.append(query)
+        if "pg_read_file" in query:
+            return [], "permission denied"
+        if "pg_switch_wal" in query:
+            return [["0/1"]], None
+        if "pg_ls_dir" in query:
+            return [["hostname"]], None
+        if "lo_import" in query:
+            return [["12345"]], None
+        if "lo_get" in query:
+            return [["fallback-host"]], None
+        if "lo_unlink" in query:
+            return [["1"]], None
+        return [], "unexpected"
+
+    monkeypatch.setattr(postgres, "_pg_query_rows", fake_query)
+
+    output, error, method, attempts = _pg_try_read_server_file(object(), "/etc/hostname")
+
+    assert output == ["fallback-host"]
+    assert error is None
+    assert method == "lo_import"
+    assert attempts[0]["method"] == "pg_read_file"
+    assert attempts[0]["ok"] is False
+    assert attempts[-1]["method"] == "lo_import"
+    assert attempts[-1]["ok"] is True
+    assert any("SELECT pg_ls_dir('/etc', FALSE, TRUE)" == query for query in queries)
+    assert any("SELECT lo_import('/etc/hostname')" == query for query in queries)
+    assert any("SELECT encode(lo_get(12345), 'escape')" == query for query in queries)
+
+
+def test_postgres_os_read_reports_both_method_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_query(_sock, query: str):  # type: ignore[no-untyped-def]
+        if "pg_read_file" in query:
+            return [], "permission denied"
+        if "lo_import" in query:
+            return [], "large object denied"
+        return [], None
+
+    monkeypatch.setattr(postgres, "_pg_query_rows", fake_query)
+
+    output, error, method, attempts = _pg_try_read_server_file(object(), "/etc/hostname")
+
+    assert output is None
+    assert method is None
+    assert "pg_read_file failed: permission denied" in str(error)
+    assert "lo_import failed: large object denied" in str(error)
+    assert [item["method"] for item in attempts] == ["pg_read_file", "lo_import"]
+
+
 @pytest.mark.parametrize(
     ("overrides", "expected_message"),
     [
@@ -297,7 +374,11 @@ def test_collect_postgres_privileges_and_query_helpers(monkeypatch: pytest.Monke
         ({"columns": ["bad-name"]}, "unsupported column identifier: bad-name"),
         ({"show_columns": True}, "--show-columns requires --table"),
         ({"execute": "id", "sql_cmd": "select 1"}, "--execute cannot be combined with --sql-cmd"),
+        ({"execute": "id", "os_read": "/etc/hostname"}, "--execute cannot be combined with --os-read"),
+        ({"sql_cmd": "select 1", "os_read": "/etc/hostname"}, "--os-read cannot be combined with --sql-cmd"),
         ({"os_shell": True, "sql_shell": True}, "--os-shell cannot be combined with --sql-shell"),
+        ({"os_shell": True, "os_read": "/etc/hostname"}, "--os-shell cannot be combined with --os-read"),
+        ({"sql_shell": True, "os_read": "/etc/hostname"}, "--sql-shell cannot be combined with --os-read"),
     ],
 )
 def test_run_postgres_stage_validation_errors(
@@ -513,7 +594,11 @@ def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
             nonlocal progress_closed
             progress_closed += 1
 
-    monkeypatch.setattr(postgres, "ProgressBar", DummyProgressBar)
+    monkeypatch.setattr(
+        postgres,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: DummyProgressBar(label, total, **kwargs),
+    )
 
     rc = postgres.run_postgres_stage(
         _postgres_args(
@@ -1549,6 +1634,42 @@ def test_audit_postgres_collects_execute_and_sql_outputs(monkeypatch) -> None:  
     assert record["sql_output"] == ["1 | hello"]
 
 
+def test_postgres_privesc_check_collector(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_bool(_sock: object, query: str) -> tuple[bool | None, str | None]:
+        if "rolsuper" in query:
+            return True, None
+        if "pg_catalog.pg_shadow" in query:
+            return True, None
+        if "pg_execute_server_program" in query:
+            return False, None
+        if "pg_read_server_files" in query:
+            return True, None
+        if "pg_write_server_files" in query:
+            return False, None
+        if "lo_import" in query or "lo_export" in query:
+            return False, None
+        if "rolcreaterole" in query:
+            return True, None
+        if "rolcreatedb" in query:
+            return False, None
+        if "has_database_privilege" in query:
+            return True, None
+        return None, "unexpected bool query"
+
+    monkeypatch.setattr(postgres, "_pg_query_scalar_bool", fake_bool)
+    monkeypatch.setattr(postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: (2, None))
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: ([["public.safe_definer"]], None))
+
+    checks, summary = _pg_collect_privesc_checks(object(), None)  # type: ignore[arg-type]
+    assert len(checks) == 11
+    assert checks[0]["name"] == "Superuser session"
+    assert checks[1]["name"] == "pg_shadow readable"
+    assert any(
+        item["id"] == "security_definer_accessible" and "public.safe_definer" in item["evidence"] for item in checks
+    )
+    assert summary == {"critical": 3, "high": 4, "medium": 3, "unknown": 0, "total": 11}
+
+
 def test_postgres_detail_and_status_renderers_cover_text_and_json_paths() -> None:
     record = {
         "timestamp": "2026-03-27T00:00:00Z",
@@ -1569,6 +1690,35 @@ def test_postgres_detail_and_status_renderers_cover_text_and_json_paths() -> Non
         "sql_ok": True,
         "sql_output": ["1"],
         "sql_error": None,
+        "os_read_path": "/etc/hostname",
+        "os_read_attempted": True,
+        "os_read_ok": True,
+        "os_read_method": "pg_read_file",
+        "os_read_output": ["pg-host"],
+        "os_read_error": None,
+        "os_read_methods": [{"method": "pg_read_file", "ok": True, "error": None}],
+        "privesc_check": True,
+        "privesc_summary": {"critical": 1, "high": 1, "medium": 0, "unknown": 1, "total": 3},
+        "privesc_checks": [
+            {
+                "id": "superuser_session",
+                "severity": "CRITICAL",
+                "name": "Superuser session",
+                "description": "full database takeover via current superuser role",
+                "vulnerable": True,
+                "evidence": "current_user rolsuper=True",
+                "error": None,
+            },
+            {
+                "id": "pg_read_file",
+                "severity": "HIGH",
+                "name": "pg_read_file()",
+                "description": "arbitrary server-side file read",
+                "vulnerable": False,
+                "evidence": "pg_read_server_files=False",
+                "error": None,
+            },
+        ],
         "status": "valid_credentials",
         "effective_username": "postgres",
         "provided_password": "",
@@ -1597,6 +1747,28 @@ def test_postgres_detail_and_status_renderers_cover_text_and_json_paths() -> Non
     assert any("query=select 1" in line for line in sql_lines)
     assert any(" 1" in line or line.endswith("\t1") for line in sql_lines)
     assert any('"type": "sql_dump"' in line for line in _format_sql_detail_records(record, "json"))
+
+    os_read_lines = _format_os_read_detail_records(record, "txt")
+    assert any("[*] OS Read" in line for line in os_read_lines)
+    assert any("path=/etc/hostname" in line for line in os_read_lines)
+    assert any("method=pg_read_file" in line for line in os_read_lines)
+    assert any("pg-host" in line for line in os_read_lines)
+    assert any('"type": "os_read_dump"' in line for line in _format_os_read_detail_records(record, "json"))
+
+    privesc_lines = _format_privesc_detail_records(record, "txt")
+    assert any("[*] PrivEsc Check" in line for line in privesc_lines)
+    assert not any("critical:" in line or "result:" in line or "evidence=" in line for line in privesc_lines)
+    assert any(
+        "CRITICAL - Superuser session - full database takeover via current superuser role" in line
+        for line in privesc_lines
+    )
+    assert not any("HIGH - pg_read_file()" in line for line in privesc_lines)
+    privesc_debug_lines = _format_privesc_detail_records(record, "txt", debug=True)
+    assert any("CRITICAL - Superuser session" in line and "result:True" in line for line in privesc_debug_lines)
+    assert any(
+        "HIGH - pg_read_file() - arbitrary server-side file read result:False" in line for line in privesc_debug_lines
+    )
+    assert any('"type": "privesc_check"' in line for line in _format_privesc_detail_records(record, "json"))
 
     status_line = _format_record(record, "txt")
     assert "[+] postgres:<empty>" in status_line
@@ -1642,6 +1814,26 @@ def test_audit_postgres_targets_emits_detect_status_and_all_detail_sections(monk
             "sql_ok": True,
             "sql_output": ["1"],
             "sql_error": None,
+            "os_read_path": "/etc/hostname",
+            "os_read_attempted": True,
+            "os_read_ok": True,
+            "os_read_method": "pg_read_file",
+            "os_read_output": ["pg-host"],
+            "os_read_error": None,
+            "os_read_methods": [{"method": "pg_read_file", "ok": True, "error": None}],
+            "privesc_check": True,
+            "privesc_summary": {"critical": 1, "high": 0, "medium": 0, "unknown": 0, "total": 1},
+            "privesc_checks": [
+                {
+                    "id": "superuser_session",
+                    "severity": "CRITICAL",
+                    "name": "Superuser session",
+                    "description": "full database takeover via current superuser role",
+                    "vulnerable": True,
+                    "evidence": "current_user rolsuper=True",
+                    "error": None,
+                }
+            ],
             "server_version": "16.0",
             "superuser": True,
             "can_execute_commands": True,
@@ -1675,6 +1867,7 @@ def test_audit_postgres_targets_emits_detect_status_and_all_detail_sections(monk
         dump_row_limit=2,
         execute_command="id",
         sql_command="select 1",
+        privesc_check=True,
         output_path=None,
         output_format="txt",
         emit_line=lines.append,
@@ -1689,6 +1882,8 @@ def test_audit_postgres_targets_emits_detect_status_and_all_detail_sections(monk
     assert any("[*] Dump Table appdb.public.users" in line for line in lines)
     assert any("[*] Execute Command" in line for line in lines)
     assert any("[*] SQL Query" in line for line in lines)
+    assert any("[*] OS Read" in line for line in lines)
+    assert any("[*] PrivEsc Check" in line for line in lines)
 
 
 def test_call_audit_postgres_host_with_stage_debug_adds_stage_telemetry(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1757,6 +1952,8 @@ def test_audit_postgres_targets_emits_two_pass_debug_markers(monkeypatch) -> Non
         dump_row_limit: int | None,
         execute_command: str | None,
         sql_command: str | None,
+        os_read_path: str | None = None,
+        privesc_check: bool = False,
         *,
         run_deep_checks: bool,
         debug: bool,
@@ -1781,6 +1978,8 @@ def test_audit_postgres_targets_emits_two_pass_debug_markers(monkeypatch) -> Non
             dump_row_limit,
             execute_command,
             sql_command,
+            os_read_path,
+            privesc_check,
             debug,
             debug_emit,
         )
@@ -1971,3 +2170,8 @@ def test_postgres_table_query_helpers_and_colored_renderer(monkeypatch: pytest.M
         "(superuser:True) (execute:False) (read:unknown) (DBs:2)",
     )
     assert painter.lines and "auth required:False" in painter.lines[0]
+    assert postgres._render_colored_postgres_line(
+        painter,
+        "POSTGRES\t127.0.0.1\t5432\t [!] CRITICAL - COPY TO/FROM PROGRAM - OS command execution",
+    )
+    assert "<orange>CRITICAL - COPY TO/FROM PROGRAM - OS command execution</orange>" in painter.lines[-1]

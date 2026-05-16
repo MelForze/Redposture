@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import argparse
 import re
 
 import pytest
 
 from redposture_core.cli_args import (
+    COMMAND_DOCKER,
     COMMAND_ELASTIC,
     COMMAND_EXPORTERS,
     COMMAND_GRPC,
     COMMAND_KAFKA,
+    COMMAND_MONGODB,
     COMMAND_QDRANT,
     COMMAND_SELFCERT,
     build_parser,
@@ -41,6 +44,22 @@ def test_help_color_is_disabled_when_supported() -> None:
     exporters_action = exporters_parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
     scan_parser = exporters_action.choices["scan"]
     assert getattr(scan_parser, "color", None) is False
+
+
+def test_exporters_listen_parser_builder_wires_shared_flags() -> None:
+    from redposture_core.cli_modules.exporters import configure_listen_parser
+
+    calls: list[str] = []
+    parser = argparse.ArgumentParser()
+
+    configure_listen_parser(
+        parser,
+        add_output_flags=lambda _parser: calls.append("output"),
+        add_log_flag=lambda _parser: calls.append("log"),
+        add_listener_flags=lambda _parser: calls.append("listener"),
+    )
+
+    assert calls == ["output", "log", "listener"]
 
 
 def _command_help(command: str) -> str:
@@ -94,15 +113,34 @@ def test_postgres_help_groups_and_orders_flags() -> None:
     show_columns_idx = _help_option_line_index(help_text, "--show-columns")
     column_idx = _help_option_line_index(help_text, "--column name")
     dump_idx = _help_option_line_index(help_text, "--dump [count]")
-    assert -1 not in {show_databases_idx, show_tables_idx, table_idx, show_columns_idx, column_idx, dump_idx}
-    assert show_databases_idx < database_idx < show_tables_idx < table_idx < show_columns_idx < column_idx < dump_idx
+    privesc_idx = _help_option_line_index(help_text, "--privesc-check")
+    assert -1 not in {
+        show_databases_idx,
+        show_tables_idx,
+        table_idx,
+        show_columns_idx,
+        column_idx,
+        dump_idx,
+        privesc_idx,
+    }
+    assert (
+        show_databases_idx
+        < database_idx
+        < show_tables_idx
+        < table_idx
+        < show_columns_idx
+        < column_idx
+        < dump_idx
+        < privesc_idx
+    )
 
     execute_idx = _help_option_line_index(help_text, "--execute")
+    os_read_idx = _help_option_line_index(help_text, "--os-read path")
     sql_cmd_idx = _help_option_line_index(help_text, "--sql-cmd query")
     os_shell_idx = _help_option_line_index(help_text, "--os-shell")
     sql_shell_idx = _help_option_line_index(help_text, "--sql-shell")
-    assert -1 not in {execute_idx, sql_cmd_idx, os_shell_idx, sql_shell_idx}
-    assert execute_idx < os_shell_idx < sql_shell_idx < sql_cmd_idx
+    assert -1 not in {execute_idx, os_read_idx, sql_cmd_idx, os_shell_idx, sql_shell_idx}
+    assert execute_idx < os_read_idx < os_shell_idx < sql_shell_idx < sql_cmd_idx
 
 
 def test_postgres_help_orders_show_columns_column_dump() -> None:
@@ -159,6 +197,8 @@ def test_help_documents_implicit_target_file_precedence() -> None:
         ("consul", ["Common", "Auth", "Actions", "SSRF / Probes", "Revshell"]),
         ("kubeapi", ["Common", "Auth", "Actions"]),
         ("postgres", ["Common", "Database / Auth", "Discovery / Dump", "Execute / Shell"]),
+        ("mongodb", ["Common", "Database / Auth", "Discovery / Dump", "NoSQL / Shell"]),
+        ("docker", ["Common", "TLS", "Inventory", "Exec"]),
         ("clickhouse", ["Common", "Auth", "Actions", "Execute / Shell"]),
         ("redis", ["Common", "Auth", "Actions"]),
         ("etcd", ["Common", "Actions"]),
@@ -236,6 +276,121 @@ def test_postgres_help_shows_defaults_only_for_selected_flags() -> None:
     assert "Optional Postgres username for credential check. (default:" not in help_text
     assert "Optional Postgres password for credential check. (default:" not in help_text
     assert "Try default Postgres credentials postgres:postgres when auth is required. (default:" not in help_text
+
+
+def test_mongodb_help_sections_and_parse_flags() -> None:
+    help_text = _command_help(COMMAND_MONGODB)
+    assert "\nCommon:\n" in help_text
+    assert "\nDatabase / Auth:\n" in help_text
+    assert "\nDiscovery / Dump:\n" in help_text
+    assert "\nNoSQL / Shell:\n" in help_text
+    assert "--auth-db name" in help_text
+    assert "--show-databases" in help_text
+    assert "--show-collections" in help_text
+    assert "--show-indexes" in help_text
+    assert "--document id" in help_text
+    assert "--index name" in help_text
+    assert "--query json" in help_text
+    assert "--nosql-cmd json" in help_text
+    assert "--nosql-shell" in help_text
+    args = parse_args(
+        [
+            "mongodb",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "27018",
+            "-u",
+            "root",
+            "-p",
+            "root",
+            "--auth-db",
+            "admin",
+            "--database",
+            "redposture",
+            "--collection",
+            "demo_accounts",
+            "--document",
+            "1",
+            "--index",
+            "username_1",
+            "--projection",
+            '{"username":1}',
+            "--nosql-cmd",
+            '{"dbStats":1}',
+            "--dump",
+            "5",
+        ]
+    )
+    assert args.command == COMMAND_MONGODB
+    assert args.port == 27018
+    assert args.username == "root"
+    assert args.password == "root"
+    assert args.auth_db == "admin"
+    assert args.database == "redposture"
+    assert args.collections == ["demo_accounts"]
+    assert args.document == "1"
+    assert args.index == "username_1"
+    assert args.nosql_cmd == '{"dbStats":1}'
+    assert args.nosql_shell is False
+    assert args.dump == 5
+
+
+def test_docker_help_sections_and_parse_flags() -> None:
+    help_text = _command_help(COMMAND_DOCKER)
+    assert "\nCommon:\n" in help_text
+    assert "\nTLS:\n" in help_text
+    assert "\nInventory:\n" in help_text
+    assert "\nExec:\n" in help_text
+    assert "--tls-ca file" in help_text
+    assert "--tls-cert file" in help_text
+    assert "--containers" in help_text
+    assert "--exec-cmd cmd" in help_text
+    args = parse_args(
+        [
+            "docker",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "2376",
+            "--insecure",
+            "--tls-ca",
+            "ca.pem",
+            "--tls-cert",
+            "cert.pem",
+            "--tls-key",
+            "key.pem",
+            "--containers",
+            "--images",
+            "--networks",
+            "--volumes",
+            "--system",
+            "--container",
+            "web",
+            "--exec-cmd",
+            "id",
+        ]
+    )
+    assert args.command == COMMAND_DOCKER
+    assert args.port == 2376
+    assert args._docker_port_explicit is True
+    assert args.insecure is True
+    assert args.tls_ca == "ca.pem"
+    assert args.tls_cert == "cert.pem"
+    assert args.tls_key == "key.pem"
+    assert args.containers is True
+    assert args.images is True
+    assert args.networks is True
+    assert args.volumes is True
+    assert args.system is True
+    assert args.container == "web"
+    assert args.exec_cmd == "id"
+
+
+def test_docker_default_port_marker_when_port_is_omitted() -> None:
+    args = parse_args(["docker", "-t", "127.0.0.1"])
+    assert args.port == 2375
+    assert args._docker_port_explicit is False
 
 
 def test_grpc_auth_flags_are_parsed() -> None:
@@ -1577,6 +1732,12 @@ def test_grafana_flags_are_parsed() -> None:
     assert args.output == "grafana_audit.jsonl"
 
 
+def test_grafana_help_documents_current_default_creds() -> None:
+    help_text = _command_help("grafana")
+    assert "admin:admin" in help_text
+    assert "admin:prom-operator" not in help_text
+
+
 def test_grafana_show_datasource_alias_is_parsed() -> None:
     args = parse_args(["grafana", "-t", "10.0.0.11", "--show-datasource"])
     assert args.command == "grafana"
@@ -1682,6 +1843,9 @@ def test_postgres_flags_are_parsed() -> None:
             "created_at",
             "--execute",
             "id",
+            "--os-read",
+            "/etc/hostname",
+            "--privesc-check",
             "--sql-cmd",
             "select 1",
             "-f",
@@ -1710,6 +1874,8 @@ def test_postgres_flags_are_parsed() -> None:
     assert args.dump == 0
     assert args.columns == ["id,username", "created_at"]
     assert args.execute == "id"
+    assert args.os_read == "/etc/hostname"
+    assert args.privesc_check is True
     assert args.sql_cmd == "select 1"
     assert args.output_format == "json"
     assert args.output == "postgres_audit.jsonl"

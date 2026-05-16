@@ -401,7 +401,7 @@ def test_invoke_unary_method_encodes_request_and_decodes_response(monkeypatch: p
         )
         return {"grpc_status": 0, "grpc_message": "", "messages": [response.SerializeToString()], "error": None}
 
-    monkeypatch.setattr(grpc_stage, "_grpc_call", fake_grpc_call)
+    monkeypatch.setattr("redposture_core.clients.grpc._grpc_call", fake_grpc_call)
 
     result = grpc_stage._invoke_unary_method(
         "127.0.0.1",
@@ -542,6 +542,41 @@ def test_render_colored_grpc_line_highlights_entities() -> None:
 
     assert rendered is True
     assert "<orange>service=grpc.health.v1.Health</orange>" in console.lines[0]
+
+    console = DummyConsole()
+    rendered = grpc_stage._render_colored_grpc_line(
+        console,
+        "GRPC    \t127.0.0.1\t50051\t service=grpc.health.v1.Health grpc=OK status=SERVING",
+    )
+
+    assert rendered is True
+    assert "<orange> service=grpc.health.v1.Health grpc=OK status=SERVING</orange>" in console.lines[0]
+    assert "grpc=OK status=SERVING</orange>" in console.lines[0]
+
+    console = DummyConsole()
+    rendered = grpc_stage._render_colored_grpc_line(
+        console,
+        (
+            "GRPC    \t127.0.0.1\t50051\t "
+            "/grpc.health.v1.Health/Check input=grpc.health.v1.HealthCheckRequest "
+            "output=grpc.health.v1.HealthCheckResponse client_stream=False server_stream=False"
+        ),
+    )
+
+    assert rendered is True
+    assert (
+        "<orange> /grpc.health.v1.Health/Check input=grpc.health.v1.HealthCheckRequest "
+        "output=grpc.health.v1.HealthCheckResponse client_stream=False server_stream=False</orange>"
+    ) in console.lines[0]
+
+    console = DummyConsole()
+    rendered = grpc_stage._render_colored_grpc_line(
+        console,
+        "GRPC    \t127.0.0.1\t50051\t [*] 2 Services",
+    )
+
+    assert rendered is True
+    assert "<orange>2 Services</orange>" not in console.lines[0]
 
 
 def test_retry_delay_is_exponential_capped() -> None:

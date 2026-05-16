@@ -4,6 +4,7 @@ import io
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -95,6 +96,16 @@ def test_qdrant_error_and_response_helpers_cover_extra_shapes() -> None:
 def test_qdrant_collections_from_payload_deduplicates() -> None:
     payload = {"result": {"collections": [{"name": "a"}, {"name": "a"}, {"name": "b"}]}}
     assert qdrant._qdrant_collections_from_payload(payload) == ["a", "b"]
+
+
+def test_qdrant_lab_seed_is_fail_fast_and_verifies_collections() -> None:
+    compose = Path("lab/full/docker-compose.yml").read_text(encoding="utf-8")
+    seed_block = compose.split("  qdrant-seed:", 1)[1].split("  elastic-open:", 1)[0]
+
+    assert ">/dev/null || true" not in seed_block
+    assert 'require_collection "demo_vectors"' in seed_block
+    assert 'require_collection "audit_logs"' in seed_block
+    assert 'require_collection "service_inventory"' in seed_block
 
 
 @pytest.mark.parametrize(
@@ -1050,7 +1061,11 @@ def test_run_qdrant_stage_multi_instance_uses_single_global_progress(monkeypatch
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(qdrant, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        qdrant,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     args = SimpleNamespace(
         debug=False,

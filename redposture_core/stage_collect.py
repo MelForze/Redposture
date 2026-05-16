@@ -12,11 +12,13 @@ from typing import Any, TextIO
 
 from .console import Console
 from .constants import COLLECT_DEEP_ENDPOINT_TEMPLATES
+from .exporters.collect import collect_exporter_debug_data
+from .exporters.discover import scan_exporter_presence
 from .logger import AttemptLogger
 from .profiles import load_profiles
-from .scanner import collect_exporter_debug_data, scan_exporter_presence
 from .stage_validate import VALIDATION_PRECISION_COLLECT_STRICT, ValidationRecordAccumulator
 from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs, utc_now_iso
+from .validate.artifacts import write_vulnerable_targets_files
 
 COLLECT_VALIDATE_INPUT_FORMAT = "auto"
 COLLECT_VALIDATE_PRECISION_PROFILE = VALIDATION_PRECISION_COLLECT_STRICT
@@ -33,54 +35,6 @@ def _collect_output_base_dir(args: argparse.Namespace) -> str:
     return os.getcwd()
 
 
-def _write_unique_lines(path: str, values: list[str]) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        for value in values:
-            text = str(value or "").strip()
-            if not text:
-                continue
-            fh.write(text + "\n")
-
-
-def _write_lines(path: str, values: list[str]) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        for value in values:
-            fh.write(str(value or "").strip() + "\n")
-
-
-def _markdown_cell(value: object) -> str:
-    if isinstance(value, list):
-        text = "<br>".join(str(item) for item in value if str(item or "").strip())
-    else:
-        text = str(value or "")
-    text = text.replace("|", "\\|").replace("\n", "<br>")
-    return text or "-"
-
-
-def _write_vulnerable_findings_markdown(path: str, findings: list[dict[str, object]]) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write("# RedPosture Vulnerable Findings\n\n")
-        fh.write(f"- generated_at: {utc_now_iso()}\n")
-        fh.write(f"- findings: {len(findings)}\n\n")
-        fh.write("| Host | Port | Endpoint | Exporter | Users | Passwords | API keys | Reason |\n")
-        fh.write("| --- | --- | --- | --- | --- | --- | --- | --- |\n")
-        for finding in findings:
-            row = [
-                finding.get("host"),
-                finding.get("port"),
-                finding.get("endpoint"),
-                finding.get("exporter"),
-                finding.get("users"),
-                finding.get("passwords"),
-                finding.get("api_keys"),
-                finding.get("reason"),
-            ]
-            fh.write("| " + " | ".join(_markdown_cell(value) for value in row) + " |\n")
-
-
 def _write_vulnerable_targets_files(
     *,
     args: argparse.Namespace,
@@ -89,47 +43,11 @@ def _write_vulnerable_targets_files(
 ) -> None:
     if not str(getattr(args, "output", "") or "").strip():
         return
-    if not hasattr(validator, "vulnerable_targets_from_shown_hits"):
-        return
-    base_dir = _collect_output_base_dir(args)
-    ips_path = os.path.join(base_dir, "vulnerable_ips.txt")
-    urls_path = os.path.join(base_dir, "vulnerable_urls.txt")
-    users_path = os.path.join(base_dir, "vulnerable_users.txt")
-    pass_path = os.path.join(base_dir, "vulnerable_pass.txt")
-    user_pass_path = os.path.join(base_dir, "vulnerable_user_pass.txt")
-    api_keys_path = os.path.join(base_dir, "vulnerable_apikeys.txt")
-    findings_path = os.path.join(base_dir, "vulnerable_findings.md")
-    hosts, urls = validator.vulnerable_targets_from_shown_hits()
-    _write_unique_lines(urls_path, urls)
-    login_rows: list[tuple[str, str, str]] = []
-    if hasattr(validator, "vulnerable_login_rows_from_shown_hits"):
-        login_rows = validator.vulnerable_login_rows_from_shown_hits()
-    if login_rows:
-        _write_lines(ips_path, [row[0] for row in login_rows])
-        _write_lines(users_path, [row[1] for row in login_rows])
-        _write_lines(pass_path, [row[2] for row in login_rows])
-        _write_lines(user_pass_path, [f"{row[1]}:{row[2]}" for row in login_rows])
-    else:
-        _write_unique_lines(ips_path, hosts)
-        _write_lines(users_path, [])
-        _write_lines(pass_path, [])
-        _write_lines(user_pass_path, [])
-    users: list[str] = []
-    passwords: list[str] = []
-    api_keys: list[str] = []
-    if hasattr(validator, "vulnerable_credentials_from_shown_hits"):
-        users, passwords, api_keys = validator.vulnerable_credentials_from_shown_hits()
-    _write_unique_lines(api_keys_path, api_keys)
-    findings: list[dict[str, object]] = []
-    if hasattr(validator, "vulnerable_findings_from_shown_hits"):
-        findings = validator.vulnerable_findings_from_shown_hits()
-    _write_vulnerable_findings_markdown(findings_path, findings)
-    if bool(getattr(args, "debug", False)):
-        console.debug(
-            "vulnerable targets written: "
-            f"hosts={len(hosts)} urls={len(urls)} login_rows={len(login_rows)} users={len(users)} passwords={len(passwords)} "
-            f"api_keys={len(api_keys)} findings={len(findings)} ips_file={ips_path} urls_file={urls_path}"
-        )
+    write_vulnerable_targets_files(
+        base_dir=_collect_output_base_dir(args),
+        validator=validator,
+        debug=console.debug if bool(getattr(args, "debug", False)) else None,
+    )
 
 
 def _resolve_collect_checkpoint_path(args: argparse.Namespace) -> str:
@@ -536,6 +454,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 emit_summary=False,
                 show_progress=True,
                 progress_leave=False,
+                progress_owner=getattr(args, "_progress_owner", None),
             )
         except OSError as exc:
             console.error(f"failed to process collect discovery scan: {exc}")
@@ -567,8 +486,9 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     discovery_exporters=discovery_exporters,
                     custom_ports=[group.port],
                     emit_summary=False,
-                    show_progress=True,
+                    show_progress=False,
                     progress_leave=False,
+                    progress_owner=getattr(args, "_progress_owner", None),
                 )
                 scan_checks += part_checks
                 scan_found += part_found
@@ -635,6 +555,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 checkpoint_path=checkpoint_path,
                 checkpoint_mode="a" if resume_enabled else "w",
                 stats_sink=collect_stats,
+                progress_owner=getattr(args, "_progress_owner", None),
             )
         except OSError as exc:
             console.error(f"failed to process collect output: {exc}")
