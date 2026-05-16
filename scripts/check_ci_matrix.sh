@@ -8,19 +8,32 @@ PYTHONS=(python3.10 python3.11 python3.12 python3.13)
 VENV_ROOT="${REDPOSTURE_CI_VENV_ROOT:-$ROOT_DIR/.ci-venvs}"
 ALLOW_MISSING=0
 SKIP_INSTALL=0
+USE_WORKTREE=0
+ALLOW_DIRTY=0
+TMP_ROOT=""
+
+cleanup() {
+  if [[ -n "$TMP_ROOT" && -d "$TMP_ROOT" ]]; then
+    rm -rf "$TMP_ROOT"
+  fi
+}
+trap cleanup EXIT
 
 usage() {
   cat <<'EOF'
-Usage: scripts/check_ci_matrix.sh [--allow-missing] [--skip-install]
+Usage: scripts/check_ci_matrix.sh [--allow-missing] [--skip-install] [--worktree] [--allow-dirty]
 
 Runs the local pre-push CI gate:
   - install project + dev deps into per-version venvs
+  - by default, test a clean tracked HEAD archive, matching GitHub checkout
   - ruff check/format on Python 3.12 when available
   - py_compile/compileall + pytest + CLI version smoke on Python 3.10-3.13
 
 Options:
   --allow-missing   Skip missing Python interpreters instead of failing.
   --skip-install    Reuse existing .ci-venvs without reinstalling dependencies.
+  --worktree        Test the current working tree instead of clean tracked HEAD.
+  --allow-dirty     Allow uncommitted changes when testing clean tracked HEAD.
 
 Environment:
   REDPOSTURE_CI_VENV_ROOT   Override venv directory. Default: .ci-venvs
@@ -37,6 +50,14 @@ while [[ $# -gt 0 ]]; do
       SKIP_INSTALL=1
       shift
       ;;
+    --worktree)
+      USE_WORKTREE=1
+      shift
+      ;;
+    --allow-dirty)
+      ALLOW_DIRTY=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -50,6 +71,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "$VENV_ROOT"
+
+if [[ "$USE_WORKTREE" -ne 1 ]]; then
+  if [[ "$ALLOW_DIRTY" -ne 1 ]] && ! git diff --quiet HEAD --; then
+    echo "[!] working tree has uncommitted changes; clean tracked HEAD would not include them" >&2
+    echo "[!] commit/stash changes, or rerun with --worktree for a partial pre-commit check" >&2
+    exit 2
+  fi
+  TMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/redposture-ci-head.XXXXXX")"
+  git archive HEAD | tar -xf - -C "$TMP_ROOT"
+  cd "$TMP_ROOT"
+  echo "== source: clean tracked HEAD archive =="
+else
+  echo "== source: current working tree =="
+fi
 
 declare -a AVAILABLE=()
 declare -a MISSING=()

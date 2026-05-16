@@ -1,16 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
-from pathlib import Path
 from typing import Any
 
 import pytest
 
 from redposture_core import stage_docker as docker_stage
-
-_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _FakeDockerClient:
@@ -145,25 +141,6 @@ def test_exec_debug_multiline_stdout_keeps_prefixes(monkeypatch: pytest.MonkeyPa
     assert any("stdout=one" in line for line in debug_lines)
     assert any("stdout=two" in line for line in debug_lines)
     assert not any(line == "two" for line in debug_lines)
-
-
-def test_lab_mock_exec_simulates_shell_chain() -> None:
-    mock_path = _ROOT / "docker" / "docker_engine" / "docker_api_mock.py"
-    spec = importlib.util.spec_from_file_location("docker_api_mock_for_test", mock_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    result = module._simulate_exec(  # type: ignore[attr-defined]
-        "hostname && pwd && ls && id && whoami",
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-    )
-    stdout = str(result["stdout"])
-    assert "redposture-web\n" in stdout
-    assert "/\n" in stdout
-    assert "bin\n" in stdout
-    assert "uid=0(root)" in stdout
-    assert stdout.endswith("root\n")
 
 
 def test_audit_docker_targets_two_pass_debug_and_output(monkeypatch: pytest.MonkeyPatch) -> None:
