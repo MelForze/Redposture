@@ -391,13 +391,20 @@ redposture zookeeper -t 127.0.0.1 --dump
 
 ## Development (Optional)
 
-Quick local checks:
+Pre-push CI parity check:
 
 ```bash
-tox
+scripts/check_ci_matrix.sh
 ```
 
-Or with a local venv:
+The script mirrors the GitHub CI test matrix (`3.10-3.13`) and fails if one of those interpreters is missing.
+For a partial local check on machines without the full Python matrix:
+
+```bash
+scripts/check_ci_matrix.sh --allow-missing
+```
+
+Quick single-venv checks:
 
 ```bash
 python3 -m venv .venv
