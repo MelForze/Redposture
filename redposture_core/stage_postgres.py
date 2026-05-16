@@ -11,16 +11,23 @@ import os
 import re
 import secrets
 import socket
-import sys
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import ProgressBar
+from .rendering import BooleanColorRule, CountColorRule, render_colored_marker_line
+from .stage_runtime import (
+    StageTelemetryBuilder,
+    TwoPassAuditRunner,
+    merge_stage_records,
+    progress_total_from_groups,
+    should_use_global_progress,
+    start_audit_progress,
+    start_command_progress,
+)
 from .utils import (
     collect_scan_ports,
     collect_scan_targets,
@@ -625,6 +632,282 @@ def _collect_postgres_privileges(
     return superuser, can_execute_commands, can_read_tables, readable_tables, query_error
 
 
+def _pg_bool_text(value: bool | None) -> str:
+    return "True" if value is True else "False" if value is False else "unknown"
+
+
+def _pg_privesc_role_membership(sock: socket.socket, role_name: str) -> tuple[bool | None, str | None]:
+    return _pg_query_scalar_bool(
+        sock,
+        (
+            "SELECT CASE "
+            f"WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {_pg_quote_literal(role_name)}) "
+            f"THEN pg_has_role(current_user, {_pg_quote_literal(role_name)}, 'MEMBER') "
+            "ELSE false "
+            "END"
+        ),
+    )
+
+
+def _pg_privesc_role_flag(sock: socket.socket, role_column: str) -> tuple[bool | None, str | None]:
+    if role_column not in {"rolsuper", "rolcreaterole", "rolcreatedb"}:
+        return None, f"unsupported role flag: {role_column}"
+    return _pg_query_scalar_bool(
+        sock,
+        f"SELECT COALESCE((SELECT {role_column} FROM pg_roles WHERE rolname = current_user), false)",
+    )
+
+
+def _pg_privesc_function_executable(sock: socket.socket, signature: str) -> tuple[bool | None, str | None]:
+    return _pg_query_scalar_bool(
+        sock,
+        (f"SELECT COALESCE(has_function_privilege(to_regprocedure({_pg_quote_literal(signature)}), 'EXECUTE'), false)"),
+    )
+
+
+def _pg_privesc_check_record(
+    severity: str,
+    check_id: str,
+    name: str,
+    description: str,
+    vulnerable: bool | None,
+    evidence: str,
+    error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": check_id,
+        "severity": severity,
+        "name": name,
+        "description": description,
+        "vulnerable": vulnerable,
+        "evidence": evidence,
+        "error": error,
+    }
+
+
+def _pg_privesc_summary(checks: list[dict[str, Any]]) -> dict[str, int]:
+    summary = {"critical": 0, "high": 0, "medium": 0, "unknown": 0, "total": len(checks)}
+    for item in checks:
+        if item.get("vulnerable") is True:
+            severity = str(item.get("severity") or "").lower()
+            if severity in {"critical", "high", "medium"}:
+                summary[severity] += 1
+        elif item.get("vulnerable") is None:
+            summary["unknown"] += 1
+    return summary
+
+
+def _pg_collect_privesc_checks(
+    sock: socket.socket, superuser: bool | None
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    checks: list[dict[str, Any]] = []
+
+    if superuser is None:
+        superuser, superuser_error = _pg_privesc_role_flag(sock, "rolsuper")
+    else:
+        superuser_error = None
+    checks.append(
+        _pg_privesc_check_record(
+            "CRITICAL",
+            "superuser_session",
+            "Superuser session",
+            "full database takeover via current superuser role",
+            superuser,
+            f"current_user rolsuper={_pg_bool_text(superuser)}",
+            superuser_error,
+        )
+    )
+
+    pg_shadow_readable, pg_shadow_error = _pg_query_scalar_bool(
+        sock,
+        (
+            "SELECT CASE WHEN to_regclass('pg_catalog.pg_shadow') IS NULL THEN false "
+            "ELSE has_table_privilege('pg_catalog.pg_shadow', 'SELECT') END"
+        ),
+    )
+    checks.append(
+        _pg_privesc_check_record(
+            "CRITICAL",
+            "pg_shadow_readable",
+            "pg_shadow readable",
+            "password hashes exposed",
+            pg_shadow_readable,
+            f"has SELECT on pg_catalog.pg_shadow={_pg_bool_text(pg_shadow_readable)}",
+            pg_shadow_error,
+        )
+    )
+
+    execute_role, execute_role_error = _pg_privesc_role_membership(sock, "pg_execute_server_program")
+    copy_program = None if superuser is None and execute_role is None else bool(superuser) or bool(execute_role)
+    copy_error = execute_role_error if execute_role is None and superuser is not True else None
+    checks.append(
+        _pg_privesc_check_record(
+            "CRITICAL",
+            "copy_program",
+            "COPY TO/FROM PROGRAM",
+            "OS command execution",
+            copy_program,
+            f"superuser={_pg_bool_text(superuser)} pg_execute_server_program={_pg_bool_text(execute_role)}",
+            copy_error,
+        )
+    )
+
+    read_server_files, read_server_error = _pg_privesc_role_membership(sock, "pg_read_server_files")
+    pg_read_file = (
+        None if superuser is None and read_server_files is None else bool(superuser) or bool(read_server_files)
+    )
+    checks.append(
+        _pg_privesc_check_record(
+            "HIGH",
+            "pg_read_file",
+            "pg_read_file()",
+            "arbitrary server-side file read",
+            pg_read_file,
+            f"superuser={_pg_bool_text(superuser)} pg_read_server_files={_pg_bool_text(read_server_files)}",
+            read_server_error if read_server_files is None and superuser is not True else None,
+        )
+    )
+
+    checks.append(
+        _pg_privesc_check_record(
+            "HIGH",
+            "pg_execute_server_program_role",
+            "pg_execute_server_program role",
+            "OS command execution via server program role",
+            execute_role,
+            f"pg_has_role(..., 'pg_execute_server_program', 'MEMBER')={_pg_bool_text(execute_role)}",
+            execute_role_error,
+        )
+    )
+
+    write_server_files, write_server_error = _pg_privesc_role_membership(sock, "pg_write_server_files")
+    file_write = (
+        None if superuser is None and write_server_files is None else bool(superuser) or bool(write_server_files)
+    )
+    checks.append(
+        _pg_privesc_check_record(
+            "HIGH",
+            "pg_write_server_files_role",
+            "pg_write_server_files role",
+            "arbitrary server-side file write",
+            file_write,
+            f"superuser={_pg_bool_text(superuser)} pg_write_server_files={_pg_bool_text(write_server_files)}",
+            write_server_error if write_server_files is None and superuser is not True else None,
+        )
+    )
+
+    lo_import_exec, lo_import_error = _pg_privesc_function_executable(sock, "pg_catalog.lo_import(text)")
+    lo_export_exec, lo_export_error = _pg_privesc_function_executable(sock, "pg_catalog.lo_export(oid,text)")
+    lo_capable = (
+        None
+        if superuser is None and lo_import_exec is None and lo_export_exec is None
+        else bool(superuser) or bool(lo_import_exec) or bool(lo_export_exec)
+    )
+    lo_errors = "; ".join(item for item in (lo_import_error, lo_export_error) if item) or None
+    checks.append(
+        _pg_privesc_check_record(
+            "HIGH",
+            "lo_import_export",
+            "lo_import / lo_export",
+            "large object file read/write",
+            lo_capable,
+            (
+                f"superuser={_pg_bool_text(superuser)} lo_import_execute={_pg_bool_text(lo_import_exec)} "
+                f"lo_export_execute={_pg_bool_text(lo_export_exec)}"
+            ),
+            lo_errors if lo_capable is None else None,
+        )
+    )
+
+    createrole, createrole_error = _pg_privesc_role_flag(sock, "rolcreaterole")
+    createrole_effective = None if superuser is None and createrole is None else bool(superuser) or bool(createrole)
+    checks.append(
+        _pg_privesc_check_record(
+            "HIGH",
+            "createrole",
+            "CREATEROLE privilege",
+            "role escalation",
+            createrole_effective,
+            f"superuser={_pg_bool_text(superuser)} rolcreaterole={_pg_bool_text(createrole)}",
+            createrole_error if createrole is None and superuser is not True else None,
+        )
+    )
+
+    createdb, createdb_error = _pg_privesc_role_flag(sock, "rolcreatedb")
+    createdb_effective = None if superuser is None and createdb is None else bool(superuser) or bool(createdb)
+    checks.append(
+        _pg_privesc_check_record(
+            "MEDIUM",
+            "createdb",
+            "CREATEDB privilege",
+            "can create databases for staging further abuse",
+            createdb_effective,
+            f"superuser={_pg_bool_text(superuser)} rolcreatedb={_pg_bool_text(createdb)}",
+            createdb_error if createdb is None and superuser is not True else None,
+        )
+    )
+
+    security_definer_count, security_definer_error = _pg_query_scalar_int(
+        sock,
+        (
+            "SELECT COUNT(*) FROM pg_proc p "
+            "JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "WHERE p.prosecdef "
+            "AND has_function_privilege(p.oid, 'EXECUTE') "
+            "AND n.nspname NOT IN ('pg_catalog', 'information_schema')"
+        ),
+    )
+    security_definer_examples: list[str] = []
+    if isinstance(security_definer_count, int) and security_definer_count > 0:
+        rows, examples_error = _pg_query_rows(
+            sock,
+            (
+                "SELECT n.nspname || '.' || p.proname FROM pg_proc p "
+                "JOIN pg_namespace n ON n.oid = p.pronamespace "
+                "WHERE p.prosecdef "
+                "AND has_function_privilege(p.oid, 'EXECUTE') "
+                "AND n.nspname NOT IN ('pg_catalog', 'information_schema') "
+                "ORDER BY 1 LIMIT 5"
+            ),
+        )
+        if examples_error:
+            security_definer_error = security_definer_error or examples_error
+        else:
+            security_definer_examples = [str(row[0]) for row in rows if row and row[0]]
+    secdef_evidence = f"accessible SECURITY DEFINER functions={security_definer_count}"
+    if security_definer_examples:
+        secdef_evidence += f" examples={','.join(security_definer_examples)}"
+    checks.append(
+        _pg_privesc_check_record(
+            "MEDIUM",
+            "security_definer_accessible",
+            "SECURITY DEFINER functions accessible",
+            "callable privileged functions may expose escalation paths",
+            None if security_definer_count is None else security_definer_count > 0,
+            secdef_evidence,
+            security_definer_error,
+        )
+    )
+
+    create_db_privilege, create_db_error = _pg_query_scalar_bool(
+        sock,
+        "SELECT has_database_privilege(current_database(), 'CREATE')",
+    )
+    checks.append(
+        _pg_privesc_check_record(
+            "MEDIUM",
+            "database_create_privilege",
+            "CREATE privilege on database",
+            "extension loading",
+            create_db_privilege,
+            f"has CREATE on current_database()={_pg_bool_text(create_db_privilege)}",
+            create_db_error,
+        )
+    )
+
+    return checks, _pg_privesc_summary(checks)
+
+
 def _pg_query_readable_tables(sock: socket.socket) -> tuple[list[str] | None, str | None]:
     rows, error = _pg_query_rows(
         sock,
@@ -794,6 +1077,27 @@ def _pg_text(value: Any) -> str:
     return str(value if value is not None else "").replace("\n", "\\n")
 
 
+def _pg_os_read_record_fields(
+    os_read_path: str | None,
+    *,
+    attempted: bool = False,
+    ok: bool | None = None,
+    method: str | None = None,
+    output: list[str] | None = None,
+    error: str | None = None,
+    attempts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "os_read_path": os_read_path,
+        "os_read_attempted": bool(attempted),
+        "os_read_ok": ok,
+        "os_read_method": method,
+        "os_read_output": output,
+        "os_read_error": error,
+        "os_read_methods": list(attempts or []),
+    }
+
+
 def _pg_try_execute_command(
     sock: socket.socket, command: str, *, max_lines: int = 100
 ) -> tuple[list[str] | None, str | None]:
@@ -837,6 +1141,112 @@ def _pg_try_query_sql(sock: socket.socket, query: str, *, max_rows: int = 500) -
     if len(rows) > limit:
         rendered_rows.append(f"<truncated:{len(rows) - limit}>")
     return rendered_rows, None
+
+
+def _pg_try_read_server_file(
+    sock: socket.socket, file_path: str
+) -> tuple[list[str] | None, str | None, str | None, list[dict[str, Any]]]:
+    """Read a server-side file with pg_read_file, then a large-object fallback."""
+
+    clean_path = str(file_path or "").strip()
+    attempts: list[dict[str, Any]] = []
+    if not clean_path:
+        return None, "empty os-read path", None, attempts
+
+    rows, pg_read_error = _pg_query_rows(sock, f"SELECT pg_read_file({_pg_quote_literal(clean_path)})")
+    if pg_read_error:
+        attempts.append({"method": "pg_read_file", "ok": False, "error": pg_read_error})
+    elif rows and rows[0]:
+        content = rows[0][0] or ""
+        attempts.append({"method": "pg_read_file", "ok": True, "error": None})
+        return content.splitlines(), None, "pg_read_file", attempts
+    else:
+        attempts.append({"method": "pg_read_file", "ok": False, "error": "empty pg_read_file result"})
+
+    directory = os.path.dirname(clean_path) or "."
+    basename = os.path.basename(clean_path)
+    _, switch_error = _pg_query_rows(sock, "SELECT pg_switch_wal()")
+    dir_rows, dir_error = _pg_query_rows(
+        sock,
+        f"SELECT pg_ls_dir({_pg_quote_literal(directory)}, FALSE, TRUE)",
+    )
+    directory_warning: str | None = None
+    if dir_error:
+        directory_warning = f"pg_ls_dir failed: {dir_error}"
+    elif basename and all((row[0] if row else None) != basename for row in dir_rows):
+        directory_warning = f"pg_ls_dir did not list {basename}"
+
+    import_rows, import_error = _pg_query_rows(sock, f"SELECT lo_import({_pg_quote_literal(clean_path)})")
+    if import_error:
+        parts = [f"lo_import failed: {import_error}"]
+        if switch_error:
+            parts.append(f"pg_switch_wal failed: {switch_error}")
+        if directory_warning:
+            parts.append(directory_warning)
+        error = "; ".join(parts)
+        attempts.append({"method": "lo_import", "ok": False, "error": error})
+        return None, _pg_read_file_error(attempts), None, attempts
+
+    if not import_rows or not import_rows[0] or not import_rows[0][0]:
+        error = "lo_import returned empty oid"
+        attempts.append({"method": "lo_import", "ok": False, "error": error})
+        return None, _pg_read_file_error(attempts), None, attempts
+
+    raw_oid = str(import_rows[0][0])
+    try:
+        oid = int(raw_oid)
+    except ValueError:
+        error = f"lo_import returned invalid oid: {raw_oid}"
+        attempts.append({"method": "lo_import", "ok": False, "error": error})
+        return None, _pg_read_file_error(attempts), None, attempts
+
+    get_rows, get_error = _pg_query_rows(sock, f"SELECT encode(lo_get({oid}), 'escape')")
+    unlink_error: str | None = None
+    _, unlink_error = _pg_query_rows(sock, f"SELECT lo_unlink({oid})")
+    if get_error:
+        parts = [f"lo_get failed: {get_error}"]
+        if unlink_error:
+            parts.append(f"lo_unlink failed: {unlink_error}")
+        attempts.append({"method": "lo_import", "ok": False, "error": "; ".join(parts), "oid": oid})
+        return None, _pg_read_file_error(attempts), None, attempts
+    if not get_rows or not get_rows[0]:
+        attempts.append({"method": "lo_import", "ok": False, "error": "empty lo_get result", "oid": oid})
+        return None, _pg_read_file_error(attempts), None, attempts
+
+    content = get_rows[0][0] or ""
+    warning_parts = [
+        item
+        for item in (
+            f"pg_switch_wal failed: {switch_error}" if switch_error else None,
+            directory_warning,
+            f"lo_unlink failed: {unlink_error}" if unlink_error else None,
+        )
+        if item
+    ]
+    attempts.append(
+        {
+            "method": "lo_import",
+            "ok": True,
+            "error": None,
+            "warning": "; ".join(warning_parts) if warning_parts else None,
+            "oid": oid,
+        }
+    )
+    return content.splitlines(), None, "lo_import", attempts
+
+
+def _pg_read_file_error(attempts: list[dict[str, Any]]) -> str:
+    parts: list[str] = []
+    for attempt in attempts:
+        if attempt.get("ok") is True:
+            continue
+        method = str(attempt.get("method") or "unknown")
+        error = str(attempt.get("error") or "failed")
+        if error.startswith(f"{method} failed:") or error.startswith(f"{method}:"):
+            parts.append(error)
+        else:
+            parts.append(f"{method} failed: {error}")
+    return "; ".join(parts) if parts else "os-read failed"
 
 
 def _pg_execute_remote_command(
@@ -1219,6 +1629,8 @@ def _audit_postgres_host(
     dump_row_limit: int | None,
     execute_command: str | None,
     sql_command: str | None,
+    os_read_path: str | None = None,
+    privesc_check: bool = False,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -1404,6 +1816,25 @@ def _audit_postgres_host(
                     sql_output, sql_error = _pg_try_query_sql(sock, sql_command, max_rows=500)
                     sql_ok = sql_error is None
 
+                os_read_attempted = False
+                os_read_ok: bool | None = None
+                os_read_output: list[str] | None = None
+                os_read_error: str | None = None
+                os_read_method: str | None = None
+                os_read_methods: list[dict[str, Any]] = []
+                if os_read_path:
+                    os_read_attempted = True
+                    os_read_output, os_read_error, os_read_method, os_read_methods = _pg_try_read_server_file(
+                        sock,
+                        os_read_path,
+                    )
+                    os_read_ok = os_read_error is None
+
+                privesc_checks: list[dict[str, Any]] = []
+                privesc_summary: dict[str, int] = {}
+                if privesc_check:
+                    privesc_checks, privesc_summary = _pg_collect_privesc_checks(sock, superuser)
+
                 try:
                     _pg_send_terminate(sock)
                 except Exception:
@@ -1459,6 +1890,18 @@ def _audit_postgres_host(
                     "sql_ok": sql_ok,
                     "sql_output": sql_output,
                     "sql_error": sql_error,
+                    **_pg_os_read_record_fields(
+                        os_read_path,
+                        attempted=os_read_attempted,
+                        ok=os_read_ok,
+                        method=os_read_method,
+                        output=os_read_output,
+                        error=os_read_error,
+                        attempts=os_read_methods,
+                    ),
+                    "privesc_check": privesc_check,
+                    "privesc_checks": privesc_checks,
+                    "privesc_summary": privesc_summary,
                     "server_version": session.server_version,
                     "superuser": superuser,
                     "can_execute_commands": can_execute_commands,
@@ -1510,6 +1953,10 @@ def _audit_postgres_host(
                 "sql_ok": None,
                 "sql_output": None,
                 "sql_error": None,
+                **_pg_os_read_record_fields(os_read_path),
+                "privesc_check": privesc_check,
+                "privesc_checks": [],
+                "privesc_summary": {},
                 "server_version": None,
                 "superuser": None,
                 "can_execute_commands": None,
@@ -1564,6 +2011,10 @@ def _audit_postgres_host(
         "sql_ok": None,
         "sql_output": None,
         "sql_error": None,
+        **_pg_os_read_record_fields(os_read_path),
+        "privesc_check": privesc_check,
+        "privesc_checks": [],
+        "privesc_summary": {},
         "server_version": None,
         "superuser": None,
         "can_execute_commands": None,
@@ -1971,6 +2422,114 @@ def _format_sql_detail_records(record: dict[str, Any], output_format: str) -> li
     return lines
 
 
+def _format_os_read_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    os_read_path = record.get("os_read_path")
+    if not os_read_path:
+        return []
+
+    os_read_ok = record.get("os_read_ok")
+    os_read_output = record.get("os_read_output")
+    os_read_error = record.get("os_read_error")
+    os_read_method = record.get("os_read_method")
+    os_read_methods = record.get("os_read_methods")
+
+    if output_format == "json":
+        return [
+            json.dumps(
+                {
+                    "timestamp": record.get("timestamp"),
+                    "type": "os_read_dump",
+                    "service": "postgres",
+                    "host": record.get("host"),
+                    "port": record.get("port"),
+                    "database": record.get("database"),
+                    "path": str(os_read_path),
+                    "ok": os_read_ok,
+                    "method": str(os_read_method) if os_read_method else None,
+                    "output": [str(item) for item in os_read_output] if isinstance(os_read_output, list) else [],
+                    "error": str(os_read_error) if os_read_error else None,
+                    "methods": os_read_methods if isinstance(os_read_methods, list) else [],
+                },
+                ensure_ascii=False,
+            )
+        ]
+
+    prefix = _nxc_prefix(record)
+    lines = [f"{prefix} [*] OS Read", f"{prefix} path={_pg_text(os_read_path)}"]
+    if os_read_method:
+        lines.append(f"{prefix} method={_pg_text(os_read_method)}")
+    if os_read_ok is True:
+        if isinstance(os_read_output, list) and os_read_output:
+            for line in os_read_output:
+                lines.append(f"{prefix} {_pg_text(line)}")
+        else:
+            lines.append(f"{prefix} <empty file>")
+    elif os_read_ok is False:
+        lines.append(f"{prefix} <error:{_pg_text(os_read_error or 'os-read failed by both methods')}>")
+    else:
+        lines.append(f"{prefix} <not attempted>")
+    return lines
+
+
+def _format_privesc_detail_records(record: dict[str, Any], output_format: str, *, debug: bool = False) -> list[str]:
+    if not record.get("privesc_check"):
+        return []
+
+    checks = record.get("privesc_checks")
+    if not isinstance(checks, list):
+        checks = []
+    summary = record.get("privesc_summary") if isinstance(record.get("privesc_summary"), dict) else {}
+
+    if output_format == "json":
+        return [
+            json.dumps(
+                {
+                    "timestamp": record.get("timestamp"),
+                    "type": "privesc_check",
+                    "service": "postgres",
+                    "host": record.get("host"),
+                    "port": record.get("port"),
+                    "database": record.get("database"),
+                    "summary": summary,
+                    "checks": checks,
+                },
+                ensure_ascii=False,
+            )
+        ]
+
+    prefix = _nxc_prefix(record)
+    lines = [f"{prefix} [*] PrivEsc Check"]
+    if not checks:
+        lines.append(f"{prefix} <no privesc checks available>")
+        return lines
+
+    finding_count = 0
+    for item in checks:
+        if not isinstance(item, dict):
+            continue
+        severity = str(item.get("severity") or "UNKNOWN").upper()
+        name = _pg_text(item.get("name") or item.get("id") or "check")
+        description = _pg_text(item.get("description") or "")
+        title = f"{name} - {description}" if description else name
+        vulnerable = item.get("vulnerable")
+        if debug:
+            result = "True" if vulnerable is True else "False" if vulnerable is False else "unknown"
+            marker = "[!]" if vulnerable is True else "[d]"
+            evidence = _pg_text(item.get("evidence") or "-")
+            error = _pg_text(item.get("error") or "")
+            suffix = f" error={error}" if error else ""
+            lines.append(f"{prefix} {marker} {severity} - {title} result:{result} evidence={evidence}{suffix}")
+            if vulnerable is True:
+                finding_count += 1
+            continue
+        if vulnerable is True:
+            finding_count += 1
+            lines.append(f"{prefix} [!] {severity} - {title}")
+    if finding_count == 0:
+        lines.append(f"{prefix} <no privesc findings>")
+    return lines
+
+
 def _format_record(record: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
         payload = dict(record)
@@ -2020,88 +2579,25 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     return f"{fail_line} err={err}" if err != "-" else fail_line
 
 
+def _postgres_extra_color_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
+    if payload.startswith(("CRITICAL - ", "HIGH - ", "MEDIUM - ")):
+        return [(0, len(payload), "orange")]
+    return []
+
+
 def _render_colored_postgres_line(console: Console, line: str) -> bool:
-    if not line.startswith("POSTGRES"):
-        return False
-
-    marker_color = {
-        "[*]": "cyan",
-        "[+]": "bright_green",
-        "[-]": "red",
-        "[!]": "red",
-    }
-
-    for marker in ("[!]", "[-]", "[+]", "[*]"):
-        token = f" {marker} "
-        if token not in line:
-            continue
-
-        left, right = line.split(token, 1)
-        tag = "POSTGRES"
-        rest = left[len(tag) :] if left.startswith(tag) else left
-
-        spans: list[tuple[int, int, str]] = []
-        auth_true = "(auth required:True)"
-        auth_false = "(auth required:False)"
-        auth_unknown = "(auth required:unknown)"
-
-        idx_true = right.find(auth_true)
-        if idx_true >= 0:
-            spans.append((idx_true, idx_true + len(auth_true), "bright_green"))
-
-        idx_false = right.find(auth_false)
-        if idx_false >= 0:
-            spans.append((idx_false, idx_false + len(auth_false), "red"))
-
-        idx_unknown = right.find(auth_unknown)
-        if idx_unknown >= 0:
-            spans.append((idx_unknown, idx_unknown + len(auth_unknown), "yellow"))
-
-        for capability in ("superuser", "execute", "read"):
-            capability_match = re.search(rf"\({capability}:(True|False|unknown)\)", right)
-            if not capability_match:
-                continue
-            capability_value = capability_match.group(1)
-            if capability_value == "True":
-                capability_color = "red"
-            elif capability_value == "False":
-                capability_color = "bright_green"
-            else:
-                capability_color = "yellow"
-            spans.append((capability_match.start(), capability_match.end(), capability_color))
-
-        database_match = re.search(r"\(DBs:(\d+)\)", right)
-        if database_match:
-            database_count = int(database_match.group(1))
-            if database_count > 0:
-                spans.append((database_match.start(), database_match.end(), "orange"))
-
-        if not spans:
-            right_colored = console._paint(right, "white", sys.stdout)
-        else:
-            chunks: list[str] = []
-            cursor = 0
-            for start, end, color in sorted(spans, key=lambda item: item[0]):
-                if start < cursor:
-                    continue
-                if start > cursor:
-                    chunks.append(console._paint(right[cursor:start], "white", sys.stdout))
-                chunks.append(console._paint(right[start:end], color, sys.stdout))
-                cursor = end
-            if cursor < len(right):
-                chunks.append(console._paint(right[cursor:], "white", sys.stdout))
-            right_colored = "".join(chunks)
-
-        colored = (
-            f"{console._paint(tag, 'blue', sys.stdout)}"
-            f"{console._paint(rest, 'white', sys.stdout)} "
-            f"{console._paint(marker, marker_color[marker], sys.stdout)} "
-            f"{right_colored}"
-        )
-        console.plain(colored)
-        return True
-
-    return False
+    return render_colored_marker_line(
+        console,
+        line,
+        tag="POSTGRES",
+        booleans=(
+            BooleanColorRule("superuser"),
+            BooleanColorRule("execute"),
+            BooleanColorRule("read"),
+        ),
+        counts=(CountColorRule("DBs", "orange"),),
+        extra_spans=_postgres_extra_color_spans,
+    )
 
 
 def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) -> None:
@@ -2132,6 +2628,8 @@ def _call_audit_postgres_host_with_stage_debug(
     dump_row_limit: int | None,
     execute_command: str | None,
     sql_command: str | None,
+    os_read_path: str | None = None,
+    privesc_check: bool = False,
     *,
     run_deep_checks: bool,
     debug: bool,
@@ -2158,72 +2656,44 @@ def _call_audit_postgres_host_with_stage_debug(
         dump_row_limit if run_deep_checks else None,
         execute_command if run_deep_checks else None,
         sql_command if run_deep_checks else None,
+        os_read_path if run_deep_checks else None,
+        privesc_check if run_deep_checks else False,
     )
 
     result: dict[str, Any] = dict(record)
-    debug_events: list[str] = []
-
-    def _debug(message: str) -> None:
-        if not debug:
-            return
-        debug_events.append(message)
-        if debug_emit is not None:
-            debug_emit(f"{host}:{port} {message}")
-
     status = str(result.get("status") or "fail")
     is_postgres = bool(result.get("is_postgres"))
     attempts = max(1, retries + 1)
     elapsed_ms = int((time.monotonic() - started) * 1000)
+    telemetry = StageTelemetryBuilder(host=host, port=port, attempts=attempts, debug=debug, debug_emit=debug_emit)
 
     if attempts > 1 and status == "fail":
-        _debug(
-            f"retry_decision stage={_STAGE_DETECT_PROTOCOL} attempt=1/{attempts} "
-            f"backoff={_retry_delay(0):.2f}s reason=error"
-        )
-
-    stages: list[dict[str, Any]] = []
-
-    def _push_stage(stage_name: str, stage_result: str, stage_error: str | None = None, duration_ms: int = 0) -> None:
-        entry = {
-            "stage_name": stage_name,
-            "attempt": 1,
-            "duration_ms": int(max(0, duration_ms)),
-            "result": stage_result,
-            "error": stage_error or None,
-        }
-        stages.append(entry)
-        _debug(
-            f"stage_trace stage_name={stage_name} attempt=1 duration_ms={entry['duration_ms']} "
-            f"result={stage_result} error={entry['error'] or '-'}"
-        )
+        telemetry.retry(_STAGE_DETECT_PROTOCOL, 1, _retry_delay(0), "error")
 
     detect_result = "ok" if is_postgres else ("error" if status == "fail" else "skip")
     detect_error = str(result.get("error") or "") if detect_result == "error" else None
-    _push_stage(_STAGE_DETECT_PROTOCOL, detect_result, detect_error, 0)
+    telemetry.stage(_STAGE_DETECT_PROTOCOL, detect_result, detect_error, 0)
 
     auth_result = "ok" if is_postgres and status in _POSTGRES_DEEP_STATUSES.union({"auth_required"}) else detect_result
-    _push_stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
+    telemetry.stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
 
     if run_deep_checks and status in _POSTGRES_DEEP_STATUSES:
-        _push_stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
+        telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
         data_result = "error" if status == "fail" and result.get("error") else "ok"
-        _push_stage(
-            _STAGE_DATA, data_result, str(result.get("error") or "") if data_result == "error" else None, elapsed_ms
+        telemetry.stage(
+            _STAGE_DATA,
+            data_result,
+            str(result.get("error") or "") if data_result == "error" else None,
+            elapsed_ms,
         )
     else:
-        _push_stage(_STAGE_ACCESS_CAPABILITIES, "skip", "deep checks disabled", 0)
-        _push_stage(_STAGE_DATA, "skip", "deep checks disabled", 0)
+        telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "skip", "deep checks disabled", 0)
+        telemetry.stage(_STAGE_DATA, "skip", "deep checks disabled", 0)
 
-    stage_failed_at: str | None = None
-    for stage_entry in stages:
-        if str(stage_entry.get("result") or "") == "error":
-            stage_failed_at = str(stage_entry.get("stage_name") or "")
-            break
-
-    stage_durations_ms = {str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in stages}
-    stage_attempts = {str(item.get("stage_name") or ""): attempts for item in stages}
-
-    _debug(
+    stage_durations_ms = {
+        str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in telemetry.stages
+    }
+    telemetry.debug(
         f"stage_timing_summary status={status} attempts=1/{attempts} "
         f"detect_ms={stage_durations_ms.get(_STAGE_DETECT_PROTOCOL, 0)} "
         f"auth_ms={stage_durations_ms.get(_STAGE_AUTH_INFERENCE, 0)} "
@@ -2231,55 +2701,11 @@ def _call_audit_postgres_host_with_stage_debug(
         f"data_ms={stage_durations_ms.get(_STAGE_DATA, 0)} total_ms={elapsed_ms}"
     )
 
-    result["stages"] = stages
-    result["stage_failed_at"] = stage_failed_at
-    result["stage_durations_ms"] = stage_durations_ms
-    result["stage_attempts"] = stage_attempts
-    result["debug_events"] = debug_events
-    result["debug_events_streamed"] = bool(debug and debug_emit is not None)
-    return result
+    return telemetry.attach(result, status=status, total_ms=elapsed_ms)
 
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
-    merged = dict(detect_record)
-    merged.update(deep_record)
-
-    debug_events: list[str] = []
-    for source in (detect_record.get("debug_events"), deep_record.get("debug_events")):
-        if not isinstance(source, list):
-            continue
-        for item in source:
-            if isinstance(item, str) and item.strip():
-                debug_events.append(item)
-    merged["debug_events"] = debug_events
-    merged["debug_events_streamed"] = bool(detect_record.get("debug_events_streamed")) or bool(
-        deep_record.get("debug_events_streamed")
-    )
-
-    stages: list[dict[str, Any]] = []
-    for source in (detect_record.get("stages"), deep_record.get("stages")):
-        if isinstance(source, list):
-            for entry in source:
-                if isinstance(entry, dict):
-                    stages.append(dict(entry))
-    merged["stages"] = stages
-
-    stage_durations: dict[str, int] = {}
-    for source in (detect_record.get("stage_durations_ms"), deep_record.get("stage_durations_ms")):
-        if isinstance(source, dict):
-            for key, value in source.items():
-                stage_durations[str(key)] = int(value or 0)
-    merged["stage_durations_ms"] = stage_durations
-
-    stage_attempts: dict[str, int] = {}
-    for source in (detect_record.get("stage_attempts"), deep_record.get("stage_attempts")):
-        if isinstance(source, dict):
-            for key, value in source.items():
-                stage_attempts[str(key)] = int(value or 0)
-    merged["stage_attempts"] = stage_attempts
-
-    merged["stage_failed_at"] = deep_record.get("stage_failed_at") or detect_record.get("stage_failed_at")
-    return merged
+    return merge_stage_records(detect_record, deep_record)
 
 
 def audit_postgres_targets(
@@ -2310,7 +2736,9 @@ def audit_postgres_targets(
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
-    show_progress: bool = True,
+    show_progress: bool = False,
+    os_read_path: str | None = None,
+    privesc_check: bool = False,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -2324,58 +2752,10 @@ def audit_postgres_targets(
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
-    progress: ProgressBar | None = None
+    progress = None
     try:
         indexed_hosts = list(enumerate(hosts))
-        detect_records: dict[int, dict[str, Any]] = {}
-        deep_records: dict[int, dict[str, Any]] = {}
-        progress = ProgressBar("POSTGRES", len(indexed_hosts), enabled=show_progress, leave=True)
-
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
-
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            pass1_future_map = {
-                executor.submit(
-                    _call_audit_postgres_host_with_stage_debug,
-                    host,
-                    port,
-                    timeout,
-                    retries,
-                    username,
-                    password,
-                    defcreds,
-                    database,
-                    show_databases,
-                    show_tables,
-                    show_row_counts,
-                    show_columns,
-                    table_targets,
-                    table_targets_by_database,
-                    table_columns,
-                    dump_table_rows,
-                    dump_row_limit,
-                    execute_command,
-                    sql_command,
-                    run_deep_checks=False,
-                    debug=bool(debug_emit),
-                    debug_emit=debug_emit,
-                ): idx
-                for idx, host in indexed_hosts
-            }
-            buffered_records: dict[int, dict[str, Any]] = {}
-            next_emit_idx = 0
-            for future in as_completed(pass1_future_map):
-                record_idx = int(pass1_future_map[future])
-                buffered_records[record_idx] = future.result()
-                progress.advance()
-                while next_emit_idx in buffered_records:
-                    detect_record = buffered_records.pop(next_emit_idx)
-                    detect_records[next_emit_idx] = detect_record
-                    if bool(detect_record.get("is_postgres")) and output_format == "txt":
-                        _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
-                    next_emit_idx += 1
-
+        progress = start_audit_progress("POSTGRES", len(indexed_hosts), enabled=show_progress, leave=True)
         deep_requested = bool(
             show_databases
             or show_tables
@@ -2386,76 +2766,99 @@ def audit_postgres_targets(
             or dump_table_rows
             or execute_command
             or sql_command
+            or os_read_path
+            or privesc_check
         )
-        deep_candidates: list[tuple[int, str]] = []
-        detected_count = 0
-        for idx, host in indexed_hosts:
-            detect_record = detect_records[idx]
+
+        def _detect_task(host: str) -> dict[str, Any]:
+            return _call_audit_postgres_host_with_stage_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                username,
+                password,
+                defcreds,
+                database,
+                show_databases,
+                show_tables,
+                show_row_counts,
+                show_columns,
+                table_targets,
+                table_targets_by_database,
+                table_columns,
+                dump_table_rows,
+                dump_row_limit,
+                execute_command,
+                sql_command,
+                os_read_path,
+                privesc_check,
+                run_deep_checks=False,
+                debug=bool(debug_emit),
+                debug_emit=debug_emit,
+            )
+
+        def _deep_task(host: str) -> dict[str, Any]:
+            return _call_audit_postgres_host_with_stage_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                username,
+                password,
+                defcreds,
+                database,
+                show_databases,
+                show_tables,
+                show_row_counts,
+                show_columns,
+                table_targets,
+                table_targets_by_database,
+                table_columns,
+                dump_table_rows,
+                dump_row_limit,
+                execute_command,
+                sql_command,
+                os_read_path,
+                privesc_check,
+                run_deep_checks=True,
+                debug=bool(debug_emit),
+                debug_emit=debug_emit,
+            )
+
+        def _emit_detect(detect_record: dict[str, Any]) -> None:
+            if bool(detect_record.get("is_postgres")) and output_format == "txt":
+                _emit_line(out_fh, emit_line, _format_detect_record(detect_record, output_format))
+
+        def _deep_gate(detect_record: dict[str, Any]) -> tuple[bool, str]:
             detect_status = str(detect_record.get("status") or "fail")
-            if not bool(detect_record.get("is_postgres")):
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_postgres")
-                continue
-            detected_count += 1
             if deep_requested and detect_status in _POSTGRES_DEEP_STATUSES:
-                deep_candidates.append((idx, host))
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
-            elif debug_emit is not None:
-                reason = "no_data_actions" if not deep_requested else f"status={detect_status}"
-                debug_emit(f"{host}:{port} stage2_gate=skip reason={reason}")
+                return True, f"status={detect_status}"
+            reason = "no_data_actions" if not deep_requested else f"status={detect_status}"
+            return False, reason
 
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect complete postgres={detected_count} deep_candidates={len(deep_candidates)}")
-            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
-
-        progress.set_total(len(indexed_hosts) + len(deep_candidates))
-        if deep_candidates:
-            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-                pass2_future_map = {
-                    executor.submit(
-                        _call_audit_postgres_host_with_stage_debug,
-                        host,
-                        port,
-                        timeout,
-                        retries,
-                        username,
-                        password,
-                        defcreds,
-                        database,
-                        show_databases,
-                        show_tables,
-                        show_row_counts,
-                        show_columns,
-                        table_targets,
-                        table_targets_by_database,
-                        table_columns,
-                        dump_table_rows,
-                        dump_row_limit,
-                        execute_command,
-                        sql_command,
-                        run_deep_checks=True,
-                        debug=bool(debug_emit),
-                        debug_emit=debug_emit,
-                    ): idx
-                    for idx, host in deep_candidates
-                }
-                for future in as_completed(pass2_future_map):
-                    deep_records[int(pass2_future_map[future])] = future.result()
-                    progress.advance()
-
-        if debug_emit is not None:
-            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
+        pass_result = TwoPassAuditRunner(
+            label="POSTGRES",
+            workers=workers,
+            debug_emit=debug_emit,
+            progress=progress,
+            detected_name="postgres",
+        ).run(
+            indexed_hosts,
+            detect_task=_detect_task,
+            deep_task=_deep_task,
+            is_detected=lambda record: bool(record.get("is_postgres")),
+            deep_gate=_deep_gate,
+            emit_detect=_emit_detect,
+            merge_records=_merge_stage2_record,
+            not_detected_reason="not_postgres",
+        )
 
         if progress is not None:
             progress.close()
             progress = None
 
-        final_records: dict[int, dict[str, Any]] = {}
-        for idx, _host in indexed_hosts:
-            detect_record = detect_records[idx]
-            deep_record = deep_records.get(idx)
-            final_records[idx] = _merge_stage2_record(detect_record, deep_record) if deep_record else detect_record
+        final_records = pass_result.final_records
 
         for idx, _host in indexed_hosts:
             record = final_records[idx]
@@ -2504,6 +2907,10 @@ def audit_postgres_targets(
                 _emit_line(out_fh, emit_line, execute_line)
             for sql_line in _format_sql_detail_records(record, output_format):
                 _emit_line(out_fh, emit_line, sql_line)
+            for os_read_line in _format_os_read_detail_records(record, output_format):
+                _emit_line(out_fh, emit_line, os_read_line)
+            for privesc_line in _format_privesc_detail_records(record, output_format, debug=debug_emit is not None):
+                _emit_line(out_fh, emit_line, privesc_line)
 
             if logger is not None:
                 logger.log(
@@ -2523,6 +2930,12 @@ def audit_postgres_targets(
                     sql_attempted=record.get("sql_attempted"),
                     sql_ok=record.get("sql_ok"),
                     sql_error=record.get("sql_error"),
+                    os_read_attempted=record.get("os_read_attempted"),
+                    os_read_ok=record.get("os_read_ok"),
+                    os_read_method=record.get("os_read_method"),
+                    os_read_error=record.get("os_read_error"),
+                    privesc_check=record.get("privesc_check"),
+                    privesc_summary=record.get("privesc_summary"),
                     error=record.get("error"),
                 )
 
@@ -2615,6 +3028,8 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     execute_command = str(getattr(args, "execute", "") or "").strip() or None
     sql_command = str(getattr(args, "sql_cmd", "") or "").strip() or None
+    os_read_path = str(getattr(args, "os_read", "") or "").strip() or None
+    privesc_check = bool(getattr(args, "privesc_check", False))
     selected_database = str(getattr(args, "database", "") or "").strip() or None
     table_targets_raw = list(getattr(args, "tables", []) or [])
     table_targets: list[str] = []
@@ -2657,8 +3072,20 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if execute_command and sql_command:
         console.error("--execute cannot be combined with --sql-cmd")
         return 2
+    if execute_command and os_read_path:
+        console.error("--execute cannot be combined with --os-read")
+        return 2
+    if sql_command and os_read_path:
+        console.error("--os-read cannot be combined with --sql-cmd")
+        return 2
     if os_shell_mode and sql_shell_mode:
         console.error("--os-shell cannot be combined with --sql-shell")
+        return 2
+    if os_shell_mode and os_read_path:
+        console.error("--os-shell cannot be combined with --os-read")
+        return 2
+    if sql_shell_mode and os_read_path:
+        console.error("--sql-shell cannot be combined with --os-read")
         return 2
     if os_shell_mode and sql_command:
         console.error("--os-shell cannot be combined with --sql-cmd")
@@ -2712,6 +3139,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             dump_row_limit=dump_row_limit,
             execute_command=None,
             sql_command=None,
+            privesc_check=privesc_check,
         )
         if bool(record.get("is_postgres")):
             emit_line(_format_detect_record(record, "txt"))
@@ -2726,6 +3154,8 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             emit_line(table_rows_line)
         for table_dump_line in _format_table_dump_detail_records(record, "txt"):
             emit_line(table_dump_line)
+        for privesc_line in _format_privesc_detail_records(record, "txt", debug=args.debug):
+            emit_line(privesc_line)
 
         if not bool(record.get("is_postgres")):
             return 1
@@ -2831,6 +3261,7 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             dump_row_limit=dump_row_limit,
             execute_command=None,
             sql_command=None,
+            privesc_check=privesc_check,
         )
         if bool(record.get("is_postgres")):
             emit_line(_format_detect_record(record, "txt"))
@@ -2845,6 +3276,8 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             emit_line(table_rows_line)
         for table_dump_line in _format_table_dump_detail_records(record, "txt"):
             emit_line(table_dump_line)
+        for privesc_line in _format_privesc_detail_records(record, "txt", debug=args.debug):
+            emit_line(privesc_line)
 
         if not bool(record.get("is_postgres")):
             return 1
@@ -2956,14 +3389,13 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     f"credential_prefilter port={int(audit_port)} open={len(hosts_by_port[int(audit_port)])}/"
                     f"{len(hosts)}"
                 )
-    outer_progress: ProgressBar | None = None
-    use_single_global_progress = (
-        stream_to_stdout and args.output_format == "txt" and (len(ports) > 1 or len(credential_runs) > 1)
-    )
+    outer_progress = None
+    use_single_global_progress = should_use_global_progress(args.output_format, len(ports), len(credential_runs))
     if use_single_global_progress:
-        outer_progress = ProgressBar(
+        outer_progress = start_command_progress(
+            args,
             "POSTGRES",
-            sum(len(hosts_by_port[int(port)]) for port in ports) * len(credential_runs),
+            progress_total_from_groups(hosts_by_port.values(), len(credential_runs)),
             enabled=True,
             leave=True,
         )
@@ -3000,6 +3432,8 @@ def run_postgres_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                         dump_row_limit=dump_row_limit,
                         execute_command=execute_command,
                         sql_command=sql_command,
+                        os_read_path=os_read_path,
+                        privesc_check=privesc_check,
                         output_path=args.output,
                         output_format=args.output_format,
                         emit_line=emit_line,

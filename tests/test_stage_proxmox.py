@@ -935,14 +935,41 @@ def test_format_discovered_urls_detail_records_for_discover_creds() -> None:
                 {"path": "/access", "status": 200, "error": None},
                 {"path": "/nodes", "status": 200, "error": None},
             ],
+            "findings": [
+                {"endpoint": "/access", "reason": "text_password", "path": "$text", "sample": "password=secret"}
+            ],
         },
         "txt",
     )
     assert lines
     assert lines[0].endswith("[*] Discovered Credentials")
     assert any(line.endswith("[*] Discovered URL") for line in lines)
-    assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/access") for line in lines)
-    assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/nodes") for line in lines)
+    url_index = next(
+        idx for idx, line in enumerate(lines) if line.endswith("[*] https://10.10.10.10:8006/api2/json/access")
+    )
+    finding_index = next(idx for idx, line in enumerate(lines) if "credential candidate reason=text_password" in line)
+    assert finding_index == url_index + 1
+    assert not any(line.endswith("[*] https://10.10.10.10:8006/api2/json/nodes") for line in lines)
+
+    debug_lines = _format_discovered_urls_detail_records(
+        {
+            "host": "10.10.10.10",
+            "port": 8006,
+            "discover_creds": True,
+            "use_https": True,
+            "endpoint_results": [
+                {"path": "/access", "status": 200, "error": None},
+                {"path": "/nodes", "status": 200, "error": None},
+            ],
+            "findings": [
+                {"endpoint": "/access", "reason": "text_password", "path": "$text", "sample": "password=secret"}
+            ],
+        },
+        "txt",
+        include_all_urls=True,
+    )
+    assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/access") for line in debug_lines)
+    assert any(line.endswith("[*] https://10.10.10.10:8006/api2/json/nodes") for line in debug_lines)
 
     no_urls = _format_discovered_urls_detail_records(
         {
@@ -1588,7 +1615,10 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
         def close(self) -> None:
             return
 
-    monkeypatch.setattr("redposture_core.stage_proxmox.ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        "redposture_core.stage_proxmox.start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     args = SimpleNamespace(
         debug=False,

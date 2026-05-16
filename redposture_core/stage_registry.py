@@ -15,12 +15,18 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import ProgressBar
+from .rendering import CountColorRule, render_colored_marker_line
+from .stage_runtime import (
+    TwoPassAuditRunner,
+    progress_total_from_groups,
+    should_use_global_progress,
+    start_audit_progress,
+    start_command_progress,
+)
 from .utils import (
     build_scan_execution_groups,
     collect_scan_ports,
@@ -2788,71 +2794,12 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
 
 
 def _render_colored_registry_line(console: Console, line: str) -> bool:
-    if not line.startswith("REGISTRY"):
-        return False
-
-    marker_default_color = {
-        "[*]": "cyan",
-        "[+]": "bright_green",
-        "[-]": "red",
-        "[!]": "red",
-    }
-
-    for marker in ("[!]", "[-]", "[+]", "[*]"):
-        token = f" {marker} "
-        if token not in line:
-            continue
-
-        left, right = line.split(token, 1)
-        tag = "REGISTRY"
-        rest = left[len(tag) :] if left.startswith(tag) else left
-
-        marker_color = marker_default_color[marker]
-
-        spans: list[tuple[int, int, str]] = []
-        auth_true = "(auth required:True)"
-        auth_false = "(auth required:False)"
-        auth_unknown = "(auth required:unknown)"
-
-        idx_true = right.find(auth_true)
-        if idx_true >= 0:
-            spans.append((idx_true, idx_true + len(auth_true), "bright_green"))
-        idx_false = right.find(auth_false)
-        if idx_false >= 0:
-            spans.append((idx_false, idx_false + len(auth_false), "red"))
-        idx_unknown = right.find(auth_unknown)
-        if idx_unknown >= 0:
-            spans.append((idx_unknown, idx_unknown + len(auth_unknown), "yellow"))
-
-        image_match = re.search(r"\(images:(\d+)\)", right)
-        if image_match:
-            image_value = image_match.group(1).strip()
-            if image_value.isdigit() and int(image_value) > 0:
-                spans.append((image_match.start(), image_match.end(), "red"))
-
-        if not spans:
-            right_colored = console._paint(right, "white", sys.stdout)
-        else:
-            chunks: list[str] = []
-            cursor = 0
-            for start, end, color in sorted(spans, key=lambda item: item[0]):
-                if start < cursor:
-                    continue
-                if start > cursor:
-                    chunks.append(console._paint(right[cursor:start], "white", sys.stdout))
-                chunks.append(console._paint(right[start:end], color, sys.stdout))
-                cursor = end
-            if cursor < len(right):
-                chunks.append(console._paint(right[cursor:], "white", sys.stdout))
-            right_colored = "".join(chunks)
-
-        tag_colored = console._paint(tag, "blue", sys.stdout)
-        rest_colored = console._paint(rest, "white", sys.stdout)
-        marker_colored = console._paint(marker, marker_color, sys.stdout)
-        console.plain(f"{tag_colored}{rest_colored} {marker_colored} {right_colored}")
-        return True
-
-    return False
+    return render_colored_marker_line(
+        console,
+        line,
+        tag="REGISTRY",
+        counts=(CountColorRule("images", "red"),),
+    )
 
 
 def _render_plain_registry_line(console: Console, line: str, *, suspicious: bool = False) -> bool:
@@ -2935,7 +2882,7 @@ def audit_registry_targets(
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
-    show_progress: bool = True,
+    show_progress: bool = False,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -2945,7 +2892,7 @@ def audit_registry_targets(
     failed = 0
 
     out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8") if output_path else None
-    progress: ProgressBar | None = None
+    progress = None
     write_lock = None
     if out_fh is not None:
         import threading
@@ -2962,140 +2909,101 @@ def audit_registry_targets(
 
     try:
         indexed_hosts = list(enumerate(hosts))
-        detect_records: dict[int, dict[str, Any]] = {}
-        deep_records: dict[int, dict[str, Any]] = {}
-        progress = ProgressBar("REGISTRY", len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = start_audit_progress("REGISTRY", len(indexed_hosts), enabled=show_progress, leave=True)
 
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
+        def _detect_task(host: str) -> dict[str, Any]:
+            return _call_audit_registry_host_with_thread_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                username=username,
+                password=password,
+                token=token,
+                docker=docker,
+                show_images=show_images,
+                show_tags=show_tags,
+                repository=repository,
+                tag=tag,
+                metadata=metadata,
+                harbor=harbor,
+                gitlab=gitlab,
+                nexus=nexus,
+                assets=assets,
+                inspect=inspect,
+                image=image,
+                download=download,
+                download_dir=download_dir,
+                console=console,
+                debug=debug,
+                run_deep_checks=False,
+                debug_emit=debug_emit,
+            )
 
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            pass1_futures = {
-                pool.submit(
-                    _call_audit_registry_host_with_thread_debug,
-                    host,
-                    port,
-                    timeout,
-                    retries,
-                    username=username,
-                    password=password,
-                    token=token,
-                    docker=docker,
-                    show_images=show_images,
-                    show_tags=show_tags,
-                    repository=repository,
-                    tag=tag,
-                    metadata=metadata,
-                    harbor=harbor,
-                    gitlab=gitlab,
-                    nexus=nexus,
-                    assets=assets,
-                    inspect=inspect,
-                    image=image,
-                    download=download,
-                    download_dir=download_dir,
-                    console=console,
-                    debug=debug,
-                    run_deep_checks=False,
-                    debug_emit=debug_emit,
-                ): idx
-                for idx, host in indexed_hosts
-            }
+        def _deep_task(host: str) -> dict[str, Any]:
+            return _call_audit_registry_host_with_thread_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                username=username,
+                password=password,
+                token=token,
+                docker=docker,
+                show_images=show_images,
+                show_tags=show_tags,
+                repository=repository,
+                tag=tag,
+                metadata=metadata,
+                harbor=harbor,
+                gitlab=gitlab,
+                nexus=nexus,
+                assets=assets,
+                inspect=inspect,
+                image=image,
+                download=download,
+                download_dir=download_dir,
+                console=console,
+                debug=debug,
+                run_deep_checks=True,
+                debug_emit=debug_emit,
+            )
 
-            buffered_records: dict[int, dict[str, Any]] = {}
-            next_emit_idx = 0
-            for future in as_completed(pass1_futures):
-                record_idx = int(pass1_futures[future])
-                buffered_records[record_idx] = future.result()
-                if progress is not None:
-                    progress.advance()
-                while next_emit_idx in buffered_records:
-                    detect_record = buffered_records.pop(next_emit_idx)
-                    detect_records[next_emit_idx] = detect_record
-                    if output_format == "txt" and bool(detect_record.get("is_registry")):
-                        detect_status = str(detect_record.get("status") or "")
-                        suppress_timeout_detect_line = suppress_timeout_status_lines and detect_status == "fail"
-                        if not suppress_timeout_detect_line:
-                            line = _format_detect_record(detect_record, output_format)
-                            emit_line(line)
-                            write_output(line)
-                    next_emit_idx += 1
-
-        deep_candidates: list[tuple[int, str]] = []
-        detected_count = 0
-        for idx, host in indexed_hosts:
-            detect_record = detect_records[idx]
+        def _emit_detect(detect_record: dict[str, Any]) -> None:
+            if output_format != "txt" or not bool(detect_record.get("is_registry")):
+                return
             detect_status = str(detect_record.get("status") or "")
-            if not bool(detect_record.get("is_registry")):
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_registry")
-                continue
-            detected_count += 1
+            suppress_timeout_detect_line = suppress_timeout_status_lines and detect_status == "fail"
+            if suppress_timeout_detect_line:
+                return
+            line = _format_detect_record(detect_record, output_format)
+            emit_line(line)
+            write_output(line)
+
+        def _deep_gate(detect_record: dict[str, Any]) -> tuple[bool, str]:
+            detect_status = str(detect_record.get("status") or "")
             if detect_status in {"open_no_auth", "valid_credentials"}:
-                deep_candidates.append((idx, host))
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
-            elif debug_emit is not None:
-                debug_emit(f"{host}:{port} stage2_gate=skip reason=status={detect_status}")
+                return True, f"status={detect_status}"
+            return False, f"status={detect_status}"
 
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect complete registry={detected_count} deep_candidates={len(deep_candidates)}")
+        pass_result = TwoPassAuditRunner(
+            label="REGISTRY",
+            workers=workers,
+            debug_emit=debug_emit,
+            progress=progress,
+            detected_name="registry",
+        ).run(
+            indexed_hosts,
+            detect_task=_detect_task,
+            deep_task=_deep_task,
+            is_detected=lambda record: bool(record.get("is_registry")),
+            deep_gate=_deep_gate,
+            emit_detect=_emit_detect,
+            merge_records=_merge_stage2_record,
+            not_detected_reason="not_registry",
+        )
 
-        if progress is not None:
-            progress.set_total(len(indexed_hosts) + len(deep_candidates))
-        if debug_emit is not None:
-            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
-
-        if deep_candidates:
-            with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-                pass2_futures = {
-                    pool.submit(
-                        _call_audit_registry_host_with_thread_debug,
-                        host,
-                        port,
-                        timeout,
-                        retries,
-                        username=username,
-                        password=password,
-                        token=token,
-                        docker=docker,
-                        show_images=show_images,
-                        show_tags=show_tags,
-                        repository=repository,
-                        tag=tag,
-                        metadata=metadata,
-                        harbor=harbor,
-                        gitlab=gitlab,
-                        nexus=nexus,
-                        assets=assets,
-                        inspect=inspect,
-                        image=image,
-                        download=download,
-                        download_dir=download_dir,
-                        console=console,
-                        debug=debug,
-                        run_deep_checks=True,
-                        debug_emit=debug_emit,
-                    ): idx
-                    for idx, host in deep_candidates
-                }
-                for future in as_completed(pass2_futures):
-                    record_idx = int(pass2_futures[future])
-                    deep_records[record_idx] = future.result()
-                    if progress is not None:
-                        progress.advance()
-
-        if debug_emit is not None:
-            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
-
-        final_records: dict[int, dict[str, Any]] = {}
-        for idx in range(len(hosts)):
-            detect_record = detect_records[idx]
-            deep_record = deep_records.get(idx)
-            if deep_record is None:
-                final_records[idx] = detect_record
-            else:
-                final_records[idx] = _merge_stage2_record(detect_record, deep_record)
+        final_records = pass_result.final_records
 
         for idx in range(len(hosts)):
             record = final_records[idx]
@@ -3371,15 +3279,13 @@ def run_registry_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     f"credential_prefilter port={int(group.port)} open={len(group_hosts_by_idx[idx])}/"
                     f"{len(group.hosts)}"
                 )
-    outer_progress: ProgressBar | None = None
-    use_single_global_progress = (
-        stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
+    outer_progress = None
+    use_single_global_progress = should_use_global_progress(
+        args.output_format, len(execution_groups), len(credential_runs)
     )
     if use_single_global_progress:
-        global_total = sum(len(group_hosts_by_idx[idx]) for idx, _group in enumerate(execution_groups)) * len(
-            credential_runs
-        )
-        outer_progress = ProgressBar("REGISTRY", global_total, enabled=True, leave=True)
+        global_total = progress_total_from_groups(group_hosts_by_idx.values(), len(credential_runs))
+        outer_progress = start_command_progress(args, "REGISTRY", global_total, enabled=True, leave=True)
     output_written = False
     try:
         for idx, group in enumerate(execution_groups):

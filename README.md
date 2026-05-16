@@ -3,7 +3,7 @@
 RedPosture is a Python security CLI for:
 
 - exporter discovery / trigger / collect workflows (`exporters`)
-- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `clickhouse`, `redis`, `etcd`, `kafka`, `zookeeper`, `elastic`, `grpc`)
+- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `mongodb`, `docker`, `clickhouse`, `redis`, `etcd`, `kafka`, `zookeeper`, `elastic`, `grpc`)
 - listener-based callback capture for lab SSRF workflows
 
 Use only on systems you own or are explicitly authorized to assess.
@@ -36,6 +36,8 @@ redposture gitlab -h
 redposture consul -h
 redposture kubeapi -h
 redposture postgres -h
+redposture mongodb -h
+redposture docker -h
 redposture clickhouse -h
 redposture redis -h
 redposture etcd -h
@@ -201,7 +203,44 @@ redposture postgres -t 127.0.0.1 --defcreds
 
 # Basic enum
 redposture postgres -t 127.0.0.1 -u postgres -p postgres --show-databases
+
+# Server-side file read: pg_read_file first, pg_ls_dir/lo_import fallback
+redposture postgres -t 127.0.0.1 -u postgres -p postgres --os-read /etc/hostname
 ```
+
+### MongoDB
+
+```bash
+# Baseline
+redposture mongodb -t 127.0.0.1
+
+# Default creds check
+redposture mongodb -t 127.0.0.1 --port 27018 --defcreds
+
+# Basic enum and dump
+redposture mongodb -t 127.0.0.1 --show-databases --show-collections --dump 20
+
+# Query selected collection
+redposture mongodb -t 127.0.0.1 --database redposture --collection demo_accounts --query '{"role":"admin"}' --dump 10
+```
+
+### Docker Engine API
+
+```bash
+# Baseline detect; if --port/--ports are omitted, scans 2375,2376,4243
+redposture docker -t 127.0.0.1
+
+# Inventory exposed API
+redposture docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
+
+# TLS API with self-signed lab cert
+redposture docker -t 127.0.0.1 --port 2376 --insecure --system
+
+# Explicit exec check in an existing container
+redposture docker -t 127.0.0.1 --port 2375 --container redposture-web --exec-cmd 'id'
+```
+
+Docker secret values are intentionally not implemented in v1; Docker Engine API does not expose secret payloads after creation.
 
 ### ClickHouse
 

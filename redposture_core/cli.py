@@ -13,6 +13,7 @@ from .cli_args import (
     COMMAND_CLICKHOUSE,
     COMMAND_COLLECT,
     COMMAND_CONSUL,
+    COMMAND_DOCKER,
     COMMAND_ELASTIC,
     COMMAND_ETCD,
     COMMAND_EXPORTERS,
@@ -21,6 +22,7 @@ from .cli_args import (
     COMMAND_GRPC,
     COMMAND_KAFKA,
     COMMAND_KUBEAPI,
+    COMMAND_MONGODB,
     COMMAND_POSTGRES,
     COMMAND_PROXMOX,
     COMMAND_QDRANT,
@@ -35,9 +37,11 @@ from .cli_args import (
 from .console import set_console_no_color
 from .logger import AttemptLogger
 from .network_proxy import parse_proxy_config, proxy_socket_context
+from .progress import CommandProgressOwner
 from .stage_clickhouse import run_clickhouse_stage
 from .stage_collect import run_collect_stage
 from .stage_consul import run_consul_stage
+from .stage_docker import run_docker_stage
 from .stage_elastic import run_elastic_stage
 from .stage_etcd import run_etcd_stage
 from .stage_gitlab import run_gitlab_stage
@@ -45,6 +49,7 @@ from .stage_grafana import run_grafana_stage
 from .stage_grpc import run_grpc_stage
 from .stage_kafka import run_kafka_stage
 from .stage_kubeapi import run_kubeapi_stage
+from .stage_mongodb import run_mongodb_stage
 from .stage_postgres import run_postgres_stage
 from .stage_proxmox import run_proxmox_stage
 from .stage_qdrant import run_qdrant_stage
@@ -165,6 +170,12 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
     if args.command == COMMAND_POSTGRES:
         return run_postgres_stage(args, logger)
 
+    if args.command == COMMAND_MONGODB:
+        return run_mongodb_stage(args, logger)
+
+    if args.command == COMMAND_DOCKER:
+        return run_docker_stage(args, logger)
+
     if args.command == COMMAND_CLICKHOUSE:
         return run_clickhouse_stage(args, logger)
 
@@ -188,6 +199,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     set_console_no_color(bool(getattr(args, "no_color", False)))
     logger = AttemptLogger()
+    progress_owner = CommandProgressOwner(enabled=True)
+    args._progress_owner = progress_owner
     log_path = str(getattr(args, "log", "") or "").strip()
     raw_proxy = str(getattr(args, "proxy", "") or "").strip()
     proxy_cfg = None
@@ -207,5 +220,6 @@ def main(argv: list[str] | None = None) -> int:
                     return 2
             return _run_command(args, logger)
     finally:
+        progress_owner.close()
         set_console_no_color(False)
         logger.close()

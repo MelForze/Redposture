@@ -12,10 +12,10 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 from .console import Console
+from .exporters.trigger import scan_exporters_and_trigger
 from .listener_runtime import parse_services, start_listeners_for_trigger, stop_started_listeners
 from .logger import AttemptLogger
 from .profiles import load_profiles
-from .scanner import scan_exporters_and_trigger
 from .servers import RunningServer
 from .utils import collect_scan_ports, collect_scan_target_specs, normalize_ip_literal, normalize_scan_host, utc_now_iso
 

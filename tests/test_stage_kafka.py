@@ -124,6 +124,46 @@ def _fetch_message_set(offset: int, value: str) -> bytes:
     return struct.pack(">q", offset) + struct.pack(">i", len(message)) + message
 
 
+def _varint(value: int) -> bytes:
+    unsigned = (int(value) << 1) ^ (int(value) >> 63)
+    out = bytearray()
+    while True:
+        byte = unsigned & 0x7F
+        unsigned >>= 7
+        if unsigned:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            break
+    return bytes(out)
+
+
+def _fetch_record_batch(base_offset: int, values: list[str]) -> bytes:
+    records = bytearray()
+    for idx, value in enumerate(values):
+        raw = value.encode("utf-8")
+        record_body = (
+            struct.pack(">b", 0) + _varint(0) + _varint(idx) + _varint(-1) + _varint(len(raw)) + raw + _varint(0)
+        )
+        records += _varint(len(record_body)) + record_body
+
+    batch = (
+        struct.pack(">i", 0)  # partition leader epoch
+        + struct.pack(">b", 2)  # magic
+        + struct.pack(">i", 0)  # crc, ignored by parser
+        + struct.pack(">h", 0)  # attributes
+        + struct.pack(">i", max(0, len(values) - 1))
+        + struct.pack(">q", 0)
+        + struct.pack(">q", 0)
+        + struct.pack(">q", -1)
+        + struct.pack(">h", -1)
+        + struct.pack(">i", -1)
+        + struct.pack(">i", len(values))
+        + bytes(records)
+    )
+    return struct.pack(">q", base_offset) + struct.pack(">i", len(batch)) + batch
+
+
 def test_parse_apiversions_response_basic() -> None:
     correlation_id = 12
     payload = (
@@ -310,7 +350,7 @@ def test_format_topics_detail_records_dump_fallbacks() -> None:
 
 def test_audit_kafka_host_open_access_with_dump(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "redposture_core.stage_kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+        "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
     monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (True, None, None))
     monkeypatch.setattr(
@@ -346,7 +386,7 @@ def test_audit_kafka_host_open_access_with_dump(monkeypatch: pytest.MonkeyPatch)
 
 def test_audit_kafka_host_uses_valid_credentials_when_auth_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "redposture_core.stage_kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+        "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
     monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (True, None, None))
     monkeypatch.setattr(
@@ -385,7 +425,7 @@ def test_audit_kafka_host_uses_valid_credentials_when_auth_is_required(monkeypat
 
 def test_audit_kafka_host_falls_back_to_sasl_probe_and_retries_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "redposture_core.stage_kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+        "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
     monkeypatch.setattr(
         kafka, "_probe_apiversions", lambda *_args, **_kwargs: (False, None, "unexpected EOF from broker")
@@ -428,7 +468,7 @@ def test_audit_kafka_host_falls_back_to_sasl_probe_and_retries_failures(monkeypa
     assert record["is_kafka"] is True
 
     monkeypatch.setattr(
-        "redposture_core.stage_kafka.socket.create_connection",
+        "redposture_core.clients.kafka.socket.create_connection",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("connection refused")),
     )
     monkeypatch.setattr(kafka, "_audit_kafka_via_sasl_fallback", lambda **_kwargs: None)
@@ -485,6 +525,26 @@ def test_offsets_fetch_and_message_parsers_cover_success_and_errors() -> None:
     assert fetch_error is None
     assert items == [(7, "hello")]
 
+    record_batch_payload = (
+        struct.pack(">i", correlation_id)
+        + struct.pack(">i", 1)
+        + _kstr("audit.logs")
+        + struct.pack(">i", 1)
+        + struct.pack(">i", 0)
+        + struct.pack(">h", 0)
+        + struct.pack(">q", 99)
+        + struct.pack(">i", len(_fetch_record_batch(11, ["alpha", "beta"])))
+        + _fetch_record_batch(11, ["alpha", "beta"])
+    )
+    record_batch_items, record_batch_error = kafka._parse_fetch_response(
+        record_batch_payload,
+        correlation_id,
+        expected_partition=0,
+        max_messages=5,
+    )
+    assert record_batch_error is None
+    assert record_batch_items == [(11, "alpha"), (12, "beta")]
+
     bad_fetch_payload = (
         struct.pack(">i", correlation_id)
         + struct.pack(">i", 1)
@@ -538,7 +598,9 @@ def test_sasl_helpers_and_dump_targets(monkeypatch: pytest.MonkeyPatch, tmp_path
     auth_ok, next_corr, auth_error = kafka._sasl_authenticate_plain(_RecvSocket(), 10, "alice", "secret")
     assert (auth_ok, next_corr, auth_error) == (True, 11, None)
 
-    monkeypatch.setattr("redposture_core.stage_kafka.socket.create_connection", lambda *_args, **_kwargs: _RecvSocket())
+    monkeypatch.setattr(
+        "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _RecvSocket()
+    )
     monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (True, None, None))
     monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (True, 2, None))
     monkeypatch.setattr(kafka, "_sasl_authenticate_plain", lambda *_args, **_kwargs: (True, 3, None))
@@ -708,7 +770,11 @@ def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypa
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(kafka, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        kafka,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     rc = kafka.run_kafka_stage(
         _kafka_args(show_topics=True, dump=True, topic="orders"),
@@ -719,6 +785,68 @@ def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypa
     assert [bool(call["show_progress"]) for call in captured] == [False, False, False]
     assert progress_totals == [3]
     assert progress_advances == [1, 1, 1]
+
+
+def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
+    monkeypatch.setattr(kafka, "collect_scan_ports", lambda *_args, **_kwargs: [9092])
+    monkeypatch.setattr(kafka, "collect_scan_targets", lambda *_args, **_kwargs: ["10.0.0.1", "10.0.0.2"])
+    monkeypatch.setattr(
+        kafka, "filter_open_tcp_hosts_for_credential_file", lambda hosts, *_args, **_kwargs: list(hosts)
+    )
+
+    creds_file = tmp_path / "creds.txt"
+    creds_file.write_text("alice:one\nbob:two\n", encoding="utf-8")
+    output_file = tmp_path / "kafka.txt"
+
+    captured: list[dict[str, object]] = []
+
+    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+        captured.append(kwargs)
+        return 1, 0, 0, 1, 0
+
+    progress_totals: list[int] = []
+    progress_advances: list[int] = []
+
+    class _FakeProgressBar:
+        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
+            _ = (enabled, leave)
+            progress_totals.append(int(total))
+
+        def advance(self, amount: int = 1) -> None:
+            progress_advances.append(int(amount))
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(kafka, "audit_kafka_targets", fake_audit_targets)
+    monkeypatch.setattr(
+        kafka,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
+
+    rc = kafka.run_kafka_stage(
+        _kafka_args(username=str(creds_file), output=str(output_file), show_topics=True),
+        logger=object(),  # type: ignore[arg-type]
+    )
+
+    assert rc == 0
+    assert len(captured) == 6
+    assert all(call["show_progress"] is False for call in captured)
+    assert [(call["hosts"], call["username"], call["password"]) for call in captured] == [
+        (["10.0.0.1"], None, None),
+        (["10.0.0.1"], "alice", "one"),
+        (["10.0.0.1"], "bob", "two"),
+        (["10.0.0.2"], None, None),
+        (["10.0.0.2"], "alice", "one"),
+        (["10.0.0.2"], "bob", "two"),
+    ]
+    assert progress_totals == [2]
+    assert progress_advances == [1, 1]
 
 
 def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -744,7 +872,11 @@ def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Monk
             return
 
     monkeypatch.setattr(kafka, "audit_kafka_targets", fake_audit_targets)
-    monkeypatch.setattr(kafka, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        kafka,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     rc = kafka.run_kafka_stage(_kafka_args(defcreds=True), logger=object())  # type: ignore[arg-type]
 
@@ -918,7 +1050,7 @@ def test_audit_kafka_targets_emits_two_pass_debug_markers(monkeypatch: pytest.Mo
 
 def test_read_topic_messages_covers_non_auth_and_loop_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "redposture_core.stage_kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+        "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
     assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 0) == ([], None)
 
@@ -949,7 +1081,7 @@ def test_read_topic_messages_covers_non_auth_and_loop_branches(monkeypatch: pyte
 
 def test_read_topic_messages_with_credentials_covers_auth_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "redposture_core.stage_kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+        "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
     monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (False, 2, "hs fail"))
     assert kafka._read_topic_messages(
@@ -977,7 +1109,7 @@ def test_read_topic_messages_with_credentials_covers_auth_failures(monkeypatch: 
 
 def test_audit_kafka_via_sasl_fallback_branch_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "redposture_core.stage_kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+        "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
     monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (False, 2, "hs fail"))
     assert (

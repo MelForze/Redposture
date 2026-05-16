@@ -681,6 +681,65 @@ def test_audit_clickhouse_targets_skips_auth_required_status_when_attempts_are_p
     assert not any("authentication required (credentials invalid)" in line for line in emitted)
 
 
+def test_audit_clickhouse_targets_skips_plain_auth_required_status_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_audit(*_args, **_kwargs):
+        return {
+            "timestamp": "2026-03-01T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 9000,
+            "protocol": "native",
+            "is_clickhouse": True,
+            "status": "auth_required",
+            "auth_required": True,
+            "attempted_credentials": 0,
+            "auth_attempts": [],
+            "error": None,
+            "show_databases": False,
+            "show_tables": False,
+            "show_columns": False,
+            "table_columns_info": [],
+            "table_dump_enabled": False,
+            "table_dumps": [],
+            "sql_command": None,
+        }
+
+    monkeypatch.setattr(clickhouse_stage, "_audit_clickhouse_host", fake_audit)
+
+    emitted: list[str] = []
+    clickhouse_stage.audit_clickhouse_targets(
+        hosts=["127.0.0.1"],
+        port=9000,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        database="default",
+        protocol="native",
+        show_databases=False,
+        show_tables=False,
+        show_columns=False,
+        table_targets=[],
+        table_columns=[],
+        dump_table_rows=False,
+        execute_command=None,
+        sql_command=None,
+        output_path=None,
+        output_format="txt",
+        emit_line=emitted.append,
+        logger=None,
+        append_output=False,
+    )
+
+    assert len(emitted) == 1
+    assert "ClickHouse Database" in emitted[0]
+    assert "(auth required:True)" in emitted[0]
+    assert not any("authentication required" in line for line in emitted)
+
+
 def test_resolve_ports_default_behavior() -> None:
     assert clickhouse_stage._resolve_ports("native", 9000, []) == [9000]
     assert clickhouse_stage._resolve_ports("auto", 9000, []) == [9000]
@@ -929,7 +988,11 @@ def test_run_clickhouse_stage_processes_all_ports_without_short_circuit(
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(clickhouse_stage, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     args = SimpleNamespace(
         debug=False,
@@ -1003,7 +1066,11 @@ def test_run_clickhouse_stage_multi_port_verbose_uses_single_global_progress(
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(clickhouse_stage, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     args = SimpleNamespace(
         debug=False,
@@ -1160,6 +1227,7 @@ def test_clickhouse_helper_predicates_and_close_client() -> None:
     )
 
     assert clickhouse_stage._should_emit_status_line({"status": "open_no_auth"}, "txt") is True
+    assert clickhouse_stage._should_emit_status_line({"status": "auth_required"}, "txt") is False
     assert (
         clickhouse_stage._should_emit_status_line(
             {"status": "auth_required", "attempted_credentials": 1, "auth_attempts": [{"ok": False}]},

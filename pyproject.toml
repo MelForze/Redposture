@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "4.8.8"
-description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper/Elasticsearch/gRPC auditing"
+version = "5.0.1"
+description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/MongoDB/Docker/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper/Elasticsearch/gRPC auditing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -32,6 +32,7 @@ dependencies = [
   "clickhouse-driver>=0.2.9",
   "h2>=4.1.0",
   "grpcio-tools>=1.74.0,<1.81.0",
+  "pymongo>=4.7,<5",
   "protobuf>=6.31.1,<7.0.0",
 ]
 

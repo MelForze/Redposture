@@ -753,7 +753,11 @@ def test_run_etcd_stage_verbose_multi_group_uses_single_global_progress(monkeypa
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(etcd, "ProgressBar", _FakeProgressBar)
+    monkeypatch.setattr(
+        etcd,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
+    )
 
     rc = etcd.run_etcd_stage(_etcd_args(show_keys=True), logger=object())  # type: ignore[arg-type]
     assert rc == 0
