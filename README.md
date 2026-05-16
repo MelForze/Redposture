@@ -399,11 +399,11 @@ Pre-push CI parity check:
 scripts/check_ci_matrix.sh
 ```
 
-The script mirrors the GitHub CI test matrix (`3.10-3.13`) and fails if one of those interpreters is missing.
+The script mirrors the GitHub CI test matrix (`3.10-3.13`) against a clean tracked `HEAD` archive, so local ignored files cannot hide CI failures. It fails if one of those interpreters is missing.
 For a partial local check on machines without the full Python matrix:
 
 ```bash
-scripts/check_ci_matrix.sh --allow-missing
+scripts/check_ci_matrix.sh --worktree --allow-missing
 ```
 
 Quick single-venv checks:
