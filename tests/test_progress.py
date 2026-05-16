@@ -5,7 +5,13 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from redposture_core.console import Console
-from redposture_core.progress import ProgressBar, _progress_enabled, iter_completed_with_progress
+from redposture_core.progress import (
+    CommandProgressOwner,
+    NoOpProgress,
+    ProgressBar,
+    _progress_enabled,
+    iter_completed_with_progress,
+)
 
 
 class _FakeStream:
@@ -101,6 +107,33 @@ def test_progress_bar_pause_for_output_clears_current_row() -> None:
     bar.close()
 
 
+def test_nested_progress_bar_is_suppressed_by_default() -> None:
+    stream = _FakeStream(tty=True)
+    outer = ProgressBar("outer", total=2, enabled=True, stream=stream, leave=True)
+    outer.advance()
+    before_inner = stream.buffer
+
+    inner = ProgressBar("inner", total=1, enabled=True, stream=stream, leave=True)
+    inner.advance()
+    inner.close()
+    outer.close()
+
+    assert "Running redposture against 1 target" not in stream.buffer[len(before_inner) :]
+
+
+def test_nested_progress_bar_can_be_explicitly_allowed() -> None:
+    stream = _FakeStream(tty=True)
+    outer = ProgressBar("outer", total=2, enabled=True, stream=stream, leave=True)
+    outer.advance()
+
+    inner = ProgressBar("inner", total=1, enabled=True, stream=stream, leave=True, allow_nested=True)
+    inner.advance()
+    inner.close()
+    outer.close()
+
+    assert "Running redposture against 1 target" in stream.buffer
+
+
 def test_console_plain_without_prior_progress_render_does_not_insert_blank_progress_row() -> None:
     stream = _FakeStream(tty=True)
     bar = ProgressBar("scan", total=2, enabled=True, stream=stream, leave=True)
@@ -148,3 +181,24 @@ def test_iter_completed_with_progress_returns_all_futures() -> None:
         values = [future.result() for future in iter_completed_with_progress(future_map, label="TEST", enabled=False)]
 
     assert sorted(values) == [1, 2, 3, 4, 5]
+
+
+def test_command_progress_owner_owns_single_progress_handle() -> None:
+    stream = _FakeStream(tty=True)
+    owner = CommandProgressOwner(enabled=True, stream=stream)
+
+    first = owner.start("first", 2)
+    first.advance()
+    second = owner.start("second", 1)
+    second.advance()
+    owner.close()
+
+    assert "Running redposture against 2 targets" in stream.buffer
+    assert "Running redposture against 1 target" in stream.buffer
+
+
+def test_command_progress_owner_returns_noop_when_disabled() -> None:
+    owner = CommandProgressOwner(enabled=False)
+    handle = owner.start("scan", 10)
+
+    assert isinstance(handle, NoOpProgress)

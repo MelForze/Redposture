@@ -10,6 +10,27 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
+from .cli_modules.clickhouse import configure_clickhouse_parser
+from .cli_modules.consul import configure_consul_parser
+from .cli_modules.datastores import configure_etcd_parser, configure_kafka_parser, configure_redis_parser
+from .cli_modules.docker_engine import configure_docker_parser
+from .cli_modules.elastic import configure_elastic_parser
+from .cli_modules.exporters import (
+    configure_collect_parser,
+    configure_scan_parser,
+    configure_trigger_parser,
+)
+from .cli_modules.gitlab import configure_gitlab_parser
+from .cli_modules.grafana import configure_grafana_parser
+from .cli_modules.grpc import configure_grpc_parser
+from .cli_modules.kubeapi import configure_kubeapi_parser
+from .cli_modules.mongodb import MongoDBHelpFormatter, configure_mongodb_parser
+from .cli_modules.postgres import PostgresHelpFormatter, configure_postgres_parser
+from .cli_modules.proxmox import configure_proxmox_parser
+from .cli_modules.qdrant import configure_qdrant_parser
+from .cli_modules.registry import configure_registry_parser
+from .cli_modules.zookeeper import configure_zookeeper_parser
+
 COMMAND_LISTEN = "listen"
 COMMAND_SCAN = "scan"
 COMMAND_TRIGGER = "trigger"
@@ -29,6 +50,8 @@ COMMAND_KAFKA = "kafka"
 COMMAND_ZOOKEEPER = "zookeeper"
 COMMAND_ELASTIC = "elastic"
 COMMAND_GRPC = "grpc"
+COMMAND_MONGODB = "mongodb"
+COMMAND_DOCKER = "docker"
 COMMAND_SELFCERT = "selfcert"
 COMMAND_EXPORTERS = "exporters"
 
@@ -41,13 +64,6 @@ class _NoColorArgumentParser(argparse.ArgumentParser):
         if _ARGPARSE_SUPPORTS_COLOR:
             kwargs.setdefault("color", False)
         super().__init__(*args, **kwargs)
-
-
-class _PostgresHelpFormatter(argparse.HelpFormatter):
-    def _format_action_invocation(self, action: argparse.Action) -> str:
-        if getattr(action, "_hide_metavar_in_help", False):
-            return ", ".join(action.option_strings)
-        return super()._format_action_invocation(action)
 
 
 def _package_version() -> str:
@@ -421,881 +437,13 @@ def _build_selfcert_option_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _configure_listen_parser(parser: argparse.ArgumentParser) -> None:
-    _add_output_flags(parser)
-    _add_log_flag(parser)
-    _add_listener_flags(parser)
-
-
-def _configure_scan_parser(parser: argparse.ArgumentParser) -> None:
-    common = parser.add_argument_group("Common")
-    actions = parser.add_argument_group("Actions")
-    _add_output_flags(common)  # type: ignore[arg-type]
-    _add_log_flag(common)
-    _add_scan_host_flags(common)  # type: ignore[arg-type]
-    _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
-    common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Scan output format for stdout/file.",
-    )
-    actions.add_argument(
-        "-p",
-        "--ports",
-        dest="ports",
-        default=None,
-        metavar="ports",
-        help="Optional custom ports to probe: single port, comma-separated list/range, or file path.",
-    )
-
-
-def _configure_trigger_parser(parser: argparse.ArgumentParser) -> None:
-    common = parser.add_argument_group("Common")
-    actions = parser.add_argument_group("Actions")
-    listener = parser.add_argument_group("Listener")
-
-    _add_output_flags(common)  # type: ignore[arg-type]
-    _add_log_flag(common)
-    _add_scan_host_flags(common)  # type: ignore[arg-type]
-    _add_save_flag(common, "Optional output file path. Use --format json for structured trigger records.")
-    common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Trigger output format for stdout/file.",
-    )
-    common.add_argument(
-        "-p",
-        "--ports",
-        dest="ports",
-        default=None,
-        metavar="ports",
-        help="Optional custom exporter ports: single port, comma-separated list/range, or file path.",
-    )
-    actions.add_argument(
-        "--callback-ip",
-        dest="callback_ip",
-        default=None,
-        metavar="ip",
-        help="Callback IP used in trigger target values.",
-    )
-    actions.add_argument(
-        "--callback-dns",
-        dest="callback_dns",
-        default=None,
-        metavar="name",
-        help="Optional callback DNS name; trigger sends targets for both IP and DNS.",
-    )
-    actions.add_argument(
-        "--with-listen",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Start listeners first, then run trigger stage, then keep listeners running.",
-    )
-    actions.add_argument(
-        "--listen-seconds",
-        dest="listen_seconds",
-        type=float,
-        default=None,
-        metavar="seconds",
-        help="With --with-listen, stop listeners automatically after N seconds.",
-    )
-    actions.add_argument(
-        "-e",
-        "--exporters",
-        dest="trigger_exporters_filter",
-        default=None,
-        metavar="names",
-        help=(
-            "Comma-separated exporter filter for trigger "
-            "(aliases: redis,postgres,blackbox,proxmox or full names like redis_exporter)."
-        ),
-    )
-    actions.add_argument(
-        "-check",
-        "--check-credentials",
-        action="store_true",
-        help=(
-            "With --with-listen, validate captured Redis/Postgres credentials against source exporter IPs "
-            "(Redis:6379, Postgres:5432)."
-        ),
-    )
-    actions.add_argument(
-        "--postgres-auth-module",
-        dest="postgres_auth_modules",
-        action="append",
-        default=None,
-        metavar="name",
-        help=(
-            "Postgres exporter auth_module value(s) for /probe (repeatable; comma-separated values supported). "
-            "Examples: stage,prod,test. When multiple are provided, trigger attempts are repeated per auth_module."
-        ),
-    )
-    _add_listener_flags(listener)
-    parser.set_defaults(workers=50)
-    for action in parser._actions:
-        if getattr(action, "dest", None) == "workers":
-            action.default = 50
-            break
-
-
-def _configure_collect_parser(parser: argparse.ArgumentParser) -> None:
-    common = parser.add_argument_group("Common")
-    actions = parser.add_argument_group("Actions")
-    _add_output_flags(common)  # type: ignore[arg-type]
-    _add_log_flag(common)
-    _add_scan_host_flags(common)  # type: ignore[arg-type]
-    _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
-    common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Collect output format for stdout/file.",
-    )
-    common.add_argument(
-        "-p",
-        "--ports",
-        dest="ports",
-        default=None,
-        metavar="ports",
-        help="Optional custom ports to probe: single port, comma-separated list/range, or file path.",
-    )
-    actions.add_argument(
-        "--save-responses-dir",
-        dest="save_responses_dir",
-        default=None,
-        metavar="dir",
-        help=("Save raw response bodies from collect endpoints to directory tree and write metadata index.jsonl."),
-    )
-    actions.add_argument(
-        "--deep",
-        action="store_true",
-        help="Enable deep collect paths (pprof internals, profile/trace dumps).",
-    )
-    actions.add_argument(
-        "--pprof-seconds",
-        dest="pprof_seconds",
-        type=_positive_int,
-        default=5,
-        metavar="seconds",
-        help="Duration for /debug/pprof/profile?seconds=... when --deep is enabled.",
-    )
-    actions.add_argument(
-        "--trace-seconds",
-        dest="trace_seconds",
-        type=_positive_int,
-        default=2,
-        metavar="seconds",
-        help="Duration for /debug/pprof/trace?seconds=... when --deep is enabled.",
-    )
-    actions.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume collect run by skipping endpoint jobs already present in checkpoint file.",
-    )
-    actions.add_argument(
-        "--checkpoint-file",
-        dest="checkpoint_file",
-        default=None,
-        metavar="file",
-        help=(
-            "Checkpoint JSONL file for collect resume state. Default: <output>.checkpoint.jsonl (or save dir fallback)."
-        ),
-    )
-    actions.add_argument(
-        "--max-inflight",
-        dest="max_inflight",
-        type=_positive_int,
-        default=None,
-        metavar="count",
-        help="Maximum in-flight collect HTTP requests (default: adaptive from worker count).",
-    )
-    actions.add_argument(
-        "--adaptive-collect",
-        dest="adaptive_collect",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Enable adaptive preflight planning to reduce unnecessary collect requests.",
-    )
-    actions.add_argument(
-        "-e",
-        "--exporters",
-        dest="collect_exporters_filter",
-        default=None,
-        metavar="names",
-        help=(
-            "Comma-separated exporter filter for collect "
-            "(aliases: redis,postgres,kafka or full names like redis_exporter)."
-        ),
-    )
-
-
-def _configure_gitlab_parser(parser: argparse.ArgumentParser) -> None:
-    common = parser.add_argument_group("Common")
-    auth = parser.add_argument_group("Auth")
-    actions = parser.add_argument_group("Actions")
-
-    _add_output_flags(common)  # type: ignore[arg-type]
-    _add_log_flag(common)
-    _add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
-    common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=80,
-        metavar="port",
-        help="GitLab HTTP port spec: single port, list/range, or file (examples: 80, 80,443,8080, ./ports.txt).",
-    )
-    _add_multi_ports_flag(common)
-    common.add_argument(
-        "--https",
-        action="store_true",
-        help="Use HTTPS for GitLab web/API probing (default is HTTP).",
-    )
-    auth.add_argument(
-        "--token",
-        dest="token",
-        default=None,
-        metavar="value",
-        help="Optional GitLab Personal/Group Access Token for API auth and permission checks.",
-    )
-    actions.add_argument(
-        "--project",
-        dest="project",
-        action="append",
-        default=None,
-        metavar="name",
-        help="Project filter (path_with_namespace or numeric id). Repeatable; comma-separated values are also supported.",
-    )
-    actions.add_argument(
-        "--clone",
-        action="store_true",
-        help="Clone accessible projects. With --project clones selected project(s); otherwise clones all accessible projects.",
-    )
-    actions.add_argument(
-        "--clone-dir",
-        dest="clone_dir",
-        default="./gitlab_clones",
-        metavar="dir",
-        help="Output directory root for --clone repositories.",
-    )
-    _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
-    common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="GitLab audit output format for stdout/file.",
-    )
-
-
-def _configure_kubeapi_parser(parser: argparse.ArgumentParser) -> None:
-    common = parser.add_argument_group("Common")
-    auth = parser.add_argument_group("Auth")
-    actions = parser.add_argument_group("Actions")
-
-    _add_output_flags(common)  # type: ignore[arg-type]
-    _add_log_flag(common)
-    _add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
-    common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=6443,
-        metavar="port",
-        help="Kubernetes API port spec: single port, list/range, or file (examples: 6443, 6443,8443, ./ports.txt).",
-    )
-    _add_multi_ports_flag(common)
-    common.add_argument(
-        "--https",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use HTTPS for Kubernetes API requests.",
-    )
-    common.add_argument(
-        "--insecure",
-        action="store_true",
-        help="Skip TLS certificate verification (useful for self-signed clusters).",
-    )
-    common.add_argument(
-        "--ca-file",
-        dest="ca_file",
-        default=None,
-        metavar="path",
-        help="Custom CA certificate file for Kubernetes API TLS verification.",
-    )
-    auth.add_argument(
-        "--token",
-        dest="token",
-        default=None,
-        metavar="value",
-        help="Optional Kubernetes Bearer token for API authentication.",
-    )
-    auth.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Optional Kubernetes API username or credential file for Basic auth.",
-    )
-    auth.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Optional Kubernetes API password for Basic auth.",
-    )
-    actions.add_argument(
-        "--namespaces",
-        action="store_true",
-        help="Enumerate namespaces accessible with no-auth or provided credentials.",
-    )
-    actions.add_argument(
-        "--pods",
-        action="store_true",
-        help="Enumerate pods across all namespaces or only selected --namespace values.",
-    )
-    actions.add_argument(
-        "--namespace",
-        dest="namespace",
-        action="append",
-        default=None,
-        metavar="name",
-        help="Namespace filter for --pods/--secrets (repeatable; comma-separated values also supported).",
-    )
-    actions.add_argument(
-        "--pod",
-        dest="pod",
-        default=None,
-        metavar="name",
-        help="Target pod for exec (name or namespace/pod).",
-    )
-    actions.add_argument(
-        "-X",
-        "--exec-command",
-        dest="exec_command",
-        default=None,
-        metavar="command",
-        help="Execute shell command in --pod via Kubernetes API exec websocket (/bin/sh -c).",
-    )
-    actions.add_argument(
-        "--secrets",
-        action="store_true",
-        help="Enumerate and decode readable Kubernetes Secret objects.",
-    )
-    _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
-    common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Kubernetes API audit output format for stdout/file.",
-    )
-
-
-def _configure_consul_parser(parser: argparse.ArgumentParser) -> None:
-    common = parser.add_argument_group("Common")
-    auth = parser.add_argument_group("Auth")
-    actions = parser.add_argument_group("Actions")
-    ssrf_options = parser.add_argument_group("SSRF / Probes")
-    revshell_options = parser.add_argument_group("Revshell")
-
-    _add_output_flags(common)  # type: ignore[arg-type]
-    _add_log_flag(common)
-    _add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
-    common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=8500,
-        metavar="port",
-        help="Consul port(s): single, list/range, or file (e.g. 8500, 8500,8501, ./ports.txt).",
-    )
-    _add_multi_ports_flag(common)
-    auth.add_argument(
-        "--token",
-        dest="token",
-        default=None,
-        metavar="value",
-        help="Consul ACL token (X-Consul-Token) for API auth.",
-    )
-    auth.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Basic auth username or credential file (for proxied/fronted Consul).",
-    )
-    auth.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Basic auth password (for proxied/fronted Consul).",
-    )
-    ssrf_options.add_argument(
-        "--ssrf-target",
-        dest="ssrf_target",
-        default=None,
-        metavar="target",
-        help=("SSRF target(s): ip/dns/cidr/url (comma-separated). Enables agent-check SSRF probing."),
-    )
-    ssrf_options.add_argument(
-        "--ssrf-port",
-        dest="ssrf_port",
-        default=None,
-        metavar="ports",
-        help="Ports for --ssrf-target (single/list/range/file syntax).",
-    )
-    ssrf_options.add_argument(
-        "--ssrf-path",
-        dest="ssrf_path",
-        default=None,
-        metavar="path",
-        help="Path/query override for generated SSRF URLs (e.g. /debug/vars).",
-    )
-    actions.add_argument(
-        "--keys",
-        dest="show_keys",
-        action="store_true",
-        help="List KV keys (names only; use --dump for values).",
-    )
-    actions.add_argument(
-        "--key",
-        dest="kv_key",
-        default=None,
-        metavar="namekey",
-        help="KV key to dump with --dump.",
-    )
-    revshell_options.add_argument(
-        "--revshell",
-        dest="revshell",
-        action="store_true",
-        help="Script-check RCE actions: create payload check or cleanup with --delete.",
-    )
-    revshell_options.add_argument(
-        "--lhost",
-        dest="revshell_host",
-        default=None,
-        metavar="addr",
-        help="Listener host for default --revshell payload.",
-    )
-    revshell_options.add_argument(
-        "--lport",
-        dest="revshell_port",
-        type=_port,
-        default=None,
-        metavar="port",
-        help="Listener port for default --revshell payload.",
-    )
-    revshell_options.add_argument(
-        "--listen",
-        dest="revshell_listen",
-        action="store_true",
-        help="Auto-start local listener on --lport (prefers rlwrap+nc, fallback nc).",
-    )
-    revshell_options.add_argument(
-        "--payload",
-        dest="revshell_payload",
-        default=None,
-        metavar="cmd",
-        help=("Custom command for --revshell. Replaces the default payload and makes --lhost/--lport optional."),
-    )
-    actions.add_argument(
-        "--services",
-        dest="show_services",
-        action="store_true",
-        help="List catalog services (use --dump for instances/details).",
-    )
-    actions.add_argument(
-        "--service",
-        dest="service_dump_name",
-        default=None,
-        metavar="name",
-        help="Catalog service name for --dump.",
-    )
-    actions.add_argument(
-        "--agents",
-        dest="show_agents",
-        action="store_true",
-        help="List agent members (use --dump for details).",
-    )
-    actions.add_argument(
-        "--agent",
-        dest="agent_name",
-        default=None,
-        metavar="name",
-        help="Agent member name for --dump.",
-    )
-    checks_action = actions.add_argument(
-        "--checks",
-        dest="show_checks",
-        action="store_true",
-        help="List agent checks (use --dump for details/status/output/definition).",
-    )
-    actions.add_argument(
-        "--nodes",
-        dest="show_nodes",
-        action="store_true",
-        help="List catalog nodes (use --dump for details).",
-    )
-    actions.add_argument(
-        "--node",
-        dest="node_name",
-        default=None,
-        metavar="name",
-        help="Catalog node name for --dump.",
-    )
-    actions.add_argument(
-        "--dump",
-        dest="dump",
-        action="store_true",
-        help=("Dump details for selected data. Without selectors, dumps KV/services/agents/checks/nodes."),
-    )
-    revshell_options.add_argument(
-        "--delete",
-        dest="delete_revshell",
-        action="store_true",
-        help="Delete revshell check(s): all rev-rp-* or a specific --check-id.",
-    )
-    check_id_action = revshell_options.add_argument(
-        "--check-id",
-        dest="revshell_check_id",
-        default=None,
-        metavar="id",
-        help=(
-            "Consul check ID for --dump filter, targeted --delete, or custom --revshell create ID "
-            "(supports id:<value>)."
-        ),
-    )
-    # Help-only duplication for shared flags that are relevant to both dump and revshell workflows.
-    _mirror_group_actions(actions, check_id_action)
-    dump_group_actions = getattr(actions, "_group_actions", None)
-    if (
-        isinstance(dump_group_actions, list)
-        and check_id_action in dump_group_actions
-        and checks_action in dump_group_actions
-    ):
-        dump_group_actions.remove(check_id_action)
-        dump_group_actions.insert(dump_group_actions.index(checks_action) + 1, check_id_action)
-    _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
-    common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Consul audit output format for stdout/file.",
-    )
-
-
-def _configure_qdrant_parser(parser: argparse.ArgumentParser) -> None:
-    common = parser.add_argument_group("Common")
-    auth = parser.add_argument_group("Auth")
-    actions = parser.add_argument_group("Actions")
-    ssrf_options = parser.add_argument_group("SSRF / Probes")
-
-    _add_output_flags(common)  # type: ignore[arg-type]
-    _add_log_flag(common)
-    _add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
-    common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=6333,
-        metavar="port",
-        help="Qdrant port(s): single, list/range, or file (e.g. 6333, 6333,6334, ./ports.txt).",
-    )
-    _add_multi_ports_flag(common)
-    auth.add_argument(
-        "--api-key",
-        dest="api_key",
-        default=None,
-        metavar="value",
-        help="Qdrant API key for auth-required endpoints (anonymous check still runs).",
-    )
-
-    actions.add_argument(
-        "--collections",
-        dest="show_collections",
-        action="store_true",
-        help="List collection names (use --dump for collection info).",
-    )
-    actions.add_argument(
-        "--collection",
-        dest="collection",
-        default=None,
-        metavar="name",
-        help="Collection name for --dump and snapshot-restore SSRF probe.",
-    )
-    actions.add_argument(
-        "--dump",
-        dest="dump",
-        action="store_true",
-        help="Dump collection info (all with --collections, or one with --collection).",
-    )
-
-    ssrf_options.add_argument(
-        "--ssrf-target",
-        dest="ssrf_target",
-        default=None,
-        metavar="target",
-        help="SSRF target(s): ip/dns/cidr/url (comma-separated) via snapshot recover.",
-    )
-    ssrf_options.add_argument(
-        "--ssrf-port",
-        dest="ssrf_port",
-        default=None,
-        metavar="ports",
-        help="Ports for --ssrf-target (single/list/range/file syntax).",
-    )
-    ssrf_options.add_argument(
-        "--ssrf-path",
-        dest="ssrf_path",
-        default=None,
-        metavar="path",
-        help="Path/query override for SSRF URLs (e.g. /snapshot).",
-    )
-    ssrf_options.add_argument(
-        "--listen",
-        dest="ssrf_listen",
-        action="store_true",
-        help="Start local HTTP SSRF capture listener on --ssrf-port (best effort).",
-    )
-
-    _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
-    common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Qdrant audit output format for stdout/file.",
-    )
-
-
-def _configure_elastic_parser(parser: argparse.ArgumentParser) -> None:
-    common = parser.add_argument_group("Common")
-    auth = parser.add_argument_group("Auth")
-    actions = parser.add_argument_group("Actions")
-
-    _add_output_flags(common)  # type: ignore[arg-type]
-    _add_log_flag(common)
-    _add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
-    common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=9200,
-        metavar="port",
-        help="Elasticsearch port spec: single port, list/range, or file (examples: 9200, 9200,19200, ./ports.txt).",
-    )
-    _add_multi_ports_flag(common)
-    common.add_argument(
-        "--ca-file",
-        dest="ca_file",
-        default=None,
-        metavar="path",
-        help="Custom CA certificate file for HTTPS verification.",
-    )
-    _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
-    common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Elastic audit output format for stdout/file.",
-    )
-
-    auth.add_argument(
-        "-u",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Basic auth username or credential file.",
-    )
-    auth.add_argument(
-        "-p",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Basic auth password.",
-    )
-    auth.add_argument(
-        "--apitoken",
-        dest="apitoken",
-        default=None,
-        metavar="value",
-        help="API key token sent as Authorization: ApiKey <value>.",
-    )
-    auth.add_argument(
-        "--defcreds",
-        action="store_true",
-        help="Try default Elasticsearch credentials elastic:changeme, elastic:elastic, elastic:password.",
-    )
-
-    actions.add_argument(
-        "--endpoints",
-        action="store_true",
-        help="List available _cat endpoints from /_cat?help.",
-    )
-    actions.add_argument(
-        "--plugins",
-        action="store_true",
-        help="List installed plugins from GET /_cat/plugins.",
-    )
-    actions.add_argument(
-        "--cluster",
-        action="store_true",
-        help="Show cluster health and nodes.",
-    )
-    actions.add_argument(
-        "--user",
-        action="store_true",
-        help="Show security users via /_security/user.",
-    )
-    actions.add_argument(
-        "--discover",
-        action="store_true",
-        help="Search all indices for potential secret leaks using query_string.",
-    )
-
-
-def _configure_grpc_parser(parser: argparse.ArgumentParser) -> None:
-    common = parser.add_argument_group("Common")
-    auth = parser.add_argument_group("Auth")
-    invoke = parser.add_argument_group("Invoke / Metadata")
-    schema = parser.add_argument_group("Schema")
-    export = parser.add_argument_group("Export")
-
-    _add_output_flags(common)  # type: ignore[arg-type]
-    _add_log_flag(common)
-    _add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
-    common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=50051,
-        metavar="port",
-        help="gRPC port spec: single port, list/range, or file (examples: 50051, 50051,25052, ./ports.txt).",
-    )
-    _add_multi_ports_flag(common)
-    _add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
-    common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="gRPC audit output format for stdout/file.",
-    )
-
-    auth.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Basic auth username or credential file (use with -p for username-only files).",
-    )
-    auth.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Basic auth password (use with -u).",
-    )
-    auth.add_argument(
-        "--token",
-        dest="token",
-        default=None,
-        metavar="value",
-        help="Bearer token sent as Authorization: Bearer <value>.",
-    )
-    auth.add_argument(
-        "--defcreds",
-        action="store_true",
-        help="Try compact default basic/token credentials when auth is required.",
-    )
-
-    invoke.add_argument(
-        "--invoke",
-        dest="invoke",
-        default=None,
-        metavar="/package.Service/Method",
-        help="Invoke one unary gRPC method after detection/auth.",
-    )
-    invoke.add_argument(
-        "--data",
-        dest="data",
-        default=None,
-        metavar="json|@file",
-        help='JSON request body for --invoke (default: "{}"; @file reads JSON from disk).',
-    )
-    invoke.add_argument(
-        "--meta",
-        dest="meta",
-        action="append",
-        default=None,
-        metavar="key=value",
-        help="Additional request metadata header for --invoke (repeatable).",
-    )
-
-    schema.add_argument(
-        "--proto",
-        dest="proto",
-        action="append",
-        default=None,
-        metavar="file",
-        help="Proto file used as an additional schema source for invoke/OpenAPI (repeatable).",
-    )
-    schema.add_argument(
-        "--proto-path",
-        dest="proto_path",
-        action="append",
-        default=None,
-        metavar="dir",
-        help="Import path for --proto compilation (repeatable).",
-    )
-    schema.add_argument(
-        "--protoset",
-        dest="protoset",
-        action="append",
-        default=None,
-        metavar="file",
-        help="Compiled FileDescriptorSet schema source (repeatable).",
-    )
-
-    export.add_argument(
-        "--openapi",
-        dest="openapi",
-        default=None,
-        metavar="path",
-        help="Write an OpenAPI 3.1 JSON representation of discovered/schema gRPC methods.",
-    )
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = _NoColorArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Security toolkit for module-focused auditing (exporters, registry, grafana, proxmox, gitlab, "
-            "consul, kubeapi, postgres, clickhouse, redis, etcd, qdrant, elastic, kafka, zookeeper, grpc). "
+            "consul, kubeapi, postgres, mongodb, docker, clickhouse, redis, etcd, qdrant, elastic, kafka, "
+            "zookeeper, grpc). "
             "Use '<module> -h' for grouped flags by topic."
         ),
     )
@@ -1318,21 +466,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Discover observability endpoints and write scan report.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    _configure_scan_parser(exporters_scan_parser)
+    configure_scan_parser(
+        exporters_scan_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_save_flag=_add_save_flag,
+    )
 
     exporters_collect_parser = exporters_subparsers.add_parser(
         COMMAND_COLLECT,
         help="Collect debug/runtime endpoints from a target service list.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    _configure_collect_parser(exporters_collect_parser)
+    configure_collect_parser(
+        exporters_collect_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_save_flag=_add_save_flag,
+        positive_int=_positive_int,
+    )
 
     exporters_trigger_parser = exporters_subparsers.add_parser(
         COMMAND_TRIGGER,
         help="Trigger discovered endpoints/exporters to your callback target.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    _configure_trigger_parser(exporters_trigger_parser)
+    configure_trigger_parser(
+        exporters_trigger_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_save_flag=_add_save_flag,
+        add_listener_flags=_add_listener_flags,
+    )
 
     registry_parser = subparsers.add_parser(
         COMMAND_REGISTRY,
@@ -1347,263 +515,30 @@ def build_parser() -> argparse.ArgumentParser:
             "image tags and config metadata on any compatible v2 registry endpoint."
         ),
     )
-    registry_common = registry_parser.add_argument_group("Common")
-    registry_auth = registry_parser.add_argument_group("Auth")
-    _add_output_flags(registry_common)  # type: ignore[arg-type]
-    _add_log_flag(registry_common)
-    _add_scan_host_flags(registry_common, include_profiles=False)  # type: ignore[arg-type]
-    registry_common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=5000,
-        metavar="port",
-        help="Docker Registry port spec: single port, list/range, or file (examples: 5000, 5000,15000-15002, ./ports.txt).",
+    configure_registry_parser(
+        registry_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        mirror_group_actions=_mirror_group_actions,
+        port_type=_port,
     )
-    _add_multi_ports_flag(registry_common)
-    _add_save_flag(registry_common, "Optional output file path. If omitted, results are printed to stdout.")
-    registry_common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Registry audit output format for stdout/file.",
-    )
-
-    registry_auth.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Optional Registry/Harbor/GitLab/Nexus username or credential file for Basic auth.",
-    )
-    registry_auth.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Optional Registry/Harbor/GitLab/Nexus password for Basic auth.",
-    )
-    registry_auth.add_argument(
-        "--token",
-        dest="token",
-        default=None,
-        metavar="value",
-        help="Optional Bearer token for Registry/Harbor/GitLab API auth.",
-    )
-
-    registry_docker = registry_parser.add_argument_group(
-        "Docker / OCI (Registry v2)",
-        (
-            "Shared OCI content operations. These flags work with plain Docker Registry v2 and "
-            "also with vendor-backed Docker registry endpoints (Harbor/GitLab/Nexus Docker)."
-        ),
-    )
-    registry_docker.add_argument(
-        "--docker",
-        action="store_true",
-        help="Enable explicit Docker Registry v2/OCI mode (for clarity with vendor-specific flags).",
-    )
-    registry_images_action = registry_docker.add_argument(
-        "--images",
-        action="store_true",
-        help="List repositories/images from /v2/_catalog and tags (when accessible).",
-    )
-    registry_repository_action = registry_docker.add_argument(
-        "--repository",
-        dest="repository",
-        default=None,
-        metavar="name",
-        help="Repository name for targeted tag listing/metadata (example: gitlab/project-api).",
-    )
-    registry_show_tags_action = registry_docker.add_argument(
-        "--show-tags",
-        dest="show_tags",
-        action="store_true",
-        help="Show tags for --repository.",
-    )
-    registry_tag_action = registry_docker.add_argument(
-        "--tag",
-        dest="tag",
-        default=None,
-        metavar="name",
-        help="Tag name used with --repository for --metadata.",
-    )
-    registry_metadata_action = registry_docker.add_argument(
-        "--metadata",
-        dest="metadata",
-        action="store_true",
-        help="Show config metadata (ENV/LABELS/CMD) for --repository + --tag.",
-    )
-    registry_inspect_action = registry_docker.add_argument(
-        "--inspect",
-        action="store_true",
-        help="Inspect image metadata (ENV, exposed ports, labels, history).",
-    )
-    registry_image_action = registry_docker.add_argument(
-        "--image",
-        dest="image",
-        default=None,
-        metavar="name",
-        help="Image reference for --inspect/--download (example: library/nginx:latest).",
-    )
-    registry_download_action = registry_docker.add_argument(
-        "--download",
-        action="store_true",
-        help="Download image blobs for --image (asks confirmation when image size exceeds 100MB).",
-    )
-    registry_download_dir_action = registry_docker.add_argument(
-        "--download-dir",
-        dest="download_dir",
-        default="./registry_downloads",
-        metavar="dir",
-        help="Output directory for --download files.",
-    )
-
-    registry_harbor = registry_parser.add_argument_group(
-        "Harbor",
-        (
-            "Harbor API deep parsing for projects/repositories/artifacts. Combine with shared "
-            "Docker/OCI flags above (--repository/--show-tags/--tag/--metadata) to inspect "
-            "specific image tags."
-        ),
-    )
-    registry_harbor.add_argument(
-        "--harbor",
-        action="store_true",
-        help="Enable Harbor API deep parsing (projects/repositories/artifacts).",
-    )
-
-    registry_gitlab = registry_parser.add_argument_group(
-        "GitLab Container Registry",
-        (
-            "GitLab registry challenge/token endpoint probing and repository enumeration. "
-            "Combine with shared Docker/OCI flags above for tags/metadata on a selected repo "
-            "(typically with --token for API access)."
-        ),
-    )
-    registry_gitlab.add_argument(
-        "--gitlab",
-        action="store_true",
-        help="Enable GitLab Container Registry deep parsing (Bearer challenge/token endpoint metadata).",
-    )
-
-    registry_nexus = registry_parser.add_argument_group(
-        "Nexus Repository",
-        (
-            "Nexus REST API deep parsing for repositories/components. Use --assets to print "
-            "downloadUrl + checksums. Shared Docker/OCI flags above work against Nexus Docker "
-            "registry endpoints for tags and metadata."
-        ),
-    )
-    registry_nexus.add_argument(
-        "--nexus",
-        action="store_true",
-        help="Enable Nexus Repository deep parsing (status/repositories via REST API).",
-    )
-    registry_nexus.add_argument(
-        "--assets",
-        dest="assets",
-        action="store_true",
-        help="With --nexus, show asset downloadUrl and checksums for repository components.",
-    )
-    for vendor_group in (registry_harbor, registry_gitlab, registry_nexus):
-        _mirror_group_actions(
-            vendor_group,
-            registry_images_action,
-            registry_repository_action,
-            registry_show_tags_action,
-            registry_tag_action,
-            registry_metadata_action,
-            registry_inspect_action,
-            registry_image_action,
-            registry_download_action,
-            registry_download_dir_action,
-        )
 
     grafana_parser = subparsers.add_parser(
         COMMAND_GRAFANA,
         help="Audit Grafana auth exposure and datasource access.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    grafana_common = grafana_parser.add_argument_group("Common")
-    grafana_auth = grafana_parser.add_argument_group("Auth")
-    grafana_actions = grafana_parser.add_argument_group("Actions")
-    grafana_ssrf = grafana_parser.add_argument_group("SSRF / Probes")
-    _add_output_flags(grafana_common)  # type: ignore[arg-type]
-    _add_log_flag(grafana_common)
-    _add_scan_host_flags(grafana_common, include_profiles=False)  # type: ignore[arg-type]
-    grafana_common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=3000,
-        metavar="port",
-        help="Grafana port spec: single port, list/range, or file (examples: 3000, 3000,3001, ./ports.txt).",
-    )
-    _add_multi_ports_flag(grafana_common)
-    grafana_auth.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Optional Grafana username or credential file for credential check.",
-    )
-    grafana_auth.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Optional Grafana password for credential check.",
-    )
-    grafana_auth.add_argument(
-        "--defcreds",
-        action="store_true",
-        help="Try default Grafana credentials admin:admin and admin:prom-operator.",
-    )
-    grafana_actions.add_argument(
-        "--show-datasources",
-        "--show-datasource",
-        dest="show_datasources",
-        action="store_true",
-        help="Show datasource details after successful access.",
-    )
-    grafana_ssrf.add_argument(
-        "--ssrf-target",
-        dest="ssrf_target",
-        default=None,
-        metavar="url",
-        help="Optional URL/host/cidr for temporary Prometheus egress-check datasource (http/https).",
-    )
-    grafana_ssrf.add_argument(
-        "--ssrf-port",
-        dest="ssrf_port",
-        type=str,
-        default=None,
-        metavar="port",
-        help="Optional port override for --ssrf-target when URL has no explicit port.",
-    )
-    grafana_ssrf.add_argument(
-        "--ssrf-path",
-        dest="ssrf_path",
-        type=str,
-        default=None,
-        metavar="path",
-        help="Optional path/query override for generated --ssrf-target URLs (example: /debug/vars).",
-    )
-    _add_save_flag(grafana_common, "Optional output file path. If omitted, results are printed to stdout.")
-    grafana_common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Grafana audit output format for stdout/file.",
+    configure_grafana_parser(
+        grafana_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
     )
 
     proxmox_parser = subparsers.add_parser(
@@ -1611,92 +546,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Audit Proxmox API with PVE API token and search leaked credentials in API responses.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    proxmox_common = proxmox_parser.add_argument_group("Common")
-    proxmox_auth = proxmox_parser.add_argument_group("Auth")
-    proxmox_actions = proxmox_parser.add_argument_group("Actions")
-    _add_output_flags(proxmox_common)  # type: ignore[arg-type]
-    _add_log_flag(proxmox_common)
-    _add_scan_host_flags(proxmox_common, include_profiles=False)  # type: ignore[arg-type]
-    proxmox_parser.set_defaults(timeout=3.0)
-    proxmox_common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=8006,
-        metavar="port",
-        help="Proxmox API port spec: single port, list/range, or file (examples: 8006, 8006,18006, ./ports.txt).",
-    )
-    _add_multi_ports_flag(proxmox_common)
-    proxmox_common.add_argument(
-        "--https",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Use HTTPS for Proxmox API requests.",
-    )
-    proxmox_common.add_argument(
-        "--insecure",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Skip TLS certificate verification (recommended for self-signed Proxmox certs).",
-    )
-    proxmox_auth.add_argument(
-        "--pveapitoken",
-        dest="pve_api_token",
-        default=None,
-        metavar="value",
-        help="Proxmox API token value: either '<user@realm!tokenid>=<secret>' or full 'PVEAPIToken=...'.",
-    )
-    proxmox_auth.add_argument(
-        "-u",
-        "--username",
-        default=None,
-        metavar="username|file",
-        help="Proxmox username, or a credential file with username:password pairs.",
-    )
-    proxmox_auth.add_argument(
-        "-p",
-        "--password",
-        default=None,
-        metavar="password",
-        help="Proxmox password for -u/--username.",
-    )
-    proxmox_auth.add_argument(
-        "--defcreds",
-        action="store_true",
-        help="Try a compact set of common Proxmox username/password pairs.",
-    )
-    proxmox_actions.add_argument(
-        "--discover-creds",
-        action="store_true",
-        help="Enable extended endpoint crawl and credential discovery in API responses.",
-    )
-    proxmox_actions.add_argument(
-        "--nodes",
-        action="store_true",
-        help="Show discovered Proxmox node names.",
-    )
-    proxmox_actions.add_argument(
-        "--users",
-        action="store_true",
-        help="Show users returned by /access/users for current token.",
-    )
-    proxmox_actions.add_argument(
-        "-add-user",
-        "--add-user",
-        dest="add_user",
-        type=str,
-        default=None,
-        metavar="username",
-        help="Create user via /access/users and generate random 20-char password.",
-    )
-    _add_save_flag(proxmox_common, "Optional output file path. If omitted, results are printed to stdout.")
-    proxmox_common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Proxmox audit output format for stdout/file.",
+    configure_proxmox_parser(
+        proxmox_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
     )
 
     gitlab_parser = subparsers.add_parser(
@@ -1710,7 +567,15 @@ def build_parser() -> argparse.ArgumentParser:
             "accessible repositories."
         ),
     )
-    _configure_gitlab_parser(gitlab_parser)
+    configure_gitlab_parser(
+        gitlab_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
+    )
 
     consul_parser = subparsers.add_parser(
         COMMAND_CONSUL,
@@ -1722,7 +587,16 @@ def build_parser() -> argparse.ArgumentParser:
             "EnableRemoteScriptChecks), and can perform SSRF probes via temporary agent HTTP checks."
         ),
     )
-    _configure_consul_parser(consul_parser)
+    configure_consul_parser(
+        consul_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        mirror_group_actions=_mirror_group_actions,
+        port_type=_port,
+    )
 
     kubeapi_parser = subparsers.add_parser(
         COMMAND_KUBEAPI,
@@ -1734,274 +608,84 @@ def build_parser() -> argparse.ArgumentParser:
             "visible to the current access level."
         ),
     )
-    _configure_kubeapi_parser(kubeapi_parser)
+    configure_kubeapi_parser(
+        kubeapi_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
+    )
 
     postgres_parser = subparsers.add_parser(
         COMMAND_POSTGRES,
         help="Audit Postgres auth exposure and risky privileges.",
-        formatter_class=_PostgresHelpFormatter,
+        formatter_class=PostgresHelpFormatter,
     )
-    postgres_common = postgres_parser.add_argument_group("Common")
-    _add_scan_host_flags(postgres_common, include_profiles=False)  # type: ignore[arg-type]
-    postgres_common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=5432,
-        metavar="port",
-        help="Postgres port spec: single port, list/range, or file (examples: 5432, 5432,15432, ./ports.txt).",
+    configure_postgres_parser(
+        postgres_parser,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        add_log_flag=_add_log_flag,
+        add_output_flags=_add_output_flags,
+        append_selected_defaults=_append_selected_defaults,
+        port_type=_port,
+        positive_int=_positive_int,
     )
-    _add_multi_ports_flag(postgres_common)
-    _add_save_flag(
-        postgres_common,
-        "Optional output file path. If omitted, results are printed to stdout.",
-        include_save_alias=False,
-    )
-    postgres_common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Postgres audit output format for stdout/file.",
-    )
-    _add_log_flag(postgres_common)
-    _add_output_flags(postgres_common, short=False)  # type: ignore[arg-type]
 
-    postgres_auth = postgres_parser.add_argument_group("Database / Auth")
-    postgres_discovery = postgres_parser.add_argument_group("Discovery / Dump")
-    postgres_exec = postgres_parser.add_argument_group("Execute / Shell")
+    mongodb_parser = subparsers.add_parser(
+        COMMAND_MONGODB,
+        help="Audit MongoDB auth exposure, database/collection visibility, and document dumps.",
+        formatter_class=MongoDBHelpFormatter,
+    )
+    configure_mongodb_parser(
+        mongodb_parser,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        add_log_flag=_add_log_flag,
+        add_output_flags=_add_output_flags,
+        append_selected_defaults=_append_selected_defaults,
+        port_type=_port,
+        positive_int=_positive_int,
+    )
 
-    postgres_auth.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Optional Postgres username or credential file for credential check.",
-    )
-    postgres_auth.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Optional Postgres password for credential check.",
-    )
-    postgres_auth.add_argument(
-        "--defcreds",
-        action="store_true",
-        help="Try default Postgres credentials postgres:postgres when auth is required.",
-    )
-    postgres_discovery.add_argument(
-        "--show-databases",
-        action="store_true",
-        help="Show available database names in output after successful access/auth.",
-    )
-    postgres_discovery.add_argument(
-        "--database",
-        dest="database",
-        default=None,
-        metavar="name",
-        help=(
-            "Target database for table/dump/SQL operations. "
-            "When omitted, --show-tables and --dump without --table walk all accessible databases."
+    docker_parser = subparsers.add_parser(
+        COMMAND_DOCKER,
+        help="Audit exposed Docker Engine TCP API endpoints and inventory visibility.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description=(
+            "Docker module detects Docker Engine API over plaintext/TLS TCP, checks auth/TLS requirements, "
+            "optionally inventories containers/images/networks/volumes/system data, and can run an explicit "
+            "Docker exec command in a selected existing container."
         ),
     )
-    postgres_discovery.add_argument(
-        "--show-tables",
-        action="store_true",
-        help="Show readable table names with inline Rows:N after successful access/auth.",
+    configure_docker_parser(
+        docker_parser,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        add_log_flag=_add_log_flag,
+        add_output_flags=_add_output_flags,
+        append_selected_defaults=_append_selected_defaults,
+        port_type=_port,
     )
-    postgres_discovery.add_argument(
-        "--table",
-        dest="tables",
-        action="append",
-        default=None,
-        metavar="name",
-        help="Target table (schema.table or table). Can be used multiple times or with comma-separated values.",
-    )
-    postgres_discovery.add_argument(
-        "--show-columns",
-        action="store_true",
-        help="Show column names for --table target(s).",
-    )
-    postgres_discovery.add_argument(
-        "--column",
-        dest="columns",
-        action="append",
-        default=None,
-        metavar="name",
-        help="Column filter for --show-columns/--dump (repeatable, comma-separated is also supported). Applies to all --table targets.",
-    )
-    postgres_discovery.add_argument(
-        "--rows",
-        action="store_true",
-        help="Compatibility alias for inline Rows:N output with --show-tables semantics.",
-    )
-    postgres_discovery.add_argument(
-        "--dump",
-        nargs="?",
-        const=0,
-        type=_positive_int,
-        metavar="count",
-        help=(
-            "Dump table rows. Optional count limits dumped rows; without count dumps all rows. "
-            "With --table dumps selected table(s); without --table dumps all readable tables."
-        ),
-    )
-    postgres_execute_action = postgres_exec.add_argument(
-        "-x",
-        "--execute",
-        dest="execute",
-        default=None,
-        metavar="command",
-        help="Try executing OS command via Postgres COPY FROM PROGRAM and print output.",
-    )
-    postgres_execute_action._hide_metavar_in_help = True
-    postgres_exec.add_argument(
-        "--os-shell",
-        action="store_true",
-        help="Interactive command mode via Postgres COPY FROM PROGRAM (single target).",
-    )
-    postgres_exec.add_argument(
-        "--sql-shell",
-        action="store_true",
-        help="Interactive SQL mode (single target).",
-    )
-    postgres_exec.add_argument(
-        "--sql-cmd",
-        dest="sql_cmd",
-        default=None,
-        metavar="query",
-        help="Execute SQL query after successful connection/auth and print result rows.",
-    )
-    _append_selected_defaults(postgres_parser, "timeout", "workers", "retries", "port", "output_format")
 
     clickhouse_parser = subparsers.add_parser(
         COMMAND_CLICKHOUSE,
         help="Audit ClickHouse auth exposure and privileges.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    clickhouse_common = clickhouse_parser.add_argument_group("Common")
-    clickhouse_auth = clickhouse_parser.add_argument_group("Auth")
-    clickhouse_actions = clickhouse_parser.add_argument_group("Actions")
-    clickhouse_exec = clickhouse_parser.add_argument_group("Execute / Shell")
-    _add_output_flags(clickhouse_common, short=False)  # type: ignore[arg-type]
-    _add_log_flag(clickhouse_common)
-    _add_scan_host_flags(clickhouse_common, include_profiles=False)  # type: ignore[arg-type]
-    clickhouse_common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=9000,
-        metavar="port",
-        help="ClickHouse port spec: single port, list/range, or file (examples: 9000, 8123, 9000,8123, ./ports.txt).",
-    )
-    _add_multi_ports_flag(clickhouse_common)
-    clickhouse_common.add_argument(
-        "--http",
-        action="store_true",
-        help="Use ClickHouse HTTP/HTTPS API mode. By default native protocol is used.",
-    )
-    clickhouse_common.add_argument(
-        "-d",
-        "--database",
-        dest="database",
-        default="default",
-        metavar="name",
-        help="Database used for authentication context and table operations.",
-    )
-    clickhouse_auth.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Optional ClickHouse username or credential file for credential check.",
-    )
-    clickhouse_auth.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Optional ClickHouse password for credential check.",
-    )
-    clickhouse_auth.add_argument(
-        "--defcreds",
-        action="store_true",
-        help="Try default ClickHouse credentials default:<empty> and default:default.",
-    )
-    clickhouse_actions.add_argument(
-        "--show-databases",
-        action="store_true",
-        help="Show database names after successful access/auth.",
-    )
-    clickhouse_actions.add_argument(
-        "--show-tables",
-        action="store_true",
-        help="Show readable table names after successful access/auth.",
-    )
-    clickhouse_actions.add_argument(
-        "--table",
-        dest="tables",
-        action="append",
-        default=None,
-        metavar="name",
-        help="Target table (db.table or table). Can be used multiple times or with comma-separated values.",
-    )
-    clickhouse_actions.add_argument(
-        "--show-columns",
-        action="store_true",
-        help="Show column names for --table target(s).",
-    )
-    clickhouse_actions.add_argument(
-        "--column",
-        dest="columns",
-        action="append",
-        default=None,
-        metavar="name",
-        help="Column filter for --show-columns/--dump (repeatable, comma-separated is also supported).",
-    )
-    clickhouse_actions.add_argument(
-        "--dump",
-        action="store_true",
-        help="Dump table rows. With --table dumps selected table(s); without --table dumps all readable tables.",
-    )
-    clickhouse_exec.add_argument(
-        "-x",
-        "--execute",
-        dest="execute",
-        default=None,
-        metavar="command",
-        help="Execute OS command via ClickHouse executable() path when available (or SYSTEM command if prefixed with SYSTEM).",
-    )
-    clickhouse_exec.add_argument(
-        "--sql-cmd",
-        dest="sql_cmd",
-        default=None,
-        metavar="query",
-        help="Execute SQL query after successful connection/auth and print result rows.",
-    )
-    clickhouse_exec.add_argument(
-        "--os-shell",
-        action="store_true",
-        help="Interactive OS command mode (single target).",
-    )
-    clickhouse_exec.add_argument(
-        "--sql-shell",
-        action="store_true",
-        help="Interactive SQL mode (single target).",
-    )
-    _add_save_flag(clickhouse_common, "Optional output file path. If omitted, results are printed to stdout.")
-    clickhouse_common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="ClickHouse audit output format for stdout/file.",
+    configure_clickhouse_parser(
+        clickhouse_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
     )
 
     redis_parser = subparsers.add_parser(
@@ -2009,69 +693,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Audit Redis auth exposure and default credentials.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    redis_common = redis_parser.add_argument_group("Common")
-    redis_auth = redis_parser.add_argument_group("Auth")
-    redis_actions = redis_parser.add_argument_group("Actions")
-    _add_output_flags(redis_common)  # type: ignore[arg-type]
-    _add_log_flag(redis_common)
-    _add_scan_host_flags(redis_common, include_profiles=False)  # type: ignore[arg-type]
-    redis_common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=6379,
-        metavar="port",
-        help="Redis port spec: single port, list/range, or file (examples: 6379, 6379,16379, ./ports.txt).",
-    )
-    _add_multi_ports_flag(redis_common)
-    redis_auth.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Optional Redis username or credential file for credential check.",
-    )
-    redis_auth.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Optional Redis password for credential check.",
-    )
-    redis_auth.add_argument(
-        "--defcreds",
-        action="store_true",
-        help="Try default Redis credentials redis:redis when auth is required.",
-    )
-    redis_actions.add_argument(
-        "--show-keys",
-        action="store_true",
-        help="Show Redis key names only (SCAN).",
-    )
-    redis_actions.add_argument(
-        "--dump",
-        dest="dump",
-        action="store_true",
-        help="Dump Redis key values. With -key/--key dumps one key; without -key dumps all keys.",
-    )
-    redis_actions.add_argument(
-        "-key",
-        "--key",
-        dest="key",
-        default=None,
-        metavar="name",
-        help="Dump one specific Redis key by name (with value).",
-    )
-    _add_save_flag(redis_common, "Optional output file path. If omitted, results are printed to stdout.")
-    redis_common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Redis audit output format for stdout/file.",
+    configure_redis_parser(
+        redis_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
     )
 
     etcd_parser = subparsers.add_parser(
@@ -2079,47 +708,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Audit etcd API exposure and auth requirements.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    etcd_common = etcd_parser.add_argument_group("Common")
-    etcd_actions = etcd_parser.add_argument_group("Actions")
-    _add_output_flags(etcd_common)  # type: ignore[arg-type]
-    _add_log_flag(etcd_common)
-    _add_scan_host_flags(etcd_common, include_profiles=False)  # type: ignore[arg-type]
-    etcd_common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=2379,
-        metavar="port",
-        help="etcd port spec: single port, list/range, or file (examples: 2379, 2379,22379, ./ports.txt).",
-    )
-    _add_multi_ports_flag(etcd_common)
-    etcd_actions.add_argument(
-        "--show-keys",
-        action="store_true",
-        help="Show etcd key names only when auth is not required.",
-    )
-    etcd_actions.add_argument(
-        "--dump",
-        dest="dump",
-        action="store_true",
-        help="Dump etcd key values. With -key/--key dumps one key; without -key dumps all keys.",
-    )
-    etcd_actions.add_argument(
-        "-key",
-        "--key",
-        dest="key",
-        default=None,
-        metavar="path",
-        help="Dump specific etcd key (example: /redposture/env) when auth is not required.",
-    )
-    _add_save_flag(etcd_common, "Optional output file path. If omitted, results are printed to stdout.")
-    etcd_common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="etcd audit output format for stdout/file.",
+    configure_etcd_parser(
+        etcd_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
     )
 
     qdrant_parser = subparsers.add_parser(
@@ -2132,7 +728,15 @@ def build_parser() -> argparse.ArgumentParser:
             "via collection snapshot restore from a supplied URL."
         ),
     )
-    _configure_qdrant_parser(qdrant_parser)
+    configure_qdrant_parser(
+        qdrant_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
+    )
 
     elastic_parser = subparsers.add_parser(
         COMMAND_ELASTIC,
@@ -2144,7 +748,15 @@ def build_parser() -> argparse.ArgumentParser:
             "query_string discovery for potential secret leaks."
         ),
     )
-    _configure_elastic_parser(elastic_parser)
+    configure_elastic_parser(
+        elastic_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
+    )
 
     grpc_parser = subparsers.add_parser(
         COMMAND_GRPC,
@@ -2155,82 +767,29 @@ def build_parser() -> argparse.ArgumentParser:
             "queries reflection services/method descriptors, and runs grpc.health.v1.Health checks."
         ),
     )
-    _configure_grpc_parser(grpc_parser)
+    configure_grpc_parser(
+        grpc_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
+    )
 
     kafka_parser = subparsers.add_parser(
         COMMAND_KAFKA,
         help="Audit Kafka broker auth exposure and topic visibility.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    kafka_common = kafka_parser.add_argument_group("Common")
-    kafka_auth = kafka_parser.add_argument_group("Auth")
-    kafka_actions = kafka_parser.add_argument_group("Actions")
-    _add_output_flags(kafka_common)  # type: ignore[arg-type]
-    _add_log_flag(kafka_common)
-    _add_scan_host_flags(kafka_common, include_profiles=False)  # type: ignore[arg-type]
-    kafka_common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=9092,
-        metavar="port",
-        help="Kafka port spec: single port, list/range, or file (examples: 9092, 9092,29092, ./ports.txt).",
-    )
-    _add_multi_ports_flag(kafka_common)
-    kafka_auth.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Optional Kafka username or credential file for credential check (SASL/PLAIN).",
-    )
-    kafka_auth.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Optional Kafka password for credential check (SASL/PLAIN).",
-    )
-    kafka_auth.add_argument(
-        "--defcreds",
-        action="store_true",
-        help="Try default Kafka credentials admin:admin, kafka:kafka, kafka:password.",
-    )
-    kafka_actions.add_argument(
-        "--show-topics",
-        action="store_true",
-        help="Show topic names after successful access/auth.",
-    )
-    kafka_actions.add_argument(
-        "--topic",
-        dest="topic",
-        default=None,
-        metavar="name",
-        help="Show one topic detail by name (partition count / not found).",
-    )
-    kafka_actions.add_argument(
-        "--dump",
-        action="store_true",
-        help="Dump topic messages: with --topic dumps only that topic, otherwise dumps all topics.",
-    )
-    kafka_actions.add_argument(
-        "--max-messages",
-        dest="max_messages",
-        type=int,
-        default=1000,
-        metavar="count",
-        help="Maximum number of topic messages to read per topic with --dump.",
-    )
-    _add_save_flag(kafka_common, "Optional output file path. If omitted, results are printed to stdout.")
-    kafka_common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="Kafka audit output format for stdout/file.",
+    configure_kafka_parser(
+        kafka_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
     )
 
     zookeeper_parser = subparsers.add_parser(
@@ -2238,87 +797,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Audit ZooKeeper exposure, auth requirements, and znode visibility.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    zookeeper_common = zookeeper_parser.add_argument_group("Common")
-    zookeeper_auth = zookeeper_parser.add_argument_group("Auth")
-    zookeeper_actions = zookeeper_parser.add_argument_group("Actions")
-    _add_output_flags(zookeeper_common)  # type: ignore[arg-type]
-    _add_log_flag(zookeeper_common)
-    _add_scan_host_flags(zookeeper_common, include_profiles=False)  # type: ignore[arg-type]
-    # ZooKeeper often requires a longer handshake window on real networks.
-    # Keep module-local default timeout at 5s without changing other modules.
-    for action in zookeeper_parser._actions:
-        if action.dest == "timeout":
-            action.default = 5.0
-            break
-    zookeeper_parser.set_defaults(timeout=5.0)
-    zookeeper_common.add_argument(
-        "--port",
-        dest="port",
-        type=_port,
-        default=2181,
-        metavar="port",
-        help="ZooKeeper port spec: single port, list/range, or file (examples: 2181, 2181,22181, ./ports.txt).",
-    )
-    _add_multi_ports_flag(zookeeper_common)
-    zookeeper_common.add_argument(
-        "--enum-workers",
-        dest="enum_workers",
-        type=_positive_int,
-        default=3,
-        metavar="count",
-        help="Parallel workers for znode enumeration during deep checks.",
-    )
-    zookeeper_auth.add_argument(
-        "-u",
-        "--username",
-        dest="username",
-        default=None,
-        metavar="name",
-        help="Optional ZooKeeper username or credential file for digest auth credential check.",
-    )
-    zookeeper_auth.add_argument(
-        "-p",
-        "--password",
-        dest="password",
-        default=None,
-        metavar="value",
-        help="Optional ZooKeeper password for digest auth credential check.",
-    )
-    zookeeper_actions.add_argument(
-        "--show-znodes",
-        action="store_true",
-        help="Show znode paths after successful access/auth.",
-    )
-    zookeeper_actions.add_argument(
-        "--dump",
-        dest="dump",
-        action="store_true",
-        help="Dump znode values. With --znode dumps only that znode; without --znode dumps all enumerated znodes.",
-    )
-    zookeeper_actions.add_argument(
-        "-znode",
-        "--znode",
-        dest="znode",
-        default=None,
-        metavar="path",
-        help="Show one znode detail by path (example: /brokers/ids).",
-    )
-    zookeeper_actions.add_argument(
-        "--max-znodes",
-        dest="max_znodes",
-        type=_positive_int,
-        default=2000,
-        metavar="count",
-        help="Maximum znodes to include in --show-znodes/--dump output per target (znode count remains full).",
-    )
-    _add_save_flag(zookeeper_common, "Optional output file path. If omitted, results are printed to stdout.")
-    zookeeper_common.add_argument(
-        "-f",
-        "--format",
-        dest="output_format",
-        choices=("json", "txt"),
-        default="txt",
-        help="ZooKeeper audit output format for stdout/file.",
+    configure_zookeeper_parser(
+        zookeeper_parser,
+        add_output_flags=_add_output_flags,
+        add_log_flag=_add_log_flag,
+        add_scan_host_flags=_add_scan_host_flags,
+        add_multi_ports_flag=_add_multi_ports_flag,
+        add_save_flag=_add_save_flag,
+        port_type=_port,
+        positive_int=_positive_int,
     )
 
     return parser
@@ -2326,6 +813,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    original_raw_argv = list(raw_argv)
     raw_argv = _normalize_multi_port_port_flag(raw_argv)
     parser = build_parser()
 
@@ -2363,7 +851,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     if raw_argv[0].startswith("-"):
         parser.error(
             "module command is required: exporters, registry, grafana, gitlab, consul, kubeapi, postgres, "
-            "clickhouse, redis, etcd, proxmox, qdrant, kafka, zookeeper, elastic, grpc, or --selfcert"
+            "mongodb, docker, clickhouse, redis, etcd, proxmox, qdrant, kafka, zookeeper, elastic, grpc, or --selfcert"
         )
 
-    return parser.parse_args(raw_argv)
+    parsed = parser.parse_args(raw_argv)
+    if getattr(parsed, "command", None) == COMMAND_DOCKER:
+        parsed._docker_port_explicit = any(
+            token == "--port" or str(token).startswith("--port=") for token in original_raw_argv
+        )
+    return parsed

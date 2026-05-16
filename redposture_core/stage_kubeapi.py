@@ -10,19 +10,24 @@ import os
 import re
 import socket
 import ssl
-import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .console import Console
 from .logger import AttemptLogger
-from .progress import ProgressBar
+from .rendering import CountColorRule, render_colored_marker_line
+from .stage_runtime import (
+    TwoPassAuditRunner,
+    progress_total_from_groups,
+    should_use_global_progress,
+    start_audit_progress,
+    start_command_progress,
+)
 from .utils import (
     build_scan_execution_groups,
     collect_scan_ports,
@@ -1879,63 +1884,17 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
 
 
 def _render_colored_kubeapi_line(console: Console, line: str) -> bool:
-    if not line.startswith(_KUBE_TAG):
-        return False
-
-    marker_color = {"[*]": "cyan", "[+]": "bright_green", "[-]": "red", "[!]": "red"}
-    for marker in ("[!]", "[-]", "[+]", "[*]"):
-        token = f" {marker} "
-        if token not in line:
-            continue
-        left, right = line.split(token, 1)
-        tag = _KUBE_TAG
-        rest = left[len(tag) :] if left.startswith(tag) else left
-
-        spans: list[tuple[int, int, str]] = []
-        for fragment, color in (
-            ("(auth required:True)", "bright_green"),
-            ("(auth required:False)", "red"),
-            ("(auth required:unknown)", "yellow"),
-        ):
-            idx = right.find(fragment)
-            if idx >= 0:
-                spans.append((idx, idx + len(fragment), color))
-
-        for pattern, color in (
-            (r"\(secrets:(\d+)\)", "red"),
-            (r"\(pods:(\d+)\)", "orange"),
-            (r"\(namespaces:(\d+)\)", "orange"),
-            (r"\(keys:(\d+)\)", "red"),
-        ):
-            match = re.search(pattern, right)
-            if match and match.group(1).isdigit() and int(match.group(1)) > 0:
-                spans.append((match.start(), match.end(), color))
-
-        if not spans:
-            right_colored = console._paint(right, "white", sys.stdout)
-        else:
-            chunks: list[str] = []
-            cursor = 0
-            for start, end, color in sorted(spans, key=lambda item: item[0]):
-                if start < cursor:
-                    continue
-                if start > cursor:
-                    chunks.append(console._paint(right[cursor:start], "white", sys.stdout))
-                chunks.append(console._paint(right[start:end], color, sys.stdout))
-                cursor = end
-            if cursor < len(right):
-                chunks.append(console._paint(right[cursor:], "white", sys.stdout))
-            right_colored = "".join(chunks)
-
-        rendered = (
-            f"{console._paint(tag, 'blue', sys.stdout)}"
-            f"{console._paint(rest, 'white', sys.stdout)} "
-            f"{console._paint(marker, marker_color.get(marker, 'white'), sys.stdout)} "
-            f"{right_colored}"
-        )
-        console.plain(rendered)
-        return True
-    return False
+    return render_colored_marker_line(
+        console,
+        line,
+        tag=_KUBE_TAG,
+        counts=(
+            CountColorRule("secrets", "red"),
+            CountColorRule("pods", "orange"),
+            CountColorRule("namespaces", "orange"),
+            CountColorRule("keys", "red"),
+        ),
+    )
 
 
 def _emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) -> None:
@@ -1972,143 +1931,108 @@ def audit_kubeapi_targets(
     append_output: bool = False,
     suppress_timeout_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
-    show_progress: bool = True,
+    show_progress: bool = False,
 ) -> tuple[int, int, int]:
     total = 0
     detected = 0
     failed = 0
 
     out_fh: Any = None
-    progress: ProgressBar | None = None
+    progress = None
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, "a" if append_output else "w", encoding="utf-8")
 
     try:
         indexed_hosts = list(enumerate(hosts))
-        detect_records: dict[int, dict[str, Any]] = {}
-        deep_records: dict[int, dict[str, Any]] = {}
-        progress = ProgressBar("KUBEAPI", len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = start_audit_progress("KUBEAPI", len(indexed_hosts), enabled=show_progress, leave=True)
 
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect start total={len(indexed_hosts)}")
+        def _detect_task(host: str) -> dict[str, Any]:
+            return _call_audit_kubeapi_host_with_thread_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                use_https=use_https,
+                insecure=insecure,
+                ca_file=ca_file,
+                token=token,
+                username=username,
+                password=password,
+                show_namespaces=show_namespaces,
+                show_pods=show_pods,
+                show_secrets=show_secrets,
+                namespace_filters=namespace_filters,
+                exec_pod=exec_pod,
+                exec_command=exec_command,
+                debug=bool(debug_emit),
+                run_deep_checks=False,
+                debug_emit=debug_emit,
+            )
 
-        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-            pass1_future_map = {
-                executor.submit(
-                    _call_audit_kubeapi_host_with_thread_debug,
-                    host,
-                    port,
-                    timeout,
-                    retries,
-                    use_https=use_https,
-                    insecure=insecure,
-                    ca_file=ca_file,
-                    token=token,
-                    username=username,
-                    password=password,
-                    show_namespaces=show_namespaces,
-                    show_pods=show_pods,
-                    show_secrets=show_secrets,
-                    namespace_filters=namespace_filters,
-                    exec_pod=exec_pod,
-                    exec_command=exec_command,
-                    debug=bool(debug_emit),
-                    run_deep_checks=False,
-                    debug_emit=debug_emit,
-                ): idx
-                for idx, host in indexed_hosts
-            }
-            buffered_records: dict[int, dict[str, Any]] = {}
-            next_emit_idx = 0
-            for future in as_completed(pass1_future_map):
-                record_idx = int(pass1_future_map[future])
-                buffered_records[record_idx] = future.result()
-                progress.advance()
-                while next_emit_idx in buffered_records:
-                    detect_record = buffered_records.pop(next_emit_idx)
-                    detect_records[next_emit_idx] = detect_record
-                    if output_format == "txt":
-                        suppress_timeout_detect_line = (
-                            suppress_timeout_status_lines
-                            and output_format == "txt"
-                            and str(detect_record.get("status") or "") == "fail"
-                        )
-                        if not suppress_timeout_detect_line:
-                            record_for_output = dict(detect_record)
-                            if username is not None or password is not None:
-                                record_for_output["_username_display"] = username or ""
-                                record_for_output["_password_display"] = password or ""
-                            _emit_line(out_fh, emit_line, _format_detect_record(record_for_output, output_format))
-                    next_emit_idx += 1
+        def _deep_task(host: str) -> dict[str, Any]:
+            return _call_audit_kubeapi_host_with_thread_debug(
+                host,
+                port,
+                timeout,
+                retries,
+                use_https=use_https,
+                insecure=insecure,
+                ca_file=ca_file,
+                token=token,
+                username=username,
+                password=password,
+                show_namespaces=show_namespaces,
+                show_pods=show_pods,
+                show_secrets=show_secrets,
+                namespace_filters=namespace_filters,
+                exec_pod=exec_pod,
+                exec_command=exec_command,
+                debug=bool(debug_emit),
+                run_deep_checks=True,
+                debug_emit=debug_emit,
+            )
 
-        deep_candidates: list[tuple[int, str]] = []
-        detected_total = 0
-        for idx, host in indexed_hosts:
-            detect_record = detect_records[idx]
+        def _emit_detect(detect_record: dict[str, Any]) -> None:
+            if output_format != "txt":
+                return
+            suppress_timeout_detect_line = (
+                suppress_timeout_status_lines
+                and output_format == "txt"
+                and str(detect_record.get("status") or "") == "fail"
+            )
+            if suppress_timeout_detect_line:
+                return
+            record_for_output = dict(detect_record)
+            if username is not None or password is not None:
+                record_for_output["_username_display"] = username or ""
+                record_for_output["_password_display"] = password or ""
+            _emit_line(out_fh, emit_line, _format_detect_record(record_for_output, output_format))
+
+        def _deep_gate(detect_record: dict[str, Any]) -> tuple[bool, str]:
             detect_status = str(detect_record.get("status") or "fail")
-            if not bool(detect_record.get("is_kubeapi")):
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=skip reason=not_kubeapi")
-                continue
-            detected_total += 1
             if detect_status in {"open_no_auth", "auth_valid"}:
-                deep_candidates.append((idx, host))
-                if debug_emit is not None:
-                    debug_emit(f"{host}:{port} stage2_gate=run reason=status={detect_status}")
-            elif debug_emit is not None:
-                debug_emit(f"{host}:{port} stage2_gate=skip reason=status={detect_status}")
+                return True, f"status={detect_status}"
+            return False, f"status={detect_status}"
 
-        if debug_emit is not None:
-            debug_emit(f"pass=1 detect complete kubeapi={detected_total} deep_candidates={len(deep_candidates)}")
+        pass_result = TwoPassAuditRunner(
+            label="KUBEAPI",
+            workers=workers,
+            debug_emit=debug_emit,
+            progress=progress,
+            detected_name="kubeapi",
+        ).run(
+            indexed_hosts,
+            detect_task=_detect_task,
+            deep_task=_deep_task,
+            is_detected=lambda record: bool(record.get("is_kubeapi")),
+            deep_gate=_deep_gate,
+            emit_detect=_emit_detect,
+            merge_records=_merge_stage2_record,
+            not_detected_reason="not_kubeapi",
+        )
 
-        progress.set_total(len(indexed_hosts) + len(deep_candidates))
-        if debug_emit is not None:
-            debug_emit(f"pass=2 deep start total={len(deep_candidates)}")
-
-        if deep_candidates:
-            with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-                pass2_future_map = {
-                    executor.submit(
-                        _call_audit_kubeapi_host_with_thread_debug,
-                        host,
-                        port,
-                        timeout,
-                        retries,
-                        use_https=use_https,
-                        insecure=insecure,
-                        ca_file=ca_file,
-                        token=token,
-                        username=username,
-                        password=password,
-                        show_namespaces=show_namespaces,
-                        show_pods=show_pods,
-                        show_secrets=show_secrets,
-                        namespace_filters=namespace_filters,
-                        exec_pod=exec_pod,
-                        exec_command=exec_command,
-                        debug=bool(debug_emit),
-                        run_deep_checks=True,
-                        debug_emit=debug_emit,
-                    ): idx
-                    for idx, host in deep_candidates
-                }
-                for future in as_completed(pass2_future_map):
-                    record_idx = int(pass2_future_map[future])
-                    deep_records[record_idx] = future.result()
-                    progress.advance()
-
-        if debug_emit is not None:
-            debug_emit(f"pass=2 deep complete processed={len(deep_records)}")
-
-        final_records: dict[int, dict[str, Any]] = {}
-        for idx in range(len(hosts)):
-            detect_record = detect_records[idx]
-            deep_record = deep_records.get(idx)
-            if deep_record is None:
-                final_records[idx] = detect_record
-            else:
-                final_records[idx] = _merge_stage2_record(detect_record, deep_record)
+        final_records = pass_result.final_records
 
         for idx in range(len(hosts)):
             record = final_records[idx]
@@ -2300,15 +2224,13 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     f"credential_prefilter port={int(group.port)} open={len(group_hosts_by_idx[idx])}/"
                     f"{len(group.hosts)}"
                 )
-    outer_progress: ProgressBar | None = None
-    use_single_global_progress = (
-        stream_to_stdout and args.output_format == "txt" and (len(execution_groups) > 1 or len(credential_runs) > 1)
+    outer_progress = None
+    use_single_global_progress = should_use_global_progress(
+        args.output_format, len(execution_groups), len(credential_runs)
     )
     if use_single_global_progress:
-        global_total = sum(len(group_hosts_by_idx[idx]) for idx, _group in enumerate(execution_groups)) * len(
-            credential_runs
-        )
-        outer_progress = ProgressBar(_KUBE_TAG, global_total, enabled=True, leave=True)
+        global_total = progress_total_from_groups(group_hosts_by_idx.values(), len(credential_runs))
+        outer_progress = start_command_progress(args, _KUBE_TAG, global_total, enabled=True, leave=True)
     output_written = False
     try:
         for idx, group in enumerate(execution_groups):

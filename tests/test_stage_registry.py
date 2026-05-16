@@ -2073,7 +2073,11 @@ def test_run_registry_stage_multi_port_uses_single_global_progress(monkeypatch: 
         def close(self) -> None:
             self.closed = True
 
-    monkeypatch.setattr(registry, "ProgressBar", _FakeProgress)
+    monkeypatch.setattr(
+        registry,
+        "start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
+    )
     captured: list[dict[str, object]] = []
 
     def fake_audit(**kwargs):  # type: ignore[no-untyped-def]

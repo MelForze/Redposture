@@ -10,7 +10,7 @@ import time
 from collections.abc import Iterator, Mapping
 from concurrent.futures import Future, as_completed
 from contextlib import contextmanager
-from typing import Any, TextIO
+from typing import Any, Protocol, TextIO
 
 _PROGRESS_BAR_WIDTH = 38
 _NO_PROGRESS_ENV = "REDPOSTURE_NO_PROGRESS"
@@ -46,6 +46,7 @@ class ProgressBar:
         enabled: bool = True,
         stream: TextIO | None = None,
         leave: bool = True,
+        allow_nested: bool = False,
     ) -> None:
         self._label = str(label or "TASK").upper().strip() or "TASK"
         self._total = max(0, int(total))
@@ -54,7 +55,12 @@ class ProgressBar:
         self._stream = stream or sys.stdout
         self._lock = threading.RLock()
         self._last_len = 0
-        self._enabled = _progress_enabled(self._stream, enabled=enabled) and self._total > 0
+        nested_progress_active = _active_progress_for_stream(self._stream) is not None
+        self._enabled = (
+            _progress_enabled(self._stream, enabled=enabled)
+            and self._total > 0
+            and (bool(allow_nested) or not nested_progress_active)
+        )
         self._leave = bool(leave)
         self._started = time.monotonic()
         self._resume_after_output_pending = False
@@ -222,6 +228,58 @@ class ProgressBar:
             self._stream.write("\n")
         self._stream.flush()
         self._last_len = visible_len
+
+
+class ProgressHandle(Protocol):
+    def advance(self, step: int = 1) -> None: ...
+
+    def set_total(self, total: int) -> None: ...
+
+    def pause_for_output(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class NoOpProgress:
+    """Progress-compatible handle used when command-level progress is disabled."""
+
+    def advance(self, step: int = 1) -> None:
+        return None
+
+    def set_total(self, total: int) -> None:
+        return None
+
+    def pause_for_output(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class CommandProgressOwner:
+    """Single owner for progress bars during one CLI command execution."""
+
+    def __init__(self, *, enabled: bool = True, stream: TextIO | None = None) -> None:
+        self._enabled = bool(enabled)
+        self._stream = stream
+        self._active: ProgressHandle | None = None
+        self._closed = False
+
+    def start(self, label: str, total: int, *, enabled: bool = True, leave: bool = True) -> ProgressHandle:
+        if self._closed or not self._enabled or not enabled or int(total) <= 0:
+            return NoOpProgress()
+        if self._active is not None:
+            self._active.close()
+        self._active = ProgressBar(label, int(total), enabled=True, stream=self._stream, leave=leave)
+        return self._active
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        if self._active is not None:
+            self._active.close()
+            self._active = None
+        self._closed = True
 
 
 def iter_completed_with_progress(

@@ -214,6 +214,18 @@ run_case kubeapi kubeapi_multi_instance_urls 0 kubeapi -t "https://127.0.0.1:264
 
 run_case postgres postgres_default 0 postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables --dump 20
 run_case postgres postgres_multi_ports 0 postgres -t 127.0.0.1 -u postgres -p postgres --ports "5432,25432,25433,25434,25435" --show-databases
+run_case mongodb mongodb_open 0 mongodb -t 127.0.0.1 --port 27017 --show-databases --show-collections --show-indexes --dump 20
+run_case mongodb mongodb_auth 0 mongodb -t 127.0.0.1 --port 27018 -u root -p root --show-databases --show-collections --dump 20
+run_case mongodb mongodb_defcreds 0 mongodb -t 127.0.0.1 --port 27018 --defcreds --show-databases --show-collections
+run_case mongodb mongodb_multi_ports 0 mongodb -t 127.0.0.1 --ports "27017,37017,37018,37019,37020" --show-databases
+run_case mongodb mongodb_query_dump 0 mongodb -t 127.0.0.1 --port 27017 --database redposture --collection demo_accounts --query '{"role":"admin"}' --dump 10
+run_text_case mongodb mongodb_debug_smoke 0 mongodb -t 127.0.0.1 --port 27017 --debug
+run_case docker docker_open 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
+run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --insecure --system
+run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --insecure --containers
+run_case docker docker_inventory 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
+run_case docker docker_exec 0 docker -t 127.0.0.1 --port 2375 --container redposture-web --exec-cmd "id"
+run_text_case docker docker_debug_smoke 0 docker -t 127.0.0.1 --port 2375 --debug
 
 run_case clickhouse clickhouse_native_open 0 clickhouse -t 127.0.0.1 --show-databases --show-tables --dump
 run_case clickhouse clickhouse_http_open 0 clickhouse -t 127.0.0.1 --http --port 8123 --show-databases --show-tables --dump
@@ -236,9 +248,9 @@ run_case qdrant qdrant_url_https_reject 2 qdrant -t "https://127.0.0.1:6333/coll
 run_case qdrant qdrant_multi_instance_urls 0 qdrant -t "http://127.0.0.1:6333/collections,http://127.0.0.1:26333/collections,http://127.0.0.1:26334/collections,http://127.0.0.1:26335/collections,http://127.0.0.1:26336/collections" --collections
 
 run_case elastic elastic_open 0 elastic -t 127.0.0.1 --port 19200 --endpoints --cluster --discover
-run_case elastic elastic_auth 0 elastic -t 127.0.0.1 --port 19201 --apitoken "ZXM6bGFiLXRva2Vu" --endpoints --cluster --user --discover
-run_case elastic elastic_url_hint_https 0 elastic -t "https://127.0.0.1:19201/" --apitoken "ZXM6bGFiLXRva2Vu" --endpoints
-run_case elastic elastic_plugins_edge 0 elastic -t 127.0.0.1 --port 19201 --apitoken "ZXM6bGFiLXRva2Vu" --plugins
+run_case elastic elastic_auth 0 elastic -t 127.0.0.1 --port 19201 -u elastic -p changeme --endpoints --cluster --user --discover
+run_case elastic elastic_url_hint_https 0 elastic -t "http://127.0.0.1:19201/" -u elastic -p changeme --endpoints
+run_case elastic elastic_plugins_edge 0 elastic -t 127.0.0.1 --port 19201 -u elastic -p changeme --plugins
 run_case elastic elastic_multi_instance_urls 0 elastic -t "http://127.0.0.1:19200/,http://127.0.0.1:19202/,http://127.0.0.1:19203/,http://127.0.0.1:19204/,http://127.0.0.1:19205/" --endpoints
 
 run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051

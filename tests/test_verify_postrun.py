@@ -6,6 +6,7 @@ import pytest
 
 from scripts.verify_postrun import (
     _EXPECTED_LABELS,
+    _EXPECTED_MODULES,
     _PROGRESS_EXPECTED_TARGETS,
     _infer_target_count_from_jsonl,
     _parse_status_file,
@@ -221,6 +222,33 @@ def test_validate_output_sanity_rejects_mixed_progress_totals(tmp_path: Path) ->
 
 def test_clickhouse_multi_ports_expected_targets_is_five() -> None:
     assert _PROGRESS_EXPECTED_TARGETS["clickhouse_multi_ports"] == 5
+
+
+def test_mongodb_expected_labels_and_progress_targets() -> None:
+    for label in (
+        "mongodb_open",
+        "mongodb_auth",
+        "mongodb_defcreds",
+        "mongodb_multi_ports",
+        "mongodb_query_dump",
+        "mongodb_debug_smoke",
+    ):
+        assert label in _EXPECTED_LABELS
+    assert _PROGRESS_EXPECTED_TARGETS["mongodb_multi_ports"] == 5
+
+
+def test_docker_expected_labels_and_progress_targets() -> None:
+    for label in {
+        "docker_open",
+        "docker_tls",
+        "docker_multi_ports",
+        "docker_inventory",
+        "docker_exec",
+        "docker_debug_smoke",
+    }:
+        assert label in _EXPECTED_LABELS
+    assert "docker" in _EXPECTED_MODULES
+    assert _PROGRESS_EXPECTED_TARGETS["docker_multi_ports"] == 5
 
 
 def test_grpc_multi_ports_expected_targets_is_five() -> None:
