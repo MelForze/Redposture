@@ -741,6 +741,8 @@ def test_run_kafka_stage_debug_flow_passes_logger_and_append_output(monkeypatch:
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         kwargs["emit_line"]("KAFKA\t127.0.0.1\t9092\t[*] Kafka Broker")
         return 1, 0, 1, 0, 0
 
@@ -766,6 +768,8 @@ def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypa
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         kwargs["emit_line"]("KAFKA\t127.0.0.1\t9092\t[*] Kafka Broker")
         return 1, 0, 1, 0, 0
 
@@ -821,6 +825,8 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return 1, 0, 0, 1, 0
 
     progress_totals: list[int] = []
@@ -860,8 +866,8 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
         (["10.0.0.2"], "alice", "one"),
         (["10.0.0.2"], "bob", "two"),
     ]
-    assert progress_totals == [2]
-    assert progress_advances == [1, 1]
+    assert progress_totals == [6]
+    assert progress_advances == [1, 1, 1, 1, 1, 1]
 
 
 def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.MonkeyPatch) -> None:

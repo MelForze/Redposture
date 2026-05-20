@@ -1417,6 +1417,8 @@ def test_run_consul_stage_warns_for_token_override_and_unreachable_targets(monke
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return 1, 0, 1, False
 
     monkeypatch.setattr(consul, "audit_consul_targets", fake_audit_targets)
@@ -1467,6 +1469,8 @@ def test_run_consul_stage_dump_flag_inference_and_listener_warnings(monkeypatch:
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return 1, 1, 0, False
 
     monkeypatch.setattr(consul, "audit_consul_targets", fake_audit_targets)
@@ -2238,6 +2242,8 @@ def test_run_consul_stage_dump_all_inference(monkeypatch: pytest.MonkeyPatch) ->
 
     def fake_audit(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 1, 0, False)
 
     monkeypatch.setattr(consul, "audit_consul_targets", fake_audit)
@@ -2295,6 +2301,8 @@ def test_run_consul_stage_multi_port_uses_single_global_progress(monkeypatch: py
 
     def fake_audit(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0, False)
 
     monkeypatch.setattr(consul, "audit_consul_targets", fake_audit)

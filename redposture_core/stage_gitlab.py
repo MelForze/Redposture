@@ -1211,6 +1211,7 @@ def audit_gitlab_targets(
     suppress_timeout_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
+    command_progress: Any | None = None,
 ) -> tuple[int, int, int]:
     total = 0
     detected = 0
@@ -1224,7 +1225,11 @@ def audit_gitlab_targets(
     progress = None
     try:
         indexed_hosts = list(enumerate(hosts))
-        progress = start_audit_progress("GITLAB", len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = (
+            command_progress
+            if command_progress is not None
+            else start_audit_progress("GITLAB", len(indexed_hosts), enabled=show_progress, leave=True)
+        )
         deep_requested = bool(project_filters or clone or token)
 
         def _detect_task(host: str) -> dict[str, Any]:
@@ -1293,7 +1298,7 @@ def audit_gitlab_targets(
             not_detected_reason="not_gitlab",
         )
 
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
             progress = None
 
@@ -1332,7 +1337,7 @@ def audit_gitlab_targets(
                     error=record.get("error"),
                 )
     finally:
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
         if out_fh is not None:
             out_fh.close()
@@ -1456,12 +1461,11 @@ def run_gitlab_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 suppress_timeout_status_lines=not bool(args.debug),
                 debug_emit=emit_debug if args.debug else None,
                 show_progress=group_progress_enabled,
+                command_progress=outer_progress,
             )
             total += part_total
             detected += part_detected
             failed += part_failed
-            if outer_progress is not None:
-                outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process gitlab output: {exc}")
         return 2

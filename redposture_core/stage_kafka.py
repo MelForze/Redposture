@@ -949,6 +949,7 @@ def audit_kafka_targets(
     suppress_connection_refused_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
+    command_progress: Any | None = None,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -964,7 +965,11 @@ def audit_kafka_targets(
     progress = None
     try:
         indexed_hosts = list(enumerate(hosts))
-        progress = start_audit_progress("KAFKA", len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = (
+            command_progress
+            if command_progress is not None
+            else start_audit_progress("KAFKA", len(indexed_hosts), enabled=show_progress, leave=True)
+        )
         deep_requested = bool(show_topics or query_topic or dump)
 
         def _detect_task(host: str) -> dict[str, Any]:
@@ -1028,7 +1033,7 @@ def audit_kafka_targets(
             merge_records=_merge_stage2_record,
             not_detected_reason="not_kafka",
         )
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
             progress = None
 
@@ -1091,7 +1096,7 @@ def audit_kafka_targets(
                     error=record.get("error"),
                 )
     finally:
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
         if out_fh is not None:
             out_fh.close()
@@ -1233,18 +1238,15 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     f"{len(hosts)}"
                 )
     outer_progress = None
+    progress_credential_runs = len(credential_runs) + 1 if credential_file_entries is not None else len(credential_runs)
     use_single_global_progress = (
         args.output_format == "txt" and credential_file_entries is not None
-    ) or should_use_global_progress(
-        args.output_format, len(ports), len(credential_runs) if credential_file_entries is None else 1
-    )
+    ) or should_use_global_progress(args.output_format, len(ports), progress_credential_runs)
     if use_single_global_progress:
         outer_progress = start_command_progress(
             args,
             "KAFKA",
-            progress_total_from_groups(
-                hosts_by_port.values(), 1 if credential_file_entries is not None else len(credential_runs)
-            ),
+            progress_total_from_groups(hosts_by_port.values(), progress_credential_runs),
             enabled=True,
             leave=True,
         )
@@ -1280,6 +1282,7 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             suppress_connection_refused_status_lines=not bool(args.debug),
             debug_emit=emit_debug if args.debug else None,
             show_progress=False,
+            command_progress=outer_progress,
         )
         return lines, counts
 
@@ -1337,8 +1340,6 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     valid += part_valid
                     auth_required += part_auth
                     failed += part_failed
-                    if outer_progress is not None:
-                        outer_progress.advance(1)
         else:
             for audit_port in ports:
                 audit_hosts = hosts_by_port[int(audit_port)]
@@ -1369,14 +1370,13 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                             suppress_connection_refused_status_lines=not bool(args.debug),
                             debug_emit=emit_debug if args.debug else None,
                             show_progress=not use_single_global_progress,
+                            command_progress=outer_progress,
                         )
                         total += part_total
                         open_no_auth += part_open
                         valid += part_valid
                         auth_required += part_auth
                         failed += part_failed
-                        if outer_progress is not None:
-                            outer_progress.advance(part_total)
                         if part_open > 0 or part_valid > 0:
                             deep_already_emitted = True
                         output_written = True

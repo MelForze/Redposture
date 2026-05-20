@@ -169,6 +169,7 @@ def start_command_progress(
     *,
     enabled: bool = True,
     leave: bool = True,
+    render_initial: bool | None = None,
 ) -> ProgressHandle:
     """Start a command-owned progress handle.
 
@@ -180,7 +181,8 @@ def start_command_progress(
     owner = get_command_progress_owner(args)
     if owner is None:
         return NoOpProgress()
-    return owner.start(label, total, enabled=enabled, leave=leave)
+    initial = bool(getattr(args, "output", None)) if render_initial is None else bool(render_initial)
+    return owner.start(label, total, enabled=enabled, leave=leave, render_initial=initial)
 
 
 def start_audit_progress(
@@ -250,12 +252,22 @@ class TwoPassAuditRunner:
             max_workers=max(1, int(self.workers))
         )
         buffered_records: dict[int, dict[str, Any]] = {}
+        gate_decisions: dict[int, tuple[bool, str]] = {}
+        detected_flags: dict[int, bool] = {}
         next_emit_idx = 0
         for (record_idx, _host), detect_record in scheduler.iter_completed(
             indexed_hosts,
             lambda item: detect_task(item[1]),
         ):
-            buffered_records[int(record_idx)] = detect_record
+            record_idx = int(record_idx)
+            buffered_records[record_idx] = detect_record
+            detected = is_detected(detect_record)
+            detected_flags[record_idx] = detected
+            if detected:
+                should_run, reason = deep_gate(detect_record)
+                gate_decisions[record_idx] = (should_run, reason)
+                if should_run and self.progress is not None:
+                    self.progress.add_total(1)
             if self.progress is not None:
                 self.progress.advance()
             while next_emit_idx in buffered_records:
@@ -269,7 +281,7 @@ class TwoPassAuditRunner:
         deep_candidates: list[tuple[int, str]] = []
         for idx, host in indexed_hosts:
             detect_record = detect_records[idx]
-            if not is_detected(detect_record):
+            if not detected_flags.get(idx, False):
                 if self.debug_emit is not None:
                     self.debug_emit(
                         format_stage2_gate(
@@ -281,7 +293,7 @@ class TwoPassAuditRunner:
                     )
                 continue
             detected_count += 1
-            should_run, reason = deep_gate(detect_record)
+            should_run, reason = gate_decisions.get(idx, (False, "gate_not_evaluated"))
             if should_run:
                 deep_candidates.append((idx, host))
                 if self.debug_emit is not None:
@@ -299,9 +311,6 @@ class TwoPassAuditRunner:
                 )
             )
             self.debug_emit(format_pass_marker(2, "deep", "start", total=len(deep_candidates)))
-
-        if self.progress is not None:
-            self.progress.set_total(len(indexed_hosts) + len(deep_candidates))
 
         if deep_candidates:
             for (record_idx, _host), deep_record in scheduler.iter_completed(

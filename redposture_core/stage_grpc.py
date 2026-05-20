@@ -1451,6 +1451,7 @@ def audit_grpc_targets(
     preferred_scheme: str | None = None,
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
+    command_progress: Any | None = None,
     schema_descriptor_bytes: list[bytes] | None = None,
     invoke_path: str | None = None,
     invoke_request_json: dict[str, Any] | None = None,
@@ -1472,7 +1473,11 @@ def audit_grpc_targets(
 
     try:
         indexed_hosts = list(enumerate(hosts))
-        progress = start_audit_progress(_GRPC_TAG, len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = (
+            command_progress
+            if command_progress is not None
+            else start_audit_progress(_GRPC_TAG, len(indexed_hosts), enabled=show_progress, leave=True)
+        )
 
         def _detect_task(host: str) -> dict[str, Any]:
             return _call_audit_grpc_host_with_thread_debug(
@@ -1605,7 +1610,7 @@ def audit_grpc_targets(
         if record_sink is not None:
             record_sink.extend(final_records[idx] for idx in range(len(hosts)))
     finally:
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
         if out_fh is not None:
             out_fh.close()
@@ -1787,6 +1792,7 @@ def run_grpc_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                         preferred_scheme=group.scheme_hint,
                         debug_emit=emit_debug if args.debug else None,
                         show_progress=not use_single_global_progress,
+                        command_progress=outer_progress,
                         schema_descriptor_bytes=explicit_descriptor_bytes,
                         invoke_path=getattr(args, "invoke", None),
                         invoke_request_json=invoke_request_json,
@@ -1799,8 +1805,6 @@ def run_grpc_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     auth_required += part_auth
                     not_grpc += part_not_grpc
                     failed += part_failed
-                    if outer_progress is not None:
-                        outer_progress.advance(part_total)
                     output_written = True
     except OSError as exc:
         console.error(f"failed to process grpc output: {exc}")

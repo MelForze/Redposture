@@ -1794,6 +1794,7 @@ def audit_zookeeper_targets(
     debug_stats: dict[str, Any] | None = None,
     enum_workers: int = 3,
     show_progress: bool = False,
+    command_progress: Any | None = None,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -1809,7 +1810,11 @@ def audit_zookeeper_targets(
 
     try:
         indexed_hosts = list(enumerate(hosts))
-        progress = start_audit_progress("ZOOKEEPER", len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = (
+            command_progress
+            if command_progress is not None
+            else start_audit_progress("ZOOKEEPER", len(indexed_hosts), enabled=show_progress, leave=True)
+        )
 
         def _detect_task(host: str) -> dict[str, Any]:
             return _call_audit_host_with_thread_debug(
@@ -1945,7 +1950,7 @@ def audit_zookeeper_targets(
                     error=emit_record.get("error"),
                 )
     finally:
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
         if out_fh is not None:
             out_fh.close()
@@ -2140,14 +2145,13 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                         debug_stats=debug_stats if args.debug else None,
                         enum_workers=enum_workers,
                         show_progress=not use_single_global_progress,
+                        command_progress=outer_progress,
                     )
                     total += part_total
                     open_no_auth += part_open
                     valid += part_valid
                     auth_required += part_auth
                     failed += part_failed
-                    if outer_progress is not None:
-                        outer_progress.advance(part_total)
                     output_written = True
     except OSError as exc:
         console.error(f"failed to process zookeeper output: {exc}")
