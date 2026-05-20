@@ -712,6 +712,7 @@ def audit_docker_targets(
     suppress_timeout_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
+    command_progress: Any | None = None,
 ) -> tuple[int, int, int, int, int]:
     total = open_no_auth = valid = auth_required = fail = 0
     out_fh: Any = None
@@ -721,7 +722,11 @@ def audit_docker_targets(
     progress = None
     try:
         indexed_hosts = list(enumerate(hosts))
-        progress = start_audit_progress(_DOCKER_TAG, len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = (
+            command_progress
+            if command_progress is not None
+            else start_audit_progress(_DOCKER_TAG, len(indexed_hosts), enabled=show_progress, leave=True)
+        )
         deep_requested = bool(
             show_containers
             or show_images
@@ -801,7 +806,7 @@ def audit_docker_targets(
             merge_records=merge_stage_records,
             not_detected_reason="not_docker",
         )
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
             progress = None
 
@@ -847,7 +852,7 @@ def audit_docker_targets(
                 )
         return total, open_no_auth, valid, auth_required, fail
     finally:
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
         if out_fh is not None:
             out_fh.close()
@@ -959,14 +964,13 @@ def run_docker_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 suppress_timeout_status_lines=not bool(args.debug),
                 debug_emit=emit_debug if args.debug else None,
                 show_progress=not use_global_progress,
+                command_progress=outer_progress,
             )
             total += part_total
             open_no_auth += part_open
             valid += part_valid
             auth_required += part_auth
             failed += part_failed
-            if outer_progress is not None:
-                outer_progress.advance(part_total)
             output_written = True
     except OSError as exc:
         console.error(f"failed to process docker output: {exc}")

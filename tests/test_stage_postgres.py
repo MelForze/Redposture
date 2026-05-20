@@ -485,6 +485,8 @@ def test_run_postgres_stage_shell_modes_and_main_flow(monkeypatch: pytest.Monkey
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         kwargs["emit_line"]("POSTGRES\t127.0.0.1\t5432\t[*] Postgres Database")
         return 1, 0, 0, 1, 0, 0
 
@@ -513,6 +515,8 @@ def test_run_postgres_stage_additional_output_and_error_paths(
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         kwargs["emit_line"]('{"type":"detect"}')
         return 1, 0, 0, 0, 1, 0
 
@@ -573,6 +577,8 @@ def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         show_progress_flags.append(bool(kwargs["show_progress"]))
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         kwargs["emit_line"]("POSTGRES\t127.0.0.1\t5432\t[*] Postgres Database")
         return 1, 0, 0, 1, 0, 0
 

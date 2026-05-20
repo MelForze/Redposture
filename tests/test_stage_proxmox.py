@@ -1513,6 +1513,8 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None: 
 
     def fake_audit_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 1, 0, 0, 0, 0)
 
     monkeypatch.setattr("redposture_core.stage_proxmox.audit_proxmox_targets", fake_audit_targets)
@@ -1597,6 +1599,8 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
 
     def fake_audit_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 1, 0, 0, 0, 0)
 
     monkeypatch.setattr("redposture_core.stage_proxmox.audit_proxmox_targets", fake_audit_targets)

@@ -2391,6 +2391,7 @@ def audit_proxmox_targets(
     suppress_fail_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
+    command_progress: Any | None = None,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     token_ok = 0
@@ -2415,7 +2416,11 @@ def audit_proxmox_targets(
 
     try:
         indexed_hosts = list(enumerate(hosts))
-        progress = start_audit_progress("PROXMOX", len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = (
+            command_progress
+            if command_progress is not None
+            else start_audit_progress("PROXMOX", len(indexed_hosts), enabled=show_progress, leave=True)
+        )
         deep_requested = bool(discover_creds or show_nodes or show_users or add_user)
 
         def _detect_task(host: str) -> dict[str, Any]:
@@ -2538,7 +2543,7 @@ def audit_proxmox_targets(
             not_detected_reason="not_proxmox",
         )
 
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
             progress = None
 
@@ -2606,7 +2611,7 @@ def audit_proxmox_targets(
                 )
 
     finally:
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
         if out_fh is not None:
             out_fh.close()
@@ -2805,6 +2810,7 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                             suppress_fail_status_lines=not bool(args.debug),
                             debug_emit=emit_debug if args.debug else None,
                             show_progress=group_progress_enabled,
+                            command_progress=outer_progress,
                         )
                     )
                     total += part_total
@@ -2813,8 +2819,6 @@ def run_proxmox_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     auth_failed += part_auth_failed
                     failed += part_failed
                     credential_hits += part_hits
-                    if outer_progress is not None:
-                        outer_progress.advance(part_total)
                     output_written = True
     except OSError as exc:
         console.error(f"failed to process proxmox output: {exc}")

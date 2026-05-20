@@ -961,6 +961,8 @@ def test_run_clickhouse_stage_calls_audit_with_port_protocols(monkeypatch: pytes
 
     def fake_audit(*_args, **kwargs):  # type: ignore[no-untyped-def]
         calls.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 0, 0, 0, 0, 1)
 
     monkeypatch.setattr(clickhouse_stage, "audit_clickhouse_targets", fake_audit)

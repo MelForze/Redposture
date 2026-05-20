@@ -1389,6 +1389,8 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0, 0, 0)
 
     monkeypatch.setattr(elastic_stage, "audit_elastic_targets", fake_audit_targets)
@@ -1496,6 +1498,8 @@ def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 0, 0, 1, 0)
 
     monkeypatch.setattr(elastic_stage, "audit_elastic_targets", fake_audit_targets)
@@ -1543,8 +1547,8 @@ def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
     assert all(call["show_progress"] is False for call in captured)
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
-    assert progress.total == 2
-    assert progress.advances == [1, 1]
+    assert progress.total == 6
+    assert progress.advances == [1, 1, 1, 1, 1, 1]
     assert progress.closed is True
 
 

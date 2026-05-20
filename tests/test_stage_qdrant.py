@@ -1047,6 +1047,8 @@ def test_run_qdrant_stage_multi_instance_uses_single_global_progress(monkeypatch
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         calls.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         kwargs["emit_line"]("QDRANT\t127.0.0.1\t6333\t[*] Qdrant Service")
         return (1, 1, 0, 0, 0)
 

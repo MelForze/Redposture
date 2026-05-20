@@ -260,6 +260,8 @@ def test_run_grpc_stage_respects_token_precedence(monkeypatch: pytest.MonkeyPatc
 
     def fake_audit(**kwargs):
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 0, 0, 1, 0, 0)
 
     monkeypatch.setattr(grpc_stage, "audit_grpc_targets", fake_audit)

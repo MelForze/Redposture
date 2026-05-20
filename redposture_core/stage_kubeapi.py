@@ -1932,6 +1932,7 @@ def audit_kubeapi_targets(
     suppress_timeout_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
+    command_progress: Any | None = None,
 ) -> tuple[int, int, int]:
     total = 0
     detected = 0
@@ -1945,7 +1946,11 @@ def audit_kubeapi_targets(
 
     try:
         indexed_hosts = list(enumerate(hosts))
-        progress = start_audit_progress("KUBEAPI", len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = (
+            command_progress
+            if command_progress is not None
+            else start_audit_progress("KUBEAPI", len(indexed_hosts), enabled=show_progress, leave=True)
+        )
 
         def _detect_task(host: str) -> dict[str, Any]:
             return _call_audit_kubeapi_host_with_thread_debug(
@@ -2091,7 +2096,7 @@ def audit_kubeapi_targets(
                     error=record.get("error"),
                 )
     finally:
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
         if out_fh is not None:
             out_fh.close()
@@ -2269,12 +2274,11 @@ def run_kubeapi_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                         suppress_timeout_status_lines=not bool(args.debug),
                         debug_emit=emit_debug if args.debug else None,
                         show_progress=not use_single_global_progress,
+                        command_progress=outer_progress,
                     )
                     total += part_total
                     detected += part_detected
                     failed += part_failed
-                    if outer_progress is not None:
-                        outer_progress.advance(part_total)
                     output_written = True
     except OSError as exc:
         console.error(f"failed to process kubeapi output: {exc}")

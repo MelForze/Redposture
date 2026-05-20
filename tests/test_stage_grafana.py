@@ -977,6 +977,8 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
 
     def _fake_audit_grafana_targets(*_args: object, **kwargs: object) -> tuple[int, int, int, int, int]:
         seen_show_progress.append(bool(kwargs.get("show_progress")))
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         hosts = list(kwargs.get("hosts") or [])
         return len(hosts), 0, 0, len(hosts), 0
 
