@@ -146,6 +146,39 @@ _PROGRESS_EXPECTED_TARGETS = {
 
 _PROGRESS_LINE_RE = re.compile(r"Running redposture against (\d+) targets?")
 
+_RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
+    "registry_open": ("redposture/demo-api", "redposture/web-ui"),
+    "registry_harbor": ("core/control-plane", "security/scanner-adapter"),
+    "registry_gitlab": ("gitlab/project-api", "team/ops-sidecar"),
+    "gitlab_public": ("redposture-lab/public-api", "team-platform/ops-scripts"),
+    "gitlab_analyst": ("redposture-lab/security-reports", "redposture-lab/incident-timeline"),
+    "consul_open": ("redposture/kafka/sasl_password", "svc-redposture-api", "gitlab-runner"),
+    "consul_acl_read": ("redposture/kafka/sasl_password", "redposture/env", "lab-acl"),
+    "consul_multi_instance_urls": ("redposture/kafka/sasl_password", "inventory/services/gitlab/url"),
+    "mongodb_open": ("demo_accounts", "service_tokens", "billing"),
+    "docker_inventory": ("redposture-web", "redposture-worker", "redposture-prod-net", "redposture-secrets"),
+    "docker_exec": ("uid=0", "root"),
+    "qdrant_default": ("demo_vectors", "audit_logs", "service_inventory"),
+    "qdrant_multi_instance_urls": ("demo_vectors", "audit_logs", "service_inventory"),
+    "grpc_open": ("grpc.health.v1.Health", "grpc.reflection.v1alpha.ServerReflection"),
+    "kafka_open": ("orders", "payments.events", "audit.logs", "security.alerts", "ord-1001"),
+    "kafka_auth": ("secure.orders", "secure.metrics", "secure.audit", "sec-2001"),
+    "kafka_multi_ports": ("orders", "payments.events", "audit.logs", "ord-1001"),
+    "zookeeper_default": ("/redposture/app/api_key", "rp-zk-key-2026"),
+    "zookeeper_multi_ports": ("/redposture/app/api_key", "rp-zk-key-2026"),
+    "proxmox_admin": ("credential_hit", "pve-edge-01", "pve-core-02", "GitLabCloudInit!2026"),
+}
+
+_RICH_OUTPUT_FORBIDDEN_SUBSTRINGS = {
+    "kafka_open": ("<no messages>",),
+    "kafka_auth": ("<no messages>",),
+    "kafka_multi_ports": ("<no messages>",),
+    "qdrant_default": ("<no collections>", "no collections available for dump"),
+    "qdrant_multi_instance_urls": ("<no collections>", "no collections available for dump"),
+}
+
+_ZOOKEEPER_MULTI_DUMP_PORTS = {2181, 22181, 22182, 22183, 22184}
+
 
 def _parse_status_file(path: Path) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
@@ -274,6 +307,62 @@ def _infer_target_count_from_jsonl(text: str) -> int:
     return len(seen)
 
 
+def _combined_run_output(row: dict[str, str]) -> str:
+    parts: list[str] = []
+    log_path = Path(row["log_path"])
+    if log_path.exists():
+        parts.append(log_path.read_text(encoding="utf-8", errors="replace"))
+    json_path = row.get("json_path") or "-"
+    if json_path not in {"", "-"}:
+        artifact = Path(json_path)
+        if artifact.exists():
+            parts.append(artifact.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(parts)
+
+
+def _iter_json_objects(text: str):
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or not line.startswith(("{", "[")):
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            yield payload
+        elif isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    yield item
+
+
+def _validate_rich_lab_outputs(rows: list[dict[str, str]]) -> None:
+    for row in rows:
+        if row["exit_code"] != "0":
+            continue
+        label = row["label"]
+        output_text = _combined_run_output(row)
+        for needle in _RICH_OUTPUT_REQUIRED_SUBSTRINGS.get(label, ()):
+            if needle not in output_text:
+                raise SystemExit(f"label '{label}' is missing expected seeded lab data: {needle}")
+        for needle in _RICH_OUTPUT_FORBIDDEN_SUBSTRINGS.get(label, ()):
+            if needle in output_text:
+                raise SystemExit(f"label '{label}' contains empty/unseeded lab output: {needle}")
+
+        if label == "zookeeper_multi_ports":
+            dump_ports = {
+                int(item["port"])
+                for item in _iter_json_objects(output_text)
+                if item.get("type") == "znodes_dump" and item.get("znode_values") and isinstance(item.get("port"), int)
+            }
+            if dump_ports != _ZOOKEEPER_MULTI_DUMP_PORTS:
+                raise SystemExit(
+                    "label 'zookeeper_multi_ports' did not dump znodes for all expected ports: "
+                    f"expected={sorted(_ZOOKEEPER_MULTI_DUMP_PORTS)} got={sorted(dump_ports)}"
+                )
+
+
 def _validate_output_sanity(rows: list[dict[str, str]]) -> None:
     for row in rows:
         log_path = Path(row["log_path"])
@@ -399,6 +488,7 @@ def main() -> int:
         raise SystemExit(f"matrix status is missing expected modules: {', '.join(missing_modules)}")
 
     _validate_output_sanity(rows)
+    _validate_rich_lab_outputs(rows)
     _validate_openapi_artifacts(out_dir, rows)
 
     missing_success = sorted(module for module in _EXPECTED_MODULES if successful_modules.get(module, 0) == 0)

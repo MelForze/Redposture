@@ -253,6 +253,8 @@ def scan_exporters_and_trigger(
     log_trigger_events_only: bool = False,
     emit_trigger_event: Callable[[dict[str, Any]], None] | None = None,
     emit_stage_event: Callable[[dict[str, Any]], None] | None = None,
+    progress_advance: Callable[[int], None] | None = None,
+    progress_add_total: Callable[[int], None] | None = None,
     http_get_text_fn: HttpGetText | None = None,
 ) -> dict[str, Any]:
     if http_get_text_fn is None:
@@ -304,14 +306,20 @@ def scan_exporters_and_trigger(
         )
 
     for (host, exporter), result in detect_scheduler.iter_completed(detect_jobs, _detect_job):
-        if result["detected"]:
-            total_detected += 1
-            host_detected[host] = True
-            by_host[host]["detected"] += 1
-            exporter_name = str(result.get("exporter") or "")
-            if exporter_name in by_exporter:
-                by_exporter[exporter_name]["detected"] += 1
-            detected_pairs.append((host, exporter))
+        try:
+            if result["detected"]:
+                total_detected += 1
+                host_detected[host] = True
+                by_host[host]["detected"] += 1
+                exporter_name = str(result.get("exporter") or "")
+                if exporter_name in by_exporter:
+                    by_exporter[exporter_name]["detected"] += 1
+                detected_pairs.append((host, exporter))
+                if callback_list and progress_add_total is not None:
+                    progress_add_total(len(callback_list))
+        finally:
+            if progress_advance is not None:
+                progress_advance(1)
     detect_ms = int((time.monotonic() - detect_started_at) * 1000)
     if emit_stage_event is not None:
         emit_stage_event(
@@ -385,14 +393,18 @@ def scan_exporters_and_trigger(
             by_exporter[exporter_name]["success"] += success
             by_exporter[exporter_name]["fail"] += fail
 
-        callback_data = result["by_callback"]
-        if isinstance(callback_data, dict):
-            for target, stats in callback_data.items():
-                if target not in by_callback or not isinstance(stats, dict):
-                    continue
-                by_callback[target]["attempted"] += int(stats.get("attempted", 0))
-                by_callback[target]["success"] += int(stats.get("success", 0))
-                by_callback[target]["fail"] += int(stats.get("fail", 0))
+        try:
+            callback_data = result["by_callback"]
+            if isinstance(callback_data, dict):
+                for target, stats in callback_data.items():
+                    if target not in by_callback or not isinstance(stats, dict):
+                        continue
+                    by_callback[target]["attempted"] += int(stats.get("attempted", 0))
+                    by_callback[target]["success"] += int(stats.get("success", 0))
+                    by_callback[target]["fail"] += int(stats.get("fail", 0))
+        finally:
+            if progress_advance is not None and attempted > 0:
+                progress_advance(attempted)
     deep_ms = int((time.monotonic() - deep_started_at) * 1000)
     if emit_stage_event is not None:
         emit_stage_event(

@@ -15,6 +15,7 @@ from scripts.verify_postrun import (
     _validate_expected_labels,
     _validate_openapi_artifacts,
     _validate_output_sanity,
+    _validate_rich_lab_outputs,
 )
 
 
@@ -318,3 +319,152 @@ def test_validate_output_sanity_allows_multi_target_json_log_without_progress(tm
         }
     ]
     _validate_output_sanity(rows)
+
+
+def test_validate_rich_lab_outputs_rejects_empty_kafka_dump(tmp_path: Path) -> None:
+    artifact = tmp_path / "kafka.jsonl"
+    log = tmp_path / "kafka.log"
+    artifact.write_text(
+        '{"type":"topics_list","topics":["orders"]}\n{"type":"topic_dump","topic":"orders"}\n', encoding="utf-8"
+    )
+    log.write_text("<no messages>\n", encoding="utf-8")
+
+    rows = [
+        {
+            "module": "kafka",
+            "label": "kafka_open",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(artifact),
+            "log_path": str(log),
+        }
+    ]
+    with pytest.raises(SystemExit, match="missing expected seeded lab data|empty/unseeded"):
+        _validate_rich_lab_outputs(rows)
+
+
+def test_validate_rich_lab_outputs_requires_qdrant_seeded_collections(tmp_path: Path) -> None:
+    artifact = tmp_path / "qdrant.jsonl"
+    log = tmp_path / "qdrant.log"
+    artifact.write_text('{"type":"collections","collections":["demo_vectors"]}\n', encoding="utf-8")
+    log.write_text("", encoding="utf-8")
+
+    rows = [
+        {
+            "module": "qdrant",
+            "label": "qdrant_default",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(artifact),
+            "log_path": str(log),
+        }
+    ]
+    with pytest.raises(SystemExit, match="missing expected seeded lab data"):
+        _validate_rich_lab_outputs(rows)
+
+
+def test_validate_rich_lab_outputs_requires_zookeeper_dump_for_all_ports(tmp_path: Path) -> None:
+    artifact = tmp_path / "zookeeper.jsonl"
+    log = tmp_path / "zookeeper.log"
+    artifact.write_text(
+        "\n".join(
+            [
+                '{"type":"znodes_dump","port":2181,"znode_values":["/redposture/app/api_key:rp-zk-key-2026"]}',
+                '{"type":"znodes_dump","port":22181,"znode_values":["/redposture/app/api_key:rp-zk-key-2026"]}',
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+
+    rows = [
+        {
+            "module": "zookeeper",
+            "label": "zookeeper_multi_ports",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(artifact),
+            "log_path": str(log),
+        }
+    ]
+    with pytest.raises(SystemExit, match="did not dump znodes for all expected ports"):
+        _validate_rich_lab_outputs(rows)
+
+
+def test_validate_rich_lab_outputs_accepts_seeded_happy_paths(tmp_path: Path) -> None:
+    kafka = tmp_path / "kafka.jsonl"
+    kafka_log = tmp_path / "kafka.log"
+    kafka.write_text(
+        '{"type":"topics_list","topics":["orders","payments.events","audit.logs","security.alerts"]}\n'
+        '{"type":"topic_dump","topic":"orders","messages":["ord-1001"]}\n',
+        encoding="utf-8",
+    )
+    kafka_log.write_text("", encoding="utf-8")
+
+    zookeeper = tmp_path / "zookeeper.jsonl"
+    zookeeper_log = tmp_path / "zookeeper.log"
+    zookeeper.write_text(
+        "\n".join(
+            f'{{"type":"znodes_dump","port":{port},"znode_values":["/redposture/app/api_key:rp-zk-key-2026"]}}'
+            for port in (2181, 22181, 22182, 22183, 22184)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    zookeeper_log.write_text("", encoding="utf-8")
+
+    rows = [
+        {
+            "module": "kafka",
+            "label": "kafka_open",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(kafka),
+            "log_path": str(kafka_log),
+        },
+        {
+            "module": "zookeeper",
+            "label": "zookeeper_multi_ports",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(zookeeper),
+            "log_path": str(zookeeper_log),
+        },
+    ]
+    _validate_rich_lab_outputs(rows)
+
+
+def test_validate_rich_lab_outputs_accepts_proxmox_json_findings(tmp_path: Path) -> None:
+    artifact = tmp_path / "proxmox.jsonl"
+    log = tmp_path / "proxmox.log"
+    artifact.write_text(
+        '{"type":"credential_hit","host":"127.0.0.1","port":18006,'
+        '"sample":"GitLabCloudInit!2026","path":"$.cipassword"}\n'
+        '{"type":"nodes","nodes":["pve-edge-01","pve-core-02"]}\n',
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+
+    rows = [
+        {
+            "module": "proxmox",
+            "label": "proxmox_admin",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(artifact),
+            "log_path": str(log),
+        }
+    ]
+    _validate_rich_lab_outputs(rows)
+
+
+def test_sequential_matrix_uses_deep_dump_for_multi_target_seeded_labs() -> None:
+    matrix = Path("scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8")
+
+    assert "qdrant_multi_instance_urls" in matrix
+    assert "qdrant_multi_instance_urls 0 qdrant" in matrix
+    assert "qdrant_multi_instance_urls 0 qdrant" in matrix and "--collections --dump" in matrix
+    assert "kafka_multi_ports 0 kafka" in matrix and "--show-topics --dump --max-messages 10" in matrix
+    assert "zookeeper_multi_ports 0 zookeeper" in matrix and "--show-znodes --dump" in matrix
+    assert "registry_gitlab 0 registry" in matrix and "--token glrt-lab-token --gitlab --images" in matrix

@@ -4,11 +4,21 @@ import io
 import subprocess
 import urllib.error
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from redposture_core import stage_gitlab as gitlab
+
+
+def test_gitlab_lab_mock_has_readiness_healthcheck() -> None:
+    compose = Path("lab/full/docker-compose.yml").read_text(encoding="utf-8")
+    block = compose.split("  gitlab-web-mock:", 1)[1].split("  nexus:", 1)[0]
+
+    assert "healthcheck:" in block
+    assert "/-/readiness" in block
+    assert "python -c" in block
 
 
 def test_normalize_path_and_base_url_helpers() -> None:

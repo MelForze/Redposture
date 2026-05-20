@@ -8,6 +8,7 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
@@ -17,6 +18,7 @@ from .listener_runtime import parse_services, start_listeners_for_trigger, stop_
 from .logger import AttemptLogger
 from .profiles import load_profiles
 from .servers import RunningServer
+from .stage_runtime import start_command_progress
 from .utils import collect_scan_ports, collect_scan_target_specs, normalize_ip_literal, normalize_scan_host, utc_now_iso
 
 _TRIGGER_EXPORTER_DISPLAY_NAMES = {
@@ -562,6 +564,8 @@ def _run_trigger_requests(
     show_trigger_info: bool,
     log_trigger_attempts: bool,
     record_sink: list[dict[str, Any]] | None = None,
+    progress_advance: Callable[[int], None] | None = None,
+    progress_add_total: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     callbacks = ",".join(callback_targets)
     if show_trigger_info:
@@ -669,6 +673,8 @@ def _run_trigger_requests(
         log_trigger_events_only=not args.debug,
         emit_trigger_event=_emit_trigger_event if (args.with_listen or record_sink is not None) else None,
         emit_stage_event=_emit_stage_event if args.debug else None,
+        progress_advance=progress_advance,
+        progress_add_total=progress_add_total,
     )
     attempted = int(summary.get("attempted", 0))
     display_success = int(summary.get("triggered", 0))
@@ -904,20 +910,57 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     trigger_records: list[dict[str, Any]] = []
     show_trigger_info = output_format == "txt" or not stream_to_stdout
+    trigger_progress = None
+    trigger_progress_total = sum(
+        len(batch_hosts) * len(batch_exporters) for batch_hosts, batch_exporters in run_batches
+    )
+
+    def _start_trigger_progress() -> None:
+        nonlocal trigger_progress
+        if output_format != "txt" or trigger_progress is not None:
+            return
+        trigger_progress = start_command_progress(args, "TRIGGER", trigger_progress_total, enabled=True, leave=True)
+
+    def _advance_trigger_progress(step: int) -> None:
+        if trigger_progress is None:
+            return
+        trigger_progress.advance(max(0, int(step)))
+
+    def _add_trigger_progress_total(step: int) -> None:
+        nonlocal trigger_progress_total
+        increment = max(0, int(step))
+        if increment <= 0:
+            return
+        trigger_progress_total += increment
+        if trigger_progress is not None:
+            trigger_progress.set_total(trigger_progress_total)
+
+    def _close_trigger_progress() -> None:
+        nonlocal trigger_progress
+        if trigger_progress is None:
+            return
+        trigger_progress.close()
+        trigger_progress = None
 
     if not args.with_listen:
-        for batch_hosts, batch_exporters in run_batches:
-            _run_trigger_requests(
-                args,
-                logger,
-                console,
-                batch_hosts,
-                callback_targets,
-                batch_exporters,
-                show_trigger_info=show_trigger_info,
-                log_trigger_attempts=output_format == "txt" or not stream_to_stdout,
-                record_sink=trigger_records if output_format == "json" else None,
-            )
+        _start_trigger_progress()
+        try:
+            for batch_hosts, batch_exporters in run_batches:
+                _run_trigger_requests(
+                    args,
+                    logger,
+                    console,
+                    batch_hosts,
+                    callback_targets,
+                    batch_exporters,
+                    show_trigger_info=show_trigger_info,
+                    log_trigger_attempts=output_format == "txt" or not stream_to_stdout,
+                    record_sink=trigger_records if output_format == "json" else None,
+                    progress_advance=_advance_trigger_progress,
+                    progress_add_total=_add_trigger_progress_total,
+                )
+        finally:
+            _close_trigger_progress()
         if output_format == "json":
             try:
                 _write_trigger_json_records(output_path, trigger_records)
@@ -935,18 +978,24 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             deduplicate=not args.debug,
         )
         running, temp_cert_dir = start_listeners_for_trigger(args, logger, console)
-        for batch_hosts, batch_exporters in run_batches:
-            _run_trigger_requests(
-                args,
-                logger,
-                console,
-                batch_hosts,
-                callback_targets,
-                batch_exporters,
-                show_trigger_info=show_trigger_info,
-                log_trigger_attempts=False,
-                record_sink=trigger_records if output_format == "json" else None,
-            )
+        _start_trigger_progress()
+        try:
+            for batch_hosts, batch_exporters in run_batches:
+                _run_trigger_requests(
+                    args,
+                    logger,
+                    console,
+                    batch_hosts,
+                    callback_targets,
+                    batch_exporters,
+                    show_trigger_info=show_trigger_info,
+                    log_trigger_attempts=False,
+                    record_sink=trigger_records if output_format == "json" else None,
+                    progress_advance=_advance_trigger_progress,
+                    progress_add_total=_add_trigger_progress_total,
+                )
+        finally:
+            _close_trigger_progress()
         if getattr(args, "check_credentials", False):
             _run_trigger_credential_checks(args, logger, console)
         if output_format == "json":
@@ -978,6 +1027,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.error(str(exc))
         return 2
     finally:
+        _close_trigger_progress()
         logger.set_trigger_callback_mode(False)
         stop_started_listeners(running, temp_cert_dir)
 

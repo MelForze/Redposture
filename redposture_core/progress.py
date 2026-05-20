@@ -64,9 +64,12 @@ class ProgressBar:
         self._leave = bool(leave)
         self._started = time.monotonic()
         self._resume_after_output_pending = False
-        item_word = "target" if self._total == 1 else "targets"
-        self._description = f"Running redposture against {self._total} {item_word}"
+        self._description = self._build_description()
         self._register_active_progress()
+
+    def _build_description(self) -> str:
+        item_word = "target" if self._total == 1 else "targets"
+        return f"Running redposture against {self._total} {item_word}"
 
     def _register_active_progress(self) -> None:
         if not self._enabled:
@@ -98,12 +101,11 @@ class ProgressBar:
         new_total = max(0, int(total))
         if not self._enabled:
             self._total = max(self._done, new_total)
+            self._description = self._build_description()
             return
         with self._lock:
             self._total = max(self._done, new_total)
-            if not self._leave and self._done >= self._total:
-                return
-            self._render()
+            self._description = self._build_description()
 
     def close(self) -> None:
         if not self._enabled:

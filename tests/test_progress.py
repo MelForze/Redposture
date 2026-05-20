@@ -84,6 +84,19 @@ def test_progress_bar_renders_and_closes() -> None:
     assert "100%" in stream.buffer
 
 
+def test_progress_bar_set_total_updates_target_count_text() -> None:
+    stream = _FakeStream(tty=True)
+    bar = ProgressBar("trigger", total=2, enabled=True, stream=stream, leave=True)
+
+    bar.advance()
+    bar.set_total(3)
+    bar.advance(2)
+    bar.close()
+
+    assert "Running redposture against 2 targets" in stream.buffer
+    assert "Running redposture against 3 targets" in stream.buffer
+
+
 def test_progress_bar_leave_false_clears_line() -> None:
     stream = _FakeStream(tty=True)
     bar = ProgressBar("scan", total=1, enabled=True, stream=stream, leave=False)
