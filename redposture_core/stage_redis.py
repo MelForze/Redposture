@@ -795,6 +795,7 @@ def audit_redis_targets(
     suppress_connection_refused_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
+    command_progress: Any | None = None,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -861,6 +862,7 @@ def audit_redis_targets(
             label="REDIS",
             workers=workers,
             debug_emit=debug_emit,
+            progress=command_progress,
             detected_name="redis",
         ).run(
             indexed_hosts,
@@ -1098,6 +1100,7 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                         suppress_connection_refused_status_lines=not bool(args.debug),
                         debug_emit=emit_debug if args.debug else None,
                         show_progress=not use_single_global_progress,
+                        command_progress=outer_progress,
                     )
                     total += part_total
                     open_no_auth += part_open
@@ -1105,8 +1108,6 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     valid += part_valid
                     auth_required += part_auth
                     failed += part_failed
-                    if outer_progress is not None:
-                        outer_progress.advance(part_total)
                     output_written = True
     except OSError as exc:
         console.error(f"failed to process redis output: {exc}")

@@ -702,6 +702,8 @@ def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypa
 
     def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
         captured_calls.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 1, 0, 0, 0, 0)
 
     monkeypatch.setattr(redis_stage, "audit_redis_targets", fake_audit_redis_targets)
@@ -764,6 +766,8 @@ def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
 
     def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
         captured_calls.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 0, 0, 1, 0, 0)
 
     monkeypatch.setattr(redis_stage, "audit_redis_targets", fake_audit_redis_targets)
@@ -833,6 +837,8 @@ def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pyte
 
     def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
         captured_calls.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 0, 0, 1, 0, 0)
 
     monkeypatch.setattr(redis_stage, "audit_redis_targets", fake_audit_redis_targets)

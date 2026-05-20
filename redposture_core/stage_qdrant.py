@@ -1597,6 +1597,7 @@ def audit_qdrant_targets(
     suppress_timeout_status_lines: bool = False,
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
+    command_progress: Any | None = None,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -1612,7 +1613,11 @@ def audit_qdrant_targets(
     progress = None
     try:
         indexed_hosts = list(enumerate(hosts))
-        progress = start_audit_progress("QDRANT", len(indexed_hosts), enabled=show_progress, leave=True)
+        progress = (
+            command_progress
+            if command_progress is not None
+            else start_audit_progress("QDRANT", len(indexed_hosts), enabled=show_progress, leave=True)
+        )
         deep_requested = bool(show_collections or dump_requested or collection_name or ssrf_urls)
 
         def _detect_task(host: str) -> dict[str, Any]:
@@ -1675,7 +1680,7 @@ def audit_qdrant_targets(
             not_detected_reason="not_qdrant",
         )
 
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
             progress = None
 
@@ -1720,7 +1725,7 @@ def audit_qdrant_targets(
                     error=record.get("error"),
                 )
     finally:
-        if progress is not None:
+        if command_progress is None and progress is not None:
             progress.close()
         if out_fh is not None:
             out_fh.close()
@@ -1892,14 +1897,13 @@ def run_qdrant_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 suppress_timeout_status_lines=not bool(args.debug),
                 debug_emit=emit_debug if args.debug else None,
                 show_progress=group_progress_enabled,
+                command_progress=outer_progress,
             )
             total += part_total
             open_no_auth += part_open_no_auth
             open_with_key += part_open_with_key
             auth_required += part_auth_required
             failed += part_failed
-            if outer_progress is not None:
-                outer_progress.advance(part_total)
     except OSError as exc:
         console.error(f"failed to process qdrant output: {exc}")
         return 2

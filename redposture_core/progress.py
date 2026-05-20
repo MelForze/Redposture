@@ -47,6 +47,7 @@ class ProgressBar:
         stream: TextIO | None = None,
         leave: bool = True,
         allow_nested: bool = False,
+        render_initial: bool = False,
     ) -> None:
         self._label = str(label or "TASK").upper().strip() or "TASK"
         self._total = max(0, int(total))
@@ -66,6 +67,8 @@ class ProgressBar:
         self._resume_after_output_pending = False
         self._description = self._build_description()
         self._register_active_progress()
+        if self._enabled and render_initial:
+            self._render()
 
     def _build_description(self) -> str:
         item_word = "target" if self._total == 1 else "targets"
@@ -106,6 +109,13 @@ class ProgressBar:
         with self._lock:
             self._total = max(self._done, new_total)
             self._description = self._build_description()
+
+    def add_total(self, step: int = 1) -> None:
+        """Increase progress total dynamically while preserving current done counter."""
+        inc = max(0, int(step))
+        if inc <= 0:
+            return
+        self.set_total(self._total + inc)
 
     def close(self) -> None:
         if not self._enabled:
@@ -237,6 +247,8 @@ class ProgressHandle(Protocol):
 
     def set_total(self, total: int) -> None: ...
 
+    def add_total(self, step: int = 1) -> None: ...
+
     def pause_for_output(self) -> None: ...
 
     def close(self) -> None: ...
@@ -249,6 +261,9 @@ class NoOpProgress:
         return None
 
     def set_total(self, total: int) -> None:
+        return None
+
+    def add_total(self, step: int = 1) -> None:
         return None
 
     def pause_for_output(self) -> None:
@@ -267,12 +282,27 @@ class CommandProgressOwner:
         self._active: ProgressHandle | None = None
         self._closed = False
 
-    def start(self, label: str, total: int, *, enabled: bool = True, leave: bool = True) -> ProgressHandle:
+    def start(
+        self,
+        label: str,
+        total: int,
+        *,
+        enabled: bool = True,
+        leave: bool = True,
+        render_initial: bool = False,
+    ) -> ProgressHandle:
         if self._closed or not self._enabled or not enabled or int(total) <= 0:
             return NoOpProgress()
         if self._active is not None:
             self._active.close()
-        self._active = ProgressBar(label, int(total), enabled=True, stream=self._stream, leave=leave)
+        self._active = ProgressBar(
+            label,
+            int(total),
+            enabled=True,
+            stream=self._stream,
+            leave=leave,
+            render_initial=render_initial,
+        )
         return self._active
 
     def close(self) -> None:

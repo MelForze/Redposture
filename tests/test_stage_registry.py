@@ -2082,6 +2082,8 @@ def test_run_registry_stage_multi_port_uses_single_global_progress(monkeypatch: 
 
     def fake_audit(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0, 0, 0, 0)
 
     monkeypatch.setattr(registry, "audit_registry_targets", fake_audit)

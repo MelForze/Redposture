@@ -2172,6 +2172,8 @@ def test_run_zookeeper_stage_multi_port_uses_single_global_progress(monkeypatch:
 
     def _fake_audit(*_args, **kwargs):
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0, 0, 0)
 
     monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", _fake_audit)

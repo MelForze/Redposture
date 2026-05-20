@@ -795,6 +795,8 @@ def test_run_kubeapi_stage_warns_on_token_override_and_all_unreachable(monkeypat
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return 1, 0, 1
 
     monkeypatch.setattr(kube, "audit_kubeapi_targets", fake_audit_targets)
@@ -823,6 +825,8 @@ def test_run_kubeapi_stage_debug_flow_passes_logger_and_append_output(monkeypatc
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         kwargs["emit_line"]("KUBEAPI\t127.0.0.1\t16443\t[*] Kubernetes API")
         return 1, 1, 0
 
@@ -882,6 +886,8 @@ def test_run_kubeapi_stage_multi_group_uses_single_global_progress(monkeypatch: 
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
         captured.append(kwargs)
+        if kwargs.get("command_progress") is not None:
+            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0)
 
     monkeypatch.setattr(kube, "audit_kubeapi_targets", fake_audit_targets)

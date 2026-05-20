@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ from redposture_core.progress import (
     _progress_enabled,
     iter_completed_with_progress,
 )
+from redposture_core.stage_runtime import start_command_progress
 
 
 class _FakeStream:
@@ -82,6 +84,27 @@ def test_progress_bar_renders_and_closes() -> None:
 
     assert "Running redposture against 3 targets" in stream.buffer
     assert "100%" in stream.buffer
+
+
+def test_progress_bar_does_not_render_initial_by_default() -> None:
+    stream = _FakeStream(tty=True)
+    bar = ProgressBar("collect", total=3, enabled=True, stream=stream, leave=True)
+
+    assert stream.buffer == ""
+    bar.close()
+
+
+def test_output_backed_command_progress_renders_initial_line() -> None:
+    stream = _FakeStream(tty=True)
+    owner = CommandProgressOwner(enabled=True, stream=stream)
+    args = SimpleNamespace(output="results.txt", _progress_owner=owner)
+
+    progress = start_command_progress(args, "proxmox", 10)
+
+    assert "Running redposture against 10 targets" in stream.buffer
+    assert "0%" in stream.buffer
+    progress.close()
+    owner.close()
 
 
 def test_progress_bar_set_total_updates_target_count_text() -> None:

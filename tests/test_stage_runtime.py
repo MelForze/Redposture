@@ -29,6 +29,9 @@ class _ProgressRecorder:
     def set_total(self, total: int) -> None:
         return None
 
+    def add_total(self, step: int = 1) -> None:
+        return None
+
     def pause_for_output(self) -> None:
         return None
 
