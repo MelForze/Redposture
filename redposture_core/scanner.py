@@ -187,6 +187,8 @@ def scan_exporters_and_trigger(
     log_trigger_events_only: bool = False,
     emit_trigger_event: Callable[[dict[str, Any]], None] | None = None,
     emit_stage_event: Callable[[dict[str, Any]], None] | None = None,
+    progress_advance: Callable[[int], None] | None = None,
+    progress_add_total: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     return _scan_exporters_and_trigger_impl(
         logger=logger,
@@ -199,6 +201,8 @@ def scan_exporters_and_trigger(
         log_trigger_events_only=log_trigger_events_only,
         emit_trigger_event=emit_trigger_event,
         emit_stage_event=emit_stage_event,
+        progress_advance=progress_advance,
+        progress_add_total=progress_add_total,
         http_get_text_fn=http_get_text,
     )
 

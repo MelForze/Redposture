@@ -6,12 +6,32 @@ import io
 import json
 import ssl
 import urllib.error
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from redposture_core import stage_consul as consul
+
+
+def test_consul_lab_uses_multiarch_official_image() -> None:
+    compose = Path("lab/full/docker-compose.yml").read_text(encoding="utf-8")
+    consul_block = compose.split("  consul:", 1)[1].split("  consul-seed:", 1)[0]
+    consul_seed_block = compose.split("  consul-seed:", 1)[1].split("  consul-acl:", 1)[0]
+    consul_acl_block = compose.split("  consul-acl:", 1)[1].split("  consul-acl-seed:", 1)[0]
+    consul_acl_seed_block = compose.split("  consul-acl-seed:", 1)[1].split("  proxmox-mock:", 1)[0]
+
+    assert "image: hashicorp/consul:1.17.3" in consul_block
+    assert "image: hashicorp/consul:1.17.3" in consul_acl_block
+    assert "dockerfile: docker/consul/Dockerfile" not in consul_block
+    assert "dockerfile: docker/consul/Dockerfile" not in consul_acl_block
+    assert "redposture-consul-seed-ready" in consul_seed_block
+    assert "redposture-consul-acl-seed-ready" in consul_acl_seed_block
+    assert '"Script"' not in consul_seed_block
+    assert '"Args":["sh","-c","consul members >/dev/null"]' in consul_seed_block
+    assert "tail -f /dev/null" in consul_seed_block
+    assert "tail -f /dev/null" in consul_acl_seed_block
 
 
 def _scope_fixture(ok_kv: bool, ok_services: bool, ok_agents: bool) -> dict[str, dict[str, object]]:

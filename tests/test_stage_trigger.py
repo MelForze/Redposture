@@ -371,6 +371,131 @@ def test_trigger_custom_ports_override_exporter_port(monkeypatch: pytest.MonkeyP
     assert captured_ports == [19121, 29121]
 
 
+def test_trigger_txt_multi_batch_uses_single_dynamic_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    progress_instances: list[object] = []
+
+    class FakeProgress:
+        def __init__(self, label: str, total: int) -> None:
+            self.label = label
+            self.total = total
+            self.set_totals: list[int] = []
+            self.advances: list[int] = []
+            self.closed = False
+
+        def advance(self, step: int = 1) -> None:
+            self.advances.append(int(step))
+
+        def set_total(self, total: int) -> None:
+            self.total = int(total)
+            self.set_totals.append(int(total))
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_start_progress(_args: argparse.Namespace, label: str, total: int, **_kwargs: object) -> FakeProgress:
+        progress = FakeProgress(label, total)
+        progress_instances.append(progress)
+        return progress
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        hosts = kwargs.get("hosts")
+        exporters = kwargs.get("trigger_exporters")
+        callbacks = kwargs.get("callback_targets")
+        progress_advance = kwargs.get("progress_advance")
+        progress_add_total = kwargs.get("progress_add_total")
+        assert isinstance(hosts, list)
+        assert isinstance(exporters, list)
+        assert isinstance(callbacks, list)
+        assert callable(progress_advance)
+        assert callable(progress_add_total)
+
+        detect_units = len(hosts) * len(exporters)
+        deep_units = detect_units * len(callbacks)
+        for _ in range(detect_units):
+            progress_advance(1)
+        progress_add_total(deep_units)
+        progress_advance(deep_units)
+        return {
+            "detected_exporters": detect_units,
+            "attempted": deep_units,
+            "triggered": deep_units,
+            "failed": 0,
+            "by_host": {
+                str(host): {
+                    "detected": len(exporters),
+                    "attempted": len(exporters),
+                    "success": len(exporters),
+                    "fail": 0,
+                }
+                for host in hosts
+            },
+            "by_callback": {str(callback): {"success": detect_units, "fail": 0} for callback in callbacks},
+        }
+
+    def fake_load_profiles(_path: object) -> dict[str, object]:
+        return {
+            "trigger_exporters": [
+                {
+                    "name": "redis_exporter",
+                    "port": 9121,
+                    "detect_path": "/metrics",
+                    "markers": ("redis_up",),
+                    "trigger_path": "/scrape",
+                    "target_fmt": "{our_host}:6379",
+                }
+            ]
+        }
+
+    monkeypatch.setattr("redposture_core.stage_trigger.start_command_progress", fake_start_progress)
+    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", fake_load_profiles)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(
+        _base_args(
+            with_listen=False,
+            targets="10.0.0.1,http://10.0.0.2:19308/scrape",
+            ports="19121,29121",
+        ),
+        AttemptLogger(),
+    )
+
+    assert rc == 0
+    assert len(progress_instances) == 1
+    progress = progress_instances[0]
+    assert progress.label == "TRIGGER"  # type: ignore[attr-defined]
+    assert progress.total == 6  # type: ignore[attr-defined]
+    assert progress.set_totals == [5, 6]  # type: ignore[attr-defined]
+    assert sum(progress.advances) == 6  # type: ignore[attr-defined]
+    assert progress.closed is True  # type: ignore[attr-defined]
+
+
+def test_trigger_json_does_not_start_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    start_calls = 0
+
+    def fake_start_progress(*_args: object, **_kwargs: object) -> object:
+        nonlocal start_calls
+        start_calls += 1
+        raise AssertionError("json trigger must not start progress")
+
+    def fake_scan(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "detected_exporters": 0,
+            "attempted": 0,
+            "triggered": 0,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 0, "attempted": 0, "success": 0, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 0, "fail": 0}},
+        }
+
+    monkeypatch.setattr("redposture_core.stage_trigger.start_command_progress", fake_start_progress)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(_base_args(with_listen=False, output_format="json"), AttemptLogger())
+
+    assert rc == 0
+    assert start_calls == 0
+
+
 def test_trigger_custom_single_port_override_exporter_port(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_ports: list[int] = []
 
@@ -864,6 +989,60 @@ def test_trigger_with_listen_summary_uses_received_callbacks(
     assert rc == 0
     out = capsys.readouterr().out
     assert "trigger complete: hosts=1 detected=4 attempts=4 success=2 fail=2" in out
+
+
+def test_trigger_with_listen_closes_progress_before_credential_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeProgress:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def advance(self, step: int = 1) -> None:
+            _ = step
+
+        def set_total(self, total: int) -> None:
+            _ = total
+
+        def close(self) -> None:
+            self.closed = True
+
+    progress = FakeProgress()
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        progress_advance = kwargs.get("progress_advance")
+        progress_add_total = kwargs.get("progress_add_total")
+        assert callable(progress_advance)
+        assert callable(progress_add_total)
+        progress_advance(1)
+        progress_add_total(1)
+        progress_advance(1)
+        return {
+            "detected_exporters": 1,
+            "attempted": 1,
+            "triggered": 1,
+            "failed": 0,
+            "by_host": {"10.0.0.1": {"detected": 1, "attempted": 1, "success": 1, "fail": 0}},
+            "by_callback": {"10.0.0.2": {"success": 1, "fail": 0}},
+            "by_exporter": {"redis_exporter": {"attempted": 1, "success": 1, "fail": 0}},
+        }
+
+    def fake_start_listeners(*_args: object, **_kwargs: object) -> tuple[list[object], None]:
+        return [], None
+
+    def fake_check_credentials(*_args: object, **_kwargs: object) -> None:
+        assert progress.closed is True
+
+    monkeypatch.setattr("redposture_core.stage_trigger.start_command_progress", lambda *_a, **_k: progress)
+    monkeypatch.setattr("redposture_core.stage_trigger.start_listeners_for_trigger", fake_start_listeners)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_trigger._run_trigger_credential_checks", fake_check_credentials)
+
+    rc = run_trigger_stage(
+        _base_args(with_listen=True, check_credentials=True, listen_seconds=0),
+        AttemptLogger(),
+    )
+
+    assert rc == 0
+    assert progress.closed is True
 
 
 def test_trigger_with_listen_warns_when_proxmox_tls_is_disabled_for_pve_profile(

@@ -182,7 +182,7 @@ run_registry_cases() {
   run_case registry registry_open 0 registry -t 127.0.0.1 --port 15000 --docker --images
   run_case registry registry_auth 0 registry -t 127.0.0.1 --port 15001 -u admin -p admin --docker --images
   run_case registry registry_harbor 0 registry -t 127.0.0.1 --port 15002 --harbor --images
-  run_case registry registry_gitlab 0 registry -t 127.0.0.1 --port 15003 --gitlab --images
+  run_case registry registry_gitlab 0 registry -t 127.0.0.1 --port 15003 --token glrt-lab-token --gitlab --images
   run_case registry registry_nexus 0 registry -t 127.0.0.1 --port 15004 --nexus --assets
   run_case registry registry_url_http 0 registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --docker --images
   run_case registry registry_url_https_reject 2 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
@@ -295,7 +295,7 @@ run_qdrant_cases() {
   run_case qdrant qdrant_default 0 qdrant -t 127.0.0.1 --collections --dump
   run_case qdrant qdrant_url_http 0 qdrant -t "http://127.0.0.1:6333/collections?from=matrix" --collections --dump
   run_case qdrant qdrant_url_https_reject 2 qdrant -t "https://127.0.0.1:6333/collections" --collections
-  run_case qdrant qdrant_multi_instance_urls 0 qdrant -t "http://127.0.0.1:6333/collections,http://127.0.0.1:26333/collections,http://127.0.0.1:26334/collections,http://127.0.0.1:26335/collections,http://127.0.0.1:26336/collections" --collections
+  run_case qdrant qdrant_multi_instance_urls 0 qdrant -t "http://127.0.0.1:6333/collections,http://127.0.0.1:26333/collections,http://127.0.0.1:26334/collections,http://127.0.0.1:26335/collections,http://127.0.0.1:26336/collections" --collections --dump
   run_text_case qdrant qdrant_debug_smoke 0 qdrant -t 127.0.0.1 --collections --debug
 }
 
@@ -326,13 +326,13 @@ run_grpc_cases() {
 run_kafka_cases() {
   run_case kafka kafka_open 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
   run_case kafka kafka_auth 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
-  run_case kafka kafka_multi_ports 0 kafka -t 127.0.0.1 --ports "9092,39092,39093,39094,39095" --show-topics
+  run_case kafka kafka_multi_ports 0 kafka -t 127.0.0.1 --ports "9092,39092,39093,39094,39095" --show-topics --dump --max-messages 10
   run_text_case kafka kafka_debug_smoke 0 kafka -t 127.0.0.1 --port 9092 --debug
 }
 
 run_zookeeper_cases() {
   run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --show-znodes --dump
-  run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes
+  run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes --dump
   run_text_case zookeeper zookeeper_debug_smoke 0 zookeeper -t 127.0.0.1 --debug
 }
 
