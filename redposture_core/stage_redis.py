@@ -13,6 +13,7 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .rendering import CountColorRule, render_colored_marker_line
+from .show_limits import limit_metadata, limit_sequence, show_flag_enabled, show_flag_limit
 from .stage_runtime import (
     TwoPassAuditRunner,
     merge_stage_records,
@@ -193,6 +194,7 @@ def _scan_redis_keys(
     sock: socket.socket,
     *,
     count: int = 500,
+    limit: int | None = None,
     max_rounds: int = 10000,
 ) -> tuple[list[str] | None, str | None]:
     cursor = "0"
@@ -220,6 +222,8 @@ def _scan_redis_keys(
                 continue
             seen.add(key)
             keys.append(key)
+            if limit is not None and len(keys) >= limit:
+                return keys, None
 
         cursor = next_cursor
         if cursor == "0":
@@ -321,6 +325,7 @@ def _audit_redis_host(
     show_keys: bool,
     dump_keys: bool,
     query_key: str | None,
+    show_keys_limit: int | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -352,6 +357,7 @@ def _audit_redis_host(
                         "provided_credentials_ok": None,
                         "defcreds_enabled": defcreds,
                         "show_keys": show_keys,
+                        "show_keys_limit": show_keys_limit,
                         "dump_keys": dump_keys,
                         "query_key": query_key,
                         "key_count": None,
@@ -394,7 +400,8 @@ def _audit_redis_host(
                         auth_error = count_error if auth_error is None else f"{auth_error}; {count_error}"
 
                 if (show_keys or dump_keys) and can_read_keys:
-                    keys, key_error = _scan_redis_keys(sock)
+                    scan_limit = show_keys_limit if show_keys and not dump_keys else None
+                    keys, key_error = _scan_redis_keys(sock, limit=scan_limit)
                     if key_error:
                         auth_error = key_error if auth_error is None else f"{auth_error}; {key_error}"
                     if key_count is None and isinstance(keys, list):
@@ -442,6 +449,7 @@ def _audit_redis_host(
                     "defcreds_enabled": defcreds,
                     "default_credentials_attempted": default_credentials_attempted,
                     "show_keys": show_keys,
+                    "show_keys_limit": show_keys_limit,
                     "dump_keys": dump_keys,
                     "query_key": query_key,
                     "key_count": key_count,
@@ -472,6 +480,7 @@ def _audit_redis_host(
         "defcreds_enabled": defcreds,
         "default_credentials_attempted": False,
         "show_keys": show_keys,
+        "show_keys_limit": show_keys_limit,
         "dump_keys": dump_keys,
         "query_key": query_key,
         "key_count": None,
@@ -508,6 +517,10 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
     key_names: list[str] = []
     if isinstance(keys, list):
         key_names = sorted(str(item) for item in keys)
+    show_keys_limit = record.get("show_keys_limit")
+    key_limit = show_keys_limit if isinstance(show_keys_limit, int) and not isinstance(show_keys_limit, bool) else None
+    key_meta = limit_metadata(key_names, key_limit)
+    displayed_key_names = limit_sequence(key_names, key_limit)
 
     key_values = record.get("key_values")
     dumped_key_values: list[str] = []
@@ -526,7 +539,10 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
                         "host": record.get("host"),
                         "port": record.get("port"),
                         "key_count": record.get("key_count"),
-                        "keys": key_names,
+                        "keys": displayed_key_names,
+                        "keys_shown": key_meta["shown"],
+                        "keys_limit": key_meta["limit"],
+                        "keys_truncated": key_meta["truncated"],
                     },
                     ensure_ascii=False,
                 )
@@ -566,8 +582,12 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
     prefix = _nxc_prefix(record)
     lines: list[str] = []
     if show_keys and key_names:
-        lines.append(f"{prefix} [*] Show Keys")
-        for item in key_names:
+        total = record.get("key_count")
+        if key_limit is not None and isinstance(total, int) and total > len(displayed_key_names):
+            lines.append(f"{prefix} [*] Show Keys (showing:{len(displayed_key_names)} of {total})")
+        else:
+            lines.append(f"{prefix} [*] Show Keys")
+        for item in displayed_key_names:
             lines.append(f"{prefix} {_format_redis_text(item)}")
     if query_key and isinstance(query_key_value, str):
         lines.append(f"{prefix} [*] Dump Key {query_key}")
@@ -667,6 +687,7 @@ def _call_audit_redis_host_with_stage_debug(
     show_keys: bool,
     dump_keys: bool,
     query_key: str | None,
+    show_keys_limit: int | None = None,
     *,
     run_deep_checks: bool,
     debug: bool,
@@ -684,6 +705,7 @@ def _call_audit_redis_host_with_stage_debug(
         show_keys if run_deep_checks else False,
         dump_keys if run_deep_checks else False,
         query_key if run_deep_checks else None,
+        show_keys_limit=show_keys_limit if run_deep_checks else None,
     )
 
     result: dict[str, Any] = dict(record)
@@ -796,6 +818,7 @@ def audit_redis_targets(
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
     command_progress: Any | None = None,
+    show_keys_limit: int | None = None,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -814,6 +837,7 @@ def audit_redis_targets(
         deep_requested = bool(show_keys or dump_keys or query_key)
 
         def _detect_task(host: str) -> dict[str, Any]:
+            limit_kwargs = {"show_keys_limit": show_keys_limit} if show_keys_limit is not None else {}
             return _call_audit_redis_host_with_stage_debug(
                 host,
                 port,
@@ -828,9 +852,11 @@ def audit_redis_targets(
                 run_deep_checks=False,
                 debug=bool(debug_emit),
                 debug_emit=debug_emit,
+                **limit_kwargs,
             )
 
         def _deep_task(host: str) -> dict[str, Any]:
+            limit_kwargs = {"show_keys_limit": show_keys_limit} if show_keys_limit is not None else {}
             return _call_audit_redis_host_with_stage_debug(
                 host,
                 port,
@@ -845,6 +871,7 @@ def audit_redis_targets(
                 run_deep_checks=True,
                 debug=bool(debug_emit),
                 debug_emit=debug_emit,
+                **limit_kwargs,
             )
 
         def _emit_detect(detect_record: dict[str, Any]) -> None:
@@ -984,6 +1011,8 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     stream_to_stdout = not bool(args.output)
     dump_keys_flag = bool(getattr(args, "dump", False))
+    show_keys = show_flag_enabled(getattr(args, "show_keys", False))
+    show_keys_limit = show_flag_limit(getattr(args, "show_keys", False))
 
     def emit_line(line: str) -> None:
         if args.output_format != "txt":
@@ -1014,8 +1043,8 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append(f"credfile={len(credential_file_entries)}")
         elif args.defcreds:
             mode_parts.append("defcreds")
-        if args.show_keys:
-            mode_parts.append("show-keys")
+        if show_keys:
+            mode_parts.append(f"show-keys:{show_keys_limit}" if show_keys_limit is not None else "show-keys")
         if dump_keys_flag:
             mode_parts.append("dump")
         if args.key:
@@ -1031,8 +1060,8 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append(f"credfile={len(credential_file_entries)}")
         elif args.defcreds:
             mode_parts.append("defcreds")
-        if args.show_keys:
-            mode_parts.append("show-keys")
+        if show_keys:
+            mode_parts.append(f"show-keys:{show_keys_limit}" if show_keys_limit is not None else "show-keys")
         if dump_keys_flag:
             mode_parts.append("dump")
         if args.key:
@@ -1088,7 +1117,8 @@ def run_redis_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                         username=run_username,
                         password=run_password,
                         defcreds=args.defcreds if credential_file_entries is None else False,
-                        show_keys=args.show_keys,
+                        show_keys=show_keys,
+                        show_keys_limit=show_keys_limit,
                         dump_keys=dump_keys_flag,
                         query_key=args.key,
                         output_path=args.output,

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..show_limits import optional_show_count_kwargs
+
 
 def configure_zookeeper_parser(
     parser: argparse.ArgumentParser,
@@ -63,7 +65,12 @@ def configure_zookeeper_parser(
         metavar="value",
         help="Optional ZooKeeper password for digest auth credential check.",
     )
-    actions.add_argument("--show-znodes", action="store_true", help="Show znode paths after successful access/auth.")
+    actions.add_argument(
+        "--show-znodes",
+        **optional_show_count_kwargs(
+            "Show znode paths after successful access/auth. Optional count overrides --max-znodes for display."
+        ),
+    )
     actions.add_argument(
         "--dump",
         dest="dump",

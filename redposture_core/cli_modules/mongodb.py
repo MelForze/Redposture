@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..show_limits import optional_show_count_kwargs
+
 
 class MongoDBHelpFormatter(argparse.HelpFormatter):
     def _format_action_invocation(self, action: argparse.Action) -> str:
@@ -83,7 +85,10 @@ def configure_mongodb_parser(
         help="Try default MongoDB credentials root:root, admin:admin, root:password, mongo:mongo, mongodb:mongodb.",
     )
 
-    discovery.add_argument("--show-databases", action="store_true", help="Show available database names.")
+    discovery.add_argument(
+        "--show-databases",
+        **optional_show_count_kwargs("Show available database names. Optional count limits output."),
+    )
     discovery.add_argument(
         "--database",
         dest="database",
@@ -91,7 +96,10 @@ def configure_mongodb_parser(
         metavar="name",
         help="Target database for collection/index/dump/query operations. Omitted value walks user databases.",
     )
-    discovery.add_argument("--show-collections", action="store_true", help="Show collection names and document counts.")
+    discovery.add_argument(
+        "--show-collections",
+        **optional_show_count_kwargs("Show collection names and document counts. Optional count limits output."),
+    )
     discovery.add_argument(
         "--collection",
         dest="collections",
@@ -108,7 +116,10 @@ def configure_mongodb_parser(
         help="Target document by _id for selected --collection target(s).",
     )
     discovery.add_argument(
-        "--show-indexes", action="store_true", help="Show index names for selected/readable collections."
+        "--show-indexes",
+        **optional_show_count_kwargs(
+            "Show index names for selected/readable collections. Optional count limits output."
+        ),
     )
     discovery.add_argument(
         "--index",

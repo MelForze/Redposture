@@ -48,6 +48,7 @@ from .clients.kafka import (
 from .console import Console
 from .logger import AttemptLogger
 from .rendering import CountColorRule, render_colored_marker_line
+from .show_limits import limit_metadata, limit_sequence, show_flag_enabled, show_flag_limit
 from .stage_runtime import (
     LineOutputSink,
     StageTelemetryBuilder,
@@ -210,6 +211,7 @@ def _audit_kafka_via_sasl_fallback(
     query_topic: str | None,
     dump: bool,
     max_messages: int,
+    show_topics_limit: int | None = None,
 ) -> dict[str, Any] | None:
     provided_credentials = bool(username and password)
     started = time.monotonic()
@@ -306,6 +308,7 @@ def _audit_kafka_via_sasl_fallback(
                 "provided_password": password if provided_credentials else None,
                 "provided_credentials_ok": provided_credentials_ok,
                 "show_topics": show_topics,
+                "show_topics_limit": show_topics_limit,
                 "query_topic": query_topic_name or None,
                 "topic_count": topic_count,
                 "topics": topic_names,
@@ -336,6 +339,7 @@ def _audit_kafka_host(
     query_topic: str | None,
     dump: bool,
     max_messages: int,
+    show_topics_limit: int | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     provided_credentials = bool(username and password)
@@ -357,6 +361,7 @@ def _audit_kafka_host(
                             username=username,
                             password=password,
                             show_topics=show_topics,
+                            show_topics_limit=show_topics_limit,
                             query_topic=query_topic,
                             dump=dump,
                             max_messages=max_messages,
@@ -375,6 +380,7 @@ def _audit_kafka_host(
                         "provided_password": password if provided_credentials else None,
                         "provided_credentials_ok": None,
                         "show_topics": show_topics,
+                        "show_topics_limit": show_topics_limit,
                         "query_topic": query_topic,
                         "dump": bool(dump),
                         "max_messages": max_messages if dump else None,
@@ -522,6 +528,7 @@ def _audit_kafka_host(
                     "provided_password": password if provided_credentials else None,
                     "provided_credentials_ok": provided_credentials_ok,
                     "show_topics": show_topics,
+                    "show_topics_limit": show_topics_limit,
                     "query_topic": query_topic_name or None,
                     "dump": bool(dump),
                     "max_messages": max_messages if dump else None,
@@ -547,6 +554,7 @@ def _audit_kafka_host(
                     username=username,
                     password=password,
                     show_topics=show_topics,
+                    show_topics_limit=show_topics_limit,
                     query_topic=query_topic,
                     dump=dump,
                     max_messages=max_messages,
@@ -569,6 +577,7 @@ def _audit_kafka_host(
         "provided_password": password if provided_credentials else None,
         "provided_credentials_ok": None,
         "show_topics": show_topics,
+        "show_topics_limit": show_topics_limit,
         "query_topic": (query_topic or "").strip() or None,
         "dump": bool(dump),
         "max_messages": max_messages if dump else None,
@@ -681,6 +690,10 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
     topic_names: list[str] = []
     if isinstance(topics, list):
         topic_names = sorted(str(item) for item in topics)
+    raw_limit = record.get("show_topics_limit")
+    show_topics_limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
+    topic_meta = limit_metadata(topic_names, show_topics_limit)
+    displayed_topic_names = limit_sequence(topic_names, show_topics_limit)
 
     dump_topics_raw = record.get("dump_topics")
     dump_topics: list[str] = []
@@ -734,7 +747,10 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
                         "host": record.get("host"),
                         "port": record.get("port"),
                         "topic_count": record.get("topic_count"),
-                        "topics": topic_names,
+                        "topics": displayed_topic_names,
+                        "topics_shown": topic_meta["shown"],
+                        "topics_limit": topic_meta["limit"],
+                        "topics_truncated": topic_meta["truncated"],
                     },
                     ensure_ascii=False,
                 )
@@ -799,8 +815,12 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
     prefix = _nxc_prefix(record)
     lines: list[str] = []
     if show_topics and topic_names:
-        lines.append(f"{prefix} [*] Show Topics")
-        for item in topic_names:
+        total = record.get("topic_count")
+        if show_topics_limit is not None and isinstance(total, int) and total > len(displayed_topic_names):
+            lines.append(f"{prefix} [*] Show Topics (showing:{len(displayed_topic_names)} of {total})")
+        else:
+            lines.append(f"{prefix} [*] Show Topics")
+        for item in displayed_topic_names:
             lines.append(f"{prefix} {item}")
     if query_topic:
         lines.append(f"{prefix} [*] Topic {query_topic}")
@@ -866,6 +886,7 @@ def _call_audit_kafka_host_with_stage_debug(
     run_deep_checks: bool,
     debug: bool,
     debug_emit: Callable[[str], None] | None,
+    show_topics_limit: int | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     record = _audit_kafka_host(
@@ -879,6 +900,7 @@ def _call_audit_kafka_host_with_stage_debug(
         query_topic if run_deep_checks else None,
         dump if run_deep_checks else False,
         max_messages,
+        show_topics_limit=show_topics_limit if run_deep_checks else None,
     )
 
     result: dict[str, Any] = dict(record)
@@ -950,6 +972,7 @@ def audit_kafka_targets(
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
     command_progress: Any | None = None,
+    show_topics_limit: int | None = None,
 ) -> tuple[int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -973,6 +996,7 @@ def audit_kafka_targets(
         deep_requested = bool(show_topics or query_topic or dump)
 
         def _detect_task(host: str) -> dict[str, Any]:
+            limit_kwargs = {"show_topics_limit": show_topics_limit} if show_topics_limit is not None else {}
             return _call_audit_kafka_host_with_stage_debug(
                 host,
                 port,
@@ -987,9 +1011,11 @@ def audit_kafka_targets(
                 run_deep_checks=False,
                 debug=bool(debug_emit),
                 debug_emit=debug_emit,
+                **limit_kwargs,
             )
 
         def _deep_task(host: str) -> dict[str, Any]:
+            limit_kwargs = {"show_topics_limit": show_topics_limit} if show_topics_limit is not None else {}
             return _call_audit_kafka_host_with_stage_debug(
                 host,
                 port,
@@ -1004,6 +1030,7 @@ def audit_kafka_targets(
                 run_deep_checks=True,
                 debug=bool(debug_emit),
                 debug_emit=debug_emit,
+                **limit_kwargs,
             )
 
         def _deep_gate(detect_record: dict[str, Any]) -> tuple[bool, str]:
@@ -1154,6 +1181,8 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
 
     stream_to_stdout = not bool(args.output)
+    show_topics = show_flag_enabled(getattr(args, "show_topics", False))
+    show_topics_limit = show_flag_limit(getattr(args, "show_topics", False))
 
     def emit_line(line: str) -> None:
         if args.output_format != "txt":
@@ -1186,8 +1215,8 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append("provided-creds")
         elif defcreds:
             mode_parts.append("defcreds")
-        if args.show_topics:
-            mode_parts.append("show-topics")
+        if show_topics:
+            mode_parts.append(f"show-topics:{show_topics_limit}" if show_topics_limit is not None else "show-topics")
         if args.topic:
             mode_parts.append(f"topic={args.topic}")
         if args.dump:
@@ -1205,8 +1234,8 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             mode_parts.append("provided-creds")
         elif defcreds:
             mode_parts.append("defcreds")
-        if args.show_topics:
-            mode_parts.append("show-topics")
+        if show_topics:
+            mode_parts.append(f"show-topics:{show_topics_limit}" if show_topics_limit is not None else "show-topics")
         if args.topic:
             mode_parts.append(f"topic={args.topic}")
         if args.dump:
@@ -1270,7 +1299,8 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             workers=args.workers,
             username=run_username,
             password=run_password,
-            show_topics=args.show_topics and include_data,
+            show_topics=show_topics and include_data,
+            show_topics_limit=show_topics_limit if include_data else None,
             query_topic=args.topic if include_data else None,
             dump=args.dump and include_data,
             max_messages=args.max_messages,
@@ -1358,7 +1388,8 @@ def run_kafka_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                             workers=args.workers,
                             username=run_username,
                             password=run_password,
-                            show_topics=args.show_topics and run_show_deep,
+                            show_topics=show_topics and run_show_deep,
+                            show_topics_limit=show_topics_limit if run_show_deep else None,
                             query_topic=args.topic if run_show_deep else None,
                             dump=args.dump and run_show_deep,
                             max_messages=args.max_messages,

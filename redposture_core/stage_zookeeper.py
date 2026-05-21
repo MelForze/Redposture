@@ -36,6 +36,7 @@ from .clients.zookeeper import (
 from .console import Console
 from .logger import AttemptLogger
 from .rendering import BooleanColorRule, CountColorRule, render_colored_marker_line
+from .show_limits import show_flag_enabled, show_flag_limit
 from .stage_runtime import (
     TwoPassAuditRunner,
     progress_total_from_groups,
@@ -2022,7 +2023,9 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     stream_to_stdout = not bool(args.output)
     query_znode = _normalize_znode_path(getattr(args, "znode", None))
-    show_znodes = bool(args.show_znodes)
+    show_znodes = show_flag_enabled(getattr(args, "show_znodes", False))
+    show_znodes_limit = show_flag_limit(getattr(args, "show_znodes", False))
+    effective_max_znodes = show_znodes_limit or int(args.max_znodes)
     dump = bool(getattr(args, "dump", False))
 
     def emit_line(line: str) -> None:
@@ -2054,7 +2057,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         elif username is not None and password is not None:
             mode_parts.append("provided-creds")
         if show_znodes:
-            mode_parts.append("show-znodes")
+            mode_parts.append(f"show-znodes:{show_znodes_limit}" if show_znodes_limit is not None else "show-znodes")
         if dump:
             mode_parts.append("dump")
         if query_znode:
@@ -2062,7 +2065,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         mode = "+".join(mode_parts)
         console.info(
             f"zookeeper audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
-            f"workers={args.workers} retries={args.retries} max_znodes={args.max_znodes} enum_workers={enum_workers} "
+            f"workers={args.workers} retries={args.retries} max_znodes={effective_max_znodes} enum_workers={enum_workers} "
             f"mode={mode} format=txt"
         )
     if args.debug and not stream_to_stdout:
@@ -2072,7 +2075,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         elif username is not None and password is not None:
             mode_parts.append("provided-creds")
         if show_znodes:
-            mode_parts.append("show-znodes")
+            mode_parts.append(f"show-znodes:{show_znodes_limit}" if show_znodes_limit is not None else "show-znodes")
         if dump:
             mode_parts.append("dump")
         if query_znode:
@@ -2080,7 +2083,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         mode = "+".join(mode_parts)
         console.info(
             f"zookeeper audit started: hosts={len(hosts)} ports={len(ports)} timeout={args.timeout}s "
-            f"workers={args.workers} retries={args.retries} max_znodes={args.max_znodes} enum_workers={enum_workers} "
+            f"workers={args.workers} retries={args.retries} max_znodes={effective_max_znodes} enum_workers={enum_workers} "
             f"mode={mode} format={args.output_format} output={args.output}"
         )
 
@@ -2134,7 +2137,7 @@ def run_zookeeper_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                         show_znodes=show_znodes,
                         dump=dump,
                         query_znode=query_znode,
-                        max_znodes=args.max_znodes,
+                        max_znodes=effective_max_znodes,
                         output_path=args.output,
                         output_format=args.output_format,
                         emit_line=emit_line,

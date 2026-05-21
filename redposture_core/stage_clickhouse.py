@@ -18,6 +18,7 @@ from uuid import UUID
 from .console import Console
 from .logger import AttemptLogger
 from .rendering import BooleanColorRule, CountColorRule, render_colored_marker_line
+from .show_limits import limit_metadata, limit_sequence, show_flag_enabled, show_flag_limit
 from .stage_runtime import (
     TwoPassAuditRunner,
     merge_stage_records,
@@ -1294,6 +1295,10 @@ def _format_databases_detail_records(record: dict[str, Any], output_format: str)
     database_names = record.get("database_names")
     if not isinstance(database_names, list) or not database_names:
         return []
+    raw_limit = record.get("show_databases_limit")
+    limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
+    database_meta = limit_metadata(database_names, limit)
+    displayed_database_names = limit_sequence(database_names, limit)
 
     if output_format == "json":
         return [
@@ -1305,15 +1310,21 @@ def _format_databases_detail_records(record: dict[str, Any], output_format: str)
                     "host": record.get("host"),
                     "port": record.get("port"),
                     "database_count": len(database_names),
-                    "databases": [str(item) for item in database_names],
+                    "databases": [str(item) for item in displayed_database_names],
+                    "databases_shown": database_meta["shown"],
+                    "databases_limit": database_meta["limit"],
+                    "databases_truncated": database_meta["truncated"],
                 },
                 ensure_ascii=False,
             )
         ]
 
     prefix = _nxc_prefix(record)
-    lines = [f"{prefix} [*] Dump Databases"]
-    for name in database_names:
+    if limit is not None and len(database_names) > len(displayed_database_names):
+        lines = [f"{prefix} [*] Dump Databases (showing:{len(displayed_database_names)} of {len(database_names)})"]
+    else:
+        lines = [f"{prefix} [*] Dump Databases"]
+    for name in displayed_database_names:
         lines.append(f"{prefix} {str(name)}")
     return lines
 
@@ -1325,6 +1336,10 @@ def _format_tables_detail_records(record: dict[str, Any], output_format: str) ->
     table_names = record.get("table_names")
     if not isinstance(table_names, list) or not table_names:
         return []
+    raw_limit = record.get("show_tables_limit")
+    limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
+    table_meta = limit_metadata(table_names, limit)
+    displayed_table_names = limit_sequence(table_names, limit)
 
     if output_format == "json":
         return [
@@ -1336,15 +1351,21 @@ def _format_tables_detail_records(record: dict[str, Any], output_format: str) ->
                     "host": record.get("host"),
                     "port": record.get("port"),
                     "table_count": len(table_names),
-                    "tables": [str(item) for item in table_names],
+                    "tables": [str(item) for item in displayed_table_names],
+                    "tables_shown": table_meta["shown"],
+                    "tables_limit": table_meta["limit"],
+                    "tables_truncated": table_meta["truncated"],
                 },
                 ensure_ascii=False,
             )
         ]
 
     prefix = _nxc_prefix(record)
-    lines = [f"{prefix} [*] Dump Tables"]
-    for name in table_names:
+    if limit is not None and len(table_names) > len(displayed_table_names):
+        lines = [f"{prefix} [*] Dump Tables (showing:{len(displayed_table_names)} of {len(table_names)})"]
+    else:
+        lines = [f"{prefix} [*] Dump Tables"]
+    for name in displayed_table_names:
         lines.append(f"{prefix} {str(name)}")
     return lines
 
@@ -1353,12 +1374,17 @@ def _format_table_columns_detail_records(record: dict[str, Any], output_format: 
     table_columns_info = record.get("table_columns_info")
     if not isinstance(table_columns_info, list) or not table_columns_info:
         return []
+    raw_limit = record.get("show_columns_limit")
+    limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
 
     if output_format == "json":
         lines: list[str] = []
         for item in table_columns_info:
             if not isinstance(item, dict):
                 continue
+            columns = item.get("columns")
+            column_names = [str(column) for column in columns] if isinstance(columns, list) else []
+            column_meta = limit_metadata(column_names, limit)
             lines.append(
                 json.dumps(
                     {
@@ -1368,7 +1394,10 @@ def _format_table_columns_detail_records(record: dict[str, Any], output_format: 
                         "host": record.get("host"),
                         "port": record.get("port"),
                         "table": str(item.get("table") or ""),
-                        "columns": [str(col) for col in item.get("columns") or []],
+                        "columns": limit_sequence(column_names, limit),
+                        "columns_shown": column_meta["shown"],
+                        "columns_limit": column_meta["limit"],
+                        "columns_truncated": column_meta["truncated"],
                         "error": str(item.get("error")) if item.get("error") else None,
                     },
                     ensure_ascii=False,
@@ -1389,7 +1418,13 @@ def _format_table_columns_detail_records(record: dict[str, Any], output_format: 
             continue
         columns = item.get("columns")
         if isinstance(columns, list) and columns:
-            for column in columns:
+            column_names = [str(column) for column in columns]
+            displayed_columns = limit_sequence(column_names, limit)
+            if limit is not None and len(column_names) > len(displayed_columns):
+                lines[-1] = (
+                    f"{prefix} [*] Table Columns {table_name} (showing:{len(displayed_columns)} of {len(column_names)})"
+                )
+            for column in displayed_columns:
                 lines.append(f"{prefix} {str(column)}")
         else:
             lines.append(f"{prefix} <no columns>")
@@ -1591,6 +1626,9 @@ def _call_audit_clickhouse_host_with_stage_debug(
     dump_table_rows: bool,
     execute_command: str | None,
     sql_command: str | None,
+    show_databases_limit: int | None = None,
+    show_tables_limit: int | None = None,
+    show_columns_limit: int | None = None,
     *,
     port_protocols: list[tuple[int, str]] | None,
     run_deep_checks: bool,
@@ -1638,6 +1676,9 @@ def _call_audit_clickhouse_host_with_stage_debug(
             sql_command=sql_command if run_deep_checks else None,
         )
 
+    record["show_databases_limit"] = show_databases_limit if run_deep_checks else None
+    record["show_tables_limit"] = show_tables_limit if run_deep_checks else None
+    record["show_columns_limit"] = show_columns_limit if run_deep_checks else None
     result: dict[str, Any] = dict(record)
     debug_events: list[str] = []
 
@@ -1754,6 +1795,9 @@ def audit_clickhouse_targets(
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
     command_progress: Any | None = None,
+    show_databases_limit: int | None = None,
+    show_tables_limit: int | None = None,
+    show_columns_limit: int | None = None,
 ) -> tuple[int, int, int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -1787,6 +1831,15 @@ def audit_clickhouse_targets(
         )
 
         def _detect_task(host: str) -> dict[str, Any]:
+            limit_kwargs = {
+                key: value
+                for key, value in {
+                    "show_databases_limit": show_databases_limit,
+                    "show_tables_limit": show_tables_limit,
+                    "show_columns_limit": show_columns_limit,
+                }.items()
+                if value is not None
+            }
             return _call_audit_clickhouse_host_with_stage_debug(
                 host,
                 port,
@@ -1809,9 +1862,19 @@ def audit_clickhouse_targets(
                 run_deep_checks=False,
                 debug=bool(debug_emit),
                 debug_emit=debug_emit,
+                **limit_kwargs,
             )
 
         def _deep_task(host: str) -> dict[str, Any]:
+            limit_kwargs = {
+                key: value
+                for key, value in {
+                    "show_databases_limit": show_databases_limit,
+                    "show_tables_limit": show_tables_limit,
+                    "show_columns_limit": show_columns_limit,
+                }.items()
+                if value is not None
+            }
             return _call_audit_clickhouse_host_with_stage_debug(
                 host,
                 port,
@@ -1834,6 +1897,7 @@ def audit_clickhouse_targets(
                 run_deep_checks=True,
                 debug=bool(debug_emit),
                 debug_emit=debug_emit,
+                **limit_kwargs,
             )
 
         def _emit_detect(detect_record: dict[str, Any]) -> None:
@@ -2188,7 +2252,12 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
         console.error(columns_error)
         return 2
 
-    show_columns = bool(getattr(args, "show_columns", False))
+    show_databases = show_flag_enabled(getattr(args, "show_databases", False))
+    show_databases_limit = show_flag_limit(getattr(args, "show_databases", False))
+    show_tables = show_flag_enabled(getattr(args, "show_tables", False))
+    show_tables_limit = show_flag_limit(getattr(args, "show_tables", False))
+    show_columns = show_flag_enabled(getattr(args, "show_columns", False))
+    show_columns_limit = show_flag_limit(getattr(args, "show_columns", False))
     dump_table_rows = bool(getattr(args, "dump", False))
     execute_command = str(getattr(args, "execute", "") or "").strip() or None
     sql_command = str(getattr(args, "sql_cmd", "") or "").strip() or None
@@ -2286,9 +2355,12 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
             defcreds=args.defcreds,
             database=args.database,
             protocol=shell_scan_protocol,
-            show_databases=args.show_databases,
-            show_tables=args.show_tables,
+            show_databases=show_databases,
+            show_tables=show_tables,
             show_columns=show_columns,
+            show_databases_limit=show_databases_limit,
+            show_tables_limit=show_tables_limit,
+            show_columns_limit=show_columns_limit,
             table_targets=table_targets,
             table_columns=table_columns,
             dump_table_rows=dump_table_rows,
@@ -2405,9 +2477,12 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
             defcreds=args.defcreds,
             database=args.database,
             protocol=shell_scan_protocol,
-            show_databases=args.show_databases,
-            show_tables=args.show_tables,
+            show_databases=show_databases,
+            show_tables=show_tables,
             show_columns=show_columns,
+            show_databases_limit=show_databases_limit,
+            show_tables_limit=show_tables_limit,
+            show_columns_limit=show_columns_limit,
             table_targets=table_targets,
             table_columns=table_columns,
             dump_table_rows=dump_table_rows,
@@ -2578,9 +2653,12 @@ def run_clickhouse_stage(args: argparse.Namespace, logger: AttemptLogger) -> int
                         defcreds=args.defcreds if credential_file_entries is None else False,
                         database=args.database,
                         protocol=str(group_protocol),
-                        show_databases=args.show_databases,
-                        show_tables=args.show_tables,
+                        show_databases=show_databases,
+                        show_tables=show_tables,
                         show_columns=show_columns,
+                        show_databases_limit=show_databases_limit,
+                        show_tables_limit=show_tables_limit,
+                        show_columns_limit=show_columns_limit,
                         table_targets=table_targets,
                         table_columns=table_columns,
                         dump_table_rows=dump_table_rows,

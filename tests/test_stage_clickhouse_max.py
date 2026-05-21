@@ -656,7 +656,7 @@ def test_render_colored_clickhouse_line_with_markers() -> None:
     )
     assert clickhouse_stage._render_colored_clickhouse_line(console, line) is True
     assert any(marker == "[+]" and color == "bright_green" for marker, color in console.paint_calls)
-    assert any("(DBs:1)" in text and color == "orange" for text, color in console.paint_calls)
+    assert any("DBs:1" in text and color == "orange" for text, color in console.paint_calls)
 
 
 def test_render_colored_clickhouse_line_returns_false_for_non_clickhouse() -> None:
