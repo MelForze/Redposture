@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..show_limits import optional_show_count_kwargs
+
 
 class PostgresHelpFormatter(argparse.HelpFormatter):
     def _format_action_invocation(self, action: argparse.Action) -> str:
@@ -79,8 +81,9 @@ def configure_postgres_parser(
     )
     discovery.add_argument(
         "--show-databases",
-        action="store_true",
-        help="Show available database names in output after successful access/auth.",
+        **optional_show_count_kwargs(
+            "Show available database names in output after successful access/auth. Optional count limits output."
+        ),
     )
     discovery.add_argument(
         "--database",
@@ -94,8 +97,9 @@ def configure_postgres_parser(
     )
     discovery.add_argument(
         "--show-tables",
-        action="store_true",
-        help="Show readable table names with inline Rows:N after successful access/auth.",
+        **optional_show_count_kwargs(
+            "Show readable table names with inline Rows:N after successful access/auth. Optional count limits output."
+        ),
     )
     discovery.add_argument(
         "--table",
@@ -107,8 +111,7 @@ def configure_postgres_parser(
     )
     discovery.add_argument(
         "--show-columns",
-        action="store_true",
-        help="Show column names for --table target(s).",
+        **optional_show_count_kwargs("Show column names for --table target(s). Optional count limits output."),
     )
     discovery.add_argument(
         "--column",

@@ -196,6 +196,38 @@ def test_format_keys_detail_records_contains_sections() -> None:
     assert any("[*] Dump Keys" in line for line in lines)
 
 
+def test_format_keys_detail_records_honors_show_limit() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 6379,
+        "show_keys": True,
+        "show_keys_limit": 1,
+        "dump_keys": False,
+        "query_key": None,
+        "keys": ["k2", "k1"],
+        "key_count": 2,
+    }
+    lines = redis_stage._format_keys_detail_records(record, "txt")
+    assert any("Show Keys (showing:1 of 2)" in line for line in lines)
+    assert any(line.strip().endswith("k1") for line in lines)
+    assert not any(line.strip().endswith("k2") for line in lines)
+
+
+def test_scan_redis_keys_stops_at_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def fake_send_cmd(_sock: object, *_parts: str) -> tuple[str, list[object]]:
+        nonlocal calls
+        calls += 1
+        return "array", ["1", ["a", "b", "c"]]
+
+    monkeypatch.setattr(redis_stage, "_send_cmd", fake_send_cmd)
+    keys, err = redis_stage._scan_redis_keys(object(), limit=2)
+    assert err is None
+    assert keys == ["a", "b"]
+    assert calls == 1
+
+
 def test_is_connection_timeout_fail_record_detection() -> None:
     assert redis_stage._is_connection_timeout_fail_record({"status": "fail", "error": "connection timeout"})
     assert redis_stage._is_connection_timeout_fail_record({"status": "fail", "error": "socket timed out"})
