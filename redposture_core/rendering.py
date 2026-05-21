@@ -177,6 +177,13 @@ def colorize_spans(
         bounded_end = max(bounded_start, min(text_len, int(end)))
         if bounded_start == bounded_end:
             continue
+        # Keep structural parentheses visually neutral while highlighting the
+        # useful key/value payload inside tokens such as ``(auth required:True)``.
+        if text[bounded_start : bounded_start + 1] == "(" and text[bounded_end - 1 : bounded_end] == ")":
+            bounded_start += 1
+            bounded_end -= 1
+        if bounded_start == bounded_end:
+            continue
         normalized.append((bounded_start, bounded_end, str(color)))
 
     if not normalized:

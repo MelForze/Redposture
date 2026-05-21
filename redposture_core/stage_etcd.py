@@ -17,6 +17,7 @@ from typing import Any
 from .console import Console
 from .logger import AttemptLogger
 from .rendering import CountColorRule, render_colored_marker_line
+from .show_limits import limit_metadata, limit_sequence, show_flag_enabled, show_flag_limit
 from .stage_runtime import (
     TwoPassAuditRunner,
     merge_stage_records,
@@ -33,6 +34,7 @@ _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _ETCD_DEEP_STATUSES = {"open_no_auth"}
+_ETCD_V3_ALL_RANGE_KEY_B64 = "AA=="
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -304,14 +306,19 @@ def _dump_v2_key(host: str, port: int, key: str, timeout: float) -> tuple[str | 
     return f"{key}:{_format_etcd_text(node.get('value'))}", None
 
 
-def _dump_v3_all(host: str, port: int, timeout: float) -> tuple[list[str] | None, str | None]:
+def _dump_v3_all(
+    host: str, port: int, timeout: float, *, limit: int | None = None
+) -> tuple[list[str] | None, str | None]:
+    payload: dict[str, Any] = {"key": _ETCD_V3_ALL_RANGE_KEY_B64, "range_end": _ETCD_V3_ALL_RANGE_KEY_B64}
+    if limit is not None:
+        payload["limit"] = limit
     status, body = _http_json_request(
         host,
         port,
         "POST",
         "/v3/kv/range",
         timeout,
-        payload={"key": "", "range_end": "AA=="},
+        payload=payload,
     )
     if status in (401, 403) or _body_indicates_auth_required(body):
         return None, "authentication required"
@@ -374,6 +381,7 @@ def _audit_etcd_host(
     show_keys: bool,
     dump_keys: bool,
     query_key: str | None,
+    show_keys_limit: int | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -435,7 +443,11 @@ def _audit_etcd_host(
                         "POST",
                         "/v3/kv/range",
                         timeout,
-                        payload={"key": "", "range_end": "AA==", "count_only": True},
+                        payload={
+                            "key": _ETCD_V3_ALL_RANGE_KEY_B64,
+                            "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
+                            "count_only": True,
+                        },
                     )
                     if range_status == 200:
                         v3_auth_required = False
@@ -466,12 +478,19 @@ def _audit_etcd_host(
                         if all_key_values is None:
                             key_dump_error = "/v2/keys returned invalid JSON"
                     elif v3_supported:
-                        all_key_values, key_dump_error = _dump_v3_all(host, port, timeout)
+                        all_key_values, key_dump_error = _dump_v3_all(
+                            host,
+                            port,
+                            timeout,
+                            limit=show_keys_limit if show_keys and not dump_keys else None,
+                        )
 
                     if isinstance(all_key_values, list):
                         if show_keys:
                             names = {_key_name_from_pair(item) for item in all_key_values}
                             keys = sorted(item for item in names if item)
+                            if show_keys_limit is not None:
+                                keys = keys[:show_keys_limit]
                         if dump_keys:
                             key_values = [str(item) for item in all_key_values]
 
@@ -509,6 +528,7 @@ def _audit_etcd_host(
                     "auth_required": None,
                     "key_count": None,
                     "show_keys": show_keys,
+                    "show_keys_limit": show_keys_limit,
                     "dump_keys": dump_keys,
                     "query_key": query_key,
                     "keys": None,
@@ -535,6 +555,7 @@ def _audit_etcd_host(
                 "auth_required": auth_required,
                 "key_count": key_count,
                 "show_keys": show_keys,
+                "show_keys_limit": show_keys_limit,
                 "dump_keys": dump_keys,
                 "query_key": query_key,
                 "keys": keys,
@@ -560,6 +581,7 @@ def _audit_etcd_host(
         "auth_required": None,
         "key_count": None,
         "show_keys": show_keys,
+        "show_keys_limit": show_keys_limit,
         "dump_keys": dump_keys,
         "query_key": query_key,
         "keys": None,
@@ -645,6 +667,10 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
     key_names: list[str] = []
     if isinstance(keys, list):
         key_names = sorted(str(item) for item in keys)
+    raw_limit = record.get("show_keys_limit")
+    show_keys_limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
+    key_meta = limit_metadata(key_names, show_keys_limit)
+    displayed_key_names = limit_sequence(key_names, show_keys_limit)
 
     dumped_key_values: list[str] = []
     if isinstance(key_values, list):
@@ -662,7 +688,10 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
                         "host": record.get("host"),
                         "port": record.get("port"),
                         "key_count": record.get("key_count"),
-                        "keys": key_names,
+                        "keys": displayed_key_names,
+                        "keys_shown": key_meta["shown"],
+                        "keys_limit": key_meta["limit"],
+                        "keys_truncated": key_meta["truncated"],
                     },
                     ensure_ascii=False,
                 )
@@ -702,8 +731,12 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
     prefix = _nxc_prefix(record)
     lines: list[str] = []
     if show_keys and key_names:
-        lines.append(f"{prefix} [*] Show Keys")
-        for item in key_names:
+        total = record.get("key_count")
+        if show_keys_limit is not None and isinstance(total, int) and total > len(displayed_key_names):
+            lines.append(f"{prefix} [*] Show Keys (showing:{len(displayed_key_names)} of {total})")
+        else:
+            lines.append(f"{prefix} [*] Show Keys")
+        for item in displayed_key_names:
             lines.append(f"{prefix} {_format_etcd_text(item)}")
     if query_key and isinstance(query_key_value, str):
         lines.append(f"{prefix} [*] Dump Key {query_key}")
@@ -735,12 +768,16 @@ def _call_audit_etcd_host_with_stage_debug(
     show_keys: bool,
     dump_keys: bool,
     query_key: str | None,
+    show_keys_limit: int | None = None,
     *,
     run_deep_checks: bool,
     debug: bool,
     debug_emit: Callable[[str], None] | None,
 ) -> dict[str, Any]:
     started = time.monotonic()
+    audit_limit_kwargs = (
+        {"show_keys_limit": show_keys_limit if run_deep_checks else None} if show_keys_limit is not None else {}
+    )
     record = _audit_etcd_host(
         host,
         port,
@@ -749,6 +786,7 @@ def _call_audit_etcd_host_with_stage_debug(
         show_keys if run_deep_checks else False,
         dump_keys if run_deep_checks else False,
         query_key if run_deep_checks else None,
+        **audit_limit_kwargs,
     )
 
     result: dict[str, Any] = dict(record)
@@ -853,6 +891,7 @@ def audit_etcd_targets(
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
     command_progress: Any | None = None,
+    show_keys_limit: int | None = None,
 ) -> tuple[int, int, int, int]:
     total = 0
     open_no_auth = 0
@@ -875,6 +914,7 @@ def audit_etcd_targets(
         deep_requested = bool(show_keys or dump_keys or query_key)
 
         def _detect_task(host: str) -> dict[str, Any]:
+            limit_kwargs = {"show_keys_limit": show_keys_limit} if show_keys_limit is not None else {}
             return _call_audit_etcd_host_with_stage_debug(
                 host,
                 port,
@@ -886,9 +926,11 @@ def audit_etcd_targets(
                 run_deep_checks=False,
                 debug=bool(debug_emit),
                 debug_emit=debug_emit,
+                **limit_kwargs,
             )
 
         def _deep_task(host: str) -> dict[str, Any]:
+            limit_kwargs = {"show_keys_limit": show_keys_limit} if show_keys_limit is not None else {}
             return _call_audit_etcd_host_with_stage_debug(
                 host,
                 port,
@@ -900,6 +942,7 @@ def audit_etcd_targets(
                 run_deep_checks=True,
                 debug=bool(debug_emit),
                 debug_emit=debug_emit,
+                **limit_kwargs,
             )
 
         def _emit_detect(detect_record: dict[str, Any]) -> None:
@@ -1031,7 +1074,8 @@ def run_etcd_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     stream_to_stdout = not bool(args.output)
     query_key = _normalize_etcd_key(getattr(args, "key", None))
-    show_keys = bool(args.show_keys)
+    show_keys = show_flag_enabled(getattr(args, "show_keys", False))
+    show_keys_limit = show_flag_limit(getattr(args, "show_keys", False))
     dump_keys = bool(getattr(args, "dump", False))
 
     def emit_line(line: str) -> None:
@@ -1087,6 +1131,7 @@ def run_etcd_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 retries=args.retries,
                 workers=args.workers,
                 show_keys=show_keys,
+                show_keys_limit=show_keys_limit,
                 dump_keys=dump_keys,
                 query_key=query_key,
                 output_path=args.output,

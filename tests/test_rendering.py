@@ -62,6 +62,18 @@ def test_colorize_spans_skips_empty_and_overlapping_ranges() -> None:
     assert ("cde", "yellow") not in console.paint_calls
 
 
+def test_colorize_spans_keeps_parentheses_uncolored_for_whole_token_span() -> None:
+    console = _Console()
+
+    rendered = colorize_spans(console, "prefix (auth required:True) suffix", [(7, 27, "bright_green")])
+
+    assert rendered
+    assert ("auth required:True", "bright_green") in console.paint_calls
+    assert ("prefix (", "white") in console.paint_calls
+    assert any(text.startswith(")") and color == "white" for text, color in console.paint_calls)
+    assert ("(auth required:True)", "bright_green") not in console.paint_calls
+
+
 def test_render_tagged_detail_line_and_marker_line_reject_invalid_lines() -> None:
     console = _Console()
 
@@ -125,5 +137,5 @@ def test_render_colored_marker_line_applies_declarative_rules_and_extra_spans() 
     assert rendered is True
     assert ("REDIS", "blue") in console.paint_calls
     assert ("[+]", "bright_green") in console.paint_calls
-    assert any(text == "(keys:2)" and color == "red" for text, color in console.paint_calls)
+    assert any(text == "keys:2" and color == "red" for text, color in console.paint_calls)
     assert any("token=abc" in text and color == "orange" for text, color in console.paint_calls)

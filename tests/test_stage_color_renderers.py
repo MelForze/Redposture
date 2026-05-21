@@ -37,7 +37,18 @@ class _RecordingConsole:
 
 
 def _contains_paint(calls: list[tuple[str, str]], text_fragment: str, color: str) -> bool:
-    return any(color_name == color and text_fragment in text for text, color_name in calls)
+    fragments = [text_fragment]
+    if text_fragment.startswith("(") and text_fragment.endswith(")"):
+        fragments.append(text_fragment[1:-1])
+    return any(color_name == color and any(fragment in text for fragment in fragments) for text, color_name in calls)
+
+
+def _assert_parentheses_are_not_colored(calls: list[tuple[str, str]]) -> None:
+    for text, color in calls:
+        if color == "white":
+            continue
+        assert "(" not in text
+        assert ")" not in text
 
 
 _Renderer = Callable[[_RecordingConsole, str], bool]
@@ -111,6 +122,7 @@ def test_render_colored_redis_colors_auth_false_and_keys() -> None:
     assert _render_colored_redis_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(auth required:False)", "red")
     assert _contains_paint(console.paint_calls, "(keys:2)", "red")
+    _assert_parentheses_are_not_colored(console.paint_calls)
 
 
 def test_render_colored_etcd_colors_auth_unknown_yellow() -> None:

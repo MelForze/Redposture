@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..show_limits import optional_show_count_kwargs
+
 
 def configure_redis_parser(
     parser: argparse.ArgumentParser,
@@ -52,7 +54,10 @@ def configure_redis_parser(
         action="store_true",
         help="Try default Redis credentials redis:redis when auth is required.",
     )
-    actions.add_argument("--show-keys", action="store_true", help="Show Redis key names only (SCAN).")
+    actions.add_argument(
+        "--show-keys",
+        **optional_show_count_kwargs("Show Redis key names only (SCAN). Optional count limits scanned/shown keys."),
+    )
     actions.add_argument(
         "--dump",
         dest="dump",
@@ -102,7 +107,12 @@ def configure_etcd_parser(
         help="etcd port spec: single port, list/range, or file (examples: 2379, 2379,22379, ./ports.txt).",
     )
     add_multi_ports_flag(common)
-    actions.add_argument("--show-keys", action="store_true", help="Show etcd key names only when auth is not required.")
+    actions.add_argument(
+        "--show-keys",
+        **optional_show_count_kwargs(
+            "Show etcd key names only when auth is not required. Optional count limits output."
+        ),
+    )
     actions.add_argument(
         "--dump",
         dest="dump",
@@ -174,7 +184,10 @@ def configure_kafka_parser(
         action="store_true",
         help="Try default Kafka credentials admin:admin, kafka:kafka, kafka:password.",
     )
-    actions.add_argument("--show-topics", action="store_true", help="Show topic names after successful access/auth.")
+    actions.add_argument(
+        "--show-topics",
+        **optional_show_count_kwargs("Show topic names after successful access/auth. Optional count limits output."),
+    )
     actions.add_argument(
         "--topic",
         dest="topic",

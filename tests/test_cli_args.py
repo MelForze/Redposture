@@ -799,6 +799,29 @@ def test_redis_flags_are_parsed() -> None:
     assert args.output == "redis_audit.jsonl"
 
 
+@pytest.mark.parametrize(
+    ("argv", "dest", "expected"),
+    [
+        (["redis", "-t", "10.0.0.7", "--show-keys", "25"], "show_keys", 25),
+        (["etcd", "-t", "10.0.0.9", "--show-keys", "25"], "show_keys", 25),
+        (["kafka", "-t", "10.0.0.21", "--show-topics", "25"], "show_topics", 25),
+        (["zookeeper", "-t", "10.0.0.21", "--show-znodes", "25"], "show_znodes", 25),
+        (["postgres", "-t", "10.0.0.1", "--show-databases", "25"], "show_databases", 25),
+        (["postgres", "-t", "10.0.0.1", "--show-tables", "25"], "show_tables", 25),
+        (["postgres", "-t", "10.0.0.1", "--show-columns", "25", "--table", "public.users"], "show_columns", 25),
+        (["clickhouse", "-t", "10.0.0.1", "--show-databases", "25"], "show_databases", 25),
+        (["clickhouse", "-t", "10.0.0.1", "--show-tables", "25"], "show_tables", 25),
+        (["clickhouse", "-t", "10.0.0.1", "--show-columns", "25", "--table", "default.users"], "show_columns", 25),
+        (["mongodb", "-t", "10.0.0.1", "--show-databases", "25"], "show_databases", 25),
+        (["mongodb", "-t", "10.0.0.1", "--show-collections", "25"], "show_collections", 25),
+        (["mongodb", "-t", "10.0.0.1", "--show-indexes", "25"], "show_indexes", 25),
+    ],
+)
+def test_show_flags_accept_optional_count(argv: list[str], dest: str, expected: int) -> None:
+    args = parse_args(argv)
+    assert getattr(args, dest) == expected
+
+
 def test_redis_short_user_password_flags_are_parsed() -> None:
     args = parse_args(["redis", "-t", "10.0.0.7", "-u", "redis", "-p", "redis"])
     assert args.command == "redis"

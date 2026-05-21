@@ -300,6 +300,49 @@ def test_audit_etcd_host_v3_auth_required_and_unknown_auth(monkeypatch) -> None:
     assert "/v3/kv/range returned status 500" in str(unknown_record["error"])
 
 
+def test_audit_etcd_host_v3_range_probe_uses_valid_all_range_payload(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    seen_payloads: list[dict[str, object] | None] = []
+
+    def fake_request(
+        host: str,
+        port: int,
+        method: str,
+        path: str,
+        timeout: float,
+        *,
+        payload: dict[str, object] | None = None,
+    ) -> tuple[int, str]:
+        _ = (host, port, method, timeout)
+        if path == "/version":
+            return 200, '{"etcdserver":"3.5.14"}'
+        if path == "/v2/keys?recursive=true":
+            return 404, ""
+        if path == "/v3/auth/status":
+            return 500, "auth status disabled by gateway"
+        if path == "/v3/kv/range":
+            seen_payloads.append(payload)
+            if payload == {"key": "AA==", "range_end": "AA==", "count_only": True}:
+                return 200, '{"count":"8"}'
+            return 400, '{"error":"etcdserver: key is not provided"}'
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_request)
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+
+    assert seen_payloads == [{"key": "AA==", "range_end": "AA==", "count_only": True}]
+    assert record["status"] == "open_no_auth"
+    assert record["auth_required"] is False
+    assert record["key_count"] == 8
+
+
 def test_audit_etcd_host_marks_non_etcd_and_retries_failures(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     def fake_not_etcd(
         host: str,
@@ -577,6 +620,20 @@ def test_dump_v2_and_v3_helpers_cover_error_and_success_paths(monkeypatch: pytes
         "redposture_core.stage_etcd._http_json_request", lambda *_args, **_kwargs: (200, '{"kvs":["x"]}')
     )
     assert etcd._dump_v3_key("127.0.0.1", 2379, "/key", 1.0) == ("/key:<not found>", None)
+
+
+def test_dump_v3_all_uses_valid_all_range_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_payloads: list[dict[str, object] | None] = []
+
+    def fake_request(*_args: object, **kwargs: object) -> tuple[int, str]:
+        payload = kwargs.get("payload")
+        assert isinstance(payload, dict)
+        seen_payloads.append(payload)
+        return 200, '{"kvs":[]}'
+
+    monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_request)
+    assert etcd._dump_v3_all("127.0.0.1", 2379, 1.0, limit=2) == ([], None)
+    assert seen_payloads == [{"key": "AA==", "range_end": "AA==", "limit": 2}]
 
 
 def test_format_keys_detail_records_json_and_merge_stage_records() -> None:

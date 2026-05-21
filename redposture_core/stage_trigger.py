@@ -17,6 +17,7 @@ from .exporters.trigger import scan_exporters_and_trigger
 from .listener_runtime import parse_services, start_listeners_for_trigger, stop_started_listeners
 from .logger import AttemptLogger
 from .profiles import load_profiles
+from .rendering import colorize_spans
 from .servers import RunningServer
 from .stage_runtime import start_command_progress
 from .utils import collect_scan_ports, collect_scan_target_specs, normalize_ip_literal, normalize_scan_host, utc_now_iso
@@ -189,21 +190,7 @@ def _render_trigger_check_row(
     if key_match and key_match.group(1).isdigit() and int(key_match.group(1)) > 0:
         spans.append((key_match.start(), key_match.end(), "red"))
 
-    if not spans:
-        body_colored = console._paint(body, "white", sys.stdout)
-    else:
-        chunks: list[str] = []
-        cursor = 0
-        for start, end, color in sorted(spans, key=lambda item: item[0]):
-            if start < cursor:
-                continue
-            if start > cursor:
-                chunks.append(console._paint(body[cursor:start], "white", sys.stdout))
-            chunks.append(console._paint(body[start:end], color, sys.stdout))
-            cursor = end
-        if cursor < len(body):
-            chunks.append(console._paint(body[cursor:], "white", sys.stdout))
-        body_colored = "".join(chunks)
+    body_colored = colorize_spans(console, body, spans)
 
     line = (
         f"{console._paint(stage_segment, 'blue', sys.stdout)}"

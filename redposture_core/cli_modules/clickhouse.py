@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..show_limits import optional_show_count_kwargs
+
 
 def configure_clickhouse_parser(
     parser: argparse.ArgumentParser,
@@ -67,10 +69,14 @@ def configure_clickhouse_parser(
         help="Try default ClickHouse credentials default:<empty> and default:default.",
     )
     actions.add_argument(
-        "--show-databases", action="store_true", help="Show database names after successful access/auth."
+        "--show-databases",
+        **optional_show_count_kwargs("Show database names after successful access/auth. Optional count limits output."),
     )
     actions.add_argument(
-        "--show-tables", action="store_true", help="Show readable table names after successful access/auth."
+        "--show-tables",
+        **optional_show_count_kwargs(
+            "Show readable table names after successful access/auth. Optional count limits output."
+        ),
     )
     actions.add_argument(
         "--table",
@@ -80,7 +86,10 @@ def configure_clickhouse_parser(
         metavar="name",
         help="Target table (db.table or table). Can be used multiple times or with comma-separated values.",
     )
-    actions.add_argument("--show-columns", action="store_true", help="Show column names for --table target(s).")
+    actions.add_argument(
+        "--show-columns",
+        **optional_show_count_kwargs("Show column names for --table target(s). Optional count limits output."),
+    )
     actions.add_argument(
         "--column",
         dest="columns",

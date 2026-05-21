@@ -21,6 +21,7 @@ from .clients.mongodb import (
 from .console import Console
 from .logger import AttemptLogger
 from .rendering import CountColorRule, render_colored_marker_line
+from .show_limits import limit_metadata, limit_sequence, show_flag_enabled, show_flag_limit
 from .stage_runtime import (
     StageTelemetryBuilder,
     TwoPassAuditRunner,
@@ -437,8 +438,11 @@ def _base_record(
         "server_version": None,
         "hello": None,
         "show_databases": show_databases,
+        "show_databases_limit": None,
         "show_collections": show_collections,
+        "show_collections_limit": None,
         "show_indexes": show_indexes,
+        "show_indexes_limit": None,
         "collection_targets": collection_targets,
         "dump_documents": dump_documents,
         "dump_limit": dump_limit,
@@ -662,6 +666,9 @@ def _audit_mongodb_host_stage(
     document_selector: Any | None = None,
     index_filter: str | None = None,
     nosql_command: dict[str, Any] | None = None,
+    show_databases_limit: int | None = None,
+    show_collections_limit: int | None = None,
+    show_indexes_limit: int | None = None,
     *,
     run_deep_checks: bool,
     debug: bool,
@@ -689,6 +696,9 @@ def _audit_mongodb_host_stage(
         index_filter if run_deep_checks else None,
         nosql_command if run_deep_checks else None,
     )
+    record["show_databases_limit"] = show_databases_limit if run_deep_checks else None
+    record["show_collections_limit"] = show_collections_limit if run_deep_checks else None
+    record["show_indexes_limit"] = show_indexes_limit if run_deep_checks else None
     result = dict(record)
     status = str(result.get("status") or "fail")
     is_mongodb = bool(result.get("is_mongodb"))
@@ -791,6 +801,10 @@ def _format_databases_detail_records(record: dict[str, Any], output_format: str)
     names = record.get("database_names")
     if not isinstance(names, list):
         return []
+    raw_limit = record.get("show_databases_limit")
+    limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
+    meta = limit_metadata(names, limit)
+    displayed_names = limit_sequence(names, limit)
     if output_format == "json":
         return [
             json.dumps(
@@ -800,19 +814,30 @@ def _format_databases_detail_records(record: dict[str, Any], output_format: str)
                     "service": "mongodb",
                     "host": record.get("host"),
                     "port": record.get("port"),
-                    "databases": names,
+                    "databases": displayed_names,
+                    "databases_shown": meta["shown"],
+                    "databases_limit": meta["limit"],
+                    "databases_truncated": meta["truncated"],
                 },
                 ensure_ascii=False,
             )
         ]
     prefix = _nxc_prefix(record)
-    return [f"{prefix} [*] Databases"] + [f"{prefix} {name}" for name in names]
+    if limit is not None and len(names) > len(displayed_names):
+        header = f"{prefix} [*] Databases (showing:{len(displayed_names)} of {len(names)})"
+    else:
+        header = f"{prefix} [*] Databases"
+    return [header] + [f"{prefix} {name}" for name in displayed_names]
 
 
 def _format_collections_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
     rows = record.get("collections")
     if not isinstance(rows, list) or not rows:
         return []
+    raw_limit = record.get("show_collections_limit")
+    limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
+    meta = limit_metadata(rows, limit)
+    displayed_rows = limit_sequence(rows, limit)
     if output_format == "json":
         return [
             json.dumps(
@@ -822,14 +847,20 @@ def _format_collections_detail_records(record: dict[str, Any], output_format: st
                     "service": "mongodb",
                     "host": record.get("host"),
                     "port": record.get("port"),
-                    "collections": rows,
+                    "collections": displayed_rows,
+                    "collections_shown": meta["shown"],
+                    "collections_limit": meta["limit"],
+                    "collections_truncated": meta["truncated"],
                 },
                 ensure_ascii=False,
             )
         ]
     prefix = _nxc_prefix(record)
-    lines = [f"{prefix} [*] Collections"]
-    for row in rows:
+    if limit is not None and len(rows) > len(displayed_rows):
+        lines = [f"{prefix} [*] Collections (showing:{len(displayed_rows)} of {len(rows)})"]
+    else:
+        lines = [f"{prefix} [*] Collections"]
+    for row in displayed_rows:
         count = row.get("documents") if isinstance(row, dict) else None
         count_text = str(count) if isinstance(count, int) else "unknown"
         lines.append(f"{prefix} {row.get('database')}.{row.get('collection')} (documents:{count_text})")
@@ -840,6 +871,10 @@ def _format_indexes_detail_records(record: dict[str, Any], output_format: str) -
     rows = record.get("indexes")
     if not isinstance(rows, list) or not rows:
         return []
+    raw_limit = record.get("show_indexes_limit")
+    limit = raw_limit if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) else None
+    meta = limit_metadata(rows, limit)
+    displayed_rows = limit_sequence(rows, limit)
     if output_format == "json":
         return [
             json.dumps(
@@ -849,14 +884,20 @@ def _format_indexes_detail_records(record: dict[str, Any], output_format: str) -
                     "service": "mongodb",
                     "host": record.get("host"),
                     "port": record.get("port"),
-                    "indexes": rows,
+                    "indexes": displayed_rows,
+                    "indexes_shown": meta["shown"],
+                    "indexes_limit": meta["limit"],
+                    "indexes_truncated": meta["truncated"],
                 },
                 ensure_ascii=False,
             )
         ]
     prefix = _nxc_prefix(record)
-    lines = [f"{prefix} [*] Indexes"]
-    for row in rows:
+    if limit is not None and len(rows) > len(displayed_rows):
+        lines = [f"{prefix} [*] Indexes (showing:{len(displayed_rows)} of {len(rows)})"]
+    else:
+        lines = [f"{prefix} [*] Indexes"]
+    for row in displayed_rows:
         index = row.get("index") if isinstance(row, dict) else {}
         index_name = index.get("name") if isinstance(index, dict) else "-"
         lines.append(f"{prefix} {row.get('database')}.{row.get('collection')} index={index_name}")
@@ -1006,6 +1047,9 @@ def audit_mongodb_targets(
     debug_emit: Callable[[str], None] | None = None,
     show_progress: bool = False,
     command_progress: Any | None = None,
+    show_databases_limit: int | None = None,
+    show_collections_limit: int | None = None,
+    show_indexes_limit: int | None = None,
 ) -> tuple[int, int, int, int, int, int]:
     total = open_no_auth = weak = valid = auth_required = fail = 0
     out_fh: Any = None
@@ -1033,6 +1077,15 @@ def audit_mongodb_targets(
         )
 
         def _detect_task(host: str) -> dict[str, Any]:
+            limit_kwargs = {
+                key: value
+                for key, value in {
+                    "show_databases_limit": show_databases_limit,
+                    "show_collections_limit": show_collections_limit,
+                    "show_indexes_limit": show_indexes_limit,
+                }.items()
+                if value is not None
+            }
             return _audit_mongodb_host_stage(
                 host,
                 port,
@@ -1056,9 +1109,19 @@ def audit_mongodb_targets(
                 run_deep_checks=False,
                 debug=bool(debug_emit),
                 debug_emit=debug_emit,
+                **limit_kwargs,
             )
 
         def _deep_task(host: str) -> dict[str, Any]:
+            limit_kwargs = {
+                key: value
+                for key, value in {
+                    "show_databases_limit": show_databases_limit,
+                    "show_collections_limit": show_collections_limit,
+                    "show_indexes_limit": show_indexes_limit,
+                }.items()
+                if value is not None
+            }
             return _audit_mongodb_host_stage(
                 host,
                 port,
@@ -1082,6 +1145,7 @@ def audit_mongodb_targets(
                 run_deep_checks=True,
                 debug=bool(debug_emit),
                 debug_emit=debug_emit,
+                **limit_kwargs,
             )
 
         def _emit_detect(record: dict[str, Any]) -> None:
@@ -1376,7 +1440,12 @@ def run_mongodb_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     dump_documents = dump_value is not None
     dump_limit = dump_value if isinstance(dump_value, int) and dump_value > 0 else None
     index_filter = str(getattr(args, "index", "") or "").strip() or None
-    show_indexes = bool(args.show_indexes or index_filter)
+    show_databases = show_flag_enabled(getattr(args, "show_databases", False))
+    show_databases_limit = show_flag_limit(getattr(args, "show_databases", False))
+    show_collections = show_flag_enabled(getattr(args, "show_collections", False))
+    show_collections_limit = show_flag_limit(getattr(args, "show_collections", False))
+    show_indexes = show_flag_enabled(getattr(args, "show_indexes", False)) or bool(index_filter)
+    show_indexes_limit = show_flag_limit(getattr(args, "show_indexes", False))
     stream_to_stdout = not bool(args.output)
 
     def emit_line(line: str) -> None:
@@ -1471,9 +1540,12 @@ def run_mongodb_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 credential_candidates=credential_candidates,
                 auth_db=str(args.auth_db or "admin"),
                 database=selected_database,
-                show_databases=bool(args.show_databases),
-                show_collections=bool(args.show_collections),
+                show_databases=show_databases,
+                show_collections=show_collections,
                 show_indexes=show_indexes,
+                show_databases_limit=show_databases_limit,
+                show_collections_limit=show_collections_limit,
+                show_indexes_limit=show_indexes_limit,
                 collection_targets=collection_targets,
                 collection_targets_by_database=collection_targets_by_database,
                 dump_documents=dump_documents,
