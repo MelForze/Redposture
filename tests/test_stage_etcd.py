@@ -10,6 +10,7 @@ from redposture_core import stage_etcd as etcd
 from redposture_core.stage_etcd import (
     _audit_etcd_host,
     _body_indicates_auth_required,
+    _call_audit_etcd_host_with_stage_debug,
     _count_v2_keys,
     _count_v2_nodes,
     _count_v3_keys,
@@ -22,8 +23,8 @@ from redposture_core.stage_etcd import (
     _join_api_versions,
     _major_version,
     _normalize_etcd_key,
-    audit_etcd_targets,
 )
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 class _ConsoleCapture:
@@ -126,7 +127,10 @@ def test_normalize_etcd_key_adds_leading_slash() -> None:
 
 def test_dump_v2_all_from_body_returns_sorted_pairs() -> None:
     body = '{"node":{"dir":true,"nodes":[{"key":"/b","value":"2"},{"key":"/a","value":"1"}]}}'
-    assert _dump_v2_all_from_body(body) == ["/a:1", "/b:2"]
+    assert _dump_v2_all_from_body(body) == [
+        {"key": "/a", "value": "1", "error": None},
+        {"key": "/b", "value": "2", "error": None},
+    ]
 
 
 def test_format_record_for_main_statuses() -> None:
@@ -439,7 +443,8 @@ def test_audit_etcd_targets_emits_detect_status_and_key_lines(monkeypatch) -> No
     monkeypatch.setattr("redposture_core.stage_etcd._audit_etcd_host", fake_audit)
 
     lines: list[str] = []
-    total, open_no_auth, auth_required, failed = audit_etcd_targets(
+    total, open_no_auth, auth_required, failed = run_module_targets_for_test(
+        "etcd",
         hosts=["127.0.0.1"],
         port=2379,
         timeout=1.0,
@@ -475,7 +480,7 @@ def test_call_audit_etcd_host_with_stage_debug_adds_stage_telemetry(monkeypatch)
 
     monkeypatch.setattr("redposture_core.stage_etcd._audit_etcd_host", fake_audit)
     debug_lines: list[str] = []
-    result = audit_etcd_targets.__globals__["_call_audit_etcd_host_with_stage_debug"](
+    result = _call_audit_etcd_host_with_stage_debug(
         "127.0.0.1",
         2379,
         1.0,
@@ -535,7 +540,8 @@ def test_audit_etcd_targets_emits_two_pass_debug_markers(monkeypatch) -> None:  
     monkeypatch.setattr("redposture_core.stage_etcd._call_audit_etcd_host_with_stage_debug", fake_stage_call)
     debug_lines: list[str] = []
     emitted: list[str] = []
-    totals = audit_etcd_targets(
+    totals = run_module_targets_for_test(
+        "etcd",
         hosts=["127.0.0.1"],
         port=2379,
         timeout=1.0,
@@ -580,7 +586,10 @@ def test_dump_v2_and_v3_helpers_cover_error_and_success_paths(monkeypatch: pytes
         return 200, '{"node": {"key": "/ok", "value": "1"}}'
 
     monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_http_v2)
-    assert etcd._dump_v2_key("127.0.0.1", 2379, "/missing", 1.0) == ("/missing:<not found>", None)
+    assert etcd._dump_v2_key("127.0.0.1", 2379, "/missing", 1.0) == (
+        {"key": "/missing", "value": "<not found>", "error": None},
+        None,
+    )
     assert etcd._dump_v2_key("127.0.0.1", 2379, "/broken", 1.0) == (None, "/v2/keys/broken returned status 500")
     assert etcd._dump_v2_key("127.0.0.1", 2379, "/invalid-json", 1.0) == (
         None,
@@ -590,15 +599,27 @@ def test_dump_v2_and_v3_helpers_cover_error_and_success_paths(monkeypatch: pytes
         None,
         "/v2/keys/invalid-node returned invalid node",
     )
-    assert etcd._dump_v2_key("127.0.0.1", 2379, "/dir", 1.0) == ("/dir:<dir>", None)
-    assert etcd._dump_v2_key("127.0.0.1", 2379, "/ok", 1.0) == ("/ok:1", None)
+    assert etcd._dump_v2_key("127.0.0.1", 2379, "/dir", 1.0) == (
+        {"key": "/dir", "value": "<dir>", "error": None},
+        None,
+    )
+    assert etcd._dump_v2_key("127.0.0.1", 2379, "/ok", 1.0) == (
+        {"key": "/ok", "value": "1", "error": None},
+        None,
+    )
 
     monkeypatch.setattr(
         "redposture_core.stage_etcd._http_json_request",
         lambda *_args, **_kwargs: (200, '{"kvs":[{"key":"L2E=","value":"MQ=="}]}'),
     )
-    assert etcd._dump_v3_all("127.0.0.1", 2379, 1.0) == (["/a:1"], None)
-    assert etcd._dump_v3_key("127.0.0.1", 2379, "/key", 1.0) == ("/a:1", None)
+    assert etcd._dump_v3_all("127.0.0.1", 2379, 1.0) == (
+        [{"key": "/a", "value": "1", "error": None}],
+        None,
+    )
+    assert etcd._dump_v3_key("127.0.0.1", 2379, "/key", 1.0) == (
+        {"key": "/a", "value": "1", "error": None},
+        None,
+    )
 
     monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", lambda *_args, **_kwargs: (401, ""))
     assert etcd._dump_v3_all("127.0.0.1", 2379, 1.0) == (None, "authentication required")
@@ -614,12 +635,18 @@ def test_dump_v2_and_v3_helpers_cover_error_and_success_paths(monkeypatch: pytes
 
     monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", lambda *_args, **_kwargs: (200, '{"kvs":"x"}'))
     assert etcd._dump_v3_all("127.0.0.1", 2379, 1.0) == ([], None)
-    assert etcd._dump_v3_key("127.0.0.1", 2379, "/key", 1.0) == ("/key:<not found>", None)
+    assert etcd._dump_v3_key("127.0.0.1", 2379, "/key", 1.0) == (
+        {"key": "/key", "value": "<not found>", "error": None},
+        None,
+    )
 
     monkeypatch.setattr(
         "redposture_core.stage_etcd._http_json_request", lambda *_args, **_kwargs: (200, '{"kvs":["x"]}')
     )
-    assert etcd._dump_v3_key("127.0.0.1", 2379, "/key", 1.0) == ("/key:<not found>", None)
+    assert etcd._dump_v3_key("127.0.0.1", 2379, "/key", 1.0) == (
+        {"key": "/key", "value": "<not found>", "error": None},
+        None,
+    )
 
 
 def test_dump_v3_all_uses_valid_all_range_payload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -718,13 +745,7 @@ def test_run_etcd_stage_validation_paths(
 def test_run_etcd_stage_rejects_https_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(etcd, "Console", _ConsoleCapture)
-    monkeypatch.setattr(etcd, "collect_scan_ports", lambda *_args, **_kwargs: [2379])
-    monkeypatch.setattr(
-        etcd,
-        "collect_scan_target_specs",
-        lambda _targets: [SimpleNamespace(host="127.0.0.1", scheme="https", explicit_port=None)],
-    )
-    rc = etcd.run_etcd_stage(_etcd_args(), logger=object())  # type: ignore[arg-type]
+    rc = etcd.run_etcd_stage(_etcd_args(targets="https://127.0.0.1:2379"), logger=object())  # type: ignore[arg-type]
     assert rc == 2
     assert any(
         "etcd accepts only http:// URL targets for -t/--targets" in msg
@@ -760,7 +781,7 @@ def test_run_etcd_stage_debug_flow_uses_single_global_progress(monkeypatch: pyte
         kwargs["emit_line"]("ETCD\t127.0.0.1\t2379\t[*] etcd Database")
         return (1, 1, 0, 0)
 
-    monkeypatch.setattr(etcd, "audit_etcd_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "etcd", fake_audit_targets)
     rc = etcd.run_etcd_stage(_etcd_args(debug=True), logger=object())  # type: ignore[arg-type]
     assert rc == 0
     assert len(calls) == 2
@@ -798,7 +819,7 @@ def test_run_etcd_stage_verbose_multi_group_uses_single_global_progress(monkeypa
         kwargs["emit_line"]("ETCD\t127.0.0.1\t2379\t[*] etcd Database")
         return (1, 1, 0, 0)
 
-    monkeypatch.setattr(etcd, "audit_etcd_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "etcd", fake_audit_targets)
 
     progress_totals: list[int] = []
     progress_advances: list[int] = []
@@ -842,7 +863,7 @@ def test_run_etcd_stage_warns_when_all_targets_unreachable(monkeypatch: pytest.M
         "build_scan_execution_groups",
         lambda _specs, _ports, include_scheme_in_key=False: [SimpleNamespace(hosts=["127.0.0.1"], port=2379)],
     )
-    monkeypatch.setattr(etcd, "audit_etcd_targets", lambda **_kwargs: (1, 0, 0, 1))
+    patch_runner_for_legacy_target_fake(monkeypatch, "etcd", lambda **_kwargs: (1, 0, 0, 1))
     rc = etcd.run_etcd_stage(_etcd_args(), logger=object())  # type: ignore[arg-type]
     assert rc == 0
     warns = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]

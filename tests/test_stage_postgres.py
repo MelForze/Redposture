@@ -38,8 +38,8 @@ from redposture_core.stage_postgres import (
     _PgSession,
     _scram_client_final,
     _scram_client_first,
-    audit_postgres_targets,
 )
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 class _DummySocket:
@@ -74,6 +74,35 @@ class _ProtocolSocket(_DummySocket):
 
     def gettimeout(self) -> float:
         return self._timeout
+
+
+def test_postgres_defcreds_include_pgbouncer_pair() -> None:
+    assert postgres._postgres_credential_runs(None, None, defcreds=True) == [
+        ("postgres", "postgres", True),
+        ("pgbouncer", "pgbouncer", True),
+    ]
+    assert postgres._postgres_credential_runs("app", "secret", defcreds=True) == [
+        ("app", "secret", False),
+        ("postgres", "postgres", True),
+        ("pgbouncer", "pgbouncer", True),
+    ]
+
+
+def test_postgres_weak_default_format_uses_effective_default_pair() -> None:
+    line = _format_record(
+        {
+            "host": "127.0.0.1",
+            "port": 5432,
+            "status": "weak_default_creds",
+            "effective_username": "pgbouncer",
+            "superuser": False,
+            "can_execute_commands": False,
+            "can_read_tables": False,
+            "database_count": 1,
+        },
+        "txt",
+    )
+    assert "[+] pgbouncer:pgbouncer" in line
 
 
 class _ConsoleCapture:
@@ -161,9 +190,19 @@ def test_postgres_name_and_value_helpers_cover_valid_and_invalid_inputs() -> Non
     assert _pg_quote_ident('bad"name') == '"bad""name"'
 
     assert _pg_normalize_table_name("public.users") == ('"public"."users"', "public.users", None)
+    assert _pg_normalize_table_name('public."offlineStocks:city_4949:552400"') == (
+        '"public"."offlineStocks:city_4949:552400"',
+        'public."offlineStocks:city_4949:552400"',
+        None,
+    )
     assert _pg_normalize_table_name("bad-name") == (None, None, "unsupported table identifier: bad-name")
 
     assert _pg_parse_table_reference("appdb.public.users") == ("appdb", "public.users", None)
+    assert _pg_parse_table_reference('"weird.db".public."table.name"') == (
+        '"weird.db"',
+        'public."table.name"',
+        None,
+    )
     assert _pg_parse_table_reference("public.users") == (None, "public.users", None)
     assert _pg_parse_table_reference("bad-name") == (None, None, "unsupported table identifier: bad-name")
 
@@ -171,6 +210,7 @@ def test_postgres_name_and_value_helpers_cover_valid_and_invalid_inputs() -> Non
         ["id", "email", "created_at"],
         None,
     )
+    assert _pg_normalize_column_names(['id,"weird:column"']) == (["id", "weird:column"], None)
     assert _pg_normalize_column_names(["bad-name"]) == ([], "unsupported column identifier: bad-name")
 
     assert _merge_query_error(None, "first") == "first"
@@ -490,7 +530,7 @@ def test_run_postgres_stage_shell_modes_and_main_flow(monkeypatch: pytest.Monkey
         kwargs["emit_line"]("POSTGRES\t127.0.0.1\t5432\t[*] Postgres Database")
         return 1, 0, 0, 1, 0, 0
 
-    monkeypatch.setattr(postgres, "audit_postgres_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "postgres", fake_audit_targets)
     rc = postgres.run_postgres_stage(
         _postgres_args(debug=True, output_format="txt", execute=None, sql_cmd=None),
         logger=object(),  # type: ignore[arg-type]
@@ -520,7 +560,7 @@ def test_run_postgres_stage_additional_output_and_error_paths(
         kwargs["emit_line"]('{"type":"detect"}')
         return 1, 0, 0, 0, 1, 0
 
-    monkeypatch.setattr(postgres, "audit_postgres_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "postgres", fake_audit_targets)
     rc = postgres.run_postgres_stage(
         _postgres_args(
             debug=True,
@@ -541,10 +581,10 @@ def test_run_postgres_stage_additional_output_and_error_paths(
     assert captured[0]["table_targets"] == ["public.users", "public.audit"]
     assert captured[0]["dump_row_limit"] == 5
     assert captured[0]["show_row_counts"] is True
-    assert '"type":"detect"' in capsys.readouterr().out
+    assert any('"type":"detect"' in msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain")
 
-    monkeypatch.setattr(
-        postgres, "audit_postgres_targets", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+    patch_runner_for_legacy_target_fake(
+        monkeypatch, "postgres", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
     )
     rc = postgres.run_postgres_stage(_postgres_args(output="postgres.json"), logger=object())  # type: ignore[arg-type]
     assert rc == 2
@@ -556,7 +596,10 @@ def test_run_postgres_stage_additional_output_and_error_paths(
 
     monkeypatch.setattr(postgres, "collect_scan_ports", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(postgres, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1", "127.0.0.2"])
-    rc = postgres.run_postgres_stage(_postgres_args(os_shell=True), logger=object())  # type: ignore[arg-type]
+    rc = postgres.run_postgres_stage(
+        _postgres_args(os_shell=True, targets="127.0.0.1,127.0.0.2"),
+        logger=object(),  # type: ignore[arg-type]
+    )
     assert rc == 2
     assert any(
         "--os-shell requires exactly one target host" in msg
@@ -582,7 +625,7 @@ def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
         kwargs["emit_line"]("POSTGRES\t127.0.0.1\t5432\t[*] Postgres Database")
         return 1, 0, 0, 1, 0, 0
 
-    monkeypatch.setattr(postgres, "audit_postgres_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "postgres", fake_audit_targets)
 
     progress_totals: list[int] = []
     progress_advanced: list[int] = []
@@ -915,7 +958,8 @@ def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(m
     monkeypatch.setattr("redposture_core.stage_postgres._audit_postgres_host", fake_audit)
 
     lines: list[str] = []
-    total, open_no_auth, weak, valid, auth_required, failed = audit_postgres_targets(
+    total, open_no_auth, weak, valid, auth_required, failed = run_module_targets_for_test(
+        "postgres",
         hosts=["127.0.0.1"],
         port=5432,
         timeout=0.2,
@@ -1852,7 +1896,8 @@ def test_audit_postgres_targets_emits_detect_status_and_all_detail_sections(monk
     monkeypatch.setattr("redposture_core.stage_postgres._audit_postgres_host", fake_audit)
 
     lines: list[str] = []
-    total, open_no_auth, weak, valid, auth_required, failed = audit_postgres_targets(
+    total, open_no_auth, weak, valid, auth_required, failed = run_module_targets_for_test(
+        "postgres",
         hosts=["127.0.0.1"],
         port=5432,
         timeout=1.0,
@@ -2017,7 +2062,8 @@ def test_audit_postgres_targets_emits_two_pass_debug_markers(monkeypatch) -> Non
     monkeypatch.setattr(postgres, "_call_audit_postgres_host_with_stage_debug", fake_stage_call)
     debug_lines: list[str] = []
     emitted: list[str] = []
-    totals = audit_postgres_targets(
+    totals = run_module_targets_for_test(
+        "postgres",
         hosts=["127.0.0.1"],
         port=5432,
         timeout=1.0,

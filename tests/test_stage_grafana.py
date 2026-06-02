@@ -25,9 +25,9 @@ from redposture_core.stage_grafana import (
     _run_temp_prometheus_check,
     _split_check_target_url,
     _verify_credentials,
-    audit_grafana_targets,
     run_grafana_stage,
 )
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def test_normalize_check_urls_builds_cartesian_product_for_targets_and_ports() -> None:
@@ -471,7 +471,8 @@ def test_audit_grafana_emits_auth_attempt_lines_before_status(monkeypatch) -> No
     monkeypatch.setattr("redposture_core.stage_grafana._audit_grafana_host", fake_audit_host)
 
     emitted_lines: list[str] = []
-    total, open_no_auth, valid, auth_required, failed = audit_grafana_targets(
+    total, open_no_auth, valid, auth_required, failed = run_module_targets_for_test(
+        "grafana",
         hosts=["127.0.0.1"],
         port=3000,
         timeout=1.0,
@@ -491,10 +492,11 @@ def test_audit_grafana_emits_auth_attempt_lines_before_status(monkeypatch) -> No
     )
 
     assert (total, open_no_auth, valid, auth_required, failed) == (1, 1, 0, 0, 0)
-    assert len(emitted_lines) == 3
+    assert len(emitted_lines) == 4
     assert "[*] Grafana Service" in emitted_lines[0]
-    assert "[-] admin:admin" in emitted_lines[1]
-    assert "[-] admin:prom-operator" in emitted_lines[2]
+    assert "[-] credentials invalid (anonymous access)" in emitted_lines[1]
+    assert "[-] admin:admin" in emitted_lines[2]
+    assert "[-] admin:prom-operator" in emitted_lines[3]
 
 
 def test_audit_grafana_auth_required_after_datasource_denial(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -759,7 +761,8 @@ def test_audit_grafana_targets_and_run_stage_paths(
     emitted: list[str] = []
     logged: list[tuple[tuple[object, ...], dict[str, object]]] = []
     output_path = tmp_path / "grafana.txt"
-    totals = audit_grafana_targets(
+    totals = run_module_targets_for_test(
+        "grafana",
         hosts=["127.0.0.1", "127.0.0.2"],
         port=3000,
         timeout=1.0,
@@ -849,9 +852,9 @@ def test_audit_grafana_targets_and_run_stage_paths(
         "collect_scan_target_specs",
         lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
     )
-    monkeypatch.setattr(
-        grafana_stage,
-        "audit_grafana_targets",
+    patch_runner_for_legacy_target_fake(
+        monkeypatch,
+        "grafana",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed")),
     )
     fake_console.errors.clear()
@@ -902,7 +905,8 @@ def test_audit_grafana_targets_emits_stage_debug_markers(monkeypatch: pytest.Mon
 
     monkeypatch.setattr("redposture_core.stage_grafana._audit_grafana_host", fake_audit_host)
     debug_lines: list[str] = []
-    totals = audit_grafana_targets(
+    totals = run_module_targets_for_test(
+        "grafana",
         hosts=["127.0.0.1"],
         port=3000,
         timeout=1.0,
@@ -982,7 +986,7 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
         hosts = list(kwargs.get("hosts") or [])
         return len(hosts), 0, 0, len(hosts), 0
 
-    monkeypatch.setattr(grafana_stage, "audit_grafana_targets", _fake_audit_grafana_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "grafana", _fake_audit_grafana_targets)
 
     created_totals: list[int] = []
     advanced_steps: list[int] = []
@@ -1038,7 +1042,7 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
 
     assert rc == 0
     assert fake_console.errors == []
-    assert seen_show_progress == [False, False]
+    assert seen_show_progress == [False, False, False]
     assert created_totals == [3]
-    assert advanced_steps == [1, 2]
+    assert advanced_steps == [1, 1, 1]
     assert closed_count == 1

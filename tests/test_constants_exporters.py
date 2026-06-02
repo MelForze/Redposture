@@ -34,6 +34,19 @@ def test_discovery_exporters_include_new_defaults() -> None:
     assert ports["snmp_exporter"] == {9117}
 
 
+def test_node_exporter_profiles_include_production_metric_markers() -> None:
+    node_profiles = [item for item in DISCOVERY_EXPORTERS if item.get("name") == "node_exporter"]
+    assert {int(item.get("port") or 0) for item in node_profiles} == {9100, 9101}
+
+    for profile in node_profiles:
+        strong = set(profile.get("strong_markers") or ())
+        weak = set(profile.get("weak_markers") or ())
+        negative = set(profile.get("negative_markers") or ())
+        assert {"node_cpu_seconds_total", "node_boot_time_seconds"}.issubset(strong)
+        assert {"node_filesystem_avail_bytes", "node_memory_MemAvailable_bytes"}.issubset(weak)
+        assert "haproxy_exporter_build_info" in negative
+
+
 def test_collect_exporters_include_new_defaults() -> None:
     ports = _to_port_map(COLLECT_EXPORTERS)
     assert ports["nats_exporter"] == {7777}

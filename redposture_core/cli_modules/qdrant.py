@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..show_limits import optional_dump_count_kwargs
+
 
 def configure_qdrant_parser(
     parser: argparse.ArgumentParser,
@@ -57,8 +59,9 @@ def configure_qdrant_parser(
     actions.add_argument(
         "--dump",
         dest="dump",
-        action="store_true",
-        help="Dump collection info (all with --collections, or one with --collection).",
+        **optional_dump_count_kwargs(
+            "Dump collection info. Optional count limits collection dumps when dumping all collections."
+        ),
     )
 
     ssrf_options.add_argument(

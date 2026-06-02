@@ -29,6 +29,36 @@ class ProxyConfig:
     raw_url: str
 
 
+@dataclass(frozen=True)
+class RuntimeNetworkConfig:
+    """Shared network settings passed from CLI to module runtime.
+
+    `proxy_socket_context` remains the enforcement layer for raw TCP and most
+    driver-based clients. This config gives modules one typed place to inspect
+    timeout/retry/proxy/TLS choices for telemetry and capability decisions.
+    """
+
+    proxy: ProxyConfig | None = None
+    timeout: float = 1.0
+    retries: int = 1
+    insecure: bool = False
+    tls: bool | None = None
+
+    @classmethod
+    def from_args(cls, args: Any, *, proxy: ProxyConfig | None = None) -> RuntimeNetworkConfig:
+        return cls(
+            proxy=proxy,
+            timeout=float(getattr(args, "timeout", 1.0) or 1.0),
+            retries=max(1, int(getattr(args, "retries", 1) or 1)),
+            insecure=bool(getattr(args, "insecure", False)),
+            tls=getattr(args, "tls", None),
+        )
+
+    @property
+    def proxy_enabled(self) -> bool:
+        return self.proxy is not None
+
+
 def parse_proxy_config(raw_proxy: str | None) -> tuple[ProxyConfig | None, str | None]:
     value = str(raw_proxy or "").strip()
     if not value:
@@ -41,9 +71,9 @@ def parse_proxy_config(raw_proxy: str | None) -> tuple[ProxyConfig | None, str |
 
     scheme = str(parsed.scheme or "").lower().strip()
     if not scheme:
-        return None, "proxy URL must include scheme (http:// or socks5://)"
-    if scheme not in {"http", "https", "socks5", "socks5h"}:
-        return None, "unsupported proxy scheme (supported: http, https, socks5, socks5h)"
+        return None, "proxy URL must include scheme (http://, socks4://, or socks5://)"
+    if scheme not in {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}:
+        return None, "unsupported proxy scheme (supported: http, https, socks4, socks4a, socks5, socks5h)"
 
     host = str(parsed.hostname or "").strip()
     if not host:
@@ -178,6 +208,54 @@ def _socks5_open_tunnel(
         raise
 
 
+def _socks4_open_tunnel(
+    proxy: ProxyConfig,
+    target_host: str,
+    target_port: int,
+    timeout: float | None,
+    source_address: tuple[str, int] | None,
+) -> socket.socket:
+    sock = _open_proxy_connection(proxy, timeout, source_address)
+    try:
+        try:
+            ip = ipaddress.ip_address(target_host)
+            if ip.version != 4:
+                raise OSError("socks4 proxy requires IPv4 target or socks4a hostname")
+            addr_payload = ip.packed
+            domain_payload = b""
+        except ValueError:
+            host_raw = target_host.encode("idna")
+            if not host_raw or len(host_raw) > 255:
+                raise OSError("invalid target host for socks4a proxy") from None
+            addr_payload = b"\x00\x00\x00\x01"
+            domain_payload = host_raw + b"\x00"
+
+        if proxy.scheme == "socks4a":
+            try:
+                ip = ipaddress.ip_address(target_host)
+            except ValueError:
+                pass
+            else:
+                host_raw = str(ip).encode("ascii")
+                addr_payload = b"\x00\x00\x00\x01"
+                domain_payload = host_raw + b"\x00"
+
+        user_raw = str(proxy.username or "").encode("utf-8", errors="replace")
+        if b"\x00" in user_raw:
+            raise OSError("socks4 userid cannot contain NUL")
+        req = b"\x04\x01" + int(target_port).to_bytes(2, "big") + addr_payload + user_raw + b"\x00" + domain_payload
+        sock.sendall(req)
+        reply = _recv_exact(sock, 8)
+        if reply[0] not in {0x00, 0x04}:
+            raise OSError("socks4 proxy returned invalid response")
+        if reply[1] != 0x5A:
+            raise OSError(f"socks4 proxy connect failed (code={reply[1]})")
+        return sock
+    except Exception:
+        sock.close()
+        raise
+
+
 def _host_port_for_connect(host: str, port: int) -> str:
     if ":" in host and not host.startswith("["):
         return f"[{host}]:{port}"
@@ -250,6 +328,8 @@ def open_connection_via_proxy(
     timeout_value = _resolve_timeout(timeout)
     if proxy.scheme in {"socks5", "socks5h"}:
         return _socks5_open_tunnel(proxy, target_host, target_port, timeout_value, source_address)
+    if proxy.scheme in {"socks4", "socks4a"}:
+        return _socks4_open_tunnel(proxy, target_host, target_port, timeout_value, source_address)
     if proxy.scheme in {"http", "https"}:
         return _http_open_tunnel(proxy, target_host, target_port, timeout_value, source_address)
     raise OSError("unsupported proxy scheme")

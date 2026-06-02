@@ -8,7 +8,10 @@ from pathlib import Path
 import pytest
 
 from redposture_core import stage_kafka as kafka
+from redposture_core.modules.kafka import stage as kafka_stage_pkg
 from redposture_core.stage_kafka import _parse_apiversions_response, _parse_metadata_response
+from redposture_core.stage_runtime import AuditCommandResult
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def test_kafka_lab_seed_has_health_markers_and_nonempty_topic_guards() -> None:
@@ -676,7 +679,8 @@ def test_sasl_helpers_and_dump_targets(monkeypatch: pytest.MonkeyPatch, tmp_path
     monkeypatch.setattr(kafka, "_audit_kafka_host", fake_audit_kafka_host)
     output_path = tmp_path / "kafka.json"
     emitted: list[str] = []
-    totals = kafka.audit_kafka_targets(
+    totals = run_module_targets_for_test(
+        "kafka",
         hosts=["127.0.0.1"],
         port=9092,
         timeout=1.0,
@@ -694,7 +698,7 @@ def test_sasl_helpers_and_dump_targets(monkeypatch: pytest.MonkeyPatch, tmp_path
     )
     assert totals == (1, 1, 0, 0, 0)
     lines = output_path.read_text(encoding="utf-8").splitlines()
-    assert any(json.loads(line).get("type") == "detect" for line in lines)
+    assert any(json.loads(line).get("service") == "kafka" for line in lines)
     assert any("orders" in line for line in lines + emitted)
 
 
@@ -704,6 +708,7 @@ def test_sasl_helpers_and_dump_targets(monkeypatch: pytest.MonkeyPatch, tmp_path
         ({"timeout": 0}, "--timeout must be > 0"),
         ({"retries": -1}, "--retries must be >= 0"),
         ({"max_messages": 0}, "--max-messages must be > 0"),
+        ({"dump": 5, "max_messages": 10}, "--dump count cannot conflict with --max-messages"),
         ({"username": "alice"}, "--username and --password must be set together"),
         ({"ports": "bad"}, "failed to parse --port"),
         ({"targets": None, "hosts": None}, "kafka requires -t/--targets"),
@@ -719,12 +724,28 @@ def test_run_kafka_stage_validation_errors(
     assert any(expected_message in msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "error")
 
 
+def test_run_kafka_stage_accepts_explicit_empty_password(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_passwords: list[str | None] = []
+
+    def fake_run_plan(self, plan):  # type: ignore[no-untyped-def]
+        _ = self
+        captured_passwords.extend(credential.password for credential in plan.credential_runs)
+        return AuditCommandResult(records=[], detected_count=1, emitted_lines=0, typed_records=[])
+
+    monkeypatch.setattr(kafka_stage_pkg.AuditCommandRunner, "run_plan", fake_run_plan)
+
+    rc = kafka.run_kafka_stage(_kafka_args(username="empire", password=""), logger=object())  # type: ignore[arg-type]
+
+    assert rc == 0
+    assert captured_passwords == [""]
+
+
 def test_run_kafka_stage_warns_when_all_targets_are_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
     monkeypatch.setattr(kafka, "collect_scan_ports", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(kafka, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
-    monkeypatch.setattr(kafka, "audit_kafka_targets", lambda **_kwargs: (1, 0, 0, 0, 1))
+    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", lambda **_kwargs: (1, 0, 0, 0, 1))
     rc = kafka.run_kafka_stage(_kafka_args(), logger=object())  # type: ignore[arg-type]
     assert rc == 0
     warnings = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
@@ -746,7 +767,7 @@ def test_run_kafka_stage_debug_flow_passes_logger_and_append_output(monkeypatch:
         kwargs["emit_line"]("KAFKA\t127.0.0.1\t9092\t[*] Kafka Broker")
         return 1, 0, 1, 0, 0
 
-    monkeypatch.setattr(kafka, "audit_kafka_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", fake_audit_targets)
     rc = kafka.run_kafka_stage(
         _kafka_args(debug=True, output="kafka.json", output_format="json", show_topics=True, dump=True, topic="orders"),
         logger=object(),  # type: ignore[arg-type]
@@ -773,7 +794,7 @@ def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypa
         kwargs["emit_line"]("KAFKA\t127.0.0.1\t9092\t[*] Kafka Broker")
         return 1, 0, 1, 0, 0
 
-    monkeypatch.setattr(kafka, "audit_kafka_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", fake_audit_targets)
 
     progress_totals: list[int] = []
     progress_advances: list[int] = []
@@ -811,8 +832,6 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
 ) -> None:  # type: ignore[no-untyped-def]
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
-    monkeypatch.setattr(kafka, "collect_scan_ports", lambda *_args, **_kwargs: [9092])
-    monkeypatch.setattr(kafka, "collect_scan_targets", lambda *_args, **_kwargs: ["10.0.0.1", "10.0.0.2"])
     monkeypatch.setattr(
         kafka, "filter_open_tcp_hosts_for_credential_file", lambda hosts, *_args, **_kwargs: list(hosts)
     )
@@ -843,7 +862,7 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(kafka, "audit_kafka_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", fake_audit_targets)
     monkeypatch.setattr(
         kafka,
         "start_command_progress",
@@ -851,7 +870,7 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
     )
 
     rc = kafka.run_kafka_stage(
-        _kafka_args(username=str(creds_file), output=str(output_file), show_topics=True),
+        _kafka_args(username=str(creds_file), output=str(output_file), show_topics=True, targets="10.0.0.1,10.0.0.2"),
         logger=object(),  # type: ignore[arg-type]
     )
 
@@ -892,7 +911,7 @@ def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Monk
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(kafka, "audit_kafka_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", fake_audit_targets)
     monkeypatch.setattr(
         kafka,
         "start_command_progress",
@@ -925,7 +944,7 @@ def test_run_kafka_stage_txt_emit_line_and_error_path(
         kwargs["emit_line"]("KAFKA\t127.0.0.1\t9092\tpayload only")
         return 1, 0, 1, 0, 0
 
-    monkeypatch.setattr(kafka, "audit_kafka_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", fake_audit_targets)
     rc = kafka.run_kafka_stage(
         _kafka_args(debug=True, output_format="txt", show_topics=True, dump=True, topic="orders"),
         logger=object(),  # type: ignore[arg-type]
@@ -937,7 +956,9 @@ def test_run_kafka_stage_txt_emit_line_and_error_path(
     assert any("mode=show-topics,topic=orders,dump,max=10" in msg for msg in infos)
     assert capsys.readouterr().out == ""
 
-    monkeypatch.setattr(kafka, "audit_kafka_targets", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    patch_runner_for_legacy_target_fake(
+        monkeypatch, "kafka", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+    )
     rc = kafka.run_kafka_stage(_kafka_args(output="kafka.json"), logger=object())  # type: ignore[arg-type]
     assert rc == 2
     assert any(
@@ -1045,7 +1066,8 @@ def test_audit_kafka_targets_emits_two_pass_debug_markers(monkeypatch: pytest.Mo
     monkeypatch.setattr(kafka, "_call_audit_kafka_host_with_stage_debug", fake_stage_call)
     debug_lines: list[str] = []
     emitted: list[str] = []
-    totals = kafka.audit_kafka_targets(
+    totals = run_module_targets_for_test(
+        "kafka",
         hosts=["127.0.0.1"],
         port=9092,
         timeout=1.0,

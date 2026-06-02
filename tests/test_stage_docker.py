@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from redposture_core import stage_docker as docker_stage
+from tests.stage_runtime_helpers import run_module_targets_for_test
 
 
 class _FakeDockerClient:
@@ -147,7 +148,8 @@ def test_audit_docker_targets_two_pass_debug_and_output(monkeypatch: pytest.Monk
     _patch_probe(monkeypatch)
     lines: list[str] = []
     debug: list[str] = []
-    result = docker_stage.audit_docker_targets(
+    result = run_module_targets_for_test(
+        "docker",
         hosts=["127.0.0.1"],
         port=2375,
         timeout=1.0,

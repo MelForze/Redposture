@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import threading
-import urllib.error
 from types import SimpleNamespace
 
 import pytest
@@ -52,9 +50,9 @@ from redposture_core.stage_proxmox import (
     _ssl_context,
     _stream_proxmox_status,
     _value_looks_secret,
-    audit_proxmox_targets,
     run_proxmox_stage,
 )
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def _json_payload(data):
@@ -1117,7 +1115,8 @@ def test_audit_proxmox_targets_streams_discovery_and_suppresses_duplicate_status
     monkeypatch.setattr("redposture_core.stage_proxmox._audit_proxmox_host", fake_audit)
 
     lines: list[str] = []
-    total, token_ok, insufficient, auth_failed, fail, credential_hits = audit_proxmox_targets(
+    total, token_ok, insufficient, auth_failed, fail, credential_hits = run_module_targets_for_test(
+        "proxmox",
         hosts=["127.0.0.1"],
         port=8006,
         timeout=1.0,
@@ -1166,7 +1165,8 @@ def test_audit_proxmox_targets_can_suppress_fail_status_lines(monkeypatch) -> No
     monkeypatch.setattr("redposture_core.stage_proxmox._audit_proxmox_host", fake_audit)
 
     lines: list[str] = []
-    total, token_ok, insufficient, auth_failed, fail, credential_hits = audit_proxmox_targets(
+    total, token_ok, insufficient, auth_failed, fail, credential_hits = run_module_targets_for_test(
+        "proxmox",
         hosts=["127.0.0.1"],
         port=8006,
         timeout=1.0,
@@ -1258,7 +1258,8 @@ def test_audit_proxmox_targets_emits_stage_debug_markers(monkeypatch) -> None:  
 
     monkeypatch.setattr("redposture_core.stage_proxmox._audit_proxmox_host", fake_audit)
     debug_lines: list[str] = []
-    totals = audit_proxmox_targets(
+    totals = run_module_targets_for_test(
+        "proxmox",
         hosts=["127.0.0.1"],
         port=8006,
         timeout=1.0,
@@ -1430,32 +1431,19 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
     assert any("--pveapitoken, -u/-p, or --defcreds is required" in item for item in fake_console.errors)
 
     fake_console.errors.clear()
-    monkeypatch.setattr("redposture_core.stage_proxmox._parse_proxy_config", lambda _raw: (None, "invalid proxy"))
+    monkeypatch.setattr(
+        "redposture_core.modules.proxmox.actions._parse_proxy_config", lambda _raw: (None, "invalid proxy")
+    )
     rc = run_proxmox_stage(
-        SimpleNamespace(**{**base_args, "pve_api_token": "monitor@pve!audit=token"}),
+        SimpleNamespace(
+            **{**base_args, "pve_api_token": "monitor@pve!audit=token", "proxy": "socks5://127.0.0.1:9050"}
+        ),
         logger=SimpleNamespace(log=lambda *_a, **_k: None),
     )
     assert rc == 2
     assert any("failed to parse --proxy: invalid proxy" in item for item in fake_console.errors)
 
     fake_console.errors.clear()
-    monkeypatch.setattr("redposture_core.stage_proxmox._parse_proxy_config", lambda _raw: (None, None))
-    monkeypatch.setattr("redposture_core.stage_proxmox.collect_scan_ports", lambda *_a, **_k: [8006])
-    monkeypatch.setattr(
-        "redposture_core.stage_proxmox.collect_scan_target_specs",
-        lambda *_a, **_k: [
-            SimpleNamespace(host="host-http", scheme="http", explicit_port=8006),
-            SimpleNamespace(host="host-https", scheme="https", explicit_port=8443),
-        ],
-    )
-    monkeypatch.setattr(
-        "redposture_core.stage_proxmox.build_scan_execution_groups",
-        lambda *_a, **_k: [
-            SimpleNamespace(hosts=["host-http"], port=8006, scheme_hint="http"),
-            SimpleNamespace(hosts=["host-https"], port=8443, scheme_hint="https"),
-        ],
-    )
-
     seen_https: list[bool] = []
 
     def fake_audit_targets(*_args, **kwargs):
@@ -1463,15 +1451,23 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
         hosts = list(kwargs.get("hosts") or [])
         return len(hosts), 1, 0, 0, 0, 0
 
-    monkeypatch.setattr("redposture_core.stage_proxmox.audit_proxmox_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "proxmox", fake_audit_targets)
 
     rc = run_proxmox_stage(
-        SimpleNamespace(**{**base_args, "debug": True, "pve_api_token": "monitor@pve!audit=token", "https": True}),
+        SimpleNamespace(
+            **{
+                **base_args,
+                "debug": True,
+                "pve_api_token": "monitor@pve!audit=token",
+                "targets": "http://host-http:8006,https://host-https:8443",
+                "https": True,
+            }
+        ),
         logger=SimpleNamespace(log=lambda *_a, **_k: None),
     )
     assert rc == 0
     assert seen_https == [False, True]
-    assert any("proxmox audit complete:" in item for item in fake_console.infos)
+    assert any("proxmox audit started:" in item for item in fake_console.infos)
 
 
 def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1517,7 +1513,7 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None: 
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 1, 0, 0, 0, 0)
 
-    monkeypatch.setattr("redposture_core.stage_proxmox.audit_proxmox_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "proxmox", fake_audit_targets)
 
     args = SimpleNamespace(
         debug=False,
@@ -1603,7 +1599,7 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 1, 0, 0, 0, 0)
 
-    monkeypatch.setattr("redposture_core.stage_proxmox.audit_proxmox_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "proxmox", fake_audit_targets)
 
     progress_totals: list[int] = []
     progress_advances: list[int] = []
@@ -1656,38 +1652,25 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
 
 
 def test_request_via_http_proxy_success_and_http_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    class _FakeResponse:
-        def __init__(self, status: int, body: bytes) -> None:
-            self.status = status
-            self._body = body
-            self.headers = {"Content-Type": "application/json"}
+    class _FakeHttpClient:
+        mode = "ok"
 
-        def read(self, _limit: int | None = None) -> bytes:
-            return self._body
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-    class _FakeOpener:
-        def __init__(self, mode: str) -> None:
-            self.mode = mode
-
-        def open(self, _request, timeout: float = 0.0):
-            _ = timeout
+        def request(self, *_args, **_kwargs):
             if self.mode == "ok":
-                return _FakeResponse(200, b'{"ok":1}')
-            if self.mode == "http_error":
-                raise urllib.error.HTTPError(
-                    "http://127.0.0.1:8006/api2/json/access",
-                    403,
-                    "forbidden",
-                    {"Content-Type": "application/json"},
-                    io.BytesIO(b'{"errors":"forbidden"}'),
+                return SimpleNamespace(
+                    status=200, body=b'{"ok":1}', headers={"content-type": "application/json"}, error=None
                 )
-            raise urllib.error.URLError("connection refused")
+            if self.mode == "http_error":
+                return SimpleNamespace(
+                    status=403,
+                    body=b'{"errors":"forbidden"}',
+                    headers={"content-type": "application/json"},
+                    error=None,
+                )
+            return SimpleNamespace(status=0, body=b"", headers={}, error="connection refused")
 
     proxy = _ProxyConfig(
         scheme="http",
@@ -1697,9 +1680,8 @@ def test_request_via_http_proxy_success_and_http_error(monkeypatch) -> None:  # 
         password=None,
         raw_url="http://127.0.0.1:8080",
     )
-    monkeypatch.setattr(
-        "redposture_core.stage_proxmox.urllib.request.build_opener", lambda *_a, **_k: _FakeOpener("ok")
-    )
+    monkeypatch.setattr("redposture_core.stage_proxmox.HttpApiClient", _FakeHttpClient)
+    _FakeHttpClient.mode = "ok"
     status, payload, _headers, error = _request_via_http_proxy(
         "127.0.0.1",
         8006,
@@ -1713,10 +1695,7 @@ def test_request_via_http_proxy_success_and_http_error(monkeypatch) -> None:  # 
     assert (status, error) == (200, None)
     assert payload == b'{"ok":1}'
 
-    monkeypatch.setattr(
-        "redposture_core.stage_proxmox.urllib.request.build_opener",
-        lambda *_a, **_k: _FakeOpener("http_error"),
-    )
+    _FakeHttpClient.mode = "http_error"
     status, payload, _headers, error = _request_via_http_proxy(
         "127.0.0.1",
         8006,
@@ -1795,10 +1774,15 @@ def test_proxmox_request_once_and_retry_paths(monkeypatch) -> None:  # type: ign
         password=None,
         raw_url="http://127.0.0.1:8080",
     )
-    monkeypatch.setattr(
-        "redposture_core.stage_proxmox._request_via_http_proxy",
-        lambda *_a, **_k: (200, b"{}", {}, None),
-    )
+
+    class _FakeHttpClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def request(self, *_args, **_kwargs):
+            return SimpleNamespace(status=200, body=b"{}", headers={}, error=None)
+
+    monkeypatch.setattr("redposture_core.stage_proxmox.HttpApiClient", _FakeHttpClient)
     status, payload, _headers, error = _proxmox_request_once(
         "127.0.0.1",
         8006,

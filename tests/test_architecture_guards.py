@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import re
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -156,6 +158,261 @@ def test_stage_runtime_reexports_models_but_does_not_own_model_definitions() -> 
     assert "from . import audit_models" in runtime_source
     assert "class AuditRecord" in model_source
     assert "class StageTrace" in model_source
+    assert "class TargetSpec" in model_source
+    assert "class RenderEvent" in model_source
+    assert "class AuditCommandRunner" in runtime_source
+    assert "typed_records: list[AuditRecord]" in runtime_source
+    assert "def _record_to_model" in runtime_source
+
+
+def test_cli_dispatch_and_parser_are_registry_backed() -> None:
+    cli_source = (_CORE / "cli.py").read_text(encoding="utf-8")
+    cli_args_source = (_CORE / "cli_args.py").read_text(encoding="utf-8")
+    registry_source = (_CORE / "module_registry.py").read_text(encoding="utf-8")
+
+    assert "from .module_registry import" in cli_source
+    assert "COMMAND_SPECS_BY_NAME" in cli_source
+    assert "resolve_command_runner" in cli_source
+    assert "from .stage_" not in cli_source
+    assert "globals().get(spec.runner_attr)" not in cli_source
+    assert "_RUNNER_COMPATIBILITY_EXPORTS" not in cli_source
+    assert "configure_cli_subcommands(" in cli_args_source
+    assert "configure_redis_parser(" not in cli_args_source
+    assert "class CommandSpec" in registry_source
+    assert "EXPORTERS_ACTION_SPECS" in registry_source
+    assert "def resolve_command_runner" in registry_source
+
+
+def test_module_runtime_dispatch_uses_module_package_boundaries() -> None:
+    registry_source = (_CORE / "module_registry.py").read_text(encoding="utf-8")
+    for module in (
+        "redis",
+        "postgres",
+        "kafka",
+        "elastic",
+        "grafana",
+        "gitlab",
+        "consul",
+        "qdrant",
+        "kubeapi",
+        "registry",
+        "proxmox",
+        "etcd",
+        "mongodb",
+        "docker",
+        "oracle",
+        "grpc",
+        "clickhouse",
+        "zookeeper",
+    ):
+        package_stage = _CORE / "modules" / module / "stage.py"
+        assert package_stage.is_file(), module
+        assert f"redposture_core.modules.{module}.stage" in registry_source
+
+
+def test_module_stage_files_are_runtime_entrypoint_facades() -> None:
+    forbidden_tokens = (
+        "TwoPassAuditRunner",
+        "start_command_progress",
+        "filter_open_tcp_hosts_for_credential_file",
+        "def audit_",
+        "def _audit_",
+        "ThreadPoolExecutor",
+        "as_completed",
+        "output_written",
+    )
+    for module in (
+        "redis",
+        "postgres",
+        "kafka",
+        "elastic",
+        "grafana",
+        "gitlab",
+        "consul",
+        "qdrant",
+        "kubeapi",
+        "registry",
+        "proxmox",
+        "etcd",
+        "mongodb",
+        "docker",
+        "oracle",
+        "grpc",
+        "clickhouse",
+        "zookeeper",
+    ):
+        source = (_CORE / "modules" / module / "stage.py").read_text(encoding="utf-8")
+        assert f"Runtime entrypoint for the {module} audit module" in source
+        assert f"run_{module}_stage" in source
+        assert "run_legacy_command" not in source
+        assert "AuditCommandRunner" in source
+        assert ".run_plan(" in source
+        offenders = [token for token in forbidden_tokens if token in source]
+        assert offenders == [], module
+
+
+def test_module_legacy_files_are_removed() -> None:
+    assert not (_CORE / "_module_runtime_impls").exists()
+    for module_dir in (_CORE / "modules").iterdir():
+        if not module_dir.is_dir() or module_dir.name.startswith("__"):
+            continue
+        assert not (module_dir / "legacy.py").exists(), module_dir.name
+        assert not (module_dir / "runtime.py").exists(), module_dir.name
+    runtime_source = (_CORE / "stage_runtime.py").read_text(encoding="utf-8")
+    assert "run_external_stage" not in runtime_source
+    assert "run_legacy_command" not in runtime_source
+
+
+def test_module_packages_do_not_import_command_runtime_primitives() -> None:
+    forbidden_tokens = (
+        "TwoPassAuditRunner",
+        "start_command_progress",
+        "LineOutputSink",
+        "filter_open_tcp_hosts_for_credential_file",
+        "def audit_",
+    )
+    offenders: list[str] = []
+    for path in (_CORE / "modules").glob("*/*.py"):
+        if path.parent.name.startswith("__"):
+            continue
+        source = path.read_text(encoding="utf-8")
+        for token in forbidden_tokens:
+            if token in source:
+                offenders.append(f"{path.relative_to(_ROOT)}:{token}")
+
+    assert offenders == []
+
+
+def test_module_package_split_boundaries_exist() -> None:
+    for module_dir in (_CORE / "modules").iterdir():
+        if not module_dir.is_dir() or module_dir.name.startswith("__"):
+            continue
+        for filename in ("stage.py", "actions.py", "policy.py", "render.py", "types.py"):
+            assert (module_dir / filename).is_file(), f"{module_dir.name}/{filename}"
+        assert not (module_dir / "runtime.py").exists(), f"{module_dir.name}/runtime.py"
+
+
+def test_module_actions_are_typed_hook_facades_not_command_runtimes() -> None:
+    forbidden_tokens = (
+        "TwoPassAuditRunner",
+        "start_command_progress",
+        "LineOutputSink",
+        "filter_open_tcp_hosts_for_credential_file",
+        "append_output",
+        "show_progress",
+        "def run_",
+        "def audit_",
+    )
+    for module_dir in (_CORE / "modules").iterdir():
+        if not module_dir.is_dir() or module_dir.name.startswith("__"):
+            continue
+        source = (module_dir / "actions.py").read_text(encoding="utf-8")
+        assert "AuditRecord" in source, module_dir.name
+        assert "def record_from_mapping" in source, module_dir.name
+        assert "def host_hook(ctx: AuditHookContext) -> AuditRecord" in source, module_dir.name
+        offenders = [token for token in forbidden_tokens if token in source]
+        assert offenders == [], module_dir.name
+
+
+def test_module_split_boundary_modules_are_importable() -> None:
+    for module_dir in (_CORE / "modules").iterdir():
+        if not module_dir.is_dir() or module_dir.name.startswith("__"):
+            continue
+        for submodule in ("policy", "render", "types"):
+            imported = importlib.import_module(f"redposture_core.modules.{module_dir.name}.{submodule}")
+            assert imported is not None
+
+
+def test_root_audit_stage_files_are_compatibility_facades_only() -> None:
+    forbidden_tokens = (
+        "TwoPassAuditRunner",
+        "start_command_progress",
+        "filter_open_tcp_hosts_for_credential_file",
+        "def audit_",
+        "def _audit_",
+        "ThreadPoolExecutor",
+        "as_completed",
+        "output_written",
+    )
+    for module in (
+        "redis",
+        "postgres",
+        "kafka",
+        "elastic",
+        "grafana",
+        "gitlab",
+        "consul",
+        "qdrant",
+        "kubeapi",
+        "registry",
+        "proxmox",
+        "etcd",
+        "mongodb",
+        "docker",
+        "oracle",
+        "grpc",
+        "clickhouse",
+        "zookeeper",
+    ):
+        source = (_CORE / f"stage_{module}.py").read_text(encoding="utf-8")
+        assert f"Compatibility facade for :mod:`redposture_core.modules.{module}`" in source
+        assert f"from .modules.{module} import actions as _actions" in source
+        assert f"from .modules.{module} import render as _render" in source
+        assert f"from .modules.{module} import stage as _stage" in source
+        assert "sys.modules[__name__] = _stage" not in source
+        assert "._module_runtime_impls" not in source
+        assert f"run_{module}_stage" in source
+        offenders = [token for token in forbidden_tokens if token in source]
+        assert offenders == [], module
+
+
+def test_no_legacy_audit_target_command_boundaries_remain_in_core() -> None:
+    offenders: list[str] = []
+    for path in _CORE.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        source = path.read_text(encoding="utf-8")
+        for token in ("run_compat_audit_targets", "run_external_stage", "run_legacy_command", "def audit_"):
+            if token in source:
+                offenders.append(f"{path.relative_to(_ROOT)}:{token}")
+        if re.search(r"\baudit_[a-z0-9_]+_targets\b", source):
+            offenders.append(f"{path.relative_to(_ROOT)}:audit_*_targets")
+    assert offenders == []
+
+
+def test_shared_http_api_client_exists_and_migrated_modules_use_it() -> None:
+    client_source = (_CORE / "clients" / "http_api.py").read_text(encoding="utf-8")
+    grafana_source = (_CORE / "modules" / "grafana" / "actions.py").read_text(encoding="utf-8")
+    etcd_source = (_CORE / "modules" / "etcd" / "actions.py").read_text(encoding="utf-8")
+
+    assert "class HttpApiClient" in client_source
+    assert "class HttpRequest" in client_source
+    assert "class HttpResponse" in client_source
+    assert "from ...clients.http_api import" in grafana_source
+    assert "from ...clients.http_api import" in etcd_source
+    assert "urllib.request.urlopen" not in grafana_source
+    assert "urllib.request.urlopen" not in etcd_source
+
+
+def test_http_api_stage_modules_do_not_own_direct_urllib_transport() -> None:
+    offenders: list[str] = []
+    for module in (
+        "grafana",
+        "gitlab",
+        "consul",
+        "qdrant",
+        "kubeapi",
+        "elastic",
+        "registry",
+        "etcd",
+        "proxmox",
+    ):
+        source = (_CORE / "modules" / module / "actions.py").read_text(encoding="utf-8")
+        for token in ("urllib.request.urlopen", "urllib.request.build_opener", "http.client.HTTPConnection"):
+            if token in source:
+                offenders.append(f"{module}:{token}")
+
+    assert offenders == []
 
 
 def test_stage_validate_is_compatibility_facade_not_validation_engine() -> None:
@@ -224,11 +481,11 @@ def test_protocol_stage_modules_do_not_own_raw_socket_frame_clients() -> None:
         ".recv(",
     )
     offenders: list[str] = []
-    for relative_path in ("stage_grpc.py", "stage_kafka.py", "stage_zookeeper.py"):
-        text = (_CORE / relative_path).read_text(encoding="utf-8")
+    for module in ("grpc", "kafka", "zookeeper"):
+        text = (_CORE / "modules" / module / "actions.py").read_text(encoding="utf-8")
         for token in forbidden_tokens:
             if token in text:
-                offenders.append(f"{relative_path}:{token}")
+                offenders.append(f"{module}:{token}")
 
     assert offenders == []
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from redposture_core.audit_models import AuditRecord
 from redposture_core.cli_args import parse_args
 from redposture_core.logger import AttemptLogger
 from redposture_core.stage_collect import run_collect_stage
@@ -145,45 +146,50 @@ def test_trigger_uses_explicit_port_batches(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_gitlab_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[bool] = []
+    captured: list[tuple[str | None, int, str, str]] = []
 
-    def fake_audit_gitlab_targets(**kwargs):  # type: ignore[no-untyped-def]
-        captured.append(bool(kwargs["use_https"]))
-        return 1, 1, 0
+    def fake_host_hook(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        captured.append((ctx.target.scheme if ctx.target else None, ctx.port, ctx.target.path, ctx.target.query))
+        return AuditRecord(host=ctx.host, port=ctx.port, module="gitlab", service="gitlab", status="open_no_auth")
 
-    monkeypatch.setattr("redposture_core.stage_gitlab.audit_gitlab_targets", fake_audit_gitlab_targets)
+    monkeypatch.setattr("redposture_core.modules.gitlab.actions.host_hook", fake_host_hook)
 
     args = parse_args(["gitlab", "-t", "http://127.0.0.1:18080/users/sign_in?ref=matrix", "--https"])
     rc = run_gitlab_stage(args, AttemptLogger())
 
     assert rc == 0
-    assert captured == [False]
+    assert captured == [
+        ("http", 18080, "/users/sign_in", "ref=matrix"),
+        ("http", 18080, "/users/sign_in", "ref=matrix"),
+    ]
 
 
 def test_kubeapi_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[bool] = []
+    captured: list[tuple[str | None, int, str]] = []
 
-    def fake_audit_kubeapi_targets(**kwargs):  # type: ignore[no-untyped-def]
-        captured.append(bool(kwargs["use_https"]))
-        return 1, 1, 0
+    def fake_host_hook(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        captured.append((ctx.target.scheme if ctx.target else None, ctx.port, ctx.target.path))
+        return AuditRecord(host=ctx.host, port=ctx.port, module="kubeapi", service="kubeapi", status="open_no_auth")
 
-    monkeypatch.setattr("redposture_core.stage_kubeapi.audit_kubeapi_targets", fake_audit_kubeapi_targets)
+    monkeypatch.setattr("redposture_core.modules.kubeapi.actions.host_hook", fake_host_hook)
 
     args = parse_args(["kubeapi", "-t", "https://127.0.0.1:26443/api", "--no-https", "--namespaces"])
     rc = run_kubeapi_stage(args, AttemptLogger())
 
     assert rc == 0
-    assert captured == [True]
+    assert captured == [("https", 26443, "/api"), ("https", 26443, "/api")]
 
 
 def test_proxmox_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[bool] = []
+    captured: list[tuple[str | None, int, str]] = []
 
-    def fake_audit_proxmox_targets(**kwargs):  # type: ignore[no-untyped-def]
-        captured.append(bool(kwargs["use_https"]))
-        return 1, 1, 0, 0, 0, 0
+    def fake_host_hook(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        captured.append((ctx.target.scheme if ctx.target else None, ctx.port, ctx.target.path))
+        return AuditRecord(
+            host=ctx.host, port=ctx.port, module="proxmox", service="proxmox", status="valid_credentials"
+        )
 
-    monkeypatch.setattr("redposture_core.stage_proxmox.audit_proxmox_targets", fake_audit_proxmox_targets)
+    monkeypatch.setattr("redposture_core.modules.proxmox.actions.host_hook", fake_host_hook)
 
     args = parse_args(
         [
@@ -199,36 +205,36 @@ def test_proxmox_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPat
     rc = run_proxmox_stage(args, AttemptLogger())
 
     assert rc == 0
-    assert captured == [True]
+    assert captured == [("https", 18006, "/api2/json/access/ticket"), ("https", 18006, "/api2/json/access/ticket")]
 
 
 def test_consul_passes_preferred_scheme_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[str | None] = []
+    captured: list[tuple[str | None, int, str]] = []
 
-    def fake_audit_consul_targets(**kwargs):  # type: ignore[no-untyped-def]
-        captured.append(kwargs.get("preferred_scheme"))
-        return 1, 1, 0, False
+    def fake_host_hook(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        captured.append((ctx.target.scheme if ctx.target else None, ctx.port, ctx.target.path))
+        return AuditRecord(host=ctx.host, port=ctx.port, module="consul", service="consul", status="open_no_auth")
 
-    monkeypatch.setattr("redposture_core.stage_consul.audit_consul_targets", fake_audit_consul_targets)
+    monkeypatch.setattr("redposture_core.modules.consul.actions.host_hook", fake_host_hook)
 
     args = parse_args(["consul", "-t", "http://127.0.0.1:8500/v1/status/leader", "--dump"])
     rc = run_consul_stage(args, AttemptLogger())
 
     assert rc == 0
-    assert captured == ["http"]
+    assert captured == [("http", 8500, "/v1/status/leader"), ("http", 8500, "/v1/status/leader")]
 
 
 def test_elastic_passes_preferred_scheme_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[str | None] = []
+    captured: list[tuple[str | None, int, str]] = []
 
-    def fake_audit_elastic_targets(**kwargs):  # type: ignore[no-untyped-def]
-        captured.append(kwargs.get("preferred_scheme"))
-        return 1, 0, 0, 1, 0
+    def fake_host_hook(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        captured.append((ctx.target.scheme if ctx.target else None, ctx.port, ctx.target.path))
+        return AuditRecord(host=ctx.host, port=ctx.port, module="elastic", service="elastic", status="auth_required")
 
-    monkeypatch.setattr("redposture_core.stage_elastic.audit_elastic_targets", fake_audit_elastic_targets)
+    monkeypatch.setattr("redposture_core.modules.elastic.actions.host_hook", fake_host_hook)
 
     args = parse_args(["elastic", "-t", "https://127.0.0.1:19201/"])
     rc = run_elastic_stage(args, AttemptLogger())
 
     assert rc == 0
-    assert captured == ["https"]
+    assert captured == [("https", 19201, "/")]

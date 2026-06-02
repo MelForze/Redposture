@@ -31,9 +31,9 @@ from redposture_core.stage_elastic import (
     _search_index,
     _verify_api_key_probe,
     _verify_authenticate,
-    audit_elastic_targets,
     run_elastic_stage,
 )
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def test_elastic_headers_prefer_apikey_over_basic() -> None:
@@ -1165,7 +1165,8 @@ def test_audit_targets_and_renderers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(elastic_stage, "_audit_elastic_host", fake_audit)
 
     lines: list[str] = []
-    total, open_no_auth, valid, auth_required, failed = audit_elastic_targets(
+    total, open_no_auth, valid, auth_required, failed = run_module_targets_for_test(
+        "elastic",
         hosts=["127.0.0.1"],
         port=9200,
         timeout=1.0,
@@ -1232,7 +1233,7 @@ def test_run_elastic_stage_validation_and_apikey_precedence(monkeypatch: pytest.
         captured.update(kwargs)
         return 1, 0, 1, 0, 0
 
-    monkeypatch.setattr(elastic_stage, "audit_elastic_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "elastic", fake_audit_targets)
 
     args = SimpleNamespace(
         timeout=1.0,
@@ -1284,7 +1285,7 @@ def test_run_elastic_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Mo
         def close(self) -> None:
             return
 
-    monkeypatch.setattr(elastic_stage, "audit_elastic_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "elastic", fake_audit_targets)
     monkeypatch.setattr(
         elastic_stage,
         "start_command_progress",
@@ -1393,7 +1394,7 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0, 0, 0)
 
-    monkeypatch.setattr(elastic_stage, "audit_elastic_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "elastic", fake_audit_targets)
 
     args = SimpleNamespace(
         timeout=1.0,
@@ -1502,7 +1503,7 @@ def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 0, 0, 1, 0)
 
-    monkeypatch.setattr(elastic_stage, "audit_elastic_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "elastic", fake_audit_targets)
 
     creds_file = tmp_path / "creds.txt"
     creds_file.write_text("alice:one\nbob:two\n", encoding="utf-8")
@@ -1705,7 +1706,8 @@ def test_audit_elastic_targets_two_pass_gate_and_debug_markers(monkeypatch: pyte
 
     text_lines: list[str] = []
     debug_lines: list[str] = []
-    totals = audit_elastic_targets(
+    totals = run_module_targets_for_test(
+        "elastic",
         hosts=["10.0.0.1", "10.0.0.2"],
         port=9200,
         timeout=1.0,
@@ -1968,12 +1970,11 @@ def test_elastic_low_level_error_and_tls_helpers(monkeypatch: pytest.MonkeyPatch
 
 
 def test_elastic_request_http_error_and_exception_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    class _Opener:
+    class _UrlOpen:
         def __init__(self, mode: str) -> None:
             self.mode = mode
 
-        def open(self, _request, timeout: float):
-            _ = timeout
+        def __call__(self, _request, **_kwargs):
             if self.mode == "http_error":
                 raise urllib.error.HTTPError(
                     url="http://127.0.0.1:9200/",
@@ -1984,7 +1985,7 @@ def test_elastic_request_http_error_and_exception_paths(monkeypatch: pytest.Monk
                 )
             raise urllib.error.URLError(OSError("[Errno 111] Connection refused"))
 
-    monkeypatch.setattr(elastic_stage.urllib.request, "build_opener", lambda *_handlers: _Opener("http_error"))
+    monkeypatch.setattr(elastic_stage.urllib.request, "urlopen", _UrlOpen("http_error"))
     status, payload, headers, error = elastic_stage._elastic_request(
         "127.0.0.1",
         9200,
@@ -1999,7 +2000,7 @@ def test_elastic_request_http_error_and_exception_paths(monkeypatch: pytest.Monk
     assert headers == {"Content-Type": "application/json"}
     assert error is None
 
-    monkeypatch.setattr(elastic_stage.urllib.request, "build_opener", lambda *_handlers: _Opener("url_error"))
+    monkeypatch.setattr(elastic_stage.urllib.request, "urlopen", _UrlOpen("url_error"))
     status, payload, headers, error = elastic_stage._elastic_request(
         "127.0.0.1",
         9200,
@@ -2117,7 +2118,7 @@ def test_run_elastic_stage_debug_emit_and_payload_rendering(monkeypatch: pytest.
             debug_emit("debug-event")
         return 1, 1, 0, 0, 0
 
-    monkeypatch.setattr(elastic_stage, "audit_elastic_targets", fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "elastic", fake_audit)
 
     args = SimpleNamespace(
         timeout=1.0,
@@ -2584,7 +2585,8 @@ def test_elastic_audit_targets_counts_and_logger_branches(monkeypatch: pytest.Mo
     debug_lines: list[str] = []
     lines: list[str] = []
     monkeypatch.setattr(elastic_stage, "_call_audit_elastic_host_with_thread_debug", fake_call)
-    total, open_no_auth, valid, auth_required, failed = audit_elastic_targets(
+    total, open_no_auth, valid, auth_required, failed = run_module_targets_for_test(
+        "elastic",
         hosts=["h1", "h2", "h3"],
         port=9200,
         timeout=1.0,

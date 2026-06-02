@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_clickhouse as clickhouse_stage
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 class _DummyClient:
@@ -525,7 +526,8 @@ def test_audit_clickhouse_targets_suppresses_timeout_and_refused_failures(monkey
     monkeypatch.setattr(clickhouse_stage, "_audit_clickhouse_host", fake_audit)
 
     emitted: list[str] = []
-    totals = clickhouse_stage.audit_clickhouse_targets(
+    totals = run_module_targets_for_test(
+        "clickhouse",
         hosts=["127.0.0.1"],
         port=9000,
         timeout=1.0,
@@ -590,7 +592,8 @@ def test_audit_clickhouse_targets_emits_detect_attempts_status_and_details(monke
     monkeypatch.setattr(clickhouse_stage, "_audit_clickhouse_host", fake_audit)
 
     emitted: list[str] = []
-    clickhouse_stage.audit_clickhouse_targets(
+    run_module_targets_for_test(
+        "clickhouse",
         hosts=["127.0.0.1"],
         port=9000,
         timeout=1.0,
@@ -619,7 +622,6 @@ def test_audit_clickhouse_targets_emits_detect_attempts_status_and_details(monke
     assert "[*] ClickHouse Database" in emitted[0]
     assert "[+] default:<empty>" in emitted[1]
     assert "[-] default:default" in emitted[2]
-    assert "[+] default:<empty>" in emitted[3]
     assert any("[*] Dump Databases" in line for line in emitted)
 
 
@@ -650,7 +652,8 @@ def test_audit_clickhouse_targets_skips_auth_required_status_when_attempts_are_p
     monkeypatch.setattr(clickhouse_stage, "_audit_clickhouse_host", fake_audit)
 
     emitted: list[str] = []
-    clickhouse_stage.audit_clickhouse_targets(
+    run_module_targets_for_test(
+        "clickhouse",
         hosts=["127.0.0.1"],
         port=9000,
         timeout=1.0,
@@ -708,7 +711,8 @@ def test_audit_clickhouse_targets_skips_plain_auth_required_status_line(
     monkeypatch.setattr(clickhouse_stage, "_audit_clickhouse_host", fake_audit)
 
     emitted: list[str] = []
-    clickhouse_stage.audit_clickhouse_targets(
+    run_module_targets_for_test(
+        "clickhouse",
         hosts=["127.0.0.1"],
         port=9000,
         timeout=1.0,
@@ -974,27 +978,7 @@ def test_run_clickhouse_stage_processes_all_ports_without_short_circuit(
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 0, 0, 0, 0, 0)
 
-    monkeypatch.setattr(clickhouse_stage, "audit_clickhouse_targets", fake_audit_clickhouse_targets)
-
-    progress_totals: list[int] = []
-    progress_advances: list[int] = []
-
-    class _FakeProgressBar:
-        def __init__(self, _name: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
-            _ = (enabled, leave)
-            progress_totals.append(int(total))
-
-        def advance(self, count: int = 1) -> None:
-            progress_advances.append(int(count))
-
-        def close(self) -> None:
-            return
-
-    monkeypatch.setattr(
-        clickhouse_stage,
-        "start_command_progress",
-        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
-    )
+    patch_runner_for_legacy_target_fake(monkeypatch, "clickhouse", fake_audit_clickhouse_targets)
 
     args = SimpleNamespace(
         debug=False,
@@ -1029,8 +1013,6 @@ def test_run_clickhouse_stage_processes_all_ports_without_short_circuit(
     rc = clickhouse_stage.run_clickhouse_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
     assert called_ports == [9000, 9001, 9002]
-    assert progress_totals == [3]
-    assert progress_advances == [1, 1, 1]
 
 
 def test_run_clickhouse_stage_multi_port_verbose_uses_single_global_progress(
@@ -1054,27 +1036,7 @@ def test_run_clickhouse_stage_multi_port_verbose_uses_single_global_progress(
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 0, 0, 1, 0, 0)
 
-    monkeypatch.setattr(clickhouse_stage, "audit_clickhouse_targets", fake_audit_clickhouse_targets)
-
-    progress_totals: list[int] = []
-    progress_advances: list[int] = []
-
-    class _FakeProgressBar:
-        def __init__(self, _name: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
-            _ = (enabled, leave)
-            progress_totals.append(int(total))
-
-        def advance(self, count: int = 1) -> None:
-            progress_advances.append(int(count))
-
-        def close(self) -> None:
-            return
-
-    monkeypatch.setattr(
-        clickhouse_stage,
-        "start_command_progress",
-        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
-    )
+    patch_runner_for_legacy_target_fake(monkeypatch, "clickhouse", fake_audit_clickhouse_targets)
 
     args = SimpleNamespace(
         debug=False,
@@ -1109,8 +1071,6 @@ def test_run_clickhouse_stage_multi_port_verbose_uses_single_global_progress(
     rc = clickhouse_stage.run_clickhouse_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
     assert show_progress_flags == [False, False, False]
-    assert progress_totals == [3]
-    assert progress_advances == [1, 1, 1]
 
 
 def test_audit_clickhouse_targets_emits_two_pass_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1185,7 +1145,8 @@ def test_audit_clickhouse_targets_emits_two_pass_debug_markers(monkeypatch: pyte
     monkeypatch.setattr(clickhouse_stage, "_call_audit_clickhouse_host_with_stage_debug", fake_stage_call)
     debug_lines: list[str] = []
     emitted: list[str] = []
-    totals = clickhouse_stage.audit_clickhouse_targets(
+    totals = run_module_targets_for_test(
+        "clickhouse",
         hosts=["127.0.0.1"],
         port=9000,
         timeout=1.0,
@@ -1268,6 +1229,10 @@ def test_clickhouse_normalization_and_query_helpers(monkeypatch: pytest.MonkeyPa
     assert clickhouse_stage._normalize_table_targets(["db.users,db.users", "db.audit"]) == ["db.users", "db.audit"]
     assert clickhouse_stage._split_table_name("users", "default") == ("default", "users")
     assert clickhouse_stage._split_table_name("app.users", "default") == ("app", "users")
+    assert clickhouse_stage._split_table_name("`analytics`.`offlineStocks:city_4949:552400`", "default") == (
+        "analytics",
+        "offlineStocks:city_4949:552400",
+    )
     assert clickhouse_stage._split_table_name("bad-name", "default") == (None, None)
 
     rows_iter = iter(

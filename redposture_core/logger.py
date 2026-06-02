@@ -7,6 +7,7 @@ import sys
 import threading
 from typing import Any
 
+from .console import is_console_no_color
 from .progress import suspend_active_progress_for_output
 from .utils import utc_now_iso
 
@@ -77,6 +78,8 @@ _PRIORITY_KEYS = (
 
 
 def _paint(text: str, color: str) -> str:
+    if is_console_no_color():
+        return text
     code = _COLORS.get(color)
     if not code:
         return text

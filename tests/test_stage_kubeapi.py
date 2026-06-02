@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_kubeapi as kube
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def test_tls_verify_error_detection() -> None:
@@ -254,7 +255,8 @@ def test_audit_kubeapi_targets_json_output_is_machine_readable(monkeypatch, tmp_
     monkeypatch.setattr(kube, "_audit_kubeapi_host", fake_audit_kubeapi_host)
     output_path = tmp_path / "kubeapi.json"
 
-    total, detected, failed = kube.audit_kubeapi_targets(
+    total, detected, failed = run_module_targets_for_test(
+        "kubeapi",
         hosts=["127.0.0.1"],
         port=26443,
         timeout=1.0,
@@ -735,7 +737,8 @@ def test_format_detail_records_and_target_dispatch(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(kube, "_audit_kubeapi_host", fake_audit_kubeapi_host)
     output_path = tmp_path / "kubeapi.txt"
-    total, detected, failed = kube.audit_kubeapi_targets(
+    total, detected, failed = run_module_targets_for_test(
+        "kubeapi",
         hosts=["127.0.0.1"],
         port=16443,
         timeout=1.0,
@@ -799,7 +802,7 @@ def test_run_kubeapi_stage_warns_on_token_override_and_all_unreachable(monkeypat
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return 1, 0, 1
 
-    monkeypatch.setattr(kube, "audit_kubeapi_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
     rc = kube.run_kubeapi_stage(
         _kube_args(token="tok", username="alice", password="secret"),
         logger=object(),  # type: ignore[arg-type]
@@ -830,7 +833,7 @@ def test_run_kubeapi_stage_debug_flow_passes_logger_and_append_output(monkeypatc
         kwargs["emit_line"]("KUBEAPI\t127.0.0.1\t16443\t[*] Kubernetes API")
         return 1, 1, 0
 
-    monkeypatch.setattr(kube, "audit_kubeapi_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
     rc = kube.run_kubeapi_stage(
         _kube_args(debug=True, output="kube.json", output_format="json", namespaces=True, pod="api", exec_command="id"),
         logger=object(),  # type: ignore[arg-type]
@@ -890,7 +893,7 @@ def test_run_kubeapi_stage_multi_group_uses_single_global_progress(monkeypatch: 
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0)
 
-    monkeypatch.setattr(kube, "audit_kubeapi_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
     rc = kube.run_kubeapi_stage(_kube_args(), logger=object())  # type: ignore[arg-type]
     assert rc == 0
     assert len(captured) == 2
@@ -923,7 +926,7 @@ def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.Monk
         kwargs["emit_line"]("KUBEAPI\t127.0.0.1\t16443\tpayload only")
         return 1, 1, 0
 
-    monkeypatch.setattr(kube, "audit_kubeapi_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
     rc = kube.run_kubeapi_stage(
         _kube_args(
             debug=True,
@@ -942,7 +945,9 @@ def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.Monk
     assert any("payload only" in msg for msg in plains)
     assert any("auth=none format=txt" in msg for msg in infos)
 
-    monkeypatch.setattr(kube, "audit_kubeapi_targets", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    patch_runner_for_legacy_target_fake(
+        monkeypatch, "kubeapi", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+    )
     rc = kube.run_kubeapi_stage(_kube_args(output="kube.json"), logger=object())  # type: ignore[arg-type]
     assert rc == 2
     assert any(
@@ -1091,7 +1096,8 @@ def test_audit_kubeapi_targets_two_pass_gate_and_debug_markers(monkeypatch: pyte
 
     text_lines: list[str] = []
     debug_lines: list[str] = []
-    total, detected, failed = kube.audit_kubeapi_targets(
+    total, detected, failed = run_module_targets_for_test(
+        "kubeapi",
         hosts=["10.0.0.1", "10.0.0.2"],
         port=16443,
         timeout=1.0,
@@ -1672,7 +1678,7 @@ def test_kube_run_stage_and_audit_output_branches(monkeypatch: pytest.MonkeyPatc
         emitted.append("called")
         return 1, 0, 1
 
-    monkeypatch.setattr(kube, "audit_kubeapi_targets", fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit)
     args = _kube_args(
         debug=True, output=str(tmp_path / "kube.jsonl"), output_format="json", token="tok", username="u", password="p"
     )
@@ -1683,7 +1689,9 @@ def test_kube_run_stage_and_audit_output_branches(monkeypatch: pytest.MonkeyPatc
     assert any("format=json output=" in msg for msg in console.infos)
     assert emitted == ["called"]
 
-    monkeypatch.setattr(kube, "audit_kubeapi_targets", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full")))
+    patch_runner_for_legacy_target_fake(
+        monkeypatch, "kubeapi", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+    )
     rc = kube.run_kubeapi_stage(args, logger=SimpleNamespace(log=lambda *a, **k: None))
     assert rc == 2
     assert any("failed to process kubeapi output" in msg for msg in _Console.instances[-1].errors)

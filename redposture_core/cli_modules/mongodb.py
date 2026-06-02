@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
-from ..show_limits import optional_show_count_kwargs
+from ..show_limits import optional_dump_count_kwargs, optional_show_count_kwargs
 
 
 class MongoDBHelpFormatter(argparse.HelpFormatter):
@@ -130,13 +130,8 @@ def configure_mongodb_parser(
     )
     discovery.add_argument(
         "--dump",
-        nargs="?",
-        const=0,
-        type=positive_int,
-        metavar="count",
-        help=(
-            "Dump MongoDB documents. Optional count limits documents per collection; without count uses a safety cap. "
-            "With --collection dumps selected collection(s); without --collection dumps readable collections."
+        **optional_dump_count_kwargs(
+            "Dump MongoDB documents. Optional count limits documents per collection; without count uses a safety cap. With --collection dumps selected collection(s); without --collection dumps readable collections."
         ),
     )
     discovery.add_argument(

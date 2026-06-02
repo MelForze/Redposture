@@ -10,50 +10,33 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from .cli_modules.clickhouse import configure_clickhouse_parser
-from .cli_modules.consul import configure_consul_parser
-from .cli_modules.datastores import configure_etcd_parser, configure_kafka_parser, configure_redis_parser
-from .cli_modules.docker_engine import configure_docker_parser
-from .cli_modules.elastic import configure_elastic_parser
-from .cli_modules.exporters import (
-    configure_collect_parser,
-    configure_scan_parser,
-    configure_trigger_parser,
-)
-from .cli_modules.gitlab import configure_gitlab_parser
-from .cli_modules.grafana import configure_grafana_parser
-from .cli_modules.grpc import configure_grpc_parser
-from .cli_modules.kubeapi import configure_kubeapi_parser
-from .cli_modules.mongodb import MongoDBHelpFormatter, configure_mongodb_parser
-from .cli_modules.postgres import PostgresHelpFormatter, configure_postgres_parser
-from .cli_modules.proxmox import configure_proxmox_parser
-from .cli_modules.qdrant import configure_qdrant_parser
-from .cli_modules.registry import configure_registry_parser
-from .cli_modules.zookeeper import configure_zookeeper_parser
+from . import module_registry as _registry
+from .module_registry import ParserHelperSet, command_names_for_error, configure_cli_subcommands
 
-COMMAND_LISTEN = "listen"
-COMMAND_SCAN = "scan"
-COMMAND_TRIGGER = "trigger"
-COMMAND_COLLECT = "collect"
-COMMAND_REDIS = "redis"
-COMMAND_REGISTRY = "registry"
-COMMAND_POSTGRES = "postgres"
-COMMAND_CLICKHOUSE = "clickhouse"
-COMMAND_ETCD = "etcd"
-COMMAND_PROXMOX = "proxmox"
-COMMAND_GRAFANA = "grafana"
-COMMAND_GITLAB = "gitlab"
-COMMAND_CONSUL = "consul"
-COMMAND_QDRANT = "qdrant"
-COMMAND_KUBEAPI = "kubeapi"
-COMMAND_KAFKA = "kafka"
-COMMAND_ZOOKEEPER = "zookeeper"
-COMMAND_ELASTIC = "elastic"
-COMMAND_GRPC = "grpc"
-COMMAND_MONGODB = "mongodb"
-COMMAND_DOCKER = "docker"
-COMMAND_SELFCERT = "selfcert"
-COMMAND_EXPORTERS = "exporters"
+COMMAND_LISTEN = _registry.COMMAND_LISTEN
+COMMAND_SCAN = _registry.COMMAND_SCAN
+COMMAND_TRIGGER = _registry.COMMAND_TRIGGER
+COMMAND_COLLECT = _registry.COMMAND_COLLECT
+COMMAND_REDIS = _registry.COMMAND_REDIS
+COMMAND_REGISTRY = _registry.COMMAND_REGISTRY
+COMMAND_POSTGRES = _registry.COMMAND_POSTGRES
+COMMAND_CLICKHOUSE = _registry.COMMAND_CLICKHOUSE
+COMMAND_ETCD = _registry.COMMAND_ETCD
+COMMAND_PROXMOX = _registry.COMMAND_PROXMOX
+COMMAND_GRAFANA = _registry.COMMAND_GRAFANA
+COMMAND_GITLAB = _registry.COMMAND_GITLAB
+COMMAND_CONSUL = _registry.COMMAND_CONSUL
+COMMAND_QDRANT = _registry.COMMAND_QDRANT
+COMMAND_KUBEAPI = _registry.COMMAND_KUBEAPI
+COMMAND_KAFKA = _registry.COMMAND_KAFKA
+COMMAND_ZOOKEEPER = _registry.COMMAND_ZOOKEEPER
+COMMAND_ELASTIC = _registry.COMMAND_ELASTIC
+COMMAND_GRPC = _registry.COMMAND_GRPC
+COMMAND_MONGODB = _registry.COMMAND_MONGODB
+COMMAND_DOCKER = _registry.COMMAND_DOCKER
+COMMAND_ORACLE = _registry.COMMAND_ORACLE
+COMMAND_SELFCERT = _registry.COMMAND_SELFCERT
+COMMAND_EXPORTERS = _registry.COMMAND_EXPORTERS
 
 
 _ARGPARSE_SUPPORTS_COLOR = "color" in inspect.signature(argparse.ArgumentParser.__init__).parameters
@@ -291,7 +274,8 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         metavar="targets",
         help=(
             "Targets list: dns/ip/cidr/http(s)://host[:port]/file (comma-separated). "
-            "URL path/query are ignored for target resolution. Existing local file paths are treated as target files. "
+            "URL scheme/path/query are preserved for URL-aware modules and host/port are used for TCP modules. "
+            "Existing local file paths are treated as target files. "
             "Files may contain targets per line."
         ),
     )
@@ -328,7 +312,7 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         metavar="url",
         help=(
             "Optional outbound proxy URL for module requests "
-            "(http[s]://host:port or socks5[h]://[user:pass@]host:port)."
+            "(http[s]://host:port, socks4[a]://host:port, or socks5[h]://[user:pass@]host:port)."
         ),
     )
     if include_profiles:
@@ -442,370 +426,28 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description=(
             "Security toolkit for module-focused auditing (exporters, registry, grafana, proxmox, gitlab, "
-            "consul, kubeapi, postgres, mongodb, docker, clickhouse, redis, etcd, qdrant, elastic, kafka, "
+            "consul, kubeapi, postgres, mongodb, docker, oracle, clickhouse, redis, etcd, qdrant, elastic, kafka, "
             "zookeeper, grpc). "
             "Use '<module> -h' for grouped flags by topic."
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_package_version()}")
     subparsers = parser.add_subparsers(dest="command", parser_class=_NoColorArgumentParser)
-
-    exporters_parser = subparsers.add_parser(
-        COMMAND_EXPORTERS,
-        help="Unified exporter workflows: scan/collect/trigger.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    exporters_subparsers = exporters_parser.add_subparsers(
-        dest="exporters_action",
-        required=True,
+    configure_cli_subcommands(
+        subparsers,
         parser_class=_NoColorArgumentParser,
-    )
-
-    exporters_scan_parser = exporters_subparsers.add_parser(
-        COMMAND_SCAN,
-        help="Discover observability endpoints and write scan report.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    configure_scan_parser(
-        exporters_scan_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_save_flag=_add_save_flag,
-    )
-
-    exporters_collect_parser = exporters_subparsers.add_parser(
-        COMMAND_COLLECT,
-        help="Collect debug/runtime endpoints from a target service list.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    configure_collect_parser(
-        exporters_collect_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_save_flag=_add_save_flag,
-        positive_int=_positive_int,
-    )
-
-    exporters_trigger_parser = exporters_subparsers.add_parser(
-        COMMAND_TRIGGER,
-        help="Trigger discovered endpoints/exporters to your callback target.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    configure_trigger_parser(
-        exporters_trigger_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_save_flag=_add_save_flag,
-        add_listener_flags=_add_listener_flags,
-    )
-
-    registry_parser = subparsers.add_parser(
-        COMMAND_REGISTRY,
-        help="Audit Docker Registry v2 / Harbor / GitLab / Nexus exposure and image metadata.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=(
-            "Registry audit supports four modes: generic Docker Registry v2/OCI, Harbor, "
-            "GitLab Container Registry, and Nexus Repository. By default it performs minimal "
-            "detection and prints only the detected type + basic access status. "
-            "Use --harbor/--gitlab/--nexus for vendor API parsing, and use shared Docker/OCI "
-            "flags (--repository/--show-tags/--tag/--metadata/--inspect/--download) to inspect "
-            "image tags and config metadata on any compatible v2 registry endpoint."
+        helpers=ParserHelperSet(
+            add_output_flags=_add_output_flags,
+            add_log_flag=_add_log_flag,
+            add_scan_host_flags=_add_scan_host_flags,
+            add_multi_ports_flag=_add_multi_ports_flag,
+            add_save_flag=_add_save_flag,
+            add_listener_flags=_add_listener_flags,
+            append_selected_defaults=_append_selected_defaults,
+            mirror_group_actions=_mirror_group_actions,
+            port_type=_port,
+            positive_int=_positive_int,
         ),
-    )
-    configure_registry_parser(
-        registry_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        mirror_group_actions=_mirror_group_actions,
-        port_type=_port,
-    )
-
-    grafana_parser = subparsers.add_parser(
-        COMMAND_GRAFANA,
-        help="Audit Grafana auth exposure and datasource access.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    configure_grafana_parser(
-        grafana_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    proxmox_parser = subparsers.add_parser(
-        COMMAND_PROXMOX,
-        help="Audit Proxmox API with PVE API token and search leaked credentials in API responses.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    configure_proxmox_parser(
-        proxmox_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    gitlab_parser = subparsers.add_parser(
-        COMMAND_GITLAB,
-        help="Audit GitLab public/unprotected endpoints, public projects, token access, and cloning.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=(
-            "GitLab module checks login-page presence alongside public/unprotected endpoints, "
-            "enumerates public projects by default, optionally validates PAT/GAT token API access "
-            "and per-project capabilities (repo/issues/members), and can clone selected or all "
-            "accessible repositories."
-        ),
-    )
-    configure_gitlab_parser(
-        gitlab_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    consul_parser = subparsers.add_parser(
-        COMMAND_CONSUL,
-        help="Audit Consul API exposure, anonymous access, and agent SSRF via health checks.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=(
-            "Consul module detects Consul agents/servers by API responses, checks anonymous access to KV, services, "
-            "agent members, and health checks, inspects script-check settings (EnableLocalScriptChecks / "
-            "EnableRemoteScriptChecks), and can perform SSRF probes via temporary agent HTTP checks."
-        ),
-    )
-    configure_consul_parser(
-        consul_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        mirror_group_actions=_mirror_group_actions,
-        port_type=_port,
-    )
-
-    kubeapi_parser = subparsers.add_parser(
-        COMMAND_KUBEAPI,
-        help="Audit Kubernetes API exposure, auth requirements, and resource visibility.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=(
-            "Kubernetes API module checks whether the cluster API is reachable without authentication, "
-            "supports Bearer token or Basic auth, and can enumerate namespaces, pods, and secrets "
-            "visible to the current access level."
-        ),
-    )
-    configure_kubeapi_parser(
-        kubeapi_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    postgres_parser = subparsers.add_parser(
-        COMMAND_POSTGRES,
-        help="Audit Postgres auth exposure and risky privileges.",
-        formatter_class=PostgresHelpFormatter,
-    )
-    configure_postgres_parser(
-        postgres_parser,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        add_log_flag=_add_log_flag,
-        add_output_flags=_add_output_flags,
-        append_selected_defaults=_append_selected_defaults,
-        port_type=_port,
-        positive_int=_positive_int,
-    )
-
-    mongodb_parser = subparsers.add_parser(
-        COMMAND_MONGODB,
-        help="Audit MongoDB auth exposure, database/collection visibility, and document dumps.",
-        formatter_class=MongoDBHelpFormatter,
-    )
-    configure_mongodb_parser(
-        mongodb_parser,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        add_log_flag=_add_log_flag,
-        add_output_flags=_add_output_flags,
-        append_selected_defaults=_append_selected_defaults,
-        port_type=_port,
-        positive_int=_positive_int,
-    )
-
-    docker_parser = subparsers.add_parser(
-        COMMAND_DOCKER,
-        help="Audit exposed Docker Engine TCP API endpoints and inventory visibility.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=(
-            "Docker module detects Docker Engine API over plaintext/TLS TCP, checks auth/TLS requirements, "
-            "optionally inventories containers/images/networks/volumes/system data, and can run an explicit "
-            "Docker exec command in a selected existing container."
-        ),
-    )
-    configure_docker_parser(
-        docker_parser,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        add_log_flag=_add_log_flag,
-        add_output_flags=_add_output_flags,
-        append_selected_defaults=_append_selected_defaults,
-        port_type=_port,
-    )
-
-    clickhouse_parser = subparsers.add_parser(
-        COMMAND_CLICKHOUSE,
-        help="Audit ClickHouse auth exposure and privileges.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    configure_clickhouse_parser(
-        clickhouse_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    redis_parser = subparsers.add_parser(
-        COMMAND_REDIS,
-        help="Audit Redis auth exposure and default credentials.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    configure_redis_parser(
-        redis_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    etcd_parser = subparsers.add_parser(
-        COMMAND_ETCD,
-        help="Audit etcd API exposure and auth requirements.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    configure_etcd_parser(
-        etcd_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    qdrant_parser = subparsers.add_parser(
-        COMMAND_QDRANT,
-        help="Audit Qdrant collections exposure, dump collection info, and snapshot-recover SSRF.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=(
-            "Qdrant module checks anonymous access to /collections, lists and dumps collection metadata, "
-            "probes collection update reachability with a no-op PATCH {} request, and can test SSRF "
-            "via collection snapshot restore from a supplied URL."
-        ),
-    )
-    configure_qdrant_parser(
-        qdrant_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    elastic_parser = subparsers.add_parser(
-        COMMAND_ELASTIC,
-        help="Audit Elasticsearch exposure, auth, cluster/users endpoints, and secret discovery.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=(
-            "Elastic module detects Elasticsearch API exposure, supports Basic/API key auth checks, "
-            "collects _cat endpoints, cluster health/nodes, security users, and performs indexed "
-            "query_string discovery for potential secret leaks."
-        ),
-    )
-    configure_elastic_parser(
-        elastic_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    grpc_parser = subparsers.add_parser(
-        COMMAND_GRPC,
-        help="Audit gRPC services with transport/auth/reflection/health checks.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description=(
-            "gRPC module fingerprints service transport (TLS/plaintext), checks auth requirements, "
-            "queries reflection services/method descriptors, and runs grpc.health.v1.Health checks."
-        ),
-    )
-    configure_grpc_parser(
-        grpc_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    kafka_parser = subparsers.add_parser(
-        COMMAND_KAFKA,
-        help="Audit Kafka broker auth exposure and topic visibility.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    configure_kafka_parser(
-        kafka_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-    )
-
-    zookeeper_parser = subparsers.add_parser(
-        COMMAND_ZOOKEEPER,
-        help="Audit ZooKeeper exposure, auth requirements, and znode visibility.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    configure_zookeeper_parser(
-        zookeeper_parser,
-        add_output_flags=_add_output_flags,
-        add_log_flag=_add_log_flag,
-        add_scan_host_flags=_add_scan_host_flags,
-        add_multi_ports_flag=_add_multi_ports_flag,
-        add_save_flag=_add_save_flag,
-        port_type=_port,
-        positive_int=_positive_int,
     )
 
     return parser
@@ -849,10 +491,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error("exporters collect credential artifact bundle export was removed; use -o/--output")
 
     if raw_argv[0].startswith("-"):
-        parser.error(
-            "module command is required: exporters, registry, grafana, gitlab, consul, kubeapi, postgres, "
-            "mongodb, docker, clickhouse, redis, etcd, proxmox, qdrant, kafka, zookeeper, elastic, grpc, or --selfcert"
-        )
+        parser.error(f"module command is required: {command_names_for_error()}")
 
     parsed = parser.parse_args(raw_argv)
     if getattr(parsed, "command", None) == COMMAND_DOCKER:

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_gitlab as gitlab
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def test_gitlab_lab_mock_has_readiness_healthcheck() -> None:
@@ -732,7 +733,8 @@ def test_audit_gitlab_targets_and_run_stage_paths(
     emitted: list[str] = []
     logged: list[tuple[tuple[object, ...], dict[str, object]]] = []
     output_path = tmp_path / "gitlab.txt"
-    totals = gitlab.audit_gitlab_targets(
+    totals = run_module_targets_for_test(
+        "gitlab",
         hosts=["127.0.0.1", "127.0.0.2"],
         port=8080,
         timeout=1.0,
@@ -809,8 +811,8 @@ def test_audit_gitlab_targets_and_run_stage_paths(
         "collect_scan_target_specs",
         lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
     )
-    monkeypatch.setattr(
-        gitlab, "audit_gitlab_targets", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed"))
+    patch_runner_for_legacy_target_fake(
+        monkeypatch, "gitlab", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed"))
     )
     fake_console.errors.clear()
     assert (
@@ -866,7 +868,8 @@ def test_audit_gitlab_targets_emits_stage_debug_markers(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(gitlab, "_audit_gitlab_host", fake_audit)
     debug_lines: list[str] = []
-    totals = gitlab.audit_gitlab_targets(
+    totals = run_module_targets_for_test(
+        "gitlab",
         hosts=["127.0.0.1"],
         port=8080,
         timeout=1.0,

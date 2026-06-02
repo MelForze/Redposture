@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..show_limits import optional_dump_count_kwargs
+
 
 def configure_consul_parser(
     parser: argparse.ArgumentParser,
@@ -174,8 +176,9 @@ def configure_consul_parser(
     actions.add_argument(
         "--dump",
         dest="dump",
-        action="store_true",
-        help=("Dump details for selected data. Without selectors, dumps KV/services/agents/checks/nodes."),
+        **optional_dump_count_kwargs(
+            "Dump details for selected data. Optional count limits each dumped category. Without selectors, dumps KV/services/agents/checks/nodes."
+        ),
     )
     revshell_options.add_argument(
         "--delete",

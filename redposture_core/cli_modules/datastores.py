@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
-from ..show_limits import optional_show_count_kwargs
+from ..show_limits import optional_dump_count_kwargs, optional_show_count_kwargs
 
 
 def configure_redis_parser(
@@ -61,8 +61,9 @@ def configure_redis_parser(
     actions.add_argument(
         "--dump",
         dest="dump",
-        action="store_true",
-        help="Dump Redis key values. With -key/--key dumps one key; without -key dumps all keys.",
+        **optional_dump_count_kwargs(
+            "Dump Redis key values. Optional count limits dumped keys when no -key/--key is selected."
+        ),
     )
     actions.add_argument(
         "-key",
@@ -116,8 +117,9 @@ def configure_etcd_parser(
     actions.add_argument(
         "--dump",
         dest="dump",
-        action="store_true",
-        help="Dump etcd key values. With -key/--key dumps one key; without -key dumps all keys.",
+        **optional_dump_count_kwargs(
+            "Dump etcd key values. Optional count limits dumped keys when no -key/--key is selected."
+        ),
     )
     actions.add_argument(
         "-key",
@@ -197,14 +199,15 @@ def configure_kafka_parser(
     )
     actions.add_argument(
         "--dump",
-        action="store_true",
-        help="Dump topic messages: with --topic dumps only that topic, otherwise dumps all topics.",
+        **optional_dump_count_kwargs(
+            "Dump topic messages. Optional count limits messages per topic and must not conflict with --max-messages."
+        ),
     )
     actions.add_argument(
         "--max-messages",
         dest="max_messages",
         type=int,
-        default=1000,
+        default=None,
         metavar="count",
         help="Maximum number of topic messages to read per topic with --dump.",
     )

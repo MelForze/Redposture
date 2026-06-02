@@ -10,6 +10,7 @@ import pytest
 
 from redposture_core import stage_registry as registry
 from redposture_core.console import Console
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def test_human_bytes_and_path_helpers() -> None:
@@ -67,6 +68,7 @@ def test_error_and_auth_helpers() -> None:
     assert registry._is_connection_timeout_fail_record({"status": "fail", "error": "connection timeout"}) is True
     assert registry._auth_headers(None, None, "tok") == {"Authorization": "Bearer tok"}
     assert registry._auth_headers("alice", "secret", None)["Authorization"].startswith("Basic ")
+    assert registry._auth_headers("alice", "", None)["Authorization"] == "Basic YWxpY2U6"
 
 
 def test_fetch_registry_catalog_supports_pagination(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -573,7 +575,7 @@ def test_audit_registry_host_debug_stage_telemetry(monkeypatch: pytest.MonkeyPat
         }
         return base
 
-    monkeypatch.setattr(registry, "_audit_registry_host_legacy", fake_legacy)
+    monkeypatch.setattr(registry, "_audit_registry_host_core", fake_legacy)
 
     record = registry._audit_registry_host(
         "127.0.0.1",
@@ -683,7 +685,8 @@ def test_audit_registry_targets_two_pass_gate_and_debug_markers(monkeypatch: pyt
 
     emitted: list[str] = []
     debug_lines: list[str] = []
-    totals = registry.audit_registry_targets(
+    totals = run_module_targets_for_test(
+        "registry",
         hosts=["10.0.0.1", "10.0.0.2"],
         port=5000,
         timeout=1.0,
@@ -1002,7 +1005,8 @@ def test_plain_registry_renderers_and_target_dispatcher(monkeypatch: pytest.Monk
     output_path = tmp_path / "registry.json"
     emitted: list[str] = []
 
-    totals = registry.audit_registry_targets(
+    totals = run_module_targets_for_test(
+        "registry",
         hosts=["127.0.0.1"],
         port=5000,
         timeout=1.0,
@@ -1035,8 +1039,10 @@ def test_plain_registry_renderers_and_target_dispatcher(monkeypatch: pytest.Monk
 
     assert totals == (1, 1, 0, 0, 0, 0)
     output_lines = output_path.read_text(encoding="utf-8").splitlines()
-    assert len(output_lines) >= 2
-    assert any(json.loads(line).get("detected") is True for line in output_lines)
+    assert len(output_lines) == 1
+    payload = json.loads(output_lines[0])
+    assert payload["is_registry"] is True
+    assert payload["status"] == "open_no_auth"
     assert any("repo/app:latest" in line for line in output_lines + emitted)
 
 
@@ -1224,7 +1230,7 @@ def test_run_registry_stage_debug_and_unreachable_summary(monkeypatch: pytest.Mo
         # total=1, open=0, valid=0, auth=0, not_registry=0, fail=1
         return 1, 0, 0, 0, 0, 1
 
-    monkeypatch.setattr(registry, "audit_registry_targets", fake_audit_registry_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "registry", fake_audit_registry_targets)
     rc = registry.run_registry_stage(_registry_args(debug=True, docker=True, images=True), logger=object())  # type: ignore[arg-type]
     assert rc == 0
     assert len(captured_kwargs) == 2
@@ -1500,7 +1506,7 @@ def test_render_colored_registry_line_paths() -> None:
         ),
     ],
 )
-def test_audit_registry_host_legacy_state_matrix(
+def test_audit_registry_host_core_state_matrix(
     monkeypatch: pytest.MonkeyPatch,
     status: int,
     body: bytes,
@@ -1513,7 +1519,7 @@ def test_audit_registry_host_legacy_state_matrix(
     monkeypatch.setattr(registry, "_fetch_harbor_info", lambda *_a, **_k: (None, "not harbor"))
     monkeypatch.setattr(registry, "_fetch_nexus_info", lambda *_a, **_k: (None, "not nexus"))
 
-    record = registry._audit_registry_host_legacy(
+    record = registry._audit_registry_host_core(
         "127.0.0.1",
         5000,
         1.0,
@@ -1545,7 +1551,7 @@ def test_audit_registry_host_legacy_state_matrix(
         assert record["images_error"] in {None, "authentication required"}
 
 
-def test_audit_registry_host_legacy_inspect_and_download_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_registry_host_core_inspect_and_download_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         registry,
         "_http_request",
@@ -1556,7 +1562,7 @@ def test_audit_registry_host_legacy_inspect_and_download_failures(monkeypatch: p
     monkeypatch.setattr(registry, "_fetch_nexus_info", lambda *_a, **_k: (None, "not nexus"))
     monkeypatch.setattr(registry, "_fetch_registry_catalog", lambda *_a, **_k: ([], None))
 
-    record = registry._audit_registry_host_legacy(
+    record = registry._audit_registry_host_core(
         "127.0.0.1",
         5000,
         1.0,
@@ -1704,7 +1710,7 @@ def test_audit_registry_host_staged_retry_and_detect_only(monkeypatch: pytest.Mo
         )
         return item
 
-    monkeypatch.setattr(registry, "_audit_registry_host_legacy", fake_legacy)
+    monkeypatch.setattr(registry, "_audit_registry_host_core", fake_legacy)
     monkeypatch.setattr(registry, "_retry_delay", lambda _i: 0.0)
 
     record = registry._audit_registry_host(
@@ -1934,7 +1940,7 @@ def test_run_registry_stage_debug_file_output_logs_mode(monkeypatch: pytest.Monk
         "build_scan_execution_groups",
         lambda *_a, **_k: [SimpleNamespace(hosts=["127.0.0.1"], port=5000, scheme_hint=None)],
     )
-    monkeypatch.setattr(registry, "audit_registry_targets", lambda **_k: (1, 1, 0, 0, 0, 0))
+    patch_runner_for_legacy_target_fake(monkeypatch, "registry", lambda **_k: (1, 1, 0, 0, 0, 0))
 
     out_file = tmp_path / "registry-out.jsonl"
     rc = registry.run_registry_stage(
@@ -2086,7 +2092,7 @@ def test_run_registry_stage_multi_port_uses_single_global_progress(monkeypatch: 
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0, 0, 0, 0)
 
-    monkeypatch.setattr(registry, "audit_registry_targets", fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "registry", fake_audit)
 
     rc = registry.run_registry_stage(_registry_args(), logger=object())  # type: ignore[arg-type]
     assert rc == 0

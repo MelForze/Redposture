@@ -233,3 +233,147 @@ def test_descriptor_helpers_dedup_protoset_and_error_normalization(tmp_path, mon
 
     assert result["transport_ok"] is False
     assert result["error"] == "connection timeout"
+
+
+def test_grpc_http2_call_success_path_with_fake_h2(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class FakeResponseReceived:
+        def __init__(self) -> None:
+            self.headers = [(b":status", b"200"), (b"content-type", b"application/grpc")]
+
+    class FakeTrailersReceived:
+        def __init__(self) -> None:
+            self.headers = [(b"grpc-status", b"0"), (b"grpc-message", b"OK")]
+
+    class FakeDataReceived:
+        def __init__(self) -> None:
+            self.data = grpc_client._encode_grpc_frame(b"response")
+            self.flow_controlled_length = len(self.data)
+            self.stream_id = 1
+
+    class FakeStreamEnded:
+        pass
+
+    class FakeH2Connection:
+        def __init__(self) -> None:
+            self.sent_headers = []
+            self.sent_data = []
+
+        def initiate_connection(self) -> None:
+            return None
+
+        def data_to_send(self) -> bytes:
+            return b""
+
+        def get_next_available_stream_id(self) -> int:
+            return 1
+
+        def send_headers(self, stream_id, headers, end_stream=False):  # noqa: ANN001
+            self.sent_headers.append((stream_id, headers, end_stream))
+
+        def send_data(self, stream_id, data, end_stream=False):  # noqa: ANN001
+            self.sent_data.append((stream_id, data, end_stream))
+
+        def receive_data(self, _chunk: bytes):  # noqa: ANN001
+            return [FakeResponseReceived(), FakeDataReceived(), FakeTrailersReceived(), FakeStreamEnded()]
+
+        def acknowledge_received_data(self, *_args) -> None:  # noqa: ANN002
+            return None
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.recv_calls = 0
+            self.sent = []
+            self.closed = False
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        def recv(self, _size: int) -> bytes:
+            self.recv_calls += 1
+            return b"server-bytes" if self.recv_calls == 1 else b""
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_sock = FakeSocket()
+    monkeypatch.setattr(grpc_client, "H2Connection", FakeH2Connection)
+    monkeypatch.setattr(grpc_client, "ResponseReceived", FakeResponseReceived)
+    monkeypatch.setattr(grpc_client, "TrailersReceived", FakeTrailersReceived)
+    monkeypatch.setattr(grpc_client, "DataReceived", FakeDataReceived)
+    monkeypatch.setattr(grpc_client, "StreamEnded", FakeStreamEnded)
+    monkeypatch.setattr(grpc_client, "_open_grpc_socket", lambda *_a, **_k: fake_sock)
+
+    result = grpc_client._grpc_call(
+        "127.0.0.1",
+        50051,
+        path="/demo.Service/Call",
+        payload=b"request",
+        timeout=1.0,
+        use_tls=False,
+        authorization="Bearer token",
+        metadata=[("x-meta", "1")],
+    )
+
+    assert result["transport_ok"] is True
+    assert result["is_grpc"] is True
+    assert result["http_status"] == 200
+    assert result["grpc_status"] == 0
+    assert result["messages"] == [b"response"]
+    assert fake_sock.closed is True
+
+
+def test_grpc_web_call_success_and_helpers(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    trailer = b"grpc-status: 0\r\ngrpc-message: OK\r\n"
+    body = b"\x00" + (3).to_bytes(4, "big") + b"abc" + b"\x80" + len(trailer).to_bytes(4, "big") + trailer
+    response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/grpc-web+proto\r\n" + f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+    )
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.sent = b""
+            self.done = False
+            self.closed = False
+
+        def sendall(self, data: bytes) -> None:
+            self.sent += data
+
+        def recv(self, _size: int) -> bytes:
+            if self.done:
+                return b""
+            self.done = True
+            return response
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_sock = FakeSocket()
+    monkeypatch.setattr(grpc_client, "_open_http_socket", lambda *_a, **_k: fake_sock)
+    result = grpc_client._grpc_web_call(
+        "127.0.0.1",
+        8080,
+        path="/grpc.health.v1.Health/Check",
+        payload=b"",
+        timeout=1.0,
+        use_tls=False,
+        authorization=None,
+        metadata=[("x-test", "1")],
+    )
+
+    assert result["is_grpc_web"] is True
+    assert result["grpc_status"] == 0
+    assert result["messages"] == [b"abc"]
+    assert b"X-Grpc-Web: 1" in fake_sock.sent
+    assert fake_sock.closed is True
+
+    data_file = tmp_path / "payload.json"
+    data_file.write_text('{"service":"demo"}', encoding="utf-8")
+    assert grpc_client._parse_json_payload_source("@" + str(data_file)) == {"service": "demo"}
+    assert grpc_client._parse_json_payload_source(None) == {}
+    assert grpc_client._parse_metadata_items(["x-token=abc"]) == [("x-token", "abc")]
+    assert grpc_client._split_grpc_method_path("/pkg.Service/Method") == ("pkg.Service", "Method")
+    written = grpc_client._write_openapi_document(
+        str(tmp_path / "openapi.json"), [grpc_health_pb2.DESCRIPTOR.serialized_pb]
+    )
+    assert written >= 1
