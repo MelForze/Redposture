@@ -8,6 +8,7 @@ from scripts.verify_postrun import (
     _EXPECTED_LABELS,
     _EXPECTED_MODULES,
     _PROGRESS_EXPECTED_TARGETS,
+    _combined_run_output,
     _infer_target_count_from_jsonl,
     _parse_status_file,
     _progress_counts_from_log,
@@ -182,6 +183,30 @@ def test_validate_output_sanity_passes_for_expected_multi_target_log(tmp_path: P
     _validate_output_sanity(rows)
 
 
+def test_validate_output_sanity_infers_targets_from_json_artifact(tmp_path: Path) -> None:
+    log = tmp_path / "oracle.log"
+    log.write_text("ORACLE logger-only output\n", encoding="utf-8")
+    jsonl = tmp_path / "oracle.json"
+    jsonl.write_text(
+        "\n".join(
+            f'{{"host":"127.0.0.1","port":{port},"status":"valid_credentials"}}'
+            for port in (1521, 31521, 31522, 31523, 31524)
+        ),
+        encoding="utf-8",
+    )
+    rows = [
+        {
+            "module": "oracle",
+            "label": "oracle_multi_ports",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(jsonl),
+            "log_path": str(log),
+        }
+    ]
+    _validate_output_sanity(rows)
+
+
 def test_validate_output_sanity_allows_repeated_same_progress_total(tmp_path: Path) -> None:
     log = tmp_path / "consul.log"
     log.write_text(
@@ -321,6 +346,27 @@ def test_validate_output_sanity_allows_multi_target_json_log_without_progress(tm
     _validate_output_sanity(rows)
 
 
+def test_combined_run_output_includes_text_sibling_for_text_cases(tmp_path: Path) -> None:
+    log = tmp_path / "oracle_listener_protected.log"
+    text = tmp_path / "oracle_listener_protected.txt"
+    log.write_text("logger warning\n", encoding="utf-8")
+    text.write_text("Listener Dump password_protected=True\n", encoding="utf-8")
+
+    combined = _combined_run_output(
+        {
+            "module": "oracle",
+            "label": "oracle_listener_protected",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": "-",
+            "log_path": str(log),
+        }
+    )
+
+    assert "logger warning" in combined
+    assert "password_protected=True" in combined
+
+
 def test_validate_rich_lab_outputs_rejects_empty_kafka_dump(tmp_path: Path) -> None:
     artifact = tmp_path / "kafka.jsonl"
     log = tmp_path / "kafka.log"
@@ -455,6 +501,45 @@ def test_validate_rich_lab_outputs_accepts_proxmox_json_findings(tmp_path: Path)
             "json_path": str(artifact),
             "log_path": str(log),
         }
+    ]
+    _validate_rich_lab_outputs(rows)
+
+
+def test_validate_rich_lab_outputs_accepts_oracle_json_artifacts(tmp_path: Path) -> None:
+    wallet = tmp_path / "oracle_wallet.jsonl"
+    wallet_log = tmp_path / "oracle_wallet.log"
+    wallet.write_text(
+        '{"type":"wallet_findings","wallet_findings":[{"file_name":"redposture_wallet_hint.txt","data":"wallet"}]}\n',
+        encoding="utf-8",
+    )
+    wallet_log.write_text("", encoding="utf-8")
+
+    large_file = tmp_path / "oracle_large_file.jsonl"
+    large_file_log = tmp_path / "oracle_large_file.log"
+    large_file.write_text(
+        '{"type":"file_results","file_results":[{"action":"download","path":"redposture_large_file.txt",'
+        '"ok":true,"bytes":4096}]}\n',
+        encoding="utf-8",
+    )
+    large_file_log.write_text("", encoding="utf-8")
+
+    rows = [
+        {
+            "module": "oracle",
+            "label": "oracle_wallet_extract",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(wallet),
+            "log_path": str(wallet_log),
+        },
+        {
+            "module": "oracle",
+            "label": "oracle_large_file_resume",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(large_file),
+            "log_path": str(large_file_log),
+        },
     ]
     _validate_rich_lab_outputs(rows)
 

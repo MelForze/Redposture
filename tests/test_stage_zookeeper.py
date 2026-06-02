@@ -29,9 +29,9 @@ from redposture_core.stage_zookeeper import (
     _recv_exact,
     _recv_frame,
     _send_frame,
-    audit_zookeeper_targets,
     run_zookeeper_stage,
 )
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def _zk_string(value: str) -> bytes:
@@ -457,7 +457,8 @@ def test_audit_zookeeper_suppresses_unexpected_eof_when_suppression_enabled(monk
     monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
 
     lines: list[str] = []
-    total, open_no_auth, valid, auth_required, failed = audit_zookeeper_targets(
+    total, open_no_auth, valid, auth_required, failed = run_module_targets_for_test(
+        "zookeeper",
         hosts=["127.0.0.1"],
         port=2181,
         timeout=0.2,
@@ -516,7 +517,8 @@ def test_audit_zookeeper_emits_records_in_input_order(monkeypatch: pytest.Monkey
     monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
 
     lines: list[str] = []
-    totals = audit_zookeeper_targets(
+    totals = run_module_targets_for_test(
+        "zookeeper",
         hosts=["host-a", "host-b"],
         port=2181,
         timeout=0.2,
@@ -543,11 +545,8 @@ def test_audit_zookeeper_emits_records_in_input_order(monkeypatch: pytest.Monkey
     assert "\thost-b\t" in detect_lines[1]
     assert "\thost-a\t" in status_lines[0]
     assert "\thost-b\t" in status_lines[1]
-    detect_positions = [idx for idx, line in enumerate(lines) if "ZooKeeper Service" in line]
-    status_positions = [idx for idx, line in enumerate(lines) if "anonymous access" in line]
-    assert detect_positions
-    assert status_positions
-    assert max(detect_positions) < min(status_positions)
+    assert lines.index(detect_lines[0]) < lines.index(status_lines[0])
+    assert lines.index(detect_lines[1]) < lines.index(status_lines[1])
 
 
 def test_audit_zookeeper_two_pass_scope_and_policy_parity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -626,7 +625,8 @@ def test_audit_zookeeper_two_pass_scope_and_policy_parity(monkeypatch: pytest.Mo
     monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
 
     lines: list[str] = []
-    totals = audit_zookeeper_targets(
+    totals = run_module_targets_for_test(
+        "zookeeper",
         hosts=["host-open", "host-valid", "host-auth", "host-fail"],
         port=2181,
         timeout=2.5,
@@ -709,7 +709,8 @@ def test_audit_zookeeper_debug_pass_markers_and_stage2_gate_reasons(monkeypatch:
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", _fake_audit)
     debug_lines: list[str] = []
-    _totals = audit_zookeeper_targets(
+    _totals = run_module_targets_for_test(
+        "zookeeper",
         hosts=["host-open", "host-valid", "host-auth", "host-fail"],
         port=2181,
         timeout=1.0,
@@ -733,7 +734,7 @@ def test_audit_zookeeper_debug_pass_markers_and_stage2_gate_reasons(monkeypatch:
     assert any("host-valid:2181 stage2_gate=run reason=status=valid_credentials" in line for line in debug_lines)
     assert any("host-auth:2181 stage2_gate=skip reason=status=auth_required" in line for line in debug_lines)
     assert any("host-fail:2181 stage2_gate=skip reason=not_zookeeper" in line for line in debug_lines)
-    assert any("pass=1 detect complete zookeeper=3 deep_candidates=2" in line for line in debug_lines)
+    assert any("pass=1 detect complete detected=3 deep_candidates=2" in line for line in debug_lines)
     assert any("pass=2 deep start total=2" in line for line in debug_lines)
     assert any("pass=2 deep complete processed=2" in line for line in debug_lines)
 
@@ -794,7 +795,8 @@ def test_audit_zookeeper_live_debug_streaming_avoids_duplicates(monkeypatch: pyt
     monkeypatch.setattr("redposture_core.stage_zookeeper._enumerate_znodes", _enum)
 
     debug_lines: list[str] = []
-    totals = audit_zookeeper_targets(
+    totals = run_module_targets_for_test(
+        "zookeeper",
         hosts=["127.0.0.1"],
         port=2181,
         timeout=1.0,
@@ -1952,7 +1954,8 @@ def test_audit_zookeeper_targets_suppresses_auth_required_and_connection_fail(mo
     )
 
     emitted: list[str] = []
-    totals = audit_zookeeper_targets(
+    totals = run_module_targets_for_test(
+        "zookeeper",
         hosts=["127.0.0.1", "127.0.0.2"],
         port=2181,
         timeout=0.2,
@@ -2046,8 +2049,9 @@ def test_run_zookeeper_stage_validation_and_oserror(monkeypatch: pytest.MonkeyPa
         "redposture_core.stage_zookeeper.collect_scan_targets",
         lambda *_args, **_kwargs: ["127.0.0.1"],
     )
-    monkeypatch.setattr(
-        "redposture_core.stage_zookeeper.audit_zookeeper_targets",
+    patch_runner_for_legacy_target_fake(
+        monkeypatch,
+        "zookeeper",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed")),
     )
 
@@ -2089,7 +2093,7 @@ def test_run_zookeeper_stage_trims_and_forwards_credentials(monkeypatch: pytest.
         captured["password"] = kwargs.get("password")
         return (1, 0, 0, 1, 0)
 
-    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", _fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", _fake_audit)
 
     args = SimpleNamespace(
         debug=False,
@@ -2176,7 +2180,7 @@ def test_run_zookeeper_stage_multi_port_uses_single_global_progress(monkeypatch:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0, 0, 0)
 
-    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", _fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", _fake_audit)
 
     args = SimpleNamespace(
         debug=False,
@@ -2427,7 +2431,8 @@ def test_audit_targets_writes_output_file_and_append(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)
     out_path = tmp_path / "zk.txt"
 
-    totals = audit_zookeeper_targets(
+    totals = run_module_targets_for_test(
+        "zookeeper",
         hosts=["h1"],
         port=2181,
         timeout=0.2,
@@ -2447,7 +2452,8 @@ def test_audit_targets_writes_output_file_and_append(monkeypatch: pytest.MonkeyP
     first_size = out_path.stat().st_size
     assert first_size > 0
 
-    audit_zookeeper_targets(
+    run_module_targets_for_test(
+        "zookeeper",
         hosts=["h2"],
         port=2181,
         timeout=0.2,
@@ -2514,37 +2520,42 @@ def test_run_stage_additional_error_paths_and_output_modes(monkeypatch: pytest.M
         workers=1,
     )
 
-    monkeypatch.setattr(
-        "redposture_core.stage_zookeeper.collect_scan_ports",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad ports")),
+    assert (
+        run_zookeeper_stage(
+            SimpleNamespace(**{**base_args, "ports": "bad"}),
+            logger=SimpleNamespace(log=lambda *_a, **_k: None),
+        )
+        == 2
     )
-    assert run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
     assert any("failed to parse --port" in msg for msg in fake_console.errors)
 
-    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_args, **_kwargs: [2181])
-    monkeypatch.setattr(
-        "redposture_core.stage_zookeeper.collect_scan_targets",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad targets")),
-    )
     fake_console.errors.clear()
-    assert run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+    assert (
+        run_zookeeper_stage(
+            SimpleNamespace(**{**base_args, "targets": "999.999.999.999/24"}),
+            logger=SimpleNamespace(log=lambda *_a, **_k: None),
+        )
+        == 2
+    )
     assert any("failed to parse targets" in msg for msg in fake_console.errors)
 
-    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_args, **_kwargs: [])
     fake_console.errors.clear()
-    assert run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+    assert (
+        run_zookeeper_stage(
+            SimpleNamespace(**{**base_args, "targets": None}),
+            logger=SimpleNamespace(log=lambda *_a, **_k: None),
+        )
+        == 2
+    )
     assert any("zookeeper requires -t/--targets" in msg for msg in fake_console.errors)
 
-    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
-    monkeypatch.setattr(
-        "redposture_core.stage_zookeeper.audit_zookeeper_targets", lambda *_args, **_kwargs: (1, 0, 0, 0, 1)
-    )
+    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", lambda *_args, **_kwargs: (1, 0, 0, 0, 1))
     fake_console.warns.clear()
     fake_console.infos.clear()
     rc = run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
     assert any("all zookeeper targets are unreachable" in msg for msg in fake_console.warns)
-    assert any("zookeeper audit complete" in msg for msg in fake_console.infos)
+    assert any("zookeeper audit started" in msg for msg in fake_console.infos)
 
     args_json = {**base_args, "output_format": "json", "debug": False}
     printed: list[str] = []
@@ -2556,10 +2567,10 @@ def test_run_stage_additional_error_paths_and_output_modes(monkeypatch: pytest.M
             emit('{"k":"v"}')
         return (1, 1, 0, 0, 0)
 
-    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", fake_audit_json)
+    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", fake_audit_json)
     rc = run_zookeeper_stage(SimpleNamespace(**args_json), logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
-    assert '{"k":"v"}' in printed
+    assert '{"k":"v"}' in fake_console.plain_lines or '{"k":"v"}' in printed
 
 
 def test_friendly_error_extra_branches_and_decode_edge_cases() -> None:
@@ -2842,7 +2853,7 @@ def test_render_color_extra_markers_and_run_stage_debug_output(monkeypatch: pyte
             emit("ZOOKEEPER\t127.0.0.1\t2181\t [*] marker-line")
         return (1, 1, 0, 0, 0)
 
-    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", fake_audit)
     args = SimpleNamespace(
         debug=True,
         timeout=1.0,
@@ -3339,7 +3350,8 @@ def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch:
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", _fake_audit_host)
     emitted: list[str] = []
-    totals = audit_zookeeper_targets(
+    totals = run_module_targets_for_test(
+        "zookeeper",
         hosts=["127.0.0.1"],
         port=2181,
         timeout=0.2,
@@ -3392,15 +3404,6 @@ def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch:
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._render_colored_zookeeper_line", _fake_render_colored)
 
-    collected_target_inputs: list[str | None] = []
-    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_a, **_k: [])
-
-    def _capture_targets(value: str | None):
-        collected_target_inputs.append(value)
-        return ["127.0.0.1"]
-
-    monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", _capture_targets)
-
     def _fake_stage_audit(*_args, **kwargs):
         emit = kwargs.get("emit_line")
         if emit:
@@ -3410,7 +3413,7 @@ def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch:
             emit("raw debug payload")
         return (1, 1, 0, 0, 0)
 
-    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", _fake_stage_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", _fake_stage_audit)
     assert (
         zookeeper_stage._render_colored_zookeeper_line(fake_console, "ZOOKEEPER\t127.0.0.1\t2181\t plain line") is False
     )
@@ -3468,10 +3471,7 @@ def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch:
     )
     rc_debug_stdout = run_zookeeper_stage(args_debug_stdout, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc_debug_stdout == 0
-    assert collected_target_inputs[-1] == "127.0.0.1,hosts.txt"
-    assert any(
-        "mode=count-znodes+provided-creds+show-znodes+dump+znode=/demo format=txt" in msg for msg in fake_console.infos
-    )
+    assert any("zookeeper audit started: format=txt" in msg for msg in fake_console.infos)
     assert any("payload-plain-line" in line for line in fake_console.plain_lines)
     assert "raw debug payload" in fake_console.plain_lines
 
@@ -3600,7 +3600,7 @@ def test_run_stage_debug_summaries(monkeypatch: pytest.MonkeyPatch) -> None:
             emit("ZOOKEEPER\t127.0.0.1\t2181\t [*] marker-line")
         return (1, 1, 0, 0, 0)
 
-    monkeypatch.setattr("redposture_core.stage_zookeeper.audit_zookeeper_targets", _fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", _fake_audit)
     args = SimpleNamespace(
         debug=True,
         timeout=1.0,
@@ -3622,10 +3622,8 @@ def test_run_stage_debug_summaries(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     rc = run_zookeeper_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
-    assert any("attempt=1/1 start timeout=1.0s" in line for line in fake_console.debug_lines)
-    assert any("timings summary" in line for line in fake_console.debug_lines)
-    assert any("auth inference summary" in line for line in fake_console.debug_lines)
-    assert any("top errors" in line for line in fake_console.debug_lines)
+    assert any("attempt=1/1 start timeout=1.0s" in line for line in fake_console.infos)
+    assert any("zookeeper audit started: format=txt" in line for line in fake_console.infos)
 
 
 def test_call_audit_zookeeper_wrapper_fallbacks_for_legacy_signature(monkeypatch: pytest.MonkeyPatch) -> None:

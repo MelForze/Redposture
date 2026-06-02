@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from redposture_core import stage_mongodb as mongodb
+from tests.stage_runtime_helpers import run_module_targets_for_test
 
 
 class _Cursor(list):
@@ -195,7 +196,8 @@ def test_audit_mongodb_targets_two_pass_debug_and_output(monkeypatch: pytest.Mon
     _patch_open(monkeypatch, auth_required=False)
     lines: list[str] = []
     debug: list[str] = []
-    result = mongodb.audit_mongodb_targets(
+    result = run_module_targets_for_test(
+        "mongodb",
         hosts=["127.0.0.1"],
         port=27017,
         timeout=1.0,
@@ -265,7 +267,12 @@ def test_mongodb_small_helpers_and_collection_validation() -> None:
     normalized, grouped, error = mongodb._group_collection_targets(["db.users", "events"], "redposture")
     assert error is None
     assert normalized == ["db.users", "events"]
-    assert grouped == {"db": ["users"], "redposture": ["events"]}
+    assert grouped == {"redposture": ["db.users", "events"]}
+
+    normalized, grouped, error = mongodb._group_collection_targets(["db.users", "events"], None)
+    assert error is None
+    assert normalized == ["db.users", "events"]
+    assert grouped == {"db": ["users"], None: ["events"]}
     assert mongodb._group_collection_targets(["broken."], None)[2] == "invalid --collection target: broken."
 
     value, safe, error = mongodb._parse_document_selector("1")
@@ -394,7 +401,8 @@ def test_audit_mongodb_invalid_credentials_do_not_run_anonymous_deep(monkeypatch
 
     monkeypatch.setattr(mongodb, "open_mongodb_client", anonymous_with_invalid_creds)
     lines: list[str] = []
-    result = mongodb.audit_mongodb_targets(
+    result = run_module_targets_for_test(
+        "mongodb",
         hosts=["127.0.0.1"],
         port=27017,
         timeout=1.0,

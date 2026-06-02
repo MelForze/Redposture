@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
-from ..show_limits import optional_show_count_kwargs
+from ..show_limits import optional_dump_count_kwargs, optional_show_count_kwargs
 
 
 class PostgresHelpFormatter(argparse.HelpFormatter):
@@ -77,7 +77,7 @@ def configure_postgres_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try default Postgres credentials postgres:postgres when auth is required.",
+        help="Try default Postgres credentials postgres:postgres and pgbouncer:pgbouncer when auth is required.",
     )
     discovery.add_argument(
         "--show-databases",
@@ -131,13 +131,8 @@ def configure_postgres_parser(
     )
     discovery.add_argument(
         "--dump",
-        nargs="?",
-        const=0,
-        type=positive_int,
-        metavar="count",
-        help=(
-            "Dump table rows. Optional count limits dumped rows; without count dumps all rows. "
-            "With --table dumps selected table(s)."
+        **optional_dump_count_kwargs(
+            "Dump table rows. Optional count limits dumped rows; without count dumps all rows. With --table dumps selected table(s)."
         ),
     )
     discovery.add_argument(

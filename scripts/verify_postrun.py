@@ -18,6 +18,7 @@ _EXPECTED_MODULES = (
     "kubeapi",
     "postgres",
     "mongodb",
+    "oracle",
     "docker",
     "clickhouse",
     "redis",
@@ -75,6 +76,33 @@ _EXPECTED_LABELS = (
     "mongodb_multi_ports",
     "mongodb_query_dump",
     "mongodb_debug_smoke",
+    "oracle_listener",
+    "oracle_sid_service_enum",
+    "oracle_auth",
+    "oracle_defcreds",
+    "oracle_combo_file",
+    "oracle_spray",
+    "oracle_multi_ports",
+    "oracle_pdb_cdb",
+    "oracle_privesc_check",
+    "oracle_privesc_chain",
+    "oracle_nne_check",
+    "oracle_listener_dump",
+    "oracle_listener_protected",
+    "oracle_query_dump",
+    "oracle_rce_scheduler",
+    "oracle_external_table_rce",
+    "oracle_dbms_cloud_capability",
+    "oracle_privesc_chain_execute",
+    "oracle_file_read",
+    "oracle_wallet_search",
+    "oracle_wallet_extract",
+    "oracle_large_file_resume",
+    "oracle_arbitrary_fs",
+    "oracle_hashes",
+    "oracle_dblink",
+    "oracle_debug_smoke",
+    "oracle_json_smoke",
     "docker_open",
     "docker_tls",
     "docker_multi_ports",
@@ -132,6 +160,7 @@ _PROGRESS_EXPECTED_TARGETS = {
     "kubeapi_multi_instance_urls": 5,
     "postgres_multi_ports": 5,
     "mongodb_multi_ports": 5,
+    "oracle_multi_ports": 5,
     "docker_multi_ports": 5,
     "clickhouse_multi_ports": 5,
     "redis_multi_ports": 5,
@@ -156,6 +185,18 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "consul_acl_read": ("redposture/kafka/sasl_password", "redposture/env", "lab-acl"),
     "consul_multi_instance_urls": ("redposture/kafka/sasl_password", "inventory/services/gitlab/url"),
     "mongodb_open": ("demo_accounts", "service_tokens", "billing"),
+    "oracle_auth": ("FREEPDB1", "SYSTEM"),
+    "oracle_query_dump": ("ACCOUNTS", "OracleAdmin!2026"),
+    "oracle_privesc_check": ("privesc_findings", "DBA/SYSDBA"),
+    "oracle_nne_check": ("nne_check", "tcp_available"),
+    "oracle_listener_dump": ("listener_dump", "services_ok"),
+    "oracle_listener_protected": ("Listener Dump", "password_protected=True"),
+    "oracle_external_table_rce": ("exec_result", "external-table", "ext-rce-ok"),
+    "oracle_dbms_cloud_capability": ("DBMS_CLOUD",),
+    "oracle_privesc_chain_execute": ("privesc_chain_executed", "scheduler_rce"),
+    "oracle_wallet_extract": ("wallet_findings", "redposture_wallet_hint"),
+    "oracle_large_file_resume": ("file_results", "redposture_large_file"),
+    "oracle_arbitrary_fs": ("file_results", "scheduler_readback"),
     "docker_inventory": ("redposture-web", "redposture-worker", "redposture-prod-net", "redposture-secrets"),
     "docker_exec": ("uid=0", "root"),
     "qdrant_default": ("demo_vectors", "audit_logs", "service_inventory"),
@@ -317,6 +358,10 @@ def _combined_run_output(row: dict[str, str]) -> str:
         artifact = Path(json_path)
         if artifact.exists():
             parts.append(artifact.read_text(encoding="utf-8", errors="replace"))
+    elif log_path.suffix == ".log":
+        text_artifact = log_path.with_suffix(".txt")
+        if text_artifact.exists():
+            parts.append(text_artifact.read_text(encoding="utf-8", errors="replace"))
     return "\n".join(parts)
 
 
@@ -350,11 +395,52 @@ def _validate_rich_lab_outputs(rows: list[dict[str, str]]) -> None:
             if needle in output_text:
                 raise SystemExit(f"label '{label}' contains empty/unseeded lab output: {needle}")
 
+        if label == "oracle_large_file_resume":
+            ok = False
+            for payload in _iter_json_objects(output_text):
+                if payload.get("type") not in {None, "file_results"}:
+                    continue
+                file_results = payload.get("file_results") or []
+                if not isinstance(file_results, list):
+                    continue
+                for item in file_results:
+                    if not isinstance(item, dict):
+                        continue
+                    if (
+                        item.get("action") == "download"
+                        and item.get("ok") is True
+                        and int(item.get("bytes") or 0) > 0
+                        and "redposture_large_file" in str(item.get("path") or "")
+                    ):
+                        ok = True
+                        break
+            if not ok:
+                raise SystemExit("label 'oracle_large_file_resume' did not complete a non-empty download")
+
+        if label == "oracle_wallet_extract":
+            ok = False
+            for payload in _iter_json_objects(output_text):
+                if payload.get("type") not in {None, "wallet_findings"}:
+                    continue
+                wallet_findings = payload.get("wallet_findings") or []
+                if not isinstance(wallet_findings, list):
+                    continue
+                for item in wallet_findings:
+                    if not isinstance(item, dict):
+                        continue
+                    if "redposture_wallet_hint" in json.dumps(item, sort_keys=True):
+                        ok = True
+                        break
+            if not ok:
+                raise SystemExit("label 'oracle_wallet_extract' did not extract seeded wallet metadata")
+
         if label == "zookeeper_multi_ports":
             dump_ports = {
                 int(item["port"])
                 for item in _iter_json_objects(output_text)
-                if item.get("type") == "znodes_dump" and item.get("znode_values") and isinstance(item.get("port"), int)
+                if item.get("type") in {None, "znodes_dump"}
+                and item.get("znode_values")
+                and isinstance(item.get("port"), int)
             }
             if dump_ports != _ZOOKEEPER_MULTI_DUMP_PORTS:
                 raise SystemExit(
@@ -388,7 +474,7 @@ def _validate_output_sanity(rows: list[dict[str, str]]) -> None:
         counts = _progress_counts_from_log(log_text)
         if not counts:
             # Some json/jsonl flows intentionally stream structured rows without rendering progress.
-            inferred_targets = _infer_target_count_from_jsonl(log_text)
+            inferred_targets = _infer_target_count_from_jsonl(_combined_run_output(row))
             if inferred_targets == expected_targets:
                 continue
             raise SystemExit(f"missing progress row in log for label '{label}'")

@@ -47,9 +47,12 @@ docker/kubeapi/output-open/*
 !docker/kubeapi/output-open/.gitkeep
 docker/consul/output/*
 !docker/consul/output/.gitkeep
+!redposture_core/modules/docker/
+!redposture_core/modules/docker/**
 cert.pem
 key.pem
 server.crt
 server.key
 tls.crt
 tls.key
+lab/services/proxy-isolated/certs/*.pem

@@ -17,9 +17,9 @@ from redposture_core.stage_grpc import (
     _merge_stage2_record,
     _nxc_prefix,
     _retry_delay,
-    audit_grpc_targets,
     run_grpc_stage,
 )
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def test_grpc_frame_roundtrip_and_truncation() -> None:
@@ -224,10 +224,11 @@ def test_audit_grpc_targets_two_pass_gate(monkeypatch: pytest.MonkeyPatch) -> No
             "health_checks": [],
         }
 
-    monkeypatch.setattr(grpc_stage, "_call_audit_grpc_host_with_thread_debug", fake_call)
+    monkeypatch.setattr(grpc_stage, "_call_audit_grpc_host_with_stage_debug", fake_call)
 
     lines: list[str] = []
-    total, anonymous, valid, auth_required, not_grpc, failed = audit_grpc_targets(
+    total, anonymous, valid, auth_required, not_grpc, failed = run_module_targets_for_test(
+        "grpc",
         hosts=["a", "b", "c"],
         port=50051,
         timeout=1.0,
@@ -264,7 +265,7 @@ def test_run_grpc_stage_respects_token_precedence(monkeypatch: pytest.MonkeyPatc
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 0, 0, 1, 0, 0)
 
-    monkeypatch.setattr(grpc_stage, "audit_grpc_targets", fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "grpc", fake_audit)
 
     args = SimpleNamespace(
         debug=False,
@@ -357,7 +358,7 @@ def test_run_grpc_stage_prints_non_marker_lines_in_non_debug(monkeypatch: pytest
 
     monkeypatch.setattr(grpc_stage, "Console", DummyConsole)
     monkeypatch.setattr(grpc_stage, "_render_colored_grpc_line", lambda _console, _line: False)
-    monkeypatch.setattr(grpc_stage, "audit_grpc_targets", fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "grpc", fake_audit)
 
     args = SimpleNamespace(
         debug=False,

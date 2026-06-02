@@ -7,12 +7,12 @@ import json
 import ssl
 import urllib.error
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from redposture_core import stage_consul as consul
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def test_consul_lab_uses_multiarch_official_image() -> None:
@@ -442,7 +442,8 @@ def test_audit_consul_targets_json_output_is_machine_readable(monkeypatch, tmp_p
     monkeypatch.setattr(consul, "_audit_consul_host", fake_audit_consul_host)
     output_path = tmp_path / "consul.json"
 
-    total, detected, failed, revshell_registered = consul.audit_consul_targets(
+    total, detected, failed, revshell_registered = run_module_targets_for_test(
+        "consul",
         hosts=["127.0.0.1"],
         port=8500,
         timeout=1.0,
@@ -671,7 +672,7 @@ def test_audit_consul_host_debug_stage_telemetry(monkeypatch: pytest.MonkeyPatch
     )
     monkeypatch.setattr(
         consul,
-        "_audit_consul_host_legacy",
+        "_audit_consul_host_core",
         lambda *_args, **_kwargs: {
             "timestamp": "2026-04-10T00:00:00Z",
             "host": "127.0.0.1",
@@ -843,7 +844,8 @@ def test_audit_consul_targets_two_pass_gate_and_debug_markers(monkeypatch: pytes
 
     emitted: list[str] = []
     debug_lines: list[str] = []
-    totals = consul.audit_consul_targets(
+    totals = run_module_targets_for_test(
+        "consul",
         hosts=["10.0.0.1", "10.0.0.2"],
         port=8500,
         timeout=1.0,
@@ -1421,7 +1423,7 @@ def test_run_consul_stage_warns_for_token_override_and_unreachable_targets(monke
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return 1, 0, 1, False
 
-    monkeypatch.setattr(consul, "audit_consul_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "consul", fake_audit_targets)
     rc = consul.run_consul_stage(
         _consul_args(token="root", username="alice", password="secret"),
         logger=object(),  # type: ignore[arg-type]
@@ -1438,7 +1440,7 @@ def test_run_consul_stage_listener_path_starts_local_listener(monkeypatch: pytes
     monkeypatch.setattr(consul, "Console", _ConsoleCapture)
     monkeypatch.setattr(consul, "collect_scan_ports", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(consul, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
-    monkeypatch.setattr(consul, "audit_consul_targets", lambda **_kwargs: (1, 1, 0, True))
+    patch_runner_for_legacy_target_fake(monkeypatch, "consul", lambda **_kwargs: (1, 1, 0, True))
 
     class _FakePopen:
         def wait(self) -> int:
@@ -1463,8 +1465,6 @@ def test_run_consul_stage_listener_path_starts_local_listener(monkeypatch: pytes
 def test_run_consul_stage_dump_flag_inference_and_listener_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(consul, "Console", _ConsoleCapture)
-    monkeypatch.setattr(consul, "collect_scan_ports", lambda *_args, **_kwargs: [8500, 18500])
-    monkeypatch.setattr(consul, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
     captured: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
@@ -1473,7 +1473,7 @@ def test_run_consul_stage_dump_flag_inference_and_listener_warnings(monkeypatch:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return 1, 1, 0, False
 
-    monkeypatch.setattr(consul, "audit_consul_targets", fake_audit_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "consul", fake_audit_targets)
     rc = consul.run_consul_stage(
         _consul_args(
             debug=True,
@@ -1486,8 +1486,7 @@ def test_run_consul_stage_dump_flag_inference_and_listener_warnings(monkeypatch:
             revshell_host="127.0.0.1",
             revshell_port=4444,
             revshell_check_id="id:rp-check",
-            targets=None,
-            hosts_file="targets.txt",
+            ports="8500,18500",
         ),
         logger=object(),  # type: ignore[arg-type]
     )
@@ -1509,7 +1508,9 @@ def test_run_consul_stage_returns_error_when_target_audit_raises(monkeypatch: py
     monkeypatch.setattr(consul, "Console", _ConsoleCapture)
     monkeypatch.setattr(consul, "collect_scan_ports", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(consul, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
-    monkeypatch.setattr(consul, "audit_consul_targets", lambda **_kwargs: (_ for _ in ()).throw(OSError("broken pipe")))
+    patch_runner_for_legacy_target_fake(
+        monkeypatch, "consul", lambda **_kwargs: (_ for _ in ()).throw(OSError("broken pipe"))
+    )
     rc = consul.run_consul_stage(_consul_args(), logger=object())  # type: ignore[arg-type]
     assert rc == 2
     assert any(
@@ -1523,7 +1524,7 @@ def test_run_consul_stage_warn_paths_for_revshell_args(monkeypatch: pytest.Monke
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(consul, "Console", _ConsoleCapture)
     monkeypatch.setattr(consul, "collect_scan_ports", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(consul, "audit_consul_targets", lambda **_kwargs: (1, 1, 0, False))
+    patch_runner_for_legacy_target_fake(monkeypatch, "consul", lambda **_kwargs: (1, 1, 0, False))
 
     rc_payload = consul.run_consul_stage(
         _consul_args(revshell=True, revshell_host="127.0.0.1", revshell_port=4444, revshell_payload="id"),
@@ -1571,24 +1572,14 @@ def test_run_consul_stage_target_parse_and_ssrf_empty_errors(monkeypatch: pytest
     monkeypatch.setattr(consul, "Console", _ConsoleCapture)
     monkeypatch.setattr(consul, "collect_scan_ports", lambda *_args, **_kwargs: [])
 
-    monkeypatch.setattr(
-        consul, "collect_scan_target_specs", lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad targets"))
-    )
-    rc_targets = consul.run_consul_stage(_consul_args(), logger=object())  # type: ignore[arg-type]
+    rc_targets = consul.run_consul_stage(_consul_args(targets="http://"), logger=object())  # type: ignore[arg-type]
     assert rc_targets == 2
     assert any(
-        "failed to parse targets: bad targets" in msg
-        for level, msg in _ConsoleCapture.instances[-1].messages
-        if level == "error"
+        "failed to parse targets:" in msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "error"
     )
 
     _ConsoleCapture.instances.clear()
-    monkeypatch.setattr(
-        consul,
-        "collect_scan_target_specs",
-        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
-    )
-    monkeypatch.setattr(consul, "_normalize_ssrf_urls", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr("redposture_core.modules.consul.policy._normalize_ssrf_urls", lambda *_args, **_kwargs: [])
     rc_ssrf = consul.run_consul_stage(_consul_args(ssrf_target="127.0.0.1"), logger=object())  # type: ignore[arg-type]
     assert rc_ssrf == 2
     assert any(
@@ -1934,7 +1925,7 @@ def test_consul_access_matrix_invokes_three_probes(monkeypatch: pytest.MonkeyPat
     assert calls == ["/v1/kv/?keys&recurse", "/v1/catalog/services", "/v1/agent/members"]
 
 
-def test_audit_consul_host_legacy_with_rich_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_consul_host_core_with_rich_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         consul,
         "_probe_consul_scheme",
@@ -1997,7 +1988,7 @@ def test_audit_consul_host_legacy_with_rich_flow(monkeypatch: pytest.MonkeyPatch
         },
     )
 
-    record = consul._audit_consul_host_legacy(
+    record = consul._audit_consul_host_core(
         "127.0.0.1",
         8500,
         1.0,
@@ -2142,7 +2133,7 @@ def test_audit_consul_host_staged_deep_fail_and_detect_only(monkeypatch: pytest.
     )
     monkeypatch.setattr(
         consul,
-        "_audit_consul_host_legacy",
+        "_audit_consul_host_core",
         lambda *_a, **_k: {"is_consul": False, "status": "fail", "error": "deep failed"},
     )
 
@@ -2227,17 +2218,6 @@ def test_audit_consul_host_staged_deep_fail_and_detect_only(monkeypatch: pytest.
 def test_run_consul_stage_dump_all_inference(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(consul, "Console", _ConsoleCapture)
-    monkeypatch.setattr(consul, "collect_scan_ports", lambda *_a, **_k: [8500])
-    monkeypatch.setattr(
-        consul,
-        "collect_scan_target_specs",
-        lambda *_a, **_k: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
-    )
-    monkeypatch.setattr(
-        consul,
-        "build_scan_execution_groups",
-        lambda *_a, **_k: [SimpleNamespace(hosts=["127.0.0.1"], port=8500, scheme_hint=None)],
-    )
     captured: list[dict[str, object]] = []
 
     def fake_audit(**kwargs):  # type: ignore[no-untyped-def]
@@ -2246,7 +2226,7 @@ def test_run_consul_stage_dump_all_inference(monkeypatch: pytest.MonkeyPatch) ->
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 1, 0, False)
 
-    monkeypatch.setattr(consul, "audit_consul_targets", fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "consul", fake_audit)
     rc = consul.run_consul_stage(_consul_args(debug=True, dump=True), logger=object())  # type: ignore[arg-type]
     assert rc == 0
     assert captured
@@ -2260,20 +2240,6 @@ def test_run_consul_stage_dump_all_inference(monkeypatch: pytest.MonkeyPatch) ->
 def test_run_consul_stage_multi_port_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(consul, "Console", _ConsoleCapture)
-    monkeypatch.setattr(consul, "collect_scan_ports", lambda *_a, **_k: [8500, 8501])
-    monkeypatch.setattr(
-        consul,
-        "collect_scan_target_specs",
-        lambda *_a, **_k: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
-    )
-    monkeypatch.setattr(
-        consul,
-        "build_scan_execution_groups",
-        lambda *_a, **_k: [
-            SimpleNamespace(hosts=["127.0.0.1"], port=8500, scheme_hint=None),
-            SimpleNamespace(hosts=["127.0.0.1"], port=8501, scheme_hint=None),
-        ],
-    )
 
     class _FakeProgress:
         instances: list[_FakeProgress] = []
@@ -2292,8 +2258,7 @@ def test_run_consul_stage_multi_port_uses_single_global_progress(monkeypatch: py
             self.closed = True
 
     monkeypatch.setattr(
-        consul,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
     )
 
@@ -2305,9 +2270,9 @@ def test_run_consul_stage_multi_port_uses_single_global_progress(monkeypatch: py
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0, False)
 
-    monkeypatch.setattr(consul, "audit_consul_targets", fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "consul", fake_audit)
 
-    rc = consul.run_consul_stage(_consul_args(), logger=object())  # type: ignore[arg-type]
+    rc = consul.run_consul_stage(_consul_args(ports="8500,8501"), logger=object())  # type: ignore[arg-type]
     assert rc == 0
     assert len(captured) == 2
     assert all(call["show_progress"] is False for call in captured)

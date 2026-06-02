@@ -220,6 +220,39 @@ run_case mongodb mongodb_defcreds 0 mongodb -t 127.0.0.1 --port 27018 --defcreds
 run_case mongodb mongodb_multi_ports 0 mongodb -t 127.0.0.1 --ports "27017,37017,37018,37019,37020" --show-databases
 run_case mongodb mongodb_query_dump 0 mongodb -t 127.0.0.1 --port 27017 --database redposture --collection demo_accounts --query '{"role":"admin"}' --dump 10
 run_text_case mongodb mongodb_debug_smoke 0 mongodb -t 127.0.0.1 --port 27017 --debug
+run_case oracle oracle_listener 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1
+run_case oracle oracle_sid_service_enum 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service-list FREEPDB1,FREE --sid-list FREE,ORCLCDB
+run_case oracle oracle_auth 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs --show-users
+run_case oracle oracle_defcreds 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 --defcreds --show-users
+ORACLE_COMBO="${OUT_DIR}/oracle_combo.txt"
+printf "bad:bad\nredposture:OracleLab!2026\n" > "${ORACLE_COMBO}"
+run_case oracle oracle_combo_file 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 --combo-list "${ORACLE_COMBO}" --show-users
+ORACLE_USERS="${OUT_DIR}/oracle_users.txt"
+ORACLE_PASSWORDS="${OUT_DIR}/oracle_passwords.txt"
+printf "redposture\nlimited\n" > "${ORACLE_USERS}"
+printf "wrong\nOracleLab!2026\n" > "${ORACLE_PASSWORDS}"
+run_case oracle oracle_spray 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 --user-list "${ORACLE_USERS}" --pass-list "${ORACLE_PASSWORDS}" --spray-passwords
+run_case oracle oracle_multi_ports 0 oracle --timeout 5 -t 127.0.0.1 --ports "1521,31521,31522,31523,31524" --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs
+run_case oracle oracle_pdb_cdb 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs
+run_case oracle oracle_privesc_check 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --privesc-check
+run_case oracle oracle_privesc_chain 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --privesc-chain
+run_case oracle oracle_nne_check 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --nne-check
+run_case oracle oracle_listener_dump 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 --listener-dump
+run_text_case oracle oracle_listener_protected 0 oracle --timeout 5 -t 127.0.0.1 --port 31525 --listener-dump
+run_case oracle oracle_query_dump 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --schema REDPOSTURE --table ACCOUNTS --show-tables --dump 10 --query "select username, role from accounts fetch first 2 rows only"
+run_case oracle oracle_rce_scheduler 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --exec-cmd "id"
+run_case oracle oracle_external_table_rce 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --exec-cmd "echo ext-rce-ok" --exec-method external-table
+run_case oracle oracle_dbms_cloud_capability 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --exec-cmd "id" --exec-method dbms-cloud
+run_case oracle oracle_privesc_chain_execute 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --privesc-check --privesc-chain
+run_case oracle oracle_file_read 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --os-read redposture_wallet_hint.txt
+run_case oracle oracle_wallet_search 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --wallet-search
+run_case oracle oracle_wallet_extract 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --wallet-search -o "${OUT_DIR}/oracle_wallet_extract.txt"
+run_case oracle oracle_large_file_resume 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --download "redposture_large_file.txt:${OUT_DIR}/oracle_large_file_download.txt"
+run_case oracle oracle_arbitrary_fs 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --os-read /etc/hostname --fs-mode scheduler
+run_case oracle oracle_hashes 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --hashes
+run_case oracle oracle_dblink 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --dblink-check
+run_text_case oracle oracle_debug_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --debug
+run_case oracle oracle_json_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs
 run_case docker docker_open 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
 run_case docker docker_tls 0 docker -t 127.0.0.1 --port 2376 --insecure --system
 run_case docker docker_multi_ports 0 docker -t 127.0.0.1 --ports "2375,2376,24243,24244,24245" --insecure --containers

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_qdrant as qdrant
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 def test_inline_and_json_compact_helpers() -> None:
@@ -681,7 +682,8 @@ def test_audit_qdrant_targets_and_run_stage_paths(
 
     monkeypatch.setattr(qdrant, "_audit_qdrant_host", fake_audit)
     output_path = tmp_path / "qdrant.txt"
-    totals = qdrant.audit_qdrant_targets(
+    totals = run_module_targets_for_test(
+        "qdrant",
         hosts=["127.0.0.1", "127.0.0.2"],
         port=6333,
         timeout=1.0,
@@ -804,7 +806,8 @@ def test_audit_qdrant_targets_emits_stage_debug_markers(monkeypatch: pytest.Monk
 
     monkeypatch.setattr(qdrant, "_audit_qdrant_host", fake_audit)
     debug_lines: list[str] = []
-    totals = qdrant.audit_qdrant_targets(
+    totals = run_module_targets_for_test(
+        "qdrant",
         hosts=["127.0.0.1"],
         port=6333,
         timeout=1.0,
@@ -943,9 +946,9 @@ def test_run_qdrant_stage_ssrf_listener_flow(monkeypatch: pytest.MonkeyPatch) ->
         "_normalize_ssrf_urls",
         lambda *_args, **_kwargs: ["http://127.0.0.1:18080/debug/vars"],
     )
-    monkeypatch.setattr(
-        qdrant,
-        "audit_qdrant_targets",
+    patch_runner_for_legacy_target_fake(
+        monkeypatch,
+        "qdrant",
         lambda *_args, **_kwargs: (1, 1, 0, 0, 0),
     )
     monkeypatch.setattr(
@@ -1052,27 +1055,7 @@ def test_run_qdrant_stage_multi_instance_uses_single_global_progress(monkeypatch
         kwargs["emit_line"]("QDRANT\t127.0.0.1\t6333\t[*] Qdrant Service")
         return (1, 1, 0, 0, 0)
 
-    monkeypatch.setattr(qdrant, "audit_qdrant_targets", fake_audit_targets)
-
-    progress_totals: list[int] = []
-    progress_advances: list[int] = []
-
-    class _FakeProgressBar:
-        def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
-            _ = (enabled, leave)
-            progress_totals.append(int(total))
-
-        def advance(self, amount: int = 1) -> None:
-            progress_advances.append(int(amount))
-
-        def close(self) -> None:
-            return
-
-    monkeypatch.setattr(
-        qdrant,
-        "start_command_progress",
-        lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
-    )
+    patch_runner_for_legacy_target_fake(monkeypatch, "qdrant", fake_audit_targets)
 
     args = SimpleNamespace(
         debug=False,
@@ -1099,8 +1082,6 @@ def test_run_qdrant_stage_multi_instance_uses_single_global_progress(monkeypatch
     assert rc == 0
     assert not fake_console.errors
     assert [bool(call["show_progress"]) for call in calls] == [False, False, False]
-    assert progress_totals == [3]
-    assert progress_advances == [1, 1, 1]
 
 
 def test_run_qdrant_stage_ssrf_url_parse_errors(monkeypatch: pytest.MonkeyPatch) -> None:

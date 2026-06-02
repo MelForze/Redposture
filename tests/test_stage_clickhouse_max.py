@@ -10,6 +10,7 @@ from uuid import UUID
 import pytest
 
 from redposture_core import stage_clickhouse as clickhouse_stage
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake
 
 
 class _DummyClient:
@@ -881,32 +882,33 @@ def test_run_clickhouse_stage_no_hosts_and_bad_ports(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(clickhouse_stage, "Console", _FakeConsole)
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: object)
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_connect_module", lambda: object)
-    monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda *_args, **_kwargs: [])
-    assert clickhouse_stage.run_clickhouse_stage(_base_args(), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
-
-    monkeypatch.setattr(
-        clickhouse_stage,
-        "collect_scan_ports",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad ports")),
+    assert (
+        clickhouse_stage.run_clickhouse_stage(
+            _base_args(targets=None, hosts=None), logger=SimpleNamespace(log=lambda *_a, **_k: None)
+        )
+        == 2
     )
-    assert clickhouse_stage.run_clickhouse_stage(_base_args(), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+
+    assert (
+        clickhouse_stage.run_clickhouse_stage(
+            _base_args(ports="bad"), logger=SimpleNamespace(log=lambda *_a, **_k: None)
+        )
+        == 2
+    )
 
 
 def test_run_clickhouse_stage_sql_shell_requires_single_target_and_txt(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(clickhouse_stage, "Console", _FakeConsole)
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: object)
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_connect_module", lambda: object)
-    monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1", "127.0.0.2"])
-
     assert (
         clickhouse_stage.run_clickhouse_stage(
-            _base_args(sql_shell=True),
+            _base_args(sql_shell=True, targets="127.0.0.1,127.0.0.2"),
             logger=SimpleNamespace(log=lambda *_a, **_k: None),
         )
         == 2
     )
 
-    monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
     assert (
         clickhouse_stage.run_clickhouse_stage(
             _base_args(sql_shell=True, output_format="json"),
@@ -965,7 +967,7 @@ def test_run_clickhouse_stage_calls_audit_with_port_protocols(monkeypatch: pytes
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 0, 0, 0, 0, 1)
 
-    monkeypatch.setattr(clickhouse_stage, "audit_clickhouse_targets", fake_audit)
+    patch_runner_for_legacy_target_fake(monkeypatch, "clickhouse", fake_audit)
     exit_code = clickhouse_stage.run_clickhouse_stage(
         _base_args(debug=False, output=None),
         logger=SimpleNamespace(log=lambda *_a, **_k: None),
@@ -1325,12 +1327,12 @@ def test_run_clickhouse_stage_runtime_error_and_target_parse_error(monkeypatch: 
 
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: object)
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_connect_module", lambda: object)
-    monkeypatch.setattr(
-        clickhouse_stage,
-        "collect_scan_targets",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad targets")),
+    assert (
+        clickhouse_stage.run_clickhouse_stage(
+            _base_args(targets="http://"), logger=SimpleNamespace(log=lambda *_a, **_k: None)
+        )
+        == 2
     )
-    assert clickhouse_stage.run_clickhouse_stage(_base_args(), logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
 
 
 def test_run_clickhouse_stage_debug_info_and_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1340,9 +1342,9 @@ def test_run_clickhouse_stage_debug_info_and_oserror(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_connect_module", lambda: object)
     monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
-    monkeypatch.setattr(
-        clickhouse_stage,
-        "audit_clickhouse_targets",
+    patch_runner_for_legacy_target_fake(
+        monkeypatch,
+        "clickhouse",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed")),
     )
     rc = clickhouse_stage.run_clickhouse_stage(

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_redis as redis_stage
+from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 class _DummySocket:
@@ -491,7 +492,8 @@ def test_audit_redis_targets_json_output_and_suppression(monkeypatch: pytest.Mon
 
     output_path = tmp_path / "redis.json"
     emitted: list[str] = []
-    totals = redis_stage.audit_redis_targets(
+    totals = run_module_targets_for_test(
+        "redis",
         hosts=["127.0.0.1", "127.0.0.2"],
         port=6379,
         timeout=1.0,
@@ -511,7 +513,7 @@ def test_audit_redis_targets_json_output_and_suppression(monkeypatch: pytest.Mon
     assert totals == (2, 0, 0, 0, 1, 1)
     lines = output_path.read_text(encoding="utf-8").splitlines()
     payloads = [json.loads(line) for line in lines]
-    assert any(item.get("type") == "detect" for item in payloads)
+    assert all(item.get("service") == "redis" for item in payloads)
     assert any(item.get("status") == "auth_required" for item in payloads)
 
 
@@ -573,7 +575,8 @@ def test_audit_redis_targets_suppresses_connection_refused_status_line_only(
     monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))  # type: ignore[no-untyped-def]
 
     emitted: list[str] = []
-    totals = redis_stage.audit_redis_targets(
+    totals = run_module_targets_for_test(
+        "redis",
         hosts=["127.0.0.1", "127.0.0.2"],
         port=6379,
         timeout=1.0,
@@ -630,7 +633,8 @@ def test_audit_redis_targets_keeps_non_refused_fail_lines_when_suppression_enabl
     monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))  # type: ignore[no-untyped-def]
 
     emitted: list[str] = []
-    totals = redis_stage.audit_redis_targets(
+    totals = run_module_targets_for_test(
+        "redis",
         hosts=["127.0.0.1"],
         port=6379,
         timeout=1.0,
@@ -663,7 +667,7 @@ def test_run_redis_stage_connection_refused_suppression_matches_debug(
         captured.update(kwargs)
         return (1, 0, 0, 0, 0, 1)
 
-    monkeypatch.setattr(redis_stage, "audit_redis_targets", fake_audit_redis_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "redis", fake_audit_redis_targets)
 
     args = SimpleNamespace(
         debug=debug,
@@ -697,7 +701,7 @@ def test_run_redis_stage_connection_refused_suppression_matches_debug(
 def test_run_redis_stage_non_debug_shows_unreachable_summary(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(redis_stage, "audit_redis_targets", lambda *_args, **_kwargs: (1, 0, 0, 0, 0, 1))
+    patch_runner_for_legacy_target_fake(monkeypatch, "redis", lambda *_args, **_kwargs: (1, 0, 0, 0, 0, 1))
 
     args = SimpleNamespace(
         debug=False,
@@ -738,7 +742,7 @@ def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypa
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 1, 0, 0, 0, 0)
 
-    monkeypatch.setattr(redis_stage, "audit_redis_targets", fake_audit_redis_targets)
+    patch_runner_for_legacy_target_fake(monkeypatch, "redis", fake_audit_redis_targets)
     monkeypatch.setattr(redis_stage, "collect_scan_ports", lambda *_args, **_kwargs: [6379, 26380, 26381])
     monkeypatch.setattr(redis_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
@@ -802,12 +806,9 @@ def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 0, 0, 1, 0, 0)
 
-    monkeypatch.setattr(redis_stage, "audit_redis_targets", fake_audit_redis_targets)
-    monkeypatch.setattr(redis_stage, "collect_scan_ports", lambda *_args, **_kwargs: [6379])
-    monkeypatch.setattr(redis_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
+    patch_runner_for_legacy_target_fake(monkeypatch, "redis", fake_audit_redis_targets)
     monkeypatch.setattr(
-        redis_stage,
-        "filter_open_tcp_hosts_for_credential_file",
+        "redposture_core.stage_runtime.filter_open_tcp_hosts_for_credential_file",
         lambda hosts, _port, **_kwargs: list(hosts),
     )
 
@@ -826,8 +827,7 @@ def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
             return
 
     monkeypatch.setattr(
-        redis_stage,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
     )
 
@@ -865,6 +865,8 @@ def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
 def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
     creds_file = tmp_path / "creds.txt"
     creds_file.write_text("bad:bad\ngood:good\n", encoding="utf-8")
+    targets_file = tmp_path / "targets.txt"
+    targets_file.write_text("closed\nopen-a\nopen-b\n", encoding="utf-8")
     captured_calls: list[dict[str, object]] = []
 
     def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
@@ -873,12 +875,9 @@ def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pyte
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (1, 0, 0, 1, 0, 0)
 
-    monkeypatch.setattr(redis_stage, "audit_redis_targets", fake_audit_redis_targets)
-    monkeypatch.setattr(redis_stage, "collect_scan_ports", lambda *_args, **_kwargs: [6379])
-    monkeypatch.setattr(redis_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["closed", "open-a", "open-b"])
+    patch_runner_for_legacy_target_fake(monkeypatch, "redis", fake_audit_redis_targets)
     monkeypatch.setattr(
-        redis_stage,
-        "filter_open_tcp_hosts_for_credential_file",
+        "redposture_core.stage_runtime.filter_open_tcp_hosts_for_credential_file",
         lambda hosts, _port, **_kwargs: [host for host in hosts if host.startswith("open-")],
     )
 
@@ -897,8 +896,7 @@ def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pyte
             return
 
     monkeypatch.setattr(
-        redis_stage,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
     )
 
@@ -917,7 +915,7 @@ def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pyte
         output_format="txt",
         port=6379,
         ports=None,
-        targets="targets.txt",
+        targets=str(targets_file),
         hosts=None,
         hosts_file=None,
     )
@@ -1021,7 +1019,8 @@ def test_audit_redis_targets_emits_two_pass_debug_markers(monkeypatch: pytest.Mo
     monkeypatch.setattr(redis_stage, "_call_audit_redis_host_with_stage_debug", fake_stage_call)
     debug_lines: list[str] = []
     emitted: list[str] = []
-    totals = redis_stage.audit_redis_targets(
+    totals = run_module_targets_for_test(
+        "redis",
         hosts=["127.0.0.1"],
         port=6379,
         timeout=1.0,

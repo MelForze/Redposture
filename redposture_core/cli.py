@@ -10,55 +10,19 @@ from collections.abc import Iterator
 from typing import Any, TextIO
 
 from .cli_args import (
-    COMMAND_CLICKHOUSE,
-    COMMAND_COLLECT,
-    COMMAND_CONSUL,
-    COMMAND_DOCKER,
-    COMMAND_ELASTIC,
-    COMMAND_ETCD,
     COMMAND_EXPORTERS,
-    COMMAND_GITLAB,
-    COMMAND_GRAFANA,
-    COMMAND_GRPC,
-    COMMAND_KAFKA,
-    COMMAND_KUBEAPI,
-    COMMAND_MONGODB,
-    COMMAND_POSTGRES,
-    COMMAND_PROXMOX,
-    COMMAND_QDRANT,
-    COMMAND_REDIS,
-    COMMAND_REGISTRY,
-    COMMAND_SCAN,
-    COMMAND_SELFCERT,
-    COMMAND_TRIGGER,
-    COMMAND_ZOOKEEPER,
     parse_args,
 )
 from .console import set_console_no_color
 from .logger import AttemptLogger
-from .network_proxy import parse_proxy_config, proxy_socket_context
+from .module_registry import (
+    COMMAND_SPECS_BY_NAME,
+    DIRECT_RUNTIME_SPECS_BY_NAME,
+    EXPORTERS_ACTION_SPECS_BY_NAME,
+    resolve_command_runner,
+)
+from .network_proxy import RuntimeNetworkConfig, parse_proxy_config, proxy_socket_context
 from .progress import CommandProgressOwner
-from .stage_clickhouse import run_clickhouse_stage
-from .stage_collect import run_collect_stage
-from .stage_consul import run_consul_stage
-from .stage_docker import run_docker_stage
-from .stage_elastic import run_elastic_stage
-from .stage_etcd import run_etcd_stage
-from .stage_gitlab import run_gitlab_stage
-from .stage_grafana import run_grafana_stage
-from .stage_grpc import run_grpc_stage
-from .stage_kafka import run_kafka_stage
-from .stage_kubeapi import run_kubeapi_stage
-from .stage_mongodb import run_mongodb_stage
-from .stage_postgres import run_postgres_stage
-from .stage_proxmox import run_proxmox_stage
-from .stage_qdrant import run_qdrant_stage
-from .stage_redis import run_redis_stage
-from .stage_registry import run_registry_stage
-from .stage_scan import run_scan_stage
-from .stage_selfcert import run_selfcert_stage
-from .stage_trigger import run_trigger_stage
-from .stage_zookeeper import run_zookeeper_stage
 
 
 class _TeeStream:
@@ -119,77 +83,20 @@ def _tee_console_output(log_path: str) -> Iterator[None]:
 def _run_command(args: Any, logger: AttemptLogger) -> int:
     if args.command == COMMAND_EXPORTERS:
         action = getattr(args, "exporters_action", None)
-        if action == COMMAND_SCAN:
-            return run_scan_stage(args, logger)
-        if action == COMMAND_TRIGGER:
-            return run_trigger_stage(args, logger)
-        if action == COMMAND_COLLECT:
-            return run_collect_stage(args, logger)
+        spec = EXPORTERS_ACTION_SPECS_BY_NAME.get(str(action or ""))
+        if spec is not None:
+            return int(resolve_command_runner(spec)(args, logger))
         print(f"[error] unsupported exporters action: {action}", file=sys.stderr)
         return 2
 
-    if args.command == COMMAND_SCAN:
-        return run_scan_stage(args, logger)
-
-    if args.command == COMMAND_TRIGGER:
-        return run_trigger_stage(args, logger)
-
-    if args.command == COMMAND_COLLECT:
-        return run_collect_stage(args, logger)
-
-    if args.command == COMMAND_REDIS:
-        return run_redis_stage(args, logger)
-
-    if args.command == COMMAND_REGISTRY:
-        return run_registry_stage(args, logger)
-
-    if args.command == COMMAND_GRAFANA:
-        return run_grafana_stage(args, logger)
-
-    if args.command == COMMAND_GITLAB:
-        return run_gitlab_stage(args, logger)
-
-    if args.command == COMMAND_CONSUL:
-        return run_consul_stage(args, logger)
-
-    if args.command == COMMAND_ELASTIC:
-        return run_elastic_stage(args, logger)
-
-    if args.command == COMMAND_GRPC:
-        return run_grpc_stage(args, logger)
-
-    if args.command == COMMAND_QDRANT:
-        return run_qdrant_stage(args, logger)
-
-    if args.command == COMMAND_KUBEAPI:
-        return run_kubeapi_stage(args, logger)
-
-    if args.command == COMMAND_KAFKA:
-        return run_kafka_stage(args, logger)
-
-    if args.command == COMMAND_POSTGRES:
-        return run_postgres_stage(args, logger)
-
-    if args.command == COMMAND_MONGODB:
-        return run_mongodb_stage(args, logger)
-
-    if args.command == COMMAND_DOCKER:
-        return run_docker_stage(args, logger)
-
-    if args.command == COMMAND_CLICKHOUSE:
-        return run_clickhouse_stage(args, logger)
-
-    if args.command == COMMAND_ETCD:
-        return run_etcd_stage(args, logger)
-
-    if args.command == COMMAND_PROXMOX:
-        return run_proxmox_stage(args, logger)
-
-    if args.command == COMMAND_ZOOKEEPER:
-        return run_zookeeper_stage(args, logger)
-
-    if args.command == COMMAND_SELFCERT:
-        return run_selfcert_stage(args)
+    spec = COMMAND_SPECS_BY_NAME.get(str(args.command or "")) or DIRECT_RUNTIME_SPECS_BY_NAME.get(
+        str(args.command or "")
+    )
+    if spec is not None:
+        runner = resolve_command_runner(spec)
+        if str(args.command or "") == "selfcert":
+            return int(runner(args))
+        return int(runner(args, logger))
 
     print(f"[error] unsupported command: {args.command}", file=sys.stderr)
     return 2
@@ -204,11 +111,13 @@ def main(argv: list[str] | None = None) -> int:
     log_path = str(getattr(args, "log", "") or "").strip()
     raw_proxy = str(getattr(args, "proxy", "") or "").strip()
     proxy_cfg = None
-    if raw_proxy and getattr(args, "command", None) != COMMAND_PROXMOX:
+    if raw_proxy:
         proxy_cfg, proxy_error = parse_proxy_config(raw_proxy)
         if proxy_error:
             print(f"[error] failed to parse --proxy: {proxy_error}", file=sys.stderr)
             return 2
+    args._proxy_config = proxy_cfg
+    args._runtime_network = RuntimeNetworkConfig.from_args(args, proxy=proxy_cfg)
     try:
         with proxy_socket_context(proxy_cfg):
             if log_path:

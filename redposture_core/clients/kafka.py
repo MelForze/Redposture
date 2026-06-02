@@ -666,7 +666,7 @@ def _read_topic_messages(
             sock.settimeout(timeout)
             correlation = 1
 
-            if username and password:
+            if username is not None and password is not None:
                 hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
                 if not hs_ok:
                     return None, hs_error or "SASL handshake failed"

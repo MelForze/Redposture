@@ -12,6 +12,7 @@ from redposture_core.cli_args import (
     COMMAND_GRPC,
     COMMAND_KAFKA,
     COMMAND_MONGODB,
+    COMMAND_ORACLE,
     COMMAND_QDRANT,
     COMMAND_SELFCERT,
     build_parser,
@@ -181,7 +182,8 @@ def test_grpc_help_sections_are_present() -> None:
 
 def test_help_documents_implicit_target_file_precedence() -> None:
     help_text = _command_help("registry")
-    assert "treated as target files" in help_text
+    assert "treated as" in help_text
+    assert "target files" in help_text
 
 
 @pytest.mark.parametrize(
@@ -259,7 +261,7 @@ def test_postgres_rows_and_dump_limit_flags_are_parsed() -> None:
 
 def test_postgres_dump_without_value_means_unlimited_dump() -> None:
     args = parse_args(["postgres", "-t", "10.0.0.1", "--dump"])
-    assert args.dump == 0
+    assert args.dump is True
 
 
 def test_postgres_help_shows_defaults_only_for_selected_flags() -> None:
@@ -275,7 +277,9 @@ def test_postgres_help_shows_defaults_only_for_selected_flags() -> None:
 
     assert "Optional Postgres username for credential check. (default:" not in help_text
     assert "Optional Postgres password for credential check. (default:" not in help_text
-    assert "Try default Postgres credentials postgres:postgres when auth is required. (default:" not in help_text
+    assert "pgbouncer:pgbouncer" in help_text
+    assert "Try default Postgres credentials postgres:postgres" in help_text
+    assert "pgbouncer:pgbouncer when auth is required. (default:" not in help_text
 
 
 def test_mongodb_help_sections_and_parse_flags() -> None:
@@ -391,6 +395,75 @@ def test_docker_default_port_marker_when_port_is_omitted() -> None:
     args = parse_args(["docker", "-t", "127.0.0.1"])
     assert args.port == 2375
     assert args._docker_port_explicit is False
+
+
+def test_oracle_help_sections_and_parse_flags() -> None:
+    help_text = _command_help(COMMAND_ORACLE)
+    assert "\nCommon:\n" in help_text
+    assert "\nConnect / TNS:\n" in help_text
+    assert "\nAuth:\n" in help_text
+    assert "\nDiscovery / Dump:\n" in help_text
+    assert "\nPrivilege Escalation:\n" in help_text
+    assert "\nRCE / File / Exfil:\n" in help_text
+    assert "--service name" in help_text
+    assert "--sid-list list|file" in help_text
+    assert "--listener-dump" in help_text
+    assert "--nne-check" in help_text
+    assert "--combo-list file" in help_text
+    assert "--privesc-check" in help_text
+    assert "--exec-cmd cmd" in help_text
+    assert "--fs-mode {auto,directory,scheduler}" in help_text
+    args = parse_args(
+        [
+            "oracle",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "1522",
+            "--service",
+            "FREEPDB1",
+            "--listener-dump",
+            "--nne-check",
+            "-u",
+            "system",
+            "-p",
+            "oracle",
+            "--show-pdbs",
+            "--show-users",
+            "--show-tables",
+            "--schema",
+            "REDPOSTURE",
+            "--table",
+            "ACCOUNTS",
+            "--dump",
+            "5",
+            "--query",
+            "select 1 from dual",
+            "--privesc-check",
+            "--exec-cmd",
+            "id",
+            "--fs-mode",
+            "scheduler",
+            "--os-read",
+            "/etc/hostname",
+            "--hashes",
+            "--dblink-check",
+        ]
+    )
+    assert args.command == COMMAND_ORACLE
+    assert args.port == 1522
+    assert args.service == "FREEPDB1"
+    assert args.listener_dump is True
+    assert args.nne_check is True
+    assert args.username == "system"
+    assert args.password == "oracle"
+    assert args.show_pdbs is True
+    assert args.show_users is True
+    assert args.dump == 5
+    assert args.privesc_check is True
+    assert args.exec_cmd == "id"
+    assert args.fs_mode == "scheduler"
+    assert args.os_read == "/etc/hostname"
 
 
 def test_grpc_auth_flags_are_parsed() -> None:
@@ -820,6 +893,47 @@ def test_redis_flags_are_parsed() -> None:
 def test_show_flags_accept_optional_count(argv: list[str], dest: str, expected: int) -> None:
     args = parse_args(argv)
     assert getattr(args, dest) == expected
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["redis", "-t", "10.0.0.7", "--dump", "10"], 10),
+        (["etcd", "-t", "10.0.0.9", "--dump", "10"], 10),
+        (["clickhouse", "-t", "10.0.0.1", "--dump", "10"], 10),
+        (["kafka", "-t", "10.0.0.21", "--dump", "10"], 10),
+        (["zookeeper", "-t", "10.0.0.21", "--dump", "10"], 10),
+        (["consul", "-t", "10.0.0.40", "--dump", "10"], 10),
+        (["qdrant", "-t", "10.0.0.60", "--dump", "10"], 10),
+        (["postgres", "-t", "10.0.0.1", "--dump", "10"], 10),
+        (["mongodb", "-t", "10.0.0.1", "--dump", "10"], 10),
+        (["oracle", "-t", "10.0.0.1", "--dump", "10"], 10),
+    ],
+)
+def test_dump_flags_accept_optional_count(argv: list[str], expected: int) -> None:
+    args = parse_args(argv)
+    assert args.dump == expected
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["redis", "-t", "10.0.0.7", "--dump", "0"],
+        ["etcd", "-t", "10.0.0.9", "--dump", "0"],
+        ["clickhouse", "-t", "10.0.0.1", "--dump", "0"],
+        ["kafka", "-t", "10.0.0.21", "--dump", "0"],
+        ["zookeeper", "-t", "10.0.0.21", "--dump", "0"],
+        ["consul", "-t", "10.0.0.40", "--dump", "0"],
+        ["qdrant", "-t", "10.0.0.60", "--dump", "0"],
+        ["postgres", "-t", "10.0.0.1", "--dump", "0"],
+        ["mongodb", "-t", "10.0.0.1", "--dump", "0"],
+        ["oracle", "-t", "10.0.0.1", "--dump", "0"],
+    ],
+)
+def test_dump_flags_reject_zero_count(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(argv)
+    assert exc.value.code == 2
 
 
 def test_redis_short_user_password_flags_are_parsed() -> None:
@@ -1345,6 +1459,11 @@ def test_proxmox_flags_are_parsed() -> None:
     assert args.add_user == "scanner-bot"
     assert args.output_format == "json"
     assert args.output == "proxmox_audit.jsonl"
+
+
+def test_proxy_flag_accepts_socks4a_url() -> None:
+    args = parse_args(["redis", "-t", "proxy-redis", "--proxy", "socks4a://127.0.0.1:1080"])
+    assert args.proxy == "socks4a://127.0.0.1:1080"
 
 
 def test_proxmox_auth_flags_are_optional_at_parse_time() -> None:
@@ -1894,7 +2013,7 @@ def test_postgres_flags_are_parsed() -> None:
     assert args.os_shell is True
     assert args.sql_shell is True
     assert args.tables == ["public.users", "redposture.demo_accounts,public.audit_log"]
-    assert args.dump == 0
+    assert args.dump is True
     assert args.columns == ["id,username", "created_at"]
     assert args.execute == "id"
     assert args.os_read == "/etc/hostname"
@@ -1933,7 +2052,7 @@ def test_postgres_short_user_password_flags_are_parsed() -> None:
     assert args.os_shell is False
     assert args.sql_shell is False
     assert args.tables == ["public.users"]
-    assert args.dump is None
+    assert args.dump is False
     assert args.columns is None
     assert args.execute == "whoami"
     assert args.sql_cmd is None

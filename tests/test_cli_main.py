@@ -19,6 +19,7 @@ from redposture_core.cli_args import (
     COMMAND_KAFKA,
     COMMAND_KUBEAPI,
     COMMAND_MONGODB,
+    COMMAND_ORACLE,
     COMMAND_POSTGRES,
     COMMAND_PROXMOX,
     COMMAND_QDRANT,
@@ -29,6 +30,20 @@ from redposture_core.cli_args import (
     COMMAND_TRIGGER,
     COMMAND_ZOOKEEPER,
 )
+
+
+class _NullContext:
+    def __init__(self, calls: list[str], value: object) -> None:
+        self._calls = calls
+        self._value = value
+
+    def __enter__(self) -> None:
+        self._calls.append(f"enter:{self._value}")
+        return None
+
+    def __exit__(self, *_exc: object) -> None:
+        self._calls.append("exit")
+        return None
 
 
 def test_tee_console_output_mirrors_stdout_and_stderr(tmp_path, capsys) -> None:
@@ -68,6 +83,7 @@ def test_tee_console_output_mirrors_stdout_and_stderr(tmp_path, capsys) -> None:
         (SimpleNamespace(command=COMMAND_POSTGRES), "run_postgres_stage"),
         (SimpleNamespace(command=COMMAND_MONGODB), "run_mongodb_stage"),
         (SimpleNamespace(command=COMMAND_DOCKER), "run_docker_stage"),
+        (SimpleNamespace(command=COMMAND_ORACLE), "run_oracle_stage"),
         (SimpleNamespace(command=COMMAND_CLICKHOUSE), "run_clickhouse_stage"),
         (SimpleNamespace(command=COMMAND_ETCD), "run_etcd_stage"),
         (SimpleNamespace(command=COMMAND_PROXMOX), "run_proxmox_stage"),
@@ -80,13 +96,22 @@ def test_run_command_dispatches_to_stage_functions(
     patch_target: str,
 ) -> None:
     calls: list[str] = []
-    monkeypatch.setattr(cli, patch_target, lambda *_args, **_kwargs: calls.append(patch_target) or 7)
+
+    def _resolve_runner(spec):
+        assert spec.runner_attr == patch_target
+        return lambda *_args, **_kwargs: calls.append(spec.runner_attr) or 7
+
+    monkeypatch.setattr(cli, "resolve_command_runner", _resolve_runner)
     assert cli._run_command(args, logger=object()) == 7
     assert calls == [patch_target]
 
 
 def test_run_command_dispatches_to_selfcert(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "run_selfcert_stage", lambda args: 13)
+    def _resolve_runner(spec):
+        assert spec.runner_attr == "run_selfcert_stage"
+        return lambda args: 13
+
+    monkeypatch.setattr(cli, "resolve_command_runner", _resolve_runner)
     assert cli._run_command(SimpleNamespace(command=COMMAND_SELFCERT), logger=object()) == 13
 
 
@@ -107,15 +132,18 @@ def test_main_returns_error_on_proxy_parse_failure(monkeypatch: pytest.MonkeyPat
     assert "failed to parse --proxy: bad proxy" in capsys.readouterr().err
 
 
-def test_main_ignores_proxy_parsing_for_proxmox(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_parses_proxy_for_proxmox_through_shared_proxy_context(monkeypatch: pytest.MonkeyPatch) -> None:
     args = SimpleNamespace(command=COMMAND_PROXMOX, log="", proxy="http://proxy.local", debug=False, no_color=False)
     calls: list[str] = []
     monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
-    monkeypatch.setattr(cli, "parse_proxy_config", lambda _raw: (_ for _ in ()).throw(AssertionError("unexpected")))
+    monkeypatch.setattr(cli, "parse_proxy_config", lambda _raw: ("proxy-config", None))
+    monkeypatch.setattr(cli, "proxy_socket_context", lambda proxy: _NullContext(calls, proxy))
     monkeypatch.setattr(cli, "_run_command", lambda *_args, **_kwargs: calls.append("run") or 0)
 
     assert cli.main(["proxmox", "-t", "127.0.0.1"]) == 0
-    assert calls == ["run"]
+    assert calls == ["enter:proxy-config", "run", "exit"]
+    assert args._proxy_config == "proxy-config"
+    assert args._runtime_network.proxy == "proxy-config"
 
 
 def test_main_tees_output_and_runs_command_on_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

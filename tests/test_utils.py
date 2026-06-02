@@ -75,22 +75,30 @@ def test_collect_scan_targets_rejects_non_network_slash_tokens() -> None:
 def test_collect_scan_target_specs_parses_http_and_https_urls() -> None:
     specs = collect_scan_target_specs("http://10.0.0.1:8500/v1/status/leader,https://api.local:9200/_cat/health")
     assert specs == [
-        ScanTargetSpec(host="10.0.0.1", scheme="http", explicit_port=8500),
-        ScanTargetSpec(host="api.local", scheme="https", explicit_port=9200),
+        ScanTargetSpec(host="10.0.0.1", scheme="http", explicit_port=8500, path="/v1/status/leader"),
+        ScanTargetSpec(host="api.local", scheme="https", explicit_port=9200, path="/_cat/health"),
     ]
 
 
-def test_collect_scan_target_specs_ignores_url_path_and_query() -> None:
+def test_collect_scan_target_specs_preserves_url_path_and_query() -> None:
     specs = collect_scan_target_specs("http://grafana.local:3000/login?next=%2F")
-    assert specs == [ScanTargetSpec(host="grafana.local", scheme="http", explicit_port=3000)]
+    assert specs == [
+        ScanTargetSpec(host="grafana.local", scheme="http", explicit_port=3000, path="/login", query="next=%2F")
+    ]
+    assert specs[0].path == "/login"
+    assert specs[0].query == "next=%2F"
+    assert specs[0].normalized_key == "http://grafana.local:3000/login?next=%2F"
 
 
-def test_collect_scan_target_specs_deduplicates_mixed_url_variants() -> None:
+def test_collect_scan_target_specs_preserves_mixed_url_variants() -> None:
     specs = collect_scan_target_specs(
         "http://Example.local:9200/_cluster/health,http://example.local:9200/_cat/health?format=json,example.local"
     )
     assert specs == [
-        ScanTargetSpec(host="example.local", scheme="http", explicit_port=9200),
+        ScanTargetSpec(host="example.local", scheme="http", explicit_port=9200, path="/_cluster/health"),
+        ScanTargetSpec(
+            host="example.local", scheme="http", explicit_port=9200, path="/_cat/health", query="format=json"
+        ),
         ScanTargetSpec(host="example.local", scheme=None, explicit_port=None),
     ]
 
@@ -104,7 +112,7 @@ def test_collect_scan_target_specs_handles_mixed_hosts_and_file(tmp_path: Path) 
     specs = collect_scan_target_specs(f"10.0.0.1,{hosts_file}")
     assert specs == [
         ScanTargetSpec(host="10.0.0.1", scheme=None, explicit_port=None),
-        ScanTargetSpec(host="10.0.0.2", scheme="http", explicit_port=9200),
+        ScanTargetSpec(host="10.0.0.2", scheme="http", explicit_port=9200, path="/_cluster/health"),
         ScanTargetSpec(host="10.0.0.3", scheme=None, explicit_port=None),
         ScanTargetSpec(host="10.0.1.1", scheme=None, explicit_port=None),
         ScanTargetSpec(host="10.0.1.2", scheme=None, explicit_port=None),

@@ -30,11 +30,34 @@ def optional_show_count_kwargs(help_text: str) -> dict[str, Any]:
     }
 
 
+def optional_dump_count_kwargs(help_text: str) -> dict[str, Any]:
+    return {
+        "nargs": "?",
+        "const": True,
+        "default": False,
+        "type": positive_int,
+        "metavar": "count",
+        "help": help_text,
+    }
+
+
 def show_flag_enabled(value: Any) -> bool:
     return bool(value)
 
 
 def show_flag_limit(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return int(value)
+    return None
+
+
+def dump_flag_enabled(value: Any) -> bool:
+    return bool(value)
+
+
+def dump_flag_limit(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int) and value > 0:
