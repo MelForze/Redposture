@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
-from ..show_limits import optional_show_count_kwargs
+from ..show_limits import optional_dump_count_kwargs, optional_show_count_kwargs
 
 
 def configure_zookeeper_parser(
@@ -74,8 +74,9 @@ def configure_zookeeper_parser(
     actions.add_argument(
         "--dump",
         dest="dump",
-        action="store_true",
-        help="Dump znode values. With --znode dumps only that znode; without --znode dumps all enumerated znodes.",
+        **optional_dump_count_kwargs(
+            "Dump znode values. Optional count limits dumped znodes when no --znode is selected."
+        ),
     )
     actions.add_argument(
         "-znode",

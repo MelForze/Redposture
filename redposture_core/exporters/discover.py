@@ -158,6 +158,14 @@ def scan_presence_port_task(
             continue
         candidates.append(candidate)
 
+    candidates_by_name: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        name = str(candidate.get("name") or "")
+        previous = candidates_by_name.get(name)
+        if previous is None or int(candidate.get("score") or 0) > int(previous.get("score") or 0):
+            candidates_by_name[name] = candidate
+    candidates = list(candidates_by_name.values())
+
     candidates.sort(
         key=lambda item: (
             int(item.get("score") or 0),
@@ -216,6 +224,17 @@ def scan_presence_port_task(
         marker_hit = str(candidates[0].get("marker_hit") or "")
     else:
         marker_hit = None
+    candidate_scores = [
+        {
+            "name": str(candidate.get("name") or ""),
+            "score": int(candidate.get("score") or 0),
+            "strong": int(candidate.get("strong_count") or 0),
+            "weak": int(candidate.get("weak_count") or 0),
+            "negative": int(candidate.get("negative_count") or 0),
+            "marker": candidate.get("marker_hit"),
+        }
+        for candidate in candidates
+    ]
 
     record = {
         "timestamp": utc_now_iso(),
@@ -228,6 +247,7 @@ def scan_presence_port_task(
         "status": status,
         "marker_hit": marker_hit,
         "candidate_count": len(candidates),
+        "candidate_scores": candidate_scores,
         "resolution": resolution,
         "elapsed_ms": result["elapsed_ms"],
         "content_type": result["content_type"],

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
+import pytest
+
 from redposture_core.stage_runtime import (
+    AuditCommandPlan,
+    AuditCommandRunner,
+    AuditCredentialRun,
     AuditRecord,
     CapabilitySet,
     CredentialAttempt,
     LineOutputSink,
+    ModuleAuditSpec,
+    ModuleRunSummary,
     StageTelemetryBuilder,
     StageTrace,
     TwoPassAuditRunner,
@@ -15,6 +22,7 @@ from redposture_core.stage_runtime import (
     merge_stage_records,
     progress_total_from_groups,
     should_use_global_progress,
+    validate_basic_module_args,
 )
 
 
@@ -37,6 +45,14 @@ class _ProgressRecorder:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _ConsoleRecorder:
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+
+    def error(self, message: str) -> None:
+        self.errors.append(message)
 
 
 def test_merge_stage_records_combines_debug_and_stage_telemetry() -> None:
@@ -130,6 +146,96 @@ def test_global_progress_policy_is_independent_from_output_destination() -> None
     assert progress_total_from_groups([(item for item in ("a", "b"))], credential_runs=2) == 4
 
 
+@pytest.mark.parametrize(
+    "module",
+    [
+        "kafka",
+        "registry",
+        "postgres",
+        "mongodb",
+        "clickhouse",
+        "zookeeper",
+        "elastic",
+        "grafana",
+        "grpc",
+        "kubeapi",
+        "consul",
+        "oracle",
+        "proxmox",
+    ],
+)
+def test_validate_basic_module_args_treats_empty_password_as_provided_for_auth_modules(module: str) -> None:
+    console = _ConsoleRecorder()
+    args = type(
+        "Args",
+        (),
+        {
+            "targets": "127.0.0.1",
+            "hosts": None,
+            "hosts_file": None,
+            "timeout": 1.0,
+            "retries": 0,
+            "username": "empire",
+            "password": "",
+            "dump": False,
+            "ports": None,
+        },
+    )()
+
+    assert validate_basic_module_args(args, console, module=module, pure_http=module in {"registry"}) is None
+    assert console.errors == []
+
+
+def test_validate_basic_module_args_allows_redis_password_only_and_username_file_empty_password(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    console = _ConsoleRecorder()
+    args = type(
+        "Args",
+        (),
+        {
+            "targets": "127.0.0.1",
+            "hosts": None,
+            "hosts_file": None,
+            "timeout": 1.0,
+            "retries": 0,
+            "username": None,
+            "password": "",
+            "dump": False,
+            "ports": None,
+        },
+    )()
+
+    args.username = None
+    assert validate_basic_module_args(args, console, module="redis") is None
+
+    username_file = tmp_path / "users.txt"
+    username_file.write_text("empire\n", encoding="utf-8")
+    args.username = str(username_file)
+    args.password = ""
+    assert validate_basic_module_args(args, console, module="kafka") is None
+
+
+def test_validate_basic_module_args_still_rejects_missing_password() -> None:
+    console = _ConsoleRecorder()
+    args = type(
+        "Args",
+        (),
+        {
+            "targets": "127.0.0.1",
+            "hosts": None,
+            "hosts_file": None,
+            "timeout": 1.0,
+            "retries": 0,
+            "username": "empire",
+            "password": None,
+            "dump": False,
+            "ports": None,
+        },
+    )()
+
+    assert validate_basic_module_args(args, console, module="kafka") == 2
+    assert "--username and --password must be set together" in console.errors[-1]
+
+
 def test_line_output_sink_emits_to_callback_and_file(tmp_path) -> None:  # type: ignore[no-untyped-def]
     emitted: list[str] = []
     callback_sink = LineOutputSink(None, emitted.append)
@@ -170,6 +276,153 @@ def test_typed_record_models_serialize_to_dicts() -> None:
     assert payload["credential_attempts"][0]["username"] == "elastic"
     assert payload["capabilities"] == {"read": True, "write": False, "error": "partial"}
     assert payload["version"] == "8.13.4"
+
+
+def test_audit_record_from_mapping_preserves_legacy_fields() -> None:
+    record = AuditRecord.from_mapping(
+        {
+            "host": "127.0.0.1",
+            "port": 6379,
+            "module": "redis",
+            "status": "open_no_auth",
+            "auth_required": "false",
+            "transport_mode": "plaintext",
+            "stages": [{"stage": "detect_protocol", "duration_ms": 4}],
+            "credential_attempts": [{"username": "default", "password": "redis", "ok": "true"}],
+            "capabilities": {"read": True},
+            "custom_field": "kept",
+        },
+        service="redis",
+    )
+
+    payload = record.to_dict()
+
+    assert payload["service"] == "redis"
+    assert payload["auth_required"] is False
+    assert payload["transport"] == "plaintext"
+    assert payload["stages"][0]["stage_name"] == "detect_protocol"
+    assert payload["credential_attempts"][0]["ok"] is True
+    assert payload["capabilities"] == {"read": True}
+    assert payload["custom_field"] == "kept"
+
+
+def test_audit_command_runner_requires_typed_hook_records() -> None:
+    emitted: list[str] = []
+    spec = ModuleAuditSpec(
+        module="redis",
+        label="REDIS",
+        default_port=6379,
+        detect=lambda host, port: AuditRecord(
+            host=host,
+            port=port,
+            module="redis",
+            service="redis",
+            status="open_no_auth",
+            auth_required=False,
+            capabilities=CapabilitySet({"read": True}),
+            extra={"legacy": "kept"},
+        ),
+        render=lambda record: [f"{record['host']}:{record['port']} {record['status']}"],
+    )
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_hosts(["127.0.0.1"])
+
+    assert result.detected_count == 1
+    assert isinstance(result.typed_records[0], AuditRecord)
+    assert result.records[0]["service"] == "redis"
+    assert result.records[0]["capabilities"] == {"read": True}
+    assert result.records[0]["legacy"] == "kept"
+    assert emitted == ["127.0.0.1:6379 open_no_auth"]
+
+
+def test_audit_command_runner_rejects_dict_hook_records() -> None:
+    spec = ModuleAuditSpec(
+        module="redis",
+        label="REDIS",
+        default_port=6379,
+        detect=lambda host, port: {"host": host, "port": port, "status": "open_no_auth"},  # type: ignore[return-value]
+    )
+
+    try:
+        AuditCommandRunner(args=object(), spec=spec).run_hosts(["127.0.0.1"])
+    except TypeError as exc:
+        assert "hooks must return AuditRecord" in str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("dict hook result was accepted")
+
+
+def test_audit_command_plan_tracks_targets_credentials_and_summary() -> None:
+    plan = AuditCommandPlan(
+        targets_by_port={6379: ("a", "b"), 6380: ("c",)},
+        credential_runs=(
+            AuditCredentialRun(username="admin", password="admin", source="file"),
+            AuditCredentialRun(token="secret", source="token"),
+        ),
+        output_path="out.txt",
+        workers=4,
+    )
+
+    assert plan.target_count == 3
+    assert plan.credential_run_count == 2
+    assert plan.total_work_units == 6
+    assert plan.iter_targets() == [(0, "a", 6379), (1, "b", 6379), (2, "c", 6380)]
+    assert plan.credential_runs[0].label == "admin:admin"
+    assert plan.credential_runs[1].label == "token:token"
+    assert plan.credential_runs[0].to_attempt(ok=True).ok is True
+
+    summary = ModuleRunSummary.from_result(
+        module="redis",
+        plan=plan,
+        result=type(
+            "Result",
+            (),
+            {
+                "detected_count": 2,
+                "emitted_lines": 5,
+            },
+        )(),
+    )
+
+    assert summary.to_dict() == {
+        "module": "redis",
+        "attempted_targets": 3,
+        "credential_runs": 2,
+        "detected_count": 2,
+        "emitted_lines": 5,
+        "output_path": "out.txt",
+    }
+
+
+def test_audit_command_runner_run_plan_uses_one_typed_path_for_multi_port_targets() -> None:
+    emitted: list[str] = []
+    seen: list[tuple[str, int]] = []
+
+    def detect(host: str, port: int) -> AuditRecord:
+        seen.append((host, port))
+        return AuditRecord(
+            host=host,
+            port=port,
+            module="redis",
+            service="redis",
+            status="open_no_auth",
+            auth_required=False,
+        )
+
+    spec = ModuleAuditSpec(
+        module="redis",
+        label="REDIS",
+        default_port=6379,
+        detect=detect,
+        render=lambda record: [f"{record['host']}:{record['port']}"],
+    )
+    plan = AuditCommandPlan(targets_by_port={6379: ("a",), 6380: ("b",)}, output_format="txt")
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
+
+    assert seen == [("a", 6379), ("b", 6380)]
+    assert [record.port for record in result.typed_records] == [6379, 6380]
+    assert result.detected_count == 2
+    assert emitted == ["a:6379", "b:6380"]
 
 
 def test_two_pass_audit_runner_orders_detect_output_and_merges_deep_records() -> None:
@@ -213,3 +466,60 @@ def test_two_pass_audit_runner_orders_detect_output_and_merges_deep_records() ->
     assert debug_events[0] == "pass=1 detect start total=3"
     assert any("stage2_gate=skip reason=not_service" in event for event in debug_events)
     assert "pass=2 deep complete processed=1" in debug_events
+
+
+def test_audit_model_optional_fields_and_render_events_are_serialized() -> None:
+    from redposture_core.audit_models import RenderEvent, TargetSpec
+
+    target = TargetSpec.from_mapping(
+        {
+            "raw": "https://example.test:8443/api?q=1#frag",
+            "host": "example.test",
+            "port": "8443",
+            "scheme": "https",
+            "path": "/api",
+            "query": "q=1",
+            "fragment": "frag",
+            "source": "cli",
+            "normalized_key": "example.test:8443",
+        }
+    )
+    assert target.to_dict()["normalized_key"] == "example.test:8443"
+
+    event = RenderEvent.from_mapping(
+        {
+            "kind": "finding",
+            "fields": {"key": "value"},
+            "severity": "high",
+            "payload_role": "secret",
+            "message": "found",
+        }
+    )
+    assert event.to_dict() == {
+        "kind": "finding",
+        "fields": {"key": "value"},
+        "severity": "high",
+        "payload_role": "secret",
+        "message": "found",
+    }
+
+    payload = AuditRecord.from_mapping(
+        {
+            "host": "127.0.0.1",
+            "port": "443",
+            "status": "open_no_auth",
+            "auth_required": "yes",
+            "target": target.to_dict(),
+            "render_events": [event.to_dict(), "ignored"],
+        },
+        module="demo",
+    ).to_dict()
+
+    assert payload["auth_required"] is True
+    assert payload["target"]["path"] == "/api"
+    assert payload["render_events"][0]["message"] == "found"
+    assert AuditRecord.from_mapping({"host": "h", "port": "", "status": "x"}).port == 0
+    assert AuditRecord.from_mapping({"host": "h", "port": 1, "status": "x", "target": "raw"}).target == "raw"
+    assert (
+        AuditRecord.from_mapping({"host": "h", "port": 1, "status": "x", "auth_required": "no"}).auth_required is False
+    )

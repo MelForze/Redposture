@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import ipaddress
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunsplit
 
 
 def normalize_scan_host(value: str) -> str | None:
@@ -35,6 +35,12 @@ class ScanTargetSpec:
     host: str
     scheme: str | None = None
     explicit_port: int | None = None
+    raw: str | None = field(default=None, compare=False)
+    path: str = ""
+    query: str = ""
+    fragment: str = ""
+    source: str | None = field(default=None, compare=False)
+    normalized_key: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -42,9 +48,11 @@ class ScanExecutionGroup:
     hosts: list[str]
     port: int
     scheme_hint: str | None = None
+    target_specs: list[ScanTargetSpec] | None = field(default=None, compare=False)
 
 
 TargetUrlMode = Literal["preserve", "strip", "reject"]
+TargetPathPolicy = Literal["preserve", "strip", "reject"]
 
 
 @dataclass(frozen=True)
@@ -58,6 +66,28 @@ class TargetParsePolicy:
 
     max_network_hosts: int = 4096
     url_mode: TargetUrlMode = "preserve"
+    path_policy: TargetPathPolicy = "preserve"
+    allowed_schemes: tuple[str, ...] = ("http", "https")
+    source: str | None = None
+
+
+def _make_normalized_key(
+    *,
+    host: str,
+    scheme: str | None,
+    port: int | None,
+    path: str = "",
+    query: str = "",
+    fragment: str = "",
+) -> str:
+    if scheme:
+        netloc = host
+        if port is not None:
+            netloc = f"{host}:{int(port)}"
+        return urlunsplit((scheme, netloc, path or "", query or "", fragment or ""))
+    if port is not None:
+        return f"{host}:{int(port)}"
+    return host
 
 
 def _expand_network_targets(token: str, max_hosts: int) -> list[str]:
@@ -89,17 +119,24 @@ def parse_scan_target_specs(
 
     active_policy = policy or TargetParsePolicy()
     unique: list[ScanTargetSpec] = []
-    seen_specs: set[tuple[str, str | None, int | None]] = set()
+    seen_specs: set[str] = set()
     processed_files: set[str] = set()
 
     def _append_spec(spec: ScanTargetSpec) -> None:
-        key = (spec.host, spec.scheme, spec.explicit_port)
+        key = spec.normalized_key or _make_normalized_key(
+            host=spec.host,
+            scheme=spec.scheme,
+            port=spec.explicit_port,
+            path=spec.path,
+            query=spec.query,
+            fragment=spec.fragment,
+        )
         if key in seen_specs:
             return
         seen_specs.add(key)
         unique.append(spec)
 
-    def _consume_token(token: str) -> None:
+    def _consume_token(token: str, *, source: str | None = None) -> None:
         item = token.strip()
         if not item:
             return
@@ -110,20 +147,21 @@ def parse_scan_target_specs(
                 return
             processed_files.add(real)
             with open(real, encoding="utf-8") as fh:
-                for raw in fh:
+                for line_no, raw in enumerate(fh, start=1):
                     clean = raw.split("#", 1)[0].strip()
                     if not clean:
                         continue
                     for part in clean.split(","):
-                        _consume_token(part)
+                        _consume_token(part, source=f"{real}:{line_no}")
             return
 
         if "://" in item:
             parsed = urlparse(item)
             scheme = str(parsed.scheme or "").strip().lower()
-            if scheme not in {"http", "https"}:
+            if scheme not in active_policy.allowed_schemes:
                 raise ValueError(
-                    f"unsupported target URL scheme '{scheme or '-'}' in '{item}' (supported: http, https)"
+                    f"unsupported target URL scheme '{scheme or '-'}' in '{item}' "
+                    f"(supported: {', '.join(active_policy.allowed_schemes)})"
                 )
             if active_policy.url_mode == "reject":
                 raise ValueError(f"URL targets are not supported here: '{item}'")
@@ -135,9 +173,47 @@ def parse_scan_target_specs(
             except ValueError as exc:
                 raise ValueError(f"invalid URL target '{item}': {exc}") from exc
             if active_policy.url_mode == "strip":
-                _append_spec(ScanTargetSpec(host=host, scheme=None, explicit_port=None))
+                _append_spec(
+                    ScanTargetSpec(
+                        host=host,
+                        scheme=None,
+                        explicit_port=None,
+                        raw=item,
+                        source=source or active_policy.source,
+                        normalized_key=host,
+                    )
+                )
             else:
-                _append_spec(ScanTargetSpec(host=host, scheme=scheme, explicit_port=explicit_port))
+                path = parsed.path or ""
+                query = parsed.query or ""
+                fragment = parsed.fragment or ""
+                if active_policy.path_policy == "reject" and (path not in {"", "/"} or query or fragment):
+                    raise ValueError(f"URL path/query are not supported here: '{item}'")
+                if active_policy.path_policy == "strip":
+                    path = ""
+                    query = ""
+                    fragment = ""
+                normalized_key = _make_normalized_key(
+                    host=host,
+                    scheme=scheme,
+                    port=explicit_port,
+                    path=path,
+                    query=query,
+                    fragment=fragment,
+                )
+                _append_spec(
+                    ScanTargetSpec(
+                        host=host,
+                        scheme=scheme,
+                        explicit_port=explicit_port,
+                        raw=item,
+                        path=path,
+                        query=query,
+                        fragment=fragment,
+                        source=source or active_policy.source,
+                        normalized_key=normalized_key,
+                    )
+                )
             return
 
         if "/" in item:
@@ -146,13 +222,31 @@ def parse_scan_target_specs(
             except ValueError as exc:
                 raise ValueError(f"invalid network target '{item}': {exc}") from exc
             for host in expanded:
-                _append_spec(ScanTargetSpec(host=host, scheme=None, explicit_port=None))
+                _append_spec(
+                    ScanTargetSpec(
+                        host=host,
+                        scheme=None,
+                        explicit_port=None,
+                        raw=item,
+                        source=source or active_policy.source,
+                        normalized_key=host,
+                    )
+                )
             return
 
         host = normalize_scan_host(item)
         if not host:
             return
-        _append_spec(ScanTargetSpec(host=host, scheme=None, explicit_port=None))
+        _append_spec(
+            ScanTargetSpec(
+                host=host,
+                scheme=None,
+                explicit_port=None,
+                raw=item,
+                source=source or active_policy.source,
+                normalized_key=host,
+            )
+        )
 
     for token in targets.split(","):
         _consume_token(token)
@@ -254,6 +348,7 @@ def build_scan_execution_groups(
 
     unique_ports = [int(port) for port in dict.fromkeys(port_matrix)]
     groups: dict[tuple[int, str | None], list[str]] = {}
+    group_specs: dict[tuple[int, str | None], list[ScanTargetSpec]] = {}
     seen_group_hosts: set[tuple[int, str | None, str]] = set()
 
     for spec in target_specs:
@@ -263,15 +358,24 @@ def build_scan_execution_groups(
             group_key = (int(port), scheme_hint)
             if group_key not in groups:
                 groups[group_key] = []
+                group_specs[group_key] = []
             host_key = (int(port), scheme_hint, spec.host)
             if host_key in seen_group_hosts:
                 continue
             seen_group_hosts.add(host_key)
             groups[group_key].append(spec.host)
+            group_specs[group_key].append(spec)
 
     result: list[ScanExecutionGroup] = []
     for (port, scheme_hint), hosts in groups.items():
         if not hosts:
             continue
-        result.append(ScanExecutionGroup(hosts=hosts, port=port, scheme_hint=scheme_hint))
+        result.append(
+            ScanExecutionGroup(
+                hosts=hosts,
+                port=port,
+                scheme_hint=scheme_hint,
+                target_specs=group_specs.get((port, scheme_hint), []),
+            )
+        )
     return result

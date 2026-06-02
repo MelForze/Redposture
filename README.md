@@ -5,7 +5,7 @@
 RedPosture is a Python security CLI for:
 
 - exporter discovery / trigger / collect workflows (`exporters`)
-- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `mongodb`, `docker`, `clickhouse`, `redis`, `etcd`, `kafka`, `zookeeper`, `elastic`, `grpc`)
+- service exposure auditing (`registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `qdrant`, `kubeapi`, `postgres`, `mongodb`, `docker`, `oracle`, `clickhouse`, `redis`, `etcd`, `kafka`, `zookeeper`, `elastic`, `grpc`)
 - listener-based callback capture for lab SSRF workflows
 
 Use only on systems you own or are explicitly authorized to assess.
@@ -40,6 +40,7 @@ redposture kubeapi -h
 redposture postgres -h
 redposture mongodb -h
 redposture docker -h
+redposture oracle -h
 redposture clickhouse -h
 redposture redis -h
 redposture etcd -h
@@ -171,8 +172,8 @@ redposture gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-root-20
 ### Consul
 
 ```bash
-# Сбор / dump
-redposture consul -t 127.0.0.1 --dump
+# Сбор / dump (optional count limits each dump category)
+redposture consul -t 127.0.0.1 --dump 25
 
 # SSRF
 redposture consul -t 127.0.0.1 --ssrf-target 127.0.0.1 --ssrf-port 3000,9115 --ssrf-path /debug/vars
@@ -202,12 +203,16 @@ redposture postgres -t 127.0.0.1
 
 # Default creds check
 redposture postgres -t 127.0.0.1 --defcreds
+# Checks postgres:postgres and pgbouncer:pgbouncer
 
 # Basic enum
 redposture postgres -t 127.0.0.1 -u postgres -p postgres --show-databases
 
 # Server-side file read: pg_read_file first, pg_ls_dir/lo_import fallback
 redposture postgres -t 127.0.0.1 -u postgres -p postgres --os-read /etc/hostname
+
+# Quoted identifiers with special characters
+redposture postgres -t 127.0.0.1 -u postgres -p postgres --table 'public."offlineStocks:city_4949:552400"' --dump 5
 ```
 
 ### MongoDB
@@ -224,6 +229,9 @@ redposture mongodb -t 127.0.0.1 --show-databases --show-collections --dump 20
 
 # Query selected collection
 redposture mongodb -t 127.0.0.1 --database redposture --collection demo_accounts --query '{"role":"admin"}' --dump 10
+
+# Literal collection name with special characters when --database is set
+redposture mongodb -t 127.0.0.1 --database redposture --collection 'offlineStocks:city_4949:552400' --dump 5
 ```
 
 ### Docker Engine API
@@ -242,6 +250,21 @@ redposture docker -t 127.0.0.1 --port 2376 --insecure --system
 redposture docker -t 127.0.0.1 --port 2375 --container redposture-web --exec-cmd 'id'
 ```
 
+## Oracle
+
+```bash
+redposture oracle -t 127.0.0.1 --port 1521 --service FREEPDB1
+redposture oracle -t 127.0.0.1 --port 1521 --service FREEPDB1 --listener-dump --nne-check
+redposture oracle -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p 'OracleLab!2026' --show-pdbs --show-users --show-schemas --show-tables
+redposture oracle -t 127.0.0.1 --port 1521 --service FREEPDB1 --defcreds --show-users
+redposture oracle -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p 'OracleLab!2026' --schema REDPOSTURE --table ACCOUNTS --dump 10
+redposture oracle -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p 'OracleLab!2026' --privesc-check --sensitive-scan --dblink-check
+redposture oracle -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p 'OracleLab!2026' --exec-cmd 'id' --exec-method scheduler
+redposture oracle -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p 'OracleLab!2026' --os-read /etc/hostname --fs-mode auto
+```
+
+Explicit post-auth actions such as `--exec-cmd`, `--os-read`, `--hashes`, `--wallet-search`, and `--privesc-chain` never run by default. When `-o` is set, Oracle hash/wallet/file/exfil sidecars are written next to the main output file.
+
 Docker secret values are intentionally not implemented in v1; Docker Engine API does not expose secret payloads after creation.
 
 ### ClickHouse
@@ -257,7 +280,10 @@ redposture clickhouse -t 127.0.0.1 --http
 redposture clickhouse -t 127.0.0.1 --defcreds
 
 # SQL query + table dump
-redposture clickhouse -t 127.0.0.1 --sql-cmd "SELECT version()" --table audit.events --dump
+redposture clickhouse -t 127.0.0.1 --sql-cmd "SELECT version()" --table audit.events --dump 50
+
+# Backtick quoted table with special characters
+redposture clickhouse -t 127.0.0.1 --table '`analytics`.`offlineStocks:city_4949:552400`' --dump 5
 ```
 
 ### Redis
@@ -269,8 +295,9 @@ redposture redis -t 127.0.0.1
 # Keys
 redposture redis -t 127.0.0.1 --show-keys
 
-# Dump
-redposture redis -t 127.0.0.1 --dump
+# Dump first N keys; key names are treated literally, including ':'
+redposture redis -t 127.0.0.1 --dump 100
+redposture redis -t 127.0.0.1 -key 'offlineStocks:city_4949:552400' --dump
 ```
 
 ### etcd
@@ -282,8 +309,9 @@ redposture etcd -t 127.0.0.1
 # Keys
 redposture etcd -t 127.0.0.1 --show-keys
 
-# Dump
-redposture etcd -t 127.0.0.1 --dump
+# Dump first N keys; key names are treated literally, including ':'
+redposture etcd -t 127.0.0.1 --dump 100
+redposture etcd -t 127.0.0.1 --key '/offlineStocks:city_4949:552400' --dump
 ```
 
 ### Proxmox
@@ -307,8 +335,8 @@ redposture proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken 'admin@pve
 # Baseline (anonymous collections access; GHSA /logger probe summary, debug shows details)
 redposture qdrant -t 127.0.0.1 --port 6333
 
-# Collections list + full collection info dump
-redposture qdrant -t 127.0.0.1 --collections --dump
+# Collections list + first N collection-info dumps
+redposture qdrant -t 127.0.0.1 --collections --dump 10
 
 # SSRF via snapshot recover + local capture listener (Docker lab: use host.docker.internal)
 redposture qdrant -t 127.0.0.1 --collection demo_vectors --ssrf-target host.docker.internal --ssrf-port 18081 --ssrf-path /probe --listen
@@ -326,8 +354,8 @@ redposture kafka -t 127.0.0.1 --defcreds --show-topics
 # Topics
 redposture kafka -t 127.0.0.1 --show-topics
 
-# Topic dump
-redposture kafka -t 127.0.0.1 --topic audit.logs --dump
+# Topic dump; --dump N is equivalent to the message limit unless --max-messages conflicts
+redposture kafka -t 127.0.0.1 --topic audit.logs --dump 50
 ```
 
 `--defcreds` checks `admin:admin`, `kafka:kafka`, `kafka:password`.
@@ -387,8 +415,8 @@ redposture zookeeper -t 127.0.0.1
 # Znodes
 redposture zookeeper -t 127.0.0.1 --show-znodes
 
-# Dump
-redposture zookeeper -t 127.0.0.1 --dump
+# Dump first N znodes
+redposture zookeeper -t 127.0.0.1 --dump 50
 ```
 
 ## Development (Optional)

@@ -27,6 +27,10 @@ def set_console_no_color(enabled: bool) -> None:
     _FORCE_NO_COLOR = bool(enabled)
 
 
+def is_console_no_color() -> bool:
+    return _FORCE_NO_COLOR
+
+
 class Console:
     def __init__(self, debug: bool = False, *, no_color: bool | None = None) -> None:
         self.debug_enabled = debug

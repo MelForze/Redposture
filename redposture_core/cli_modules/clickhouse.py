@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
-from ..show_limits import optional_show_count_kwargs
+from ..show_limits import optional_dump_count_kwargs, optional_show_count_kwargs
 
 
 def configure_clickhouse_parser(
@@ -100,8 +100,9 @@ def configure_clickhouse_parser(
     )
     actions.add_argument(
         "--dump",
-        action="store_true",
-        help="Dump table rows. With --table dumps selected table(s); without --table dumps all readable tables.",
+        **optional_dump_count_kwargs(
+            "Dump table rows. Optional count limits rows per table. With --table dumps selected table(s); without --table dumps all readable tables."
+        ),
     )
     exec_group.add_argument(
         "-x",

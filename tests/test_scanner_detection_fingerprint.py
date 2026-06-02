@@ -4,6 +4,7 @@ import threading
 import time
 
 from redposture_core import scanner
+from redposture_core.constants import DISCOVERY_EXPORTERS
 from redposture_core.scanner import scan_exporter_presence
 
 
@@ -517,3 +518,132 @@ def test_scan_uses_unique_port_fallback_for_generic_prometheus_metrics(monkeypat
     assert len(hits) == 1
     assert hits[0]["exporter"] == "blackbox_exporter"
     assert hits[0]["method"] == "metrics"
+
+
+def test_scan_detects_node_exporter_from_production_node_metrics(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
+        _ = (timeout, retries, kwargs)
+        if url.endswith("/metrics"):
+            return {
+                "status": 200,
+                "body": (
+                    "# HELP node_cpu_seconds_total Seconds the CPUs spent in each mode.\n"
+                    'node_cpu_seconds_total{cpu="0",mode="idle"} 12345\n'
+                    'node_filesystem_avail_bytes{mountpoint="/"} 987654321\n'
+                    "node_memory_MemAvailable_bytes 123456789\n"
+                    'node_network_receive_bytes_total{device="eth0"} 777\n'
+                    "node_boot_time_seconds 1700000000\n"
+                ),
+                "content_type": "text/plain; version=0.0.4",
+                "elapsed_ms": 1,
+                "truncated": False,
+                "error": None,
+            }
+        raise AssertionError("strong node metrics should not require fingerprint endpoints")
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    checks, found, by_host = scan_exporter_presence(
+        hosts=["127.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        logger=None,
+        emit_line=None,
+        workers=1,
+        retries=0,
+        discovery_exporters=list(DISCOVERY_EXPORTERS),
+        custom_ports=[9100],
+    )
+
+    assert checks == 1
+    assert found == 1
+    hits = by_host["127.0.0.1"]
+    assert hits == [
+        {
+            "exporter": "node_exporter",
+            "port": 9100,
+            "url": "http://127.0.0.1:9100/metrics",
+            "status": 200,
+            "method": "marker",
+        }
+    ]
+
+
+def test_scan_does_not_classify_haproxy_as_node_on_shared_port(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
+        _ = (timeout, retries, kwargs)
+        if url.endswith("/metrics"):
+            return {
+                "status": 200,
+                "body": (
+                    "# HELP haproxy_up Whether HAProxy was successfully scraped.\n"
+                    "haproxy_up 1\n"
+                    'haproxy_frontend_http_requests_total{proxy="edge"} 42\n'
+                    "haproxy_exporter_build_info 1\n"
+                ),
+                "content_type": "text/plain; version=0.0.4",
+                "elapsed_ms": 1,
+                "truncated": False,
+                "error": None,
+            }
+        raise AssertionError("clear HAProxy markers should not require fingerprint endpoints")
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    _checks, found, by_host = scan_exporter_presence(
+        hosts=["127.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        logger=None,
+        emit_line=None,
+        workers=1,
+        retries=0,
+        discovery_exporters=list(DISCOVERY_EXPORTERS),
+        custom_ports=[9101],
+    )
+
+    assert found == 1
+    assert by_host["127.0.0.1"][0]["exporter"] == "haproxy_exporter"
+
+
+def test_scan_keeps_generic_prometheus_metrics_unknown_with_multiple_profiles(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
+        _ = (timeout, retries, kwargs)
+        if url.endswith("/metrics"):
+            return {
+                "status": 200,
+                "body": "process_cpu_seconds_total 1.5\ngo_memstats_alloc_bytes 2048\n",
+                "content_type": "text/plain; version=0.0.4",
+                "elapsed_ms": 1,
+                "truncated": False,
+                "error": None,
+            }
+        return {
+            "status": 200,
+            "body": "{}",
+            "content_type": "application/json",
+            "elapsed_ms": 1,
+            "truncated": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr("redposture_core.scanner.http_get_details", fake_http_get_details)
+
+    checks, found, by_host = scan_exporter_presence(
+        hosts=["127.0.0.1"],
+        timeout=1.0,
+        output_path=None,
+        output_format="json",
+        logger=None,
+        emit_line=None,
+        workers=1,
+        retries=0,
+        discovery_exporters=list(DISCOVERY_EXPORTERS),
+        custom_ports=[9100],
+    )
+
+    assert checks == 1
+    assert found == 0
+    assert by_host["127.0.0.1"] == []

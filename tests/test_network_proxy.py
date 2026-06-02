@@ -5,6 +5,7 @@ import socket
 import pytest
 
 from redposture_core import network_proxy as np
+from redposture_core.exporters.http_pool import HTTPConnectionPool
 
 
 @pytest.mark.parametrize(
@@ -48,6 +49,18 @@ def test_parse_proxy_config_supports_socks5h() -> None:
     assert cfg.port == 1080
 
 
+@pytest.mark.parametrize("scheme", ["socks4", "socks4a"])
+def test_parse_proxy_config_supports_socks4_variants(scheme: str) -> None:
+    cfg, err = np.parse_proxy_config(f"{scheme}://audit@127.0.0.1:1080")
+    assert err is None
+    assert cfg is not None
+    assert cfg.scheme == scheme
+    assert cfg.host == "127.0.0.1"
+    assert cfg.port == 1080
+    assert cfg.username == "audit"
+    assert cfg.password is None
+
+
 @pytest.mark.parametrize(
     ("address", "error_substr"),
     [
@@ -74,6 +87,9 @@ def test_proxy_socket_patch_routes_socket_create_connection(monkeypatch: pytest.
     calls: list[tuple[tuple[object, ...], object, object]] = []
 
     class DummySock:
+        def setsockopt(self, *_args: object) -> None:
+            return
+
         def close(self) -> None:
             return
 
@@ -112,6 +128,31 @@ def test_proxy_socket_patch_with_none_proxy_keeps_original() -> None:
     with np.ProxySocketPatch(None):
         assert socket.create_connection is original
     assert socket.create_connection is original
+
+
+def test_runtime_network_config_from_args_carries_proxy_and_retries() -> None:
+    class _Args:
+        timeout = "2.5"
+        retries = "3"
+        insecure = True
+        tls = None
+
+    proxy = np.ProxyConfig(
+        scheme="socks5",
+        host="127.0.0.1",
+        port=9050,
+        username=None,
+        password=None,
+        raw_url="socks5://127.0.0.1:9050",
+    )
+
+    config = np.RuntimeNetworkConfig.from_args(_Args(), proxy=proxy)
+
+    assert config.proxy is proxy
+    assert config.proxy_enabled is True
+    assert config.timeout == 2.5
+    assert config.retries == 3
+    assert config.insecure is True
 
 
 @pytest.mark.parametrize(
@@ -161,6 +202,9 @@ def test_proxy_socket_patch_nested_contexts_restore_original(monkeypatch: pytest
     calls: list[tuple[str, tuple[object, ...], object, object]] = []
 
     class DummySock:
+        def setsockopt(self, *_args: object) -> None:
+            return
+
         def close(self) -> None:
             return
 
@@ -293,6 +337,81 @@ def test_socks5_open_tunnel_closes_socket_on_negotiation_failure(monkeypatch: py
     assert sock.closed is True
 
 
+def test_socks4_open_tunnel_ipv4_request_with_userid(monkeypatch: pytest.MonkeyPatch) -> None:
+    sock = _FakeSocket([b"\x00\x5a\x00\x00\x00\x00\x00\x00"])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
+
+    proxy = np.ProxyConfig(
+        scheme="socks4",
+        host="127.0.0.1",
+        port=1080,
+        username="audit",
+        password=None,
+        raw_url="socks4://audit@127.0.0.1:1080",
+    )
+    returned = np._socks4_open_tunnel(proxy, "192.0.2.10", 9100, timeout=1.0, source_address=None)
+
+    assert returned is sock
+    assert sock.sent == [b"\x04\x01\x23\x8c\xc0\x00\x02\x0aaudit\x00"]
+    assert sock.closed is False
+
+
+def test_socks4_open_tunnel_domain_uses_socks4a(monkeypatch: pytest.MonkeyPatch) -> None:
+    sock = _FakeSocket([b"\x00\x5a\x00\x00\x00\x00\x00\x00"])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
+
+    proxy = np.ProxyConfig(
+        scheme="socks4",
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks4://127.0.0.1:1080",
+    )
+    returned = np._socks4_open_tunnel(proxy, "proxy-node-exporter", 9100, timeout=1.0, source_address=None)
+
+    assert returned is sock
+    assert sock.sent == [b"\x04\x01\x23\x8c\x00\x00\x00\x01\x00proxy-node-exporter\x00"]
+    assert sock.closed is False
+
+
+def test_socks4a_open_tunnel_forces_remote_dns_even_for_ipv4(monkeypatch: pytest.MonkeyPatch) -> None:
+    sock = _FakeSocket([b"\x00\x5a\x00\x00\x00\x00\x00\x00"])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
+
+    proxy = np.ProxyConfig(
+        scheme="socks4a",
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks4a://127.0.0.1:1080",
+    )
+    returned = np._socks4_open_tunnel(proxy, "192.0.2.10", 9100, timeout=1.0, source_address=None)
+
+    assert returned is sock
+    assert sock.sent == [b"\x04\x01\x23\x8c\x00\x00\x00\x01\x00192.0.2.10\x00"]
+    assert sock.closed is False
+
+
+def test_socks4_open_tunnel_closes_socket_on_reject(monkeypatch: pytest.MonkeyPatch) -> None:
+    sock = _FakeSocket([b"\x00\x5b\x00\x00\x00\x00\x00\x00"])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
+
+    proxy = np.ProxyConfig(
+        scheme="socks4",
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks4://127.0.0.1:1080",
+    )
+    with pytest.raises(OSError, match="code=91"):
+        np._socks4_open_tunnel(proxy, "192.0.2.10", 9100, timeout=1.0, source_address=None)
+
+    assert sock.closed is True
+
+
 def test_http_open_tunnel_sends_connect_and_proxy_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     sock = _FakeSocket([])
     monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
@@ -350,3 +469,40 @@ def test_http_open_tunnel_closes_socket_on_non_200(monkeypatch: pytest.MonkeyPat
         np._http_open_tunnel(proxy, "example.com", 443, timeout=2.0, source_address=None)
 
     assert sock.closed is True
+
+
+def test_http_connection_pool_uses_proxy_socket_patch(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, tuple[object, ...], object, object]] = []
+
+    class DummySock:
+        def setsockopt(self, *_args: object) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    def fake_open_connection_via_proxy(
+        proxy: np.ProxyConfig,
+        address: tuple[object, ...],
+        timeout: object = np._SOCKET_DEFAULT_TIMEOUT,
+        source_address: tuple[str, int] | None = None,
+    ) -> DummySock:
+        calls.append((proxy.raw_url, address, timeout, source_address))
+        return DummySock()
+
+    monkeypatch.setattr(np, "open_connection_via_proxy", fake_open_connection_via_proxy)
+
+    proxy = np.ProxyConfig(
+        scheme="socks4a",
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks4a://127.0.0.1:1080",
+    )
+    pool = HTTPConnectionPool()
+    with np.ProxySocketPatch(proxy):
+        conn = pool._acquire("proxy-node-exporter", 9100, 1.25)
+        conn.connect()
+
+    assert calls == [("socks4a://127.0.0.1:1080", ("proxy-node-exporter", 9100), 1.25, None)]
