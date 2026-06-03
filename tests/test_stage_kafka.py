@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from redposture_core import stage_kafka as kafka
+from redposture_core.modules.kafka import actions as kafka_actions
 from redposture_core.modules.kafka import stage as kafka_stage_pkg
 from redposture_core.stage_kafka import _parse_apiversions_response, _parse_metadata_response
 from redposture_core.stage_runtime import AuditCommandResult
@@ -740,6 +741,71 @@ def test_run_kafka_stage_accepts_explicit_empty_password(monkeypatch: pytest.Mon
     assert captured_passwords == [""]
 
 
+def test_run_kafka_stage_uses_dump_count_as_message_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[tuple[bool, bool, int]] = []
+
+    def fake_stage_call(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        username: str | None,
+        password: str | None,
+        show_topics: bool,
+        query_topic: str | None,
+        dump: bool,
+        max_messages: int,
+        *,
+        run_deep_checks: bool,
+        debug: bool,
+        debug_emit,
+        show_topics_limit: int | None = None,
+    ) -> dict[str, object]:
+        _ = (
+            timeout,
+            retries,
+            username,
+            password,
+            show_topics,
+            query_topic,
+            debug,
+            debug_emit,
+            show_topics_limit,
+        )
+        captured.append((bool(run_deep_checks), bool(dump), int(max_messages)))
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": port,
+            "is_kafka": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "provided_credentials": False,
+            "show_topics": bool(show_topics),
+            "query_topic": query_topic,
+            "topic_count": 1,
+            "topics": ["orders"] if run_deep_checks else None,
+            "query_topic_value": "orders (partitions:1)" if query_topic else None,
+            "dump": bool(dump),
+            "max_messages": int(max_messages) if dump else None,
+            "dump_topics": ["orders"] if dump else None,
+            "dump_results": {"orders": ["p0@1 ord-1001"]} if dump else None,
+            "dump_errors": {},
+            "dump_error": None,
+            "error": None,
+        }
+
+    monkeypatch.setattr(kafka_actions, "_call_audit_kafka_host_with_stage_debug", fake_stage_call)
+
+    rc = kafka.run_kafka_stage(
+        _kafka_args(show_topics=True, topic="orders", dump=3, max_messages=None),
+        logger=object(),  # type: ignore[arg-type]
+    )
+
+    assert rc == 0
+    assert (True, True, 3) in captured
+
+
 def test_run_kafka_stage_warns_when_all_targets_are_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
@@ -875,18 +941,16 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
     )
 
     assert rc == 0
-    assert len(captured) == 6
+    assert len(captured) == 4
     assert all(call["show_progress"] is False for call in captured)
     assert [(call["hosts"], call["username"], call["password"]) for call in captured] == [
-        (["10.0.0.1"], None, None),
         (["10.0.0.1"], "alice", "one"),
         (["10.0.0.1"], "bob", "two"),
-        (["10.0.0.2"], None, None),
         (["10.0.0.2"], "alice", "one"),
         (["10.0.0.2"], "bob", "two"),
     ]
-    assert progress_totals == [6]
-    assert progress_advances == [1, 1, 1, 1, 1, 1]
+    assert progress_totals == [4]
+    assert progress_advances == [1, 1, 1, 1]
 
 
 def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.MonkeyPatch) -> None:

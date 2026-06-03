@@ -19,22 +19,12 @@ _DEFAULT_PORT = 2375
 _DEFAULT_PORTS = (2375, 2376, 4243)
 
 
-def _dummy_detect(host: str, port: int) -> AuditRecord:
-    return AuditRecord(
-        host=str(host),
-        port=int(port),
-        service="docker",
-        status="not_run",
-        module="docker",
-    )
-
-
 def build_docker_plan(args: Any) -> AuditCommandPlan:
     return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
 
 
 def build_docker_spec(args: Any) -> ModuleAuditSpec:
-    def _render(record: dict[str, Any]) -> list[str]:
+    def _render(record: AuditRecord) -> list[str]:
         return render_record_with_module(
             render,
             record,
@@ -46,8 +36,10 @@ def build_docker_spec(args: Any) -> ModuleAuditSpec:
         module="docker",
         label="DOCKER",
         default_port=_DEFAULT_PORT,
-        detect=_dummy_detect,
-        detect_context=actions.host_hook,
+        detect=actions.detect,
+        auth=actions.auth,
+        capabilities=actions.capabilities,
+        data=actions.data,
         render=_render,
     )
 

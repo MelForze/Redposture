@@ -5,8 +5,7 @@ import json
 import threading
 from types import SimpleNamespace
 
-import pytest
-
+from redposture_core.network_proxy import ProxyConfig
 from redposture_core.stage_proxmox import (
     _PROXMOX_DEFAULT_CREDENTIALS,
     _audit_proxmox_host,
@@ -39,14 +38,8 @@ from redposture_core.stage_proxmox import (
     _key_looks_sensitive,
     _looks_like_cloud_init_secret_blob,
     _normalize_add_user_id,
-    _parse_proxy_config,
     _proxmox_request,
     _proxmox_request_once,
-    _ProxyConfig,
-    _recv_exact,
-    _request_via_http_proxy,
-    _request_via_socks_proxy,
-    _socks5_open_tunnel,
     _ssl_context,
     _stream_proxmox_status,
     _value_looks_secret,
@@ -93,23 +86,6 @@ def test_proxmox_small_helpers_cover_auth_userid_caps_and_ssl() -> None:
     assert _ssl_context(use_https=False, insecure=False) is None
     assert _ssl_context(use_https=True, insecure=True) is not None
     assert _ssl_context(use_https=True, insecure=False) is not None
-
-
-def test_recv_exact_handles_complete_and_eof_cases() -> None:
-    class _Socket:
-        def __init__(self, chunks: list[bytes]) -> None:
-            self._chunks = list(chunks)
-
-        def recv(self, _size: int) -> bytes:
-            if not self._chunks:
-                return b""
-            return self._chunks.pop(0)
-
-    sock = _Socket([b"ab", b"cd"])
-    assert _recv_exact(sock, 4) == b"abcd"
-
-    with pytest.raises(ConnectionError):
-        _recv_exact(_Socket([b"a", b""]), 2)
 
 
 def test_proxmox_error_and_permission_helpers_cover_nested_payloads() -> None:
@@ -868,40 +844,6 @@ def test_audit_proxmox_detects_uri_jwt_and_base64_cloud_init(monkeypatch) -> Non
     assert "cloud_init_blob" in reasons
 
 
-def test_parse_proxy_config_accepts_http_proxy() -> None:
-    proxy, error = _parse_proxy_config("http://127.0.0.1:8080")
-    assert error is None
-    assert proxy is not None
-    assert proxy.scheme == "http"
-    assert proxy.host == "127.0.0.1"
-    assert proxy.port == 8080
-    assert proxy.username is None
-    assert proxy.password is None
-
-
-def test_parse_proxy_config_accepts_socks5h_auth_proxy() -> None:
-    proxy, error = _parse_proxy_config("socks5h://audit:secret@127.0.0.1:1080")
-    assert error is None
-    assert proxy is not None
-    assert proxy.scheme == "socks5h"
-    assert proxy.host == "127.0.0.1"
-    assert proxy.port == 1080
-    assert proxy.username == "audit"
-    assert proxy.password == "secret"
-
-
-def test_parse_proxy_config_rejects_invalid_scheme() -> None:
-    proxy, error = _parse_proxy_config("ftp://127.0.0.1:21")
-    assert proxy is None
-    assert "unsupported proxy scheme" in str(error or "")
-
-
-def test_parse_proxy_config_requires_scheme() -> None:
-    proxy, error = _parse_proxy_config("127.0.0.1:8080")
-    assert proxy is None
-    assert "must include scheme" in str(error or "")
-
-
 def test_format_record_token_ok_caps_order_and_no_endpoints_findings() -> None:
     line = _format_record(
         {
@@ -1318,53 +1260,6 @@ def test_audit_proxmox_unexpected_http_marks_not_detected(monkeypatch) -> None: 
     assert "unexpected HTTP 500" in str(record.get("error") or "")
 
 
-def test_socks5_open_tunnel_uses_socket_create_connection(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    calls: list[tuple[tuple[str, int], float | None]] = []
-
-    class _DummySocket:
-        def __init__(self) -> None:
-            self._responses = [
-                b"\x05\x00",  # method selection (no auth)
-                b"\x05\x00\x00\x01",  # connect reply header (IPv4)
-                b"\x00\x00\x00\x00",  # bound addr
-                b"\x00\x00",  # bound port
-            ]
-
-        def settimeout(self, _timeout: float | None) -> None:
-            return
-
-        def sendall(self, _data: bytes) -> None:
-            return
-
-        def recv(self, _size: int) -> bytes:
-            if not self._responses:
-                return b""
-            return self._responses.pop(0)
-
-        def close(self) -> None:
-            return
-
-    def fake_create_connection(address: tuple[str, int], timeout: float | None = None):
-        calls.append((address, timeout))
-        return _DummySocket()
-
-    monkeypatch.setattr("redposture_core.stage_proxmox.socket.create_connection", fake_create_connection)
-
-    proxy = _ProxyConfig(
-        scheme="socks5",
-        host="::1",
-        port=1080,
-        username=None,
-        password=None,
-        raw_url="socks5://[::1]:1080",
-    )
-    sock, error = _socks5_open_tunnel(proxy, "127.0.0.1", 8006, 1.5)
-
-    assert error is None
-    assert sock is not None
-    assert calls == [(("::1", 1080), 1.5)]
-
-
 def test_proxmox_error_helpers_cover_tls_and_transport_cases() -> None:
     assert _friendly_error_text("certificate verify failed") == "tls verification failed (try --insecure)"
     assert _friendly_error_text("wrong version number") == "tls/http protocol mismatch"
@@ -1431,19 +1326,6 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
     assert any("--pveapitoken, -u/-p, or --defcreds is required" in item for item in fake_console.errors)
 
     fake_console.errors.clear()
-    monkeypatch.setattr(
-        "redposture_core.modules.proxmox.actions._parse_proxy_config", lambda _raw: (None, "invalid proxy")
-    )
-    rc = run_proxmox_stage(
-        SimpleNamespace(
-            **{**base_args, "pve_api_token": "monitor@pve!audit=token", "proxy": "socks5://127.0.0.1:9050"}
-        ),
-        logger=SimpleNamespace(log=lambda *_a, **_k: None),
-    )
-    assert rc == 2
-    assert any("failed to parse --proxy: invalid proxy" in item for item in fake_console.errors)
-
-    fake_console.errors.clear()
     seen_https: list[bool] = []
 
     def fake_audit_targets(*_args, **kwargs):
@@ -1494,7 +1376,6 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None: 
 
     fake_console = _FakeConsole()
     monkeypatch.setattr("redposture_core.stage_proxmox.Console", lambda debug=False: fake_console)
-    monkeypatch.setattr("redposture_core.stage_proxmox._parse_proxy_config", lambda _raw: (None, None))
     monkeypatch.setattr("redposture_core.stage_proxmox.collect_scan_ports", lambda *_a, **_k: [8006])
     monkeypatch.setattr(
         "redposture_core.stage_proxmox.collect_scan_target_specs",
@@ -1576,7 +1457,6 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
 
     fake_console = _FakeConsole()
     monkeypatch.setattr("redposture_core.stage_proxmox.Console", lambda debug=False: fake_console)
-    monkeypatch.setattr("redposture_core.stage_proxmox._parse_proxy_config", lambda _raw: (None, None))
     monkeypatch.setattr("redposture_core.stage_proxmox.collect_scan_ports", lambda *_a, **_k: [8006, 18061, 18062])
     monkeypatch.setattr(
         "redposture_core.stage_proxmox.collect_scan_target_specs",
@@ -1651,122 +1531,8 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
     assert progress_advances == [1, 1, 1]
 
 
-def test_request_via_http_proxy_success_and_http_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    class _FakeHttpClient:
-        mode = "ok"
-
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def request(self, *_args, **_kwargs):
-            if self.mode == "ok":
-                return SimpleNamespace(
-                    status=200, body=b'{"ok":1}', headers={"content-type": "application/json"}, error=None
-                )
-            if self.mode == "http_error":
-                return SimpleNamespace(
-                    status=403,
-                    body=b'{"errors":"forbidden"}',
-                    headers={"content-type": "application/json"},
-                    error=None,
-                )
-            return SimpleNamespace(status=0, body=b"", headers={}, error="connection refused")
-
-    proxy = _ProxyConfig(
-        scheme="http",
-        host="127.0.0.1",
-        port=8080,
-        username=None,
-        password=None,
-        raw_url="http://127.0.0.1:8080",
-    )
-    monkeypatch.setattr("redposture_core.stage_proxmox.HttpApiClient", _FakeHttpClient)
-    _FakeHttpClient.mode = "ok"
-    status, payload, _headers, error = _request_via_http_proxy(
-        "127.0.0.1",
-        8006,
-        "/access",
-        1.0,
-        pve_api_token="monitor@pve!audit=token",
-        use_https=False,
-        insecure=True,
-        proxy=proxy,
-    )
-    assert (status, error) == (200, None)
-    assert payload == b'{"ok":1}'
-
-    _FakeHttpClient.mode = "http_error"
-    status, payload, _headers, error = _request_via_http_proxy(
-        "127.0.0.1",
-        8006,
-        "/access",
-        1.0,
-        pve_api_token="monitor@pve!audit=token",
-        use_https=False,
-        insecure=True,
-        proxy=proxy,
-    )
-    assert status == 403
-    assert payload == b'{"errors":"forbidden"}'
-    assert error is None
-
-
-def test_request_via_socks_proxy_success_and_transport_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    class _DummySock:
-        def __init__(self) -> None:
-            self.sent: list[bytes] = []
-            self.closed = False
-
-        def sendall(self, data: bytes) -> None:
-            self.sent.append(data)
-
-        def close(self) -> None:
-            self.closed = True
-
-    proxy = _ProxyConfig(
-        scheme="socks5",
-        host="127.0.0.1",
-        port=1080,
-        username=None,
-        password=None,
-        raw_url="socks5://127.0.0.1:1080",
-    )
-    sock = _DummySock()
-    monkeypatch.setattr("redposture_core.stage_proxmox._socks5_open_tunnel", lambda *_a, **_k: (sock, None))
-    monkeypatch.setattr(
-        "redposture_core.stage_proxmox._read_http_response_from_socket",
-        lambda _sock: (200, b"{}", {"content-type": "application/json"}, None),
-    )
-    status, payload, _headers, error = _request_via_socks_proxy(
-        "127.0.0.1",
-        8006,
-        "/access",
-        1.0,
-        pve_api_token="monitor@pve!audit=token",
-        use_https=False,
-        insecure=True,
-        proxy=proxy,
-    )
-    assert (status, payload, error) == (200, b"{}", None)
-    assert sock.sent
-
-    monkeypatch.setattr("redposture_core.stage_proxmox._socks5_open_tunnel", lambda *_a, **_k: (None, "proxy failed"))
-    status, _payload, _headers, error = _request_via_socks_proxy(
-        "127.0.0.1",
-        8006,
-        "/access",
-        1.0,
-        pve_api_token="monitor@pve!audit=token",
-        use_https=False,
-        insecure=True,
-        proxy=proxy,
-    )
-    assert status == 0
-    assert error == "proxy failed"
-
-
 def test_proxmox_request_once_and_retry_paths(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    proxy = _ProxyConfig(
+    proxy = ProxyConfig(
         scheme="http",
         host="127.0.0.1",
         port=8080,

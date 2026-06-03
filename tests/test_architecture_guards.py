@@ -309,9 +309,31 @@ def test_module_actions_are_typed_hook_facades_not_command_runtimes() -> None:
         source = (module_dir / "actions.py").read_text(encoding="utf-8")
         assert "AuditRecord" in source, module_dir.name
         assert "def record_from_mapping" in source, module_dir.name
-        assert "def host_hook(ctx: AuditHookContext) -> AuditRecord" in source, module_dir.name
+        assert "def detect(ctx: AuditHookContext) -> AuditRecord" in source, module_dir.name
+        assert "def auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord" in source, module_dir.name
+        assert "def capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord" in source, module_dir.name
+        assert "def data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord" in source, module_dir.name
         offenders = [token for token in forbidden_tokens if token in source]
         assert offenders == [], module_dir.name
+
+
+def test_proxmox_uses_shared_proxy_transport_only() -> None:
+    offenders: list[str] = []
+    for path in (_CORE / "modules" / "proxmox").glob("*.py"):
+        source = path.read_text(encoding="utf-8")
+        for token in (
+            "_parse_proxy_config",
+            "_ProxyConfig",
+            "_socks5_open_tunnel",
+            "_request_via_socks_proxy",
+            "_request_via_http_proxy",
+            "http.client",
+            "socket.create_connection",
+        ):
+            if token in source:
+                offenders.append(f"{path.name}:{token}")
+
+    assert offenders == []
 
 
 def test_module_split_boundary_modules_are_importable() -> None:

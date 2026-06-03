@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from ...stage_runtime import validate_basic_module_args
-from . import actions
 
 
 def validate_args(args: Any, console: Any) -> int | None:
@@ -18,12 +17,6 @@ def validate_args(args: Any, console: Any) -> int | None:
     if not token and not (username is not None and password is not None) and not bool(getattr(args, "defcreds", False)):
         console.error("--pveapitoken, -u/-p, or --defcreds is required")
         return 2
-    proxy = getattr(args, "proxy", None)
-    if proxy:
-        _config, error = actions._parse_proxy_config(str(proxy))
-        if error:
-            console.error(f"failed to parse --proxy: {error}")
-            return 2
     return None
 
 

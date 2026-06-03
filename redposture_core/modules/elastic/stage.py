@@ -21,22 +21,12 @@ _DEFAULT_PORT = 9200
 _DEFAULT_PORTS = None
 
 
-def _dummy_detect(host: str, port: int) -> AuditRecord:
-    return AuditRecord(
-        host=str(host),
-        port=int(port),
-        service="elastic",
-        status="not_run",
-        module="elastic",
-    )
-
-
 def build_elastic_plan(args: Any) -> AuditCommandPlan:
     return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
 
 
 def build_elastic_spec(args: Any) -> ModuleAuditSpec:
-    def _render(record: dict[str, Any]) -> list[str]:
+    def _render(record: AuditRecord) -> list[str]:
         return render_record_with_module(
             render,
             record,
@@ -48,8 +38,10 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
         module="elastic",
         label="ELASTIC",
         default_port=_DEFAULT_PORT,
-        detect=_dummy_detect,
-        detect_context=actions.host_hook,
+        detect=actions.detect,
+        auth=actions.auth,
+        capabilities=actions.capabilities,
+        data=actions.data,
         render=_render,
     )
 

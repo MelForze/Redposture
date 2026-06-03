@@ -98,3 +98,48 @@ def test_http_api_client_transport_error_is_normalized(monkeypatch) -> None:  # 
     assert response.status == 0
     assert "Connection refused" in str(response.error)
     assert normalize_http_error(urllib.error.URLError("timed out"))
+
+
+def test_http_api_client_https_target_via_https_proxy_uses_manual_tunnel(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _FakeSocket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.timeout: float | None = None
+
+        def settimeout(self, value: float) -> None:
+            self.timeout = value
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_socket = _FakeSocket()
+    opened: list[tuple[Any, tuple[str, int], float]] = []
+    exchanged: list[bytes] = []
+
+    def _unexpected_urlopen(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("urlopen must not be used for HTTPS target through HTTPS proxy")
+
+    def _fake_open_connection(proxy: Any, address: tuple[str, int], timeout: float) -> _FakeSocket:
+        opened.append((proxy, address, timeout))
+        return fake_socket
+
+    def _fake_exchange(_sock: Any, _context: Any, **kwargs: Any) -> bytes:
+        exchanged.append(kwargs["request_payload"])
+        return b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{"ok":true}'
+
+    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", _unexpected_urlopen)
+    monkeypatch.setattr("redposture_core.clients.http_api.open_connection_via_proxy", _fake_open_connection)
+    monkeypatch.setattr("redposture_core.clients.http_api._tls_over_tls_exchange", _fake_exchange)
+
+    client = HttpApiClient(HttpClientConfig(proxy="https://127.0.0.1:18443", timeout=4.0))
+    response = client.get("https://proxmox.internal:8006/api2/json/version", headers={"Accept": "application/json"})
+
+    assert response.status == 200
+    assert response.json() == {"ok": True}
+    assert opened[0][1] == ("proxmox.internal", 8006)
+    assert opened[0][2] == 4.0
+    assert opened[0][0].scheme == "https"
+    assert b"GET /api2/json/version HTTP/1.1" in exchanged[0]
+    assert b"Host: proxmox.internal:8006" in exchanged[0]
+    assert b"Accept: application/json" in exchanged[0]
+    assert fake_socket.closed is True
