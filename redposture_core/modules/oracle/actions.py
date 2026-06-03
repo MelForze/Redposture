@@ -35,7 +35,7 @@ from ...stage_runtime import (
     AuditHookContext,
     AuditRecord,
     StageTelemetryBuilder,
-    invoke_action_hook_from_args,
+    _invoke_module_host_stage,
     merge_stage_records,
 )
 from ...utils import (
@@ -1899,13 +1899,42 @@ __all__ = [
 
 
 # Typed runner boundary -----------------------------------------------------
+
+
 def record_from_mapping(payload: dict[str, Any]) -> AuditRecord:
-    """Convert legacy protocol payloads at the typed runtime boundary."""
+    """Convert module protocol payloads to the typed runtime model."""
 
     return AuditRecord.from_mapping(payload, module="oracle", service="oracle")
 
 
-def host_hook(ctx: AuditHookContext) -> AuditRecord:
-    """Typed host hook consumed by AuditCommandRunner."""
+def _credential_is_anonymous(ctx: AuditHookContext) -> bool:
+    return ctx.credential.username is None and ctx.credential.password is None and ctx.credential.token is None
 
-    return invoke_action_hook_from_args(sys.modules[__name__], module="oracle", ctx=ctx)
+
+def _run_host_stage(ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
+    return _invoke_module_host_stage(
+        sys.modules[__name__],
+        module="oracle",
+        ctx=ctx,
+        run_deep_checks=run_deep_checks,
+    )
+
+
+def detect(ctx: AuditHookContext) -> AuditRecord:
+    return _run_host_stage(ctx, run_deep_checks=False)
+
+
+def auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+    if _credential_is_anonymous(ctx) and not bool(getattr(ctx.args, "defcreds", False)):
+        return record
+    return _run_host_stage(ctx, run_deep_checks=False)
+
+
+def capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+    _ = ctx
+    return record
+
+
+def data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+    _ = record
+    return _run_host_stage(ctx, run_deep_checks=True)

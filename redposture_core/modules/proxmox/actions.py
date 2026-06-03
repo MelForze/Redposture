@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import base64
 import binascii
-import http.client
-import ipaddress
 import json
 import re
 import secrets
-import socket
 import ssl
 import string
 import sys
@@ -17,7 +14,6 @@ import time
 import urllib.error
 import urllib.parse
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig
@@ -26,7 +22,7 @@ from ...rendering import BooleanColorRule, render_colored_marker_line
 from ...stage_runtime import (
     AuditHookContext,
     AuditRecord,
-    invoke_action_hook_from_args,
+    _invoke_module_host_stage,
     merge_stage_records,
 )
 from ...utils import (
@@ -121,16 +117,6 @@ _PROXMOX_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
 )
 
 
-@dataclass(frozen=True)
-class _ProxyConfig:
-    scheme: str
-    host: str
-    port: int
-    username: str | None
-    password: str | None
-    raw_url: str
-
-
 def _clip(text: str, width: int = 90) -> str:
     if len(text) <= width:
         return text
@@ -192,7 +178,7 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
         if isinstance(reason, BaseException):
             return _friendly_error_text(str(reason))
         return _friendly_error_text(str(reason or exc))
-    if isinstance(exc, (socket.timeout, TimeoutError)):
+    if isinstance(exc, TimeoutError):
         return "connection timeout"
     return _friendly_error_text(str(exc))
 
@@ -217,47 +203,6 @@ def _ssl_context(*, use_https: bool, insecure: bool) -> ssl.SSLContext | None:
     if insecure:
         return ssl._create_unverified_context()
     return ssl.create_default_context()
-
-
-def _parse_proxy_config(raw_proxy: str | None) -> tuple[_ProxyConfig | None, str | None]:
-    value = str(raw_proxy or "").strip()
-    if not value:
-        return None, None
-    if "://" not in value:
-        return None, "proxy URL must include scheme (http:// or socks5://)"
-
-    try:
-        parsed = urllib.parse.urlsplit(value)
-    except ValueError:
-        return None, "invalid --proxy URL"
-
-    scheme = str(parsed.scheme or "").lower().strip()
-    if not scheme:
-        return None, "proxy URL must include scheme (http:// or socks5://)"
-    if scheme not in {"http", "https", "socks5", "socks5h"}:
-        return None, "unsupported proxy scheme (supported: http, https, socks5, socks5h)"
-
-    host = str(parsed.hostname or "").strip()
-    if not host:
-        return None, "proxy URL must include host"
-
-    try:
-        port = int(parsed.port or 0)
-    except ValueError:
-        return None, "proxy URL has invalid port"
-    if port < 1 or port > 65535:
-        return None, "proxy URL port must be in range 1..65535"
-
-    username = urllib.parse.unquote(parsed.username) if parsed.username is not None else None
-    password = urllib.parse.unquote(parsed.password) if parsed.password is not None else None
-    return _ProxyConfig(
-        scheme=scheme,
-        host=host,
-        port=port,
-        username=username,
-        password=password,
-        raw_url=value,
-    ), None
 
 
 def _auth_header_value(pve_api_token: str) -> str:
@@ -292,213 +237,6 @@ def _normalize_add_user_id(raw_username: str) -> str | None:
     return user_value
 
 
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
-    data = b""
-    while len(data) < size:
-        chunk = sock.recv(size - len(data))
-        if not chunk:
-            raise ConnectionError("unexpected EOF")
-        data += chunk
-    return data
-
-
-def _socks5_open_tunnel(
-    proxy: _ProxyConfig, target_host: str, target_port: int, timeout: float
-) -> tuple[socket.socket | None, str | None]:
-    sock: socket.socket | None = None
-    try:
-        sock = socket.create_connection((proxy.host, proxy.port), timeout=timeout)
-        sock.settimeout(timeout)
-
-        methods = [0x00]
-        if proxy.username is not None:
-            methods.append(0x02)
-        sock.sendall(bytes([0x05, len(methods), *methods]))
-        hello = _recv_exact(sock, 2)
-        if hello[0] != 0x05 or hello[1] == 0xFF:
-            return sock, "socks5 proxy authentication method negotiation failed"
-
-        if hello[1] == 0x02:
-            username = str(proxy.username or "")
-            password = str(proxy.password or "")
-            user_raw = username.encode("utf-8", errors="replace")
-            pass_raw = password.encode("utf-8", errors="replace")
-            if len(user_raw) > 255 or len(pass_raw) > 255:
-                return sock, "socks5 credentials are too long"
-            sock.sendall(bytes([0x01, len(user_raw)]) + user_raw + bytes([len(pass_raw)]) + pass_raw)
-            auth_reply = _recv_exact(sock, 2)
-            if auth_reply[1] != 0x00:
-                return sock, "socks5 proxy authentication failed"
-
-        use_remote_dns = proxy.scheme == "socks5h"
-        atyp: int
-        addr_payload: bytes
-        if use_remote_dns:
-            host_raw = target_host.encode("idna")
-            if not host_raw or len(host_raw) > 255:
-                return sock, "invalid target host for socks5h proxy"
-            atyp = 0x03
-            addr_payload = bytes([len(host_raw)]) + host_raw
-        else:
-            try:
-                ip = ipaddress.ip_address(target_host)
-                if ip.version == 4:
-                    atyp = 0x01
-                else:
-                    atyp = 0x04
-                addr_payload = ip.packed
-            except ValueError:
-                host_raw = target_host.encode("idna")
-                if not host_raw or len(host_raw) > 255:
-                    return sock, "invalid target host for socks5 proxy"
-                atyp = 0x03
-                addr_payload = bytes([len(host_raw)]) + host_raw
-
-        req = bytes([0x05, 0x01, 0x00, atyp]) + addr_payload + int(target_port).to_bytes(2, "big")
-        sock.sendall(req)
-
-        reply_head = _recv_exact(sock, 4)
-        if reply_head[0] != 0x05:
-            return sock, "socks5 proxy returned invalid response"
-        rep = reply_head[1]
-        if rep != 0x00:
-            return sock, f"socks5 proxy connect failed (code={rep})"
-
-        rep_atyp = reply_head[3]
-        if rep_atyp == 0x01:
-            _recv_exact(sock, 4)
-        elif rep_atyp == 0x04:
-            _recv_exact(sock, 16)
-        elif rep_atyp == 0x03:
-            domain_len = _recv_exact(sock, 1)[0]
-            _recv_exact(sock, domain_len)
-        else:
-            return sock, "socks5 proxy returned invalid address type"
-        _recv_exact(sock, 2)
-        return sock, None
-    except (OSError, ValueError, ConnectionError) as exc:
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
-        return None, _friendly_error_from_exception(exc)
-
-
-def _read_http_response_from_socket(sock: socket.socket) -> tuple[int, bytes, dict[str, str], str | None]:
-    try:
-        response = http.client.HTTPResponse(sock)
-        response.begin()
-        status = int(response.status)
-        payload = response.read(_MAX_HTTP_BODY_BYTES)
-        headers = {str(k).lower(): str(v) for k, v in response.getheaders()}
-        return status, payload, headers, None
-    except (OSError, ValueError, http.client.HTTPException) as exc:
-        return 0, b"", {}, _friendly_error_from_exception(exc)
-
-
-def _request_via_socks_proxy(
-    host: str,
-    port: int,
-    path: str,
-    timeout: float,
-    *,
-    pve_api_token: str,
-    use_https: bool,
-    insecure: bool,
-    proxy: _ProxyConfig,
-    method: str = "GET",
-    data: bytes | None = None,
-    auth_headers: dict[str, str] | None = None,
-) -> tuple[int, bytes, dict[str, str], str | None]:
-    sock: socket.socket | None = None
-    transport_sock: socket.socket | ssl.SSLSocket | None = None
-    try:
-        sock, connect_error = _socks5_open_tunnel(proxy, host, port, timeout)
-        if connect_error:
-            return 0, b"", {}, connect_error
-        if sock is None:
-            return 0, b"", {}, "proxy connection failed"
-        transport_sock = sock
-        if use_https:
-            ctx = _ssl_context(use_https=True, insecure=insecure)
-            if ctx is None:
-                return 0, b"", {}, "internal tls context error"
-            transport_sock = ctx.wrap_socket(sock, server_hostname=host)
-            transport_sock.settimeout(timeout)
-
-        request_method = str(method or "GET").upper()
-        request_path = f"{_PROXMOX_API_PREFIX}{path}"
-        host_header = f"{host}:{port}"
-        header_lines = [
-            f"{request_method} {request_path} HTTP/1.1",
-            f"Host: {host_header}",
-            "User-Agent: RedPosture/1.0",
-            "Accept: application/json,text/plain,*/*",
-            "Connection: close",
-        ]
-        for key, value in _proxmox_auth_headers(pve_api_token, auth_headers).items():
-            header_lines.append(f"{key}: {value}")
-        body = data if data else b""
-        if body:
-            header_lines.append("Content-Type: application/x-www-form-urlencoded")
-            header_lines.append(f"Content-Length: {len(body)}")
-        header_lines.extend(("", ""))
-        transport_sock.sendall("\r\n".join(header_lines).encode("utf-8", errors="replace") + body)
-        return _read_http_response_from_socket(transport_sock)
-    except (ssl.SSLError, OSError, ValueError) as exc:
-        return 0, b"", {}, _friendly_error_from_exception(exc)
-    finally:
-        if transport_sock is not None and transport_sock is not sock:
-            try:
-                transport_sock.close()
-            except OSError:
-                pass
-        if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
-
-
-def _request_via_http_proxy(
-    host: str,
-    port: int,
-    path: str,
-    timeout: float,
-    *,
-    pve_api_token: str,
-    use_https: bool,
-    insecure: bool,
-    proxy: _ProxyConfig,
-    method: str = "GET",
-    data: bytes | None = None,
-    auth_headers: dict[str, str] | None = None,
-) -> tuple[int, bytes, dict[str, str], str | None]:
-    scheme = "https" if use_https else "http"
-    url = f"{scheme}://{host}:{port}{_PROXMOX_API_PREFIX}{path}"
-    request_method = str(method or "GET").upper()
-    body = data if data else None
-    request_headers = {
-        "User-Agent": "RedPosture/1.0",
-        "Accept": "application/json,text/plain,*/*",
-    }
-    request_headers.update(_proxmox_auth_headers(pve_api_token, auth_headers))
-    if body:
-        request_headers["Content-Type"] = "application/x-www-form-urlencoded"
-    response = HttpApiClient(
-        HttpClientConfig(
-            timeout=timeout,
-            insecure=bool(use_https and insecure),
-            proxy=proxy,
-            response_size_cap=_MAX_HTTP_BODY_BYTES,
-        )
-    ).request(request_method, url, headers=request_headers, body=body, timeout=timeout)
-    if response.error:
-        return 0, b"", {}, _friendly_error_text(response.error)
-    return int(response.status), response.body, {str(k).lower(): str(v) for k, v in response.headers.items()}, None
-
-
 def _proxmox_request_once(
     host: str,
     port: int,
@@ -508,7 +246,7 @@ def _proxmox_request_once(
     pve_api_token: str,
     use_https: bool,
     insecure: bool,
-    proxy: _ProxyConfig | None,
+    proxy: Any | None,
     method: str = "GET",
     form: dict[str, Any] | None = None,
     auth_headers: dict[str, str] | None = None,
@@ -553,7 +291,7 @@ def _proxmox_request(
     pve_api_token: str,
     use_https: bool,
     insecure: bool,
-    proxy: _ProxyConfig | None,
+    proxy: Any | None,
     method: str = "GET",
     form: dict[str, Any] | None = None,
     auth_headers: dict[str, str] | None = None,
@@ -934,7 +672,7 @@ def _login_proxmox_password(
     password: str,
     use_https: bool,
     insecure: bool,
-    proxy: _ProxyConfig | None,
+    proxy: Any | None,
 ) -> tuple[dict[str, str] | None, str | None]:
     status, payload, _headers, error = _proxmox_request(
         host,
@@ -977,7 +715,7 @@ def _resolve_proxmox_auth_headers(
     defcreds: bool,
     use_https: bool,
     insecure: bool,
-    proxy: _ProxyConfig | None,
+    proxy: Any | None,
 ) -> tuple[dict[str, str], str, str | None, str | None, list[dict[str, str]]]:
     token = str(pve_api_token or "").strip()
     if token:
@@ -1243,7 +981,7 @@ def _audit_proxmox_host(
     pve_api_token: str,
     use_https: bool,
     insecure: bool,
-    proxy: _ProxyConfig | None,
+    proxy: Any | None,
     *,
     username: str | None = None,
     password: str | None = None,
@@ -2076,7 +1814,7 @@ def _call_audit_proxmox_host_with_stage_debug(
     pve_api_token: str,
     use_https: bool,
     insecure: bool,
-    proxy: _ProxyConfig | None,
+    proxy: Any | None,
     *,
     username: str | None,
     password: str | None,
@@ -2222,13 +1960,42 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 
 # Typed runner boundary -----------------------------------------------------
+
+
 def record_from_mapping(payload: dict[str, Any]) -> AuditRecord:
-    """Convert legacy protocol payloads at the typed runtime boundary."""
+    """Convert module protocol payloads to the typed runtime model."""
 
     return AuditRecord.from_mapping(payload, module="proxmox", service="proxmox")
 
 
-def host_hook(ctx: AuditHookContext) -> AuditRecord:
-    """Typed host hook consumed by AuditCommandRunner."""
+def _credential_is_anonymous(ctx: AuditHookContext) -> bool:
+    return ctx.credential.username is None and ctx.credential.password is None and ctx.credential.token is None
 
-    return invoke_action_hook_from_args(sys.modules[__name__], module="proxmox", ctx=ctx)
+
+def _run_host_stage(ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
+    return _invoke_module_host_stage(
+        sys.modules[__name__],
+        module="proxmox",
+        ctx=ctx,
+        run_deep_checks=run_deep_checks,
+    )
+
+
+def detect(ctx: AuditHookContext) -> AuditRecord:
+    return _run_host_stage(ctx, run_deep_checks=False)
+
+
+def auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+    if _credential_is_anonymous(ctx) and not bool(getattr(ctx.args, "defcreds", False)):
+        return record
+    return _run_host_stage(ctx, run_deep_checks=False)
+
+
+def capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+    _ = ctx
+    return record
+
+
+def data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+    _ = record
+    return _run_host_stage(ctx, run_deep_checks=True)

@@ -9,6 +9,15 @@ export DOCKER_CONTEXT="${DOCKER_CONTEXT:-default}"
 OUT_DIR="${1:-/tmp/redposture_lab_matrix_seq_$(date +%Y%m%d_%H%M%S)}"
 STATUS_FILE="${OUT_DIR}/matrix-status.tsv"
 VERIFY_SCRIPT="${ROOT_DIR}/scripts/verify_postrun.py"
+MATRIX_PROFILE="${REDPOSTURE_MATRIX_PROFILE:-balanced}"
+case "${MATRIX_PROFILE}" in
+  balanced|extended)
+    ;;
+  *)
+    echo "[error] unsupported REDPOSTURE_MATRIX_PROFILE=${MATRIX_PROFILE}; expected balanced or extended" >&2
+    exit 2
+    ;;
+esac
 if [ -n "${PYTHON_BIN:-}" ]; then
   PYTHON_BIN="${PYTHON_BIN}"
 elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
@@ -20,6 +29,10 @@ fi
 EXPORTER_PORTS="7777,9100,9102,9104,9113,9114,9116,9117,9119,9121,9127,9128,9131,9150,9182,9187,9216,9221,9256,9290,9308,9342,9349,9399,9419,9427,19101,19119,17777,19100,19102,19104,19113,19114,19115,19117,19121,19128,19131,19150,19182,19187,19219,19221,19290,19308,19399,19419"
 
 mkdir -p "${OUT_DIR}/logs" "${OUT_DIR}/json"
+
+is_extended_matrix() {
+  [ "${MATRIX_PROFILE}" = "extended" ]
+}
 
 CURRENT_SERVICE=""
 compose_service() {
@@ -176,6 +189,15 @@ run_exporters_cases() {
   run_case exporters exporters_trigger_url_http 0 exporters trigger -t "http://127.0.0.1:19121/scrape?target=redis://127.0.0.1:6379" --callback-dns host.docker.internal --no-with-listen
   run_case exporters exporters_trigger_url_https_reject 2 exporters trigger -t "https://127.0.0.1:19121/scrape" --callback-dns host.docker.internal --no-with-listen
   run_text_case exporters exporters_debug_smoke 0 exporters scan -t 127.0.0.1 -p "19100,19121" --debug
+  if is_extended_matrix; then
+    local collect_checkpoint="${OUT_DIR}/exporters_collect_extended.checkpoint"
+    run_case exporters exporters_scan_extended_controls 0 exporters scan -t 127.0.0.1 -p "19100,19121" --timeout 2 -w 4 -r 1
+    run_case exporters exporters_collect_extended_controls 0 exporters collect -t 127.0.0.1 -p "19100,19121" --exporters node,blackbox --deep --no-adaptive-collect --max-inflight 4 --pprof-seconds 1 --trace-seconds 1 --checkpoint-file "${collect_checkpoint}" --save-responses-dir "${OUT_DIR}/collect_extended"
+    run_case exporters exporters_collect_resume_checkpoint 0 exporters collect -t 127.0.0.1 -p "19100,19121" --exporters node --resume --checkpoint-file "${collect_checkpoint}" --save-responses-dir "${OUT_DIR}/collect_extended_resume"
+    run_text_case exporters exporters_collect_debug_smoke 0 exporters collect -t 127.0.0.1 -p "19100" --exporters node --debug
+    run_case exporters exporters_trigger_extended_controls 0 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 -p "19121,19187" --no-with-listen --exporters blackbox,postgres --services blackbox --blackbox-port 29115 --postgres-auth-module stage --no-postgres-tls --no-proxmox-tls
+    run_text_case exporters exporters_trigger_debug_smoke 0 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 -p "19121" --no-with-listen --exporters blackbox --debug
+  fi
 }
 
 run_registry_cases() {
@@ -188,6 +210,10 @@ run_registry_cases() {
   run_case registry registry_url_https_reject 2 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
   run_case registry registry_multi_instance_urls 0 registry -t "http://127.0.0.1:15000/v2/_catalog,http://127.0.0.1:15010/v2/_catalog,http://127.0.0.1:15011/v2/_catalog,http://127.0.0.1:15012/v2/_catalog,http://127.0.0.1:15013/v2/_catalog" --docker --images
   run_text_case registry registry_debug_smoke 0 registry -t 127.0.0.1 --port 15000 --docker --images --debug
+  if is_extended_matrix; then
+    run_case registry registry_extended_tags_metadata 0 registry -t 127.0.0.1 --port 15000 --docker --repository redposture/demo-api --show-tags --tag latest --metadata --inspect --image redposture/demo-api:latest --download --download-dir "${OUT_DIR}/registry_downloads"
+    run_case registry registry_extended_ports_flag 0 registry -t 127.0.0.1 --ports 15000 --docker --images
+  fi
 }
 
 run_grafana_cases() {
@@ -197,6 +223,10 @@ run_grafana_cases() {
   run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --defcreds --ssrf-target "http://127.0.0.1:19115/probe?module=http_2xx" --show-datasources
   run_case grafana grafana_multi_instance_urls 0 grafana -t "http://127.0.0.1:3000/login,http://127.0.0.1:13001/login,http://127.0.0.1:13002/login,http://127.0.0.1:13003/login,http://127.0.0.1:13004/login" --defcreds
   run_text_case grafana grafana_debug_smoke 0 grafana -t 127.0.0.1 --defcreds --debug
+  if is_extended_matrix; then
+    run_case grafana grafana_extended_auth_ssrf_controls 0 grafana -t 127.0.0.1 --port 3000 -u admin -p prom-operator --show-datasource --ssrf-target 127.0.0.1 --ssrf-port 19115 --ssrf-path /probe?module=http_2xx
+    run_case grafana grafana_extended_ports_flag 0 grafana -t 127.0.0.1 --ports 3000 --defcreds
+  fi
 }
 
 run_gitlab_cases() {
@@ -205,6 +235,10 @@ run_gitlab_cases() {
   run_case gitlab gitlab_url_override_http 0 gitlab -t "http://127.0.0.1:18080/users/sign_in?ref=matrix" --https
   run_case gitlab gitlab_multi_instance_urls 0 gitlab -t "http://127.0.0.1:18080/users/sign_in,http://127.0.0.1:18081/users/sign_in,http://127.0.0.1:18082/users/sign_in,http://127.0.0.1:18083/users/sign_in,http://127.0.0.1:18084/users/sign_in"
   run_text_case gitlab gitlab_debug_smoke 0 gitlab -t 127.0.0.1 --port 18080 --debug
+  if is_extended_matrix; then
+    run_case gitlab gitlab_extended_token_project_clone 0 gitlab -t 127.0.0.1 --port 18080 --https --token glpat-redposture-lab-analyst-2026 --project redposture-lab/public-api --clone --clone-dir "${OUT_DIR}/gitlab_clones"
+    run_case gitlab gitlab_extended_ports_flag 0 gitlab -t 127.0.0.1 --ports 18080
+  fi
 }
 
 run_consul_cases() {
@@ -223,6 +257,11 @@ run_consul_cases() {
   run_case consul consul_url_hint_http 0 consul -t "http://127.0.0.1:8500/v1/status/leader" --dump
   run_case consul consul_multi_instance_urls 0 consul -t "http://127.0.0.1:8500/v1/status/leader,http://127.0.0.1:8501/v1/status/leader,http://127.0.0.1:8502/v1/status/leader,http://127.0.0.1:8503/v1/status/leader,http://127.0.0.1:8504/v1/status/leader" --dump
   run_text_case consul consul_debug_smoke 0 consul -t 127.0.0.1 --port 8500 --debug
+  if is_extended_matrix; then
+    run_case consul consul_extended_ports_basic_auth 0 consul -t 127.0.0.1 --ports 8500 -u matrix -p "" --keys
+    run_case consul consul_extended_inventory_filters 0 consul -t 127.0.0.1 --port 8500 --keys --services --agents --checks --nodes --key redposture/kafka/sasl_password --service svc-redposture-api --agent redposture-lab-consul --node redposture-lab-consul --dump 3
+    run_case consul consul_extended_ssrf_probe 0 consul -t 127.0.0.1 --port 8500 --ssrf-target 127.0.0.1 --ssrf-port 19100 --ssrf-path /metrics --checks
+  fi
 }
 
 run_kubeapi_cases() {
@@ -241,12 +280,22 @@ run_kubeapi_cases() {
   run_case kubeapi kubeapi_url_override_https 0 kubeapi -t "https://127.0.0.1:26443/api?from=matrix" --no-https --namespaces
   run_case kubeapi kubeapi_multi_instance_urls 0 kubeapi -t "https://127.0.0.1:26443/version,https://127.0.0.1:26444/version,https://127.0.0.1:26445/version,https://127.0.0.1:26446/version,https://127.0.0.1:26447/version" --namespaces
   run_text_case kubeapi kubeapi_debug_smoke 0 kubeapi -t 127.0.0.1 --port 26443 --debug
+  if is_extended_matrix; then
+    run_case kubeapi kubeapi_extended_ports_flag 0 kubeapi -t 127.0.0.1 --ports 26443 --namespaces
+    run_case kubeapi kubeapi_extended_selectors_basic_auth 0 kubeapi -t 127.0.0.1 --port 26443 --namespace default --namespaces --pods --pod redposture-api --username audit --password ""
+  fi
 }
 
 run_postgres_cases() {
   run_case postgres postgres_default 0 postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables --dump 20
   run_case postgres postgres_multi_ports 0 postgres -t 127.0.0.1 -u postgres -p postgres --ports "5432,25432,25433,25434,25435" --show-databases
   run_text_case postgres postgres_debug_smoke 0 postgres -t 127.0.0.1 -u postgres -p postgres --debug
+  if is_extended_matrix; then
+    run_case postgres postgres_extended_defcreds 0 postgres -t 127.0.0.1 --port 5432 --defcreds --show-databases
+    run_case postgres postgres_extended_query_privs 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --database postgres --table redposture.demo_accounts --show-columns 5 --column username,password --rows --dump 5 --sql-cmd "select username, role from redposture.demo_accounts order by id limit 2" --privesc-check
+    run_case postgres postgres_extended_execute 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --execute "id"
+    run_case postgres postgres_extended_os_read 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --os-read /etc/hostname
+  fi
 }
 
 run_mongodb_cases() {
@@ -256,6 +305,10 @@ run_mongodb_cases() {
   run_case mongodb mongodb_multi_ports 0 mongodb -t 127.0.0.1 --ports "27017,37017,37018,37019,37020" --show-databases
   run_case mongodb mongodb_query_dump 0 mongodb -t 127.0.0.1 --port 27017 --database redposture --collection demo_accounts --query '{"role":"admin"}' --dump 10
   run_text_case mongodb mongodb_debug_smoke 0 mongodb -t 127.0.0.1 --port 27017 --debug
+  if is_extended_matrix; then
+    run_case mongodb mongodb_extended_document_index_cmd 0 mongodb -t 127.0.0.1 --port 27017 --auth-db admin --database redposture --collection demo_accounts --document 1 --projection '{"username":1,"role":1}' --show-indexes 5 --index username_1 --nosql-cmd '{"dbStats":1}'
+    run_case mongodb mongodb_extended_invalid_document_query 2 mongodb -t 127.0.0.1 --port 27017 --database redposture --collection demo_accounts --document 1 --query '{"role":"admin"}'
+  fi
 }
 
 run_oracle_cases() {
@@ -292,6 +345,9 @@ run_oracle_cases() {
   run_case oracle oracle_dblink 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --dblink-check
   run_text_case oracle oracle_debug_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --debug
   run_case oracle oracle_json_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs
+  if is_extended_matrix; then
+    run_case oracle oracle_extended_schema_sensitive_protocol 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --protocol tcp --insecure --service FREEPDB1 -u redposture -p "OracleLab!2026" --schema REDPOSTURE --table ACCOUNTS --show-roles --show-privs --show-schemas --show-tables --dump 2 --sensitive-scan
+  fi
 }
 
 run_docker_cases() {
@@ -301,6 +357,10 @@ run_docker_cases() {
   run_case docker docker_inventory 0 docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
   run_case docker docker_exec 0 docker -t 127.0.0.1 --port 2375 --container redposture-web --exec-cmd "id"
   run_text_case docker docker_debug_smoke 0 docker -t 127.0.0.1 --port 2375 --debug
+  if is_extended_matrix; then
+    run_case docker docker_extended_tls_files_pairing_error 2 docker -t 127.0.0.1 --port 2376 --tls-cert "${ROOT_DIR}/lab/services/proxy-isolated/certs/proxy-cert.pem"
+    run_case docker docker_extended_exec_worker 0 docker -t 127.0.0.1 --port 2375 --container redposture-worker --exec-cmd "hostname && whoami"
+  fi
 }
 
 run_clickhouse_cases() {
@@ -310,12 +370,21 @@ run_clickhouse_cases() {
   run_case clickhouse clickhouse_http_auth 0 clickhouse -t 127.0.0.1 --http --port 18123 -u default -p default --show-databases --show-tables --dump
   run_case clickhouse clickhouse_multi_ports 0 clickhouse -t 127.0.0.1 --ports "9000,29001,29002,29003,29004" --show-databases
   run_text_case clickhouse clickhouse_debug_smoke 0 clickhouse -t 127.0.0.1 --debug
+  if is_extended_matrix; then
+    run_case clickhouse clickhouse_extended_defcreds 0 clickhouse -t 127.0.0.1 --port 9000 --defcreds --show-databases
+    run_case clickhouse clickhouse_extended_query_columns 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --database secure --show-databases 5 --show-tables 5 --table secure.secrets_inventory --show-columns 5 --column owner,value_hint --dump 5 --sql-cmd "select secret_name, owner from secure.secrets_inventory limit 2"
+    run_case clickhouse clickhouse_extended_execute 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --execute "id"
+  fi
 }
 
 run_redis_cases() {
   run_case redis redis_default 0 redis -t 127.0.0.1 -u redis -p redis --show-keys --dump
   run_case redis redis_multi_ports 0 redis -t 127.0.0.1 -u redis -p redis --ports "6379,26380,26381,26382,26383" --show-keys
   run_text_case redis redis_debug_smoke 0 redis -t 127.0.0.1 -u redis -p redis --debug
+  if is_extended_matrix; then
+    run_case redis redis_extended_key_dump_count 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --key offlineStocks:city_4949:552400 --show-keys 5 --dump 3
+    run_case redis redis_extended_defcreds 0 redis -t 127.0.0.1 --port 6379 --defcreds --show-keys 3
+  fi
 }
 
 run_etcd_cases() {
@@ -325,6 +394,10 @@ run_etcd_cases() {
   run_case etcd etcd_url_https_reject 2 etcd -t "https://127.0.0.1:2379/v2/keys?recursive=true" --show-keys
   run_case etcd etcd_multi_instance_urls 0 etcd -t "http://127.0.0.1:2379/v2/keys,http://127.0.0.1:23790/v2/keys,http://127.0.0.1:23791/v2/keys,http://127.0.0.1:23792/v2/keys,http://127.0.0.1:23793/v2/keys" --show-keys
   run_text_case etcd etcd_debug_smoke 0 etcd -t 127.0.0.1 --port 2379 --debug
+  if is_extended_matrix; then
+    run_case etcd etcd_extended_key_dump_count 0 etcd -t 127.0.0.1 --port 2379 --key /offlineStocks:city_4949:552400 --show-keys 5 --dump 3
+    run_case etcd etcd_extended_ports_flag 0 etcd -t 127.0.0.1 --ports 2379 --show-keys 3
+  fi
 }
 
 run_qdrant_cases() {
@@ -333,6 +406,11 @@ run_qdrant_cases() {
   run_case qdrant qdrant_url_https_reject 2 qdrant -t "https://127.0.0.1:6333/collections" --collections
   run_case qdrant qdrant_multi_instance_urls 0 qdrant -t "http://127.0.0.1:6333/collections,http://127.0.0.1:26333/collections,http://127.0.0.1:26334/collections,http://127.0.0.1:26335/collections,http://127.0.0.1:26336/collections" --collections --dump
   run_text_case qdrant qdrant_debug_smoke 0 qdrant -t 127.0.0.1 --collections --debug
+  if is_extended_matrix; then
+    run_case qdrant qdrant_extended_collection_dump_count 0 qdrant -t 127.0.0.1 --port 6333 --api-key matrix-key --collection demo_vectors --collections --dump 3
+    run_case qdrant qdrant_extended_ports_flag 0 qdrant -t 127.0.0.1 --ports 6333 --collections
+    run_case qdrant qdrant_extended_ssrf_probe 0 qdrant -t 127.0.0.1 --port 6333 --collection demo_vectors --listen --ssrf-target http://127.0.0.1:19115/probe --ssrf-port 19115 --ssrf-path /probe?module=http_2xx
+  fi
 }
 
 run_elastic_cases() {
@@ -342,6 +420,11 @@ run_elastic_cases() {
   run_case elastic elastic_plugins_edge 0 elastic -t 127.0.0.1 --port 19201 -u elastic -p changeme --plugins
   run_case elastic elastic_multi_instance_urls 0 elastic -t "http://127.0.0.1:19200/,http://127.0.0.1:19202/,http://127.0.0.1:19203/,http://127.0.0.1:19204/,http://127.0.0.1:19205/" --endpoints
   run_text_case elastic elastic_debug_smoke 0 elastic -t 127.0.0.1 --port 19200 --debug
+  if is_extended_matrix; then
+    run_case elastic elastic_extended_ports_defcreds 0 elastic -t 127.0.0.1 --ports 19201 --defcreds --endpoints
+    run_case elastic elastic_extended_all_actions 0 elastic -t 127.0.0.1 --port 19201 -u elastic -p changeme --endpoints --cluster --user --plugins --discover
+    run_case elastic elastic_extended_apitoken_invalid 0 elastic -t 127.0.0.1 --port 19201 --apitoken invalid-token --endpoints
+  fi
 }
 
 run_grpc_cases() {
@@ -357,6 +440,10 @@ run_grpc_cases() {
   run_case grpc grpc_protoset_invoke 0 grpc -t 127.0.0.1 --port 50051 --protoset "${grpc_protoset}" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
   run_case grpc grpc_openapi_export 0 grpc -t 127.0.0.1 --port 50051 --openapi "${OUT_DIR}/json/grpc_openapi.json"
   run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071
+  if is_extended_matrix; then
+    run_case grpc grpc_extended_metadata_invoke 0 grpc -t 127.0.0.1 --port 50051 --meta "x-redposture-matrix: extended" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+    run_case grpc grpc_extended_basic_empty_password 0 grpc -t 127.0.0.1 --port 50061 -u grpcuser -p "" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+  fi
 }
 
 run_kafka_cases() {
@@ -364,12 +451,22 @@ run_kafka_cases() {
   run_case kafka kafka_auth 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
   run_case kafka kafka_multi_ports 0 kafka -t 127.0.0.1 --ports "9092,39092,39093,39094,39095" --show-topics --dump --max-messages 10
   run_text_case kafka kafka_debug_smoke 0 kafka -t 127.0.0.1 --port 9092 --debug
+  if is_extended_matrix; then
+    run_case kafka kafka_extended_topic_dump_count 0 kafka -t 127.0.0.1 --port 9092 --topic orders --show-topics --dump 3
+    run_case kafka kafka_extended_dump_max_conflict 2 kafka -t 127.0.0.1 --port 9092 --dump 3 --max-messages 4
+    run_case kafka kafka_extended_defcreds 0 kafka -t 127.0.0.1 --port 9092 --defcreds --show-topics
+    run_case kafka kafka_extended_empty_password 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p "" --show-topics
+  fi
 }
 
 run_zookeeper_cases() {
   run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --show-znodes --dump
   run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes --dump
   run_text_case zookeeper zookeeper_debug_smoke 0 zookeeper -t 127.0.0.1 --debug
+  if is_extended_matrix; then
+    run_case zookeeper zookeeper_extended_znode_limits 0 zookeeper -t 127.0.0.1 --port 2181 --znode /redposture/app/api_key --show-znodes 5 --dump 3 --max-znodes 10 --enum-workers 2
+    run_case zookeeper zookeeper_extended_empty_password 0 zookeeper -t 127.0.0.1 --port 2181 -u zkuser -p "" --show-znodes 1
+  fi
 }
 
 run_proxmox_cases() {
@@ -378,6 +475,25 @@ run_proxmox_cases() {
   run_case proxmox proxmox_url_override_https 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket" --no-https --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
   run_case proxmox proxmox_multi_instance_urls 0 proxmox -t "https://127.0.0.1:18006/api2/json/access/ticket,https://127.0.0.1:18061/api2/json/access/ticket,https://127.0.0.1:18062/api2/json/access/ticket,https://127.0.0.1:18063/api2/json/access/ticket,https://127.0.0.1:18064/api2/json/access/ticket" --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
   run_text_case proxmox proxmox_debug_smoke 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --debug
+  if is_extended_matrix; then
+    run_case proxmox proxmox_extended_ports_flag 0 proxmox -t 127.0.0.1 --ports 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
+    run_case proxmox proxmox_extended_defcreds 0 proxmox -t 127.0.0.1 --port 18006 --insecure --defcreds --nodes
+    run_case proxmox proxmox_extended_defcreds_empty_password 0 proxmox -t 127.0.0.1 --port 18006 --insecure --no-https -u root@pam -p "" --nodes --users
+    run_case proxmox proxmox_extended_add_user_mock 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --add-user rp-matrix@pve --users
+  fi
+}
+
+run_proxy_isolated_cases() {
+  run_case exporters proxy_exporters_socks4a 0 exporters scan -t proxy-node-exporter -p 9100 --proxy socks4a://127.0.0.1:11080
+  run_case exporters proxy_exporters_socks5h 0 exporters scan -t proxy-node-exporter -p 9100 --proxy socks5h://127.0.0.1:11081
+  run_case exporters proxy_exporters_http 0 exporters scan -t proxy-node-exporter -p 9100 --proxy http://127.0.0.1:18080
+  SSL_CERT_FILE="${ROOT_DIR}/lab/services/proxy-isolated/certs/proxy-ca.pem" \
+    run_case exporters proxy_exporters_https 0 exporters scan -t proxy-node-exporter -p 9100 --proxy https://127.0.0.1:18443
+  run_case redis proxy_redis_socks4a 0 redis -t proxy-redis --port 6379 --proxy socks4a://127.0.0.1:11080 --show-keys 3
+  run_case redis proxy_redis_socks5h 0 redis -t proxy-redis --port 6379 --proxy socks5h://127.0.0.1:11081 --show-keys 3
+  run_case redis proxy_redis_http 0 redis -t proxy-redis --port 6379 --proxy http://127.0.0.1:18080 --show-keys 3
+  SSL_CERT_FILE="${ROOT_DIR}/lab/services/proxy-isolated/certs/proxy-ca.pem" \
+    run_case redis proxy_redis_https 0 redis -t proxy-redis --port 6379 --proxy https://127.0.0.1:18443 --show-keys 3
 }
 
 run_service_block() {
@@ -410,9 +526,18 @@ run_service_block grpc run_grpc_cases
 run_service_block kafka run_kafka_cases
 run_service_block zookeeper run_zookeeper_cases
 run_service_block proxmox run_proxmox_cases
+if is_extended_matrix; then
+  run_service_block proxy-isolated run_proxy_isolated_cases
+fi
 
-"${PYTHON_BIN}" "${VERIFY_SCRIPT}" --status-file "${STATUS_FILE}" --out-dir "${OUT_DIR}"
+"${PYTHON_BIN}" "${VERIFY_SCRIPT}" --status-file "${STATUS_FILE}" --out-dir "${OUT_DIR}" --profile "${MATRIX_PROFILE}"
+if is_extended_matrix; then
+  "${PYTHON_BIN}" "${ROOT_DIR}/scripts/matrix_flag_coverage.py" \
+    --matrix-script "${ROOT_DIR}/scripts/run_lab_matrix_sequential.sh" \
+    --status-file "${STATUS_FILE}" \
+    --out "${OUT_DIR}/postrun_checks/flag-coverage.json"
+fi
 
 echo
-echo "Sequential matrix complete."
+echo "Sequential matrix complete (${MATRIX_PROFILE})."
 echo "OUT_DIR=${OUT_DIR}"

@@ -152,7 +152,8 @@ def test_gitlab_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatc
         captured.append((ctx.target.scheme if ctx.target else None, ctx.port, ctx.target.path, ctx.target.query))
         return AuditRecord(host=ctx.host, port=ctx.port, module="gitlab", service="gitlab", status="open_no_auth")
 
-    monkeypatch.setattr("redposture_core.modules.gitlab.actions.host_hook", fake_host_hook)
+    monkeypatch.setattr("redposture_core.modules.gitlab.actions.detect", fake_host_hook)
+    monkeypatch.setattr("redposture_core.modules.gitlab.actions.data", lambda ctx, record: fake_host_hook(ctx))
 
     args = parse_args(["gitlab", "-t", "http://127.0.0.1:18080/users/sign_in?ref=matrix", "--https"])
     rc = run_gitlab_stage(args, AttemptLogger())
@@ -171,7 +172,8 @@ def test_kubeapi_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPat
         captured.append((ctx.target.scheme if ctx.target else None, ctx.port, ctx.target.path))
         return AuditRecord(host=ctx.host, port=ctx.port, module="kubeapi", service="kubeapi", status="open_no_auth")
 
-    monkeypatch.setattr("redposture_core.modules.kubeapi.actions.host_hook", fake_host_hook)
+    monkeypatch.setattr("redposture_core.modules.kubeapi.actions.detect", fake_host_hook)
+    monkeypatch.setattr("redposture_core.modules.kubeapi.actions.data", lambda ctx, record: fake_host_hook(ctx))
 
     args = parse_args(["kubeapi", "-t", "https://127.0.0.1:26443/api", "--no-https", "--namespaces"])
     rc = run_kubeapi_stage(args, AttemptLogger())
@@ -189,7 +191,8 @@ def test_proxmox_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPat
             host=ctx.host, port=ctx.port, module="proxmox", service="proxmox", status="valid_credentials"
         )
 
-    monkeypatch.setattr("redposture_core.modules.proxmox.actions.host_hook", fake_host_hook)
+    monkeypatch.setattr("redposture_core.modules.proxmox.actions.detect", fake_host_hook)
+    monkeypatch.setattr("redposture_core.modules.proxmox.actions.data", lambda ctx, record: fake_host_hook(ctx))
 
     args = parse_args(
         [
@@ -215,7 +218,8 @@ def test_consul_passes_preferred_scheme_hint(monkeypatch: pytest.MonkeyPatch) ->
         captured.append((ctx.target.scheme if ctx.target else None, ctx.port, ctx.target.path))
         return AuditRecord(host=ctx.host, port=ctx.port, module="consul", service="consul", status="open_no_auth")
 
-    monkeypatch.setattr("redposture_core.modules.consul.actions.host_hook", fake_host_hook)
+    monkeypatch.setattr("redposture_core.modules.consul.actions.detect", fake_host_hook)
+    monkeypatch.setattr("redposture_core.modules.consul.actions.data", lambda ctx, record: fake_host_hook(ctx))
 
     args = parse_args(["consul", "-t", "http://127.0.0.1:8500/v1/status/leader", "--dump"])
     rc = run_consul_stage(args, AttemptLogger())
@@ -231,7 +235,7 @@ def test_elastic_passes_preferred_scheme_hint(monkeypatch: pytest.MonkeyPatch) -
         captured.append((ctx.target.scheme if ctx.target else None, ctx.port, ctx.target.path))
         return AuditRecord(host=ctx.host, port=ctx.port, module="elastic", service="elastic", status="auth_required")
 
-    monkeypatch.setattr("redposture_core.modules.elastic.actions.host_hook", fake_host_hook)
+    monkeypatch.setattr("redposture_core.modules.elastic.actions.detect", fake_host_hook)
 
     args = parse_args(["elastic", "-t", "https://127.0.0.1:19201/"])
     rc = run_elastic_stage(args, AttemptLogger())

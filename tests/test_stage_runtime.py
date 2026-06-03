@@ -14,7 +14,6 @@ from redposture_core.stage_runtime import (
     ModuleRunSummary,
     StageTelemetryBuilder,
     StageTrace,
-    TwoPassAuditRunner,
     format_pass_marker,
     format_retry_decision,
     format_stage2_gate,
@@ -312,9 +311,9 @@ def test_audit_command_runner_requires_typed_hook_records() -> None:
         module="redis",
         label="REDIS",
         default_port=6379,
-        detect=lambda host, port: AuditRecord(
-            host=host,
-            port=port,
+        detect=lambda ctx: AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
             module="redis",
             service="redis",
             status="open_no_auth",
@@ -322,10 +321,11 @@ def test_audit_command_runner_requires_typed_hook_records() -> None:
             capabilities=CapabilitySet({"read": True}),
             extra={"legacy": "kept"},
         ),
-        render=lambda record: [f"{record['host']}:{record['port']} {record['status']}"],
+        render=lambda record: [f"{record.host}:{record.port} {record.status}"],
     )
 
-    result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_hosts(["127.0.0.1"])
+    plan = AuditCommandPlan(targets_by_port={6379: ("127.0.0.1",)}, output_format="txt")
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
 
     assert result.detected_count == 1
     assert isinstance(result.typed_records[0], AuditRecord)
@@ -340,11 +340,16 @@ def test_audit_command_runner_rejects_dict_hook_records() -> None:
         module="redis",
         label="REDIS",
         default_port=6379,
-        detect=lambda host, port: {"host": host, "port": port, "status": "open_no_auth"},  # type: ignore[return-value]
+        detect=lambda ctx: {  # type: ignore[return-value]
+            "host": ctx.host,
+            "port": ctx.port,
+            "status": "open_no_auth",
+        },
     )
 
+    plan = AuditCommandPlan(targets_by_port={6379: ("127.0.0.1",)})
     try:
-        AuditCommandRunner(args=object(), spec=spec).run_hosts(["127.0.0.1"])
+        AuditCommandRunner(args=object(), spec=spec).run_plan(plan)
     except TypeError as exc:
         assert "hooks must return AuditRecord" in str(exc)
     else:  # pragma: no cover - assertion guard
@@ -397,11 +402,11 @@ def test_audit_command_runner_run_plan_uses_one_typed_path_for_multi_port_target
     emitted: list[str] = []
     seen: list[tuple[str, int]] = []
 
-    def detect(host: str, port: int) -> AuditRecord:
-        seen.append((host, port))
+    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        seen.append((ctx.host, ctx.port))
         return AuditRecord(
-            host=host,
-            port=port,
+            host=ctx.host,
+            port=ctx.port,
             module="redis",
             service="redis",
             status="open_no_auth",
@@ -413,7 +418,7 @@ def test_audit_command_runner_run_plan_uses_one_typed_path_for_multi_port_target
         label="REDIS",
         default_port=6379,
         detect=detect,
-        render=lambda record: [f"{record['host']}:{record['port']}"],
+        render=lambda record: [f"{record.host}:{record.port}"],
     )
     plan = AuditCommandPlan(targets_by_port={6379: ("a",), 6380: ("b",)}, output_format="txt")
 
@@ -425,46 +430,61 @@ def test_audit_command_runner_run_plan_uses_one_typed_path_for_multi_port_target
     assert emitted == ["a:6379", "b:6380"]
 
 
-def test_two_pass_audit_runner_orders_detect_output_and_merges_deep_records() -> None:
+def test_audit_command_runner_detects_once_auths_all_and_runs_data_once() -> None:
     debug_events: list[str] = []
-    emitted: list[str] = []
-    progress = _ProgressRecorder()
-    hosts = [(0, "a"), (1, "b"), (2, "c")]
+    calls: list[tuple[str, str, str | None]] = []
 
-    def detect(host: str) -> dict[str, object]:
-        status = "open_no_auth" if host != "c" else "fail"
-        return {"host": host, "port": 1234, "status": status, "is_service": host != "c"}
+    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        calls.append(("detect", ctx.host, ctx.credential.username))
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="auth_required",
+            extra={"is_demo": True},
+        )
 
-    def deep(host: str) -> dict[str, object]:
-        return {"host": host, "port": 1234, "status": "open_no_auth", "deep": host}
+    def auth(ctx, record: AuditRecord) -> AuditRecord:  # type: ignore[no-untyped-def]
+        calls.append(("auth", ctx.host, ctx.credential.username))
+        status = "valid_credentials" if ctx.credential.username == "good" else "invalid_credentials"
+        return AuditRecord.from_mapping({**record.to_dict(), "status": status}, module="demo", service="demo")
 
-    result = TwoPassAuditRunner(
-        label="TEST",
-        workers=2,
-        debug_emit=debug_events.append,
-        progress=progress,
-        detected_name="service",
-    ).run(
-        hosts,
-        detect_task=detect,
-        deep_task=deep,
-        is_detected=lambda record: bool(record.get("is_service")),
-        deep_gate=lambda record: (
-            str(record.get("host")) == "a",
-            f"status={record.get('status')}",
-        ),
-        emit_detect=lambda record: emitted.append(str(record["host"])),
-        not_detected_reason="not_service",
+    def data(ctx, record: AuditRecord) -> AuditRecord:  # type: ignore[no-untyped-def]
+        calls.append(("data", ctx.host, ctx.credential.username))
+        return AuditRecord.from_mapping({**record.to_dict(), "deep": True}, module="demo", service="demo")
+
+    spec = ModuleAuditSpec(
+        module="demo",
+        label="DEMO",
+        default_port=1234,
+        detect=detect,
+        auth=auth,
+        data=data,
+        render=lambda record: [record.status],
     )
+    plan = AuditCommandPlan(
+        targets_by_port={1234: ("a",)},
+        credential_runs=(
+            AuditCredentialRun(username="bad", password="x", source="file"),
+            AuditCredentialRun(username="good", password="x", source="file"),
+        ),
+    )
+    args = type("Args", (), {"debug": True, "debug_emit": debug_events.append})()
 
-    assert emitted == ["a", "b", "c"]
-    assert result.detected_count == 2
-    assert result.deep_candidates == [(0, "a")]
-    assert result.final_records[0]["deep"] == "a"
-    assert "deep" not in result.final_records[1]
-    assert progress.advanced == 4
-    assert debug_events[0] == "pass=1 detect start total=3"
-    assert any("stage2_gate=skip reason=not_service" in event for event in debug_events)
+    result = AuditCommandRunner(args=args, spec=spec, emit_line=lambda _line: None).run_plan(plan)
+
+    assert calls == [
+        ("detect", "a", None),
+        ("auth", "a", "bad"),
+        ("auth", "a", "good"),
+        ("data", "a", "good"),
+    ]
+    assert result.detected_count == 1
+    assert result.records[0]["status"] == "valid_credentials"
+    assert result.records[0]["deep"] is True
+    assert debug_events[0] == "pass=1 detect start total=1"
+    assert any("stage2_gate=run reason=status=valid_credentials" in event for event in debug_events)
     assert "pass=2 deep complete processed=1" in debug_events
 
 
