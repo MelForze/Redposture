@@ -7,8 +7,10 @@ import pytest
 from scripts.verify_postrun import (
     _EXPECTED_LABELS,
     _EXPECTED_MODULES,
+    _EXTENDED_EXPECTED_LABELS,
     _PROGRESS_EXPECTED_TARGETS,
     _combined_run_output,
+    _expected_labels_for_profile,
     _infer_target_count_from_jsonl,
     _parse_status_file,
     _progress_counts_from_log,
@@ -93,6 +95,20 @@ def test_validate_expected_labels_fails_when_missing_label() -> None:
 def test_validate_expected_labels_passes_with_full_label_set() -> None:
     rows = [{"module": "elastic", "label": label} for label in _EXPECTED_LABELS]
     _validate_expected_labels(rows)
+
+
+def test_validate_expected_labels_profile_extended_requires_extended_labels() -> None:
+    rows = [{"module": "elastic", "label": label} for label in _EXPECTED_LABELS]
+    with pytest.raises(SystemExit, match="missing expected labels"):
+        _validate_expected_labels(rows, profile="extended")
+
+    rows.extend({"module": "elastic", "label": label} for label in _EXTENDED_EXPECTED_LABELS)
+    _validate_expected_labels(rows, profile="extended")
+
+
+def test_expected_labels_for_profile_rejects_unknown_profile() -> None:
+    with pytest.raises(SystemExit, match="unsupported verifier profile"):
+        _expected_labels_for_profile("full")
 
 
 def test_progress_counts_from_log_parses_counts() -> None:

@@ -1538,18 +1538,16 @@ def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
 
     assert rc == 0
     assert [(call["hosts"], call["username"], call["password"]) for call in captured] == [
-        (["10.0.0.1"], None, None),
         (["10.0.0.1"], "alice", "one"),
         (["10.0.0.1"], "bob", "two"),
-        (["10.0.0.2"], None, None),
         (["10.0.0.2"], "alice", "one"),
         (["10.0.0.2"], "bob", "two"),
     ]
     assert all(call["show_progress"] is False for call in captured)
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
-    assert progress.total == 6
-    assert progress.advances == [1, 1, 1, 1, 1, 1]
+    assert progress.total == 4
+    assert progress.advances == [1, 1, 1, 1]
     assert progress.closed is True
 
 

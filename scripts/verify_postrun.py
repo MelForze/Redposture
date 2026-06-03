@@ -151,6 +151,83 @@ _EXPECTED_LABELS = (
     "proxmox_multi_instance_urls",
 )
 
+_EXTENDED_EXPECTED_LABELS = (
+    "exporters_debug_smoke",
+    "exporters_scan_extended_controls",
+    "exporters_collect_extended_controls",
+    "exporters_collect_resume_checkpoint",
+    "exporters_collect_debug_smoke",
+    "exporters_trigger_extended_controls",
+    "exporters_trigger_debug_smoke",
+    "registry_debug_smoke",
+    "registry_extended_tags_metadata",
+    "registry_extended_ports_flag",
+    "grafana_debug_smoke",
+    "grafana_extended_auth_ssrf_controls",
+    "grafana_extended_ports_flag",
+    "gitlab_debug_smoke",
+    "gitlab_extended_token_project_clone",
+    "gitlab_extended_ports_flag",
+    "consul_debug_smoke",
+    "consul_extended_ports_basic_auth",
+    "consul_extended_inventory_filters",
+    "consul_extended_ssrf_probe",
+    "kubeapi_debug_smoke",
+    "kubeapi_extended_ports_flag",
+    "kubeapi_extended_selectors_basic_auth",
+    "postgres_debug_smoke",
+    "postgres_extended_defcreds",
+    "postgres_extended_query_privs",
+    "postgres_extended_execute",
+    "postgres_extended_os_read",
+    "mongodb_extended_document_index_cmd",
+    "mongodb_extended_invalid_document_query",
+    "oracle_extended_schema_sensitive_protocol",
+    "docker_extended_tls_files_pairing_error",
+    "docker_extended_exec_worker",
+    "clickhouse_debug_smoke",
+    "clickhouse_extended_defcreds",
+    "clickhouse_extended_query_columns",
+    "clickhouse_extended_execute",
+    "redis_debug_smoke",
+    "redis_extended_key_dump_count",
+    "redis_extended_defcreds",
+    "etcd_debug_smoke",
+    "etcd_extended_key_dump_count",
+    "etcd_extended_ports_flag",
+    "qdrant_debug_smoke",
+    "qdrant_extended_collection_dump_count",
+    "qdrant_extended_ports_flag",
+    "qdrant_extended_ssrf_probe",
+    "elastic_debug_smoke",
+    "elastic_extended_ports_defcreds",
+    "elastic_extended_all_actions",
+    "elastic_extended_apitoken_invalid",
+    "grpc_extended_metadata_invoke",
+    "grpc_extended_basic_empty_password",
+    "kafka_debug_smoke",
+    "kafka_extended_topic_dump_count",
+    "kafka_extended_dump_max_conflict",
+    "kafka_extended_defcreds",
+    "kafka_extended_empty_password",
+    "zookeeper_debug_smoke",
+    "zookeeper_extended_znode_limits",
+    "zookeeper_extended_empty_password",
+    "proxmox_debug_smoke",
+    "proxmox_extended_ports_flag",
+    "proxmox_extended_defcreds",
+    "proxmox_extended_defcreds_empty_password",
+    "proxmox_extended_add_user_mock",
+    "proxy_exporters_socks4a",
+    "proxy_exporters_socks5h",
+    "proxy_exporters_http",
+    "proxy_exporters_https",
+    "proxy_redis_socks4a",
+    "proxy_redis_socks5h",
+    "proxy_redis_http",
+    "proxy_redis_https",
+)
+
 _PROGRESS_EXPECTED_TARGETS = {
     "exporters_scan": 48,
     "registry_multi_instance_urls": 5,
@@ -208,14 +285,34 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "zookeeper_default": ("/redposture/app/api_key", "rp-zk-key-2026"),
     "zookeeper_multi_ports": ("/redposture/app/api_key", "rp-zk-key-2026"),
     "proxmox_admin": ("credential_hit", "pve-edge-01", "pve-core-02", "GitLabCloudInit!2026"),
+    "registry_extended_tags_metadata": ("redposture/demo-api", "latest"),
+    "consul_extended_inventory_filters": ("redposture/kafka/sasl_password", "svc-redposture-api"),
+    "postgres_extended_query_privs": ("demo_accounts", "username"),
+    "mongodb_extended_document_index_cmd": ("demo_accounts", "username_1"),
+    "oracle_extended_schema_sensitive_protocol": ("ACCOUNTS", "REDPOSTURE"),
+    "docker_extended_exec_worker": ("root",),
+    "clickhouse_extended_query_columns": ("secrets_inventory", "owner"),
+    "redis_extended_key_dump_count": ("offlineStocks:city_4949:552400",),
+    "etcd_extended_key_dump_count": ("offlineStocks:city_4949:552400",),
+    "qdrant_extended_collection_dump_count": ("demo_vectors",),
+    "grpc_extended_metadata_invoke": ("grpc.health.v1.Health",),
+    "kafka_extended_topic_dump_count": ("orders", "ord-1001"),
+    "zookeeper_extended_znode_limits": ("/redposture/app/api_key",),
+    "proxmox_extended_add_user_mock": ("rp-matrix@pve",),
+    "proxy_exporters_socks4a": ("node_exporter",),
+    "proxy_exporters_socks5h": ("node_exporter",),
+    "proxy_exporters_http": ("node_exporter",),
+    "proxy_exporters_https": ("node_exporter",),
 }
 
 _RICH_OUTPUT_FORBIDDEN_SUBSTRINGS = {
     "kafka_open": ("<no messages>",),
     "kafka_auth": ("<no messages>",),
     "kafka_multi_ports": ("<no messages>",),
+    "kafka_extended_topic_dump_count": ("<no messages>",),
     "qdrant_default": ("<no collections>", "no collections available for dump"),
     "qdrant_multi_instance_urls": ("<no collections>", "no collections available for dump"),
+    "qdrant_extended_collection_dump_count": ("<no collections>", "no collections available for dump"),
 }
 
 _ZOOKEEPER_MULTI_DUMP_PORTS = {2181, 22181, 22182, 22183, 22184}
@@ -273,9 +370,17 @@ def _validate_expected_exits(rows: list[dict[str, str]]) -> None:
             raise SystemExit(f"label '{label}' exit mismatch: expected={expected_exit} actual={exit_code}")
 
 
-def _validate_expected_labels(rows: list[dict[str, str]]) -> None:
+def _expected_labels_for_profile(profile: str) -> tuple[str, ...]:
+    if profile == "balanced":
+        return _EXPECTED_LABELS
+    if profile == "extended":
+        return (*_EXPECTED_LABELS, *_EXTENDED_EXPECTED_LABELS)
+    raise SystemExit(f"unsupported verifier profile: {profile}")
+
+
+def _validate_expected_labels(rows: list[dict[str, str]], *, profile: str = "balanced") -> None:
     seen_labels = {row["label"] for row in rows}
-    missing = sorted(label for label in _EXPECTED_LABELS if label not in seen_labels)
+    missing = sorted(label for label in _expected_labels_for_profile(profile) if label not in seen_labels)
     if missing:
         raise SystemExit(f"matrix status is missing expected labels: {', '.join(missing)}")
 
@@ -546,6 +651,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Verify lab matrix outputs and artifacts.")
     parser.add_argument("--status-file", required=True)
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--profile", choices=("balanced", "extended"), default="balanced")
     args = parser.parse_args()
 
     status_path = Path(args.status_file)
@@ -562,7 +668,7 @@ def main() -> int:
         raise SystemExit("matrix status file is empty")
 
     _validate_expected_exits(rows)
-    _validate_expected_labels(rows)
+    _validate_expected_labels(rows, profile=args.profile)
 
     successful_modules = _validate_json_artifacts(rows)
     if not successful_modules:
@@ -585,9 +691,10 @@ def main() -> int:
 
     summary = {
         "total_rows": len(rows),
+        "profile": args.profile,
         "successful_modules": dict(successful_modules),
         "expected_modules": list(_EXPECTED_MODULES),
-        "expected_labels": list(_EXPECTED_LABELS),
+        "expected_labels": list(_expected_labels_for_profile(args.profile)),
     }
     (checks_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))
