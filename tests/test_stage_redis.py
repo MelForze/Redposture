@@ -360,6 +360,77 @@ def test_audit_redis_host_handles_unexpected_ping_and_retries_failures(monkeypat
     )
     assert failed["status"] == "fail"
     assert "connection refused" in str(failed["error"])
+    assert failed["tcp_open"] is False
+
+
+def test_audit_redis_host_tcp_open_protocol_close_is_not_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_redis.socket.create_connection",
+        lambda *_args, **_kwargs: _ReadSocket(b""),
+    )
+    monkeypatch.setattr(
+        redis_stage,
+        "_open_redis_tls_socket",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("tls handshake failed")),
+    )
+
+    record = redis_stage._audit_redis_host(
+        "127.0.0.1",
+        6379,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+
+    assert record["status"] == "tcp_open_protocol_failed"
+    assert record["tcp_open"] is True
+    assert record["transport_mode"] == "plaintext"
+    assert "protocol closed before RESP reply" in str(record["protocol_error"])
+    assert "tls_fallback_err=tls handshake failed" in str(record["error"])
+
+    line = redis_stage._format_record(record, "txt")
+    assert "[!] protocol closed before RESP reply" in line
+    assert "connection failed" not in line
+
+
+def test_audit_redis_host_plaintext_close_can_fallback_to_tls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_redis.socket.create_connection",
+        lambda *_args, **_kwargs: _ReadSocket(b""),
+    )
+    monkeypatch.setattr(
+        redis_stage,
+        "_open_redis_tls_socket",
+        lambda *_args, **_kwargs: _ReadSocket(b"+PONG\r\n:0\r\n"),
+    )
+
+    record = redis_stage._audit_redis_host(
+        "127.0.0.1",
+        6379,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert record["tcp_open"] is True
+    assert record["transport_mode"] == "tls"
+    assert record["protocol_error"] is None
+    assert record["key_count"] == 0
 
 
 def test_resp_readers_and_send_cmd_cover_types() -> None:
@@ -731,6 +802,68 @@ def test_run_redis_stage_non_debug_shows_unreachable_summary(
     assert rc == 0
     captured = capsys.readouterr()
     assert "all redis targets are unreachable" in captured.out
+
+
+def test_run_redis_stage_tcp_open_protocol_failure_does_not_show_unreachable_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fake_audit(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": "127.0.0.1",
+            "port": 6379,
+            "is_redis": False,
+            "status": "tcp_open_protocol_failed",
+            "auth_required": None,
+            "default_credentials": None,
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "provided_credentials_ok": None,
+            "defcreds_enabled": False,
+            "default_credentials_attempted": False,
+            "show_keys": False,
+            "dump_keys": False,
+            "query_key": None,
+            "key_count": None,
+            "keys": None,
+            "key_values": None,
+            "key_value_entries": None,
+            "query_key_value": None,
+            "query_key_entry": None,
+            "tcp_open": True,
+            "transport_mode": "plaintext",
+            "protocol_error": "protocol closed before RESP reply (unexpected EOF)",
+            "error": "protocol closed before RESP reply (unexpected EOF)",
+        }
+
+    monkeypatch.setattr(redis_stage, "_audit_redis_host", fake_audit)
+
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump=False,
+        key=None,
+        output=None,
+        output_format="txt",
+        port=6379,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+    )
+
+    rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "protocol closed before RESP reply" in captured.out
+    assert "all redis targets are unreachable" not in captured.out
 
 
 def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:

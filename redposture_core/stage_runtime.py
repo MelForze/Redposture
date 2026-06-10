@@ -635,7 +635,7 @@ def _record_looks_detected(record: dict[str, Any]) -> bool:
     if any(bool(value) for key, value in record.items() if key.startswith("is_")):
         return True
     status = str(record.get("status") or "")
-    return status not in {"fail", "not_detected", "not_found", "not_service"}
+    return status not in {"fail", "tcp_open_protocol_failed", "not_detected", "not_found", "not_service"}
 
 
 def _can_call_detail_renderer(func: Callable[..., Any]) -> bool:

@@ -123,6 +123,58 @@ def test_proxy_socket_patch_routes_socket_create_connection(monkeypatch: pytest.
     assert socket.create_connection is original
 
 
+@pytest.mark.parametrize(
+    ("client_name", "address"),
+    [
+        ("redis", ("redis.internal", 6379)),
+        ("kafka", ("kafka.internal", 9092)),
+        ("zookeeper", ("zookeeper.internal", 2181)),
+        ("grpc", ("grpc.internal", 50051)),
+        ("postgres", ("postgres.internal", 5432)),
+        ("oracle", ("oracle.internal", 1521)),
+        ("clickhouse_native", ("clickhouse.internal", 9000)),
+        ("kubeapi_websocket", ("kubeapi.internal", 6443)),
+    ],
+)
+def test_proxy_socket_patch_routes_representative_raw_tcp_clients(
+    monkeypatch: pytest.MonkeyPatch,
+    client_name: str,
+    address: tuple[str, int],
+) -> None:
+    calls: list[tuple[str, tuple[object, ...], object, object]] = []
+
+    class DummySock:
+        def setsockopt(self, *_args: object) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+    def fake_open_connection_via_proxy(
+        proxy: np.ProxyConfig,
+        proxied_address: tuple[object, ...],
+        timeout: object = np._SOCKET_DEFAULT_TIMEOUT,
+        source_address: tuple[str, int] | None = None,
+    ) -> DummySock:
+        calls.append((proxy.raw_url, proxied_address, timeout, source_address))
+        return DummySock()
+
+    monkeypatch.setattr(np, "open_connection_via_proxy", fake_open_connection_via_proxy)
+
+    proxy = np.ProxyConfig(
+        scheme="socks5h",
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks5h://127.0.0.1:1080",
+    )
+    with np.ProxySocketPatch(proxy):
+        socket.create_connection(address, timeout=2.0)
+
+    assert calls == [("socks5h://127.0.0.1:1080", address, 2.0, None)], client_name
+
+
 def test_proxy_socket_patch_with_none_proxy_keeps_original() -> None:
     original = socket.create_connection
     with np.ProxySocketPatch(None):

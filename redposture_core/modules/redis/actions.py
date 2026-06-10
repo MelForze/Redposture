@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import socket
+import ssl
 import sys
 import time
 from collections.abc import Callable
@@ -50,6 +51,30 @@ def _is_connection_refused_error(value: Any) -> bool:
     if not text:
         return False
     return "connection refused" in text or "[errno 111]" in text or "[errno 61]" in text or "10061" in text
+
+
+def _is_protocol_closed_error(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return any(
+        marker in text
+        for marker in (
+            "unexpected eof",
+            "connection reset by peer",
+            "connection aborted",
+            "connection closed",
+            "closed before",
+            "closed unexpectedly",
+        )
+    )
+
+
+def _protocol_closed_error_text(value: Any) -> str:
+    detail = str(value or "").strip()
+    if not detail:
+        return "protocol closed before RESP reply"
+    return f"protocol closed before RESP reply ({detail})"
 
 
 def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
@@ -125,6 +150,31 @@ def _read_resp(sock: socket.socket) -> tuple[str, Any]:
 def _send_cmd(sock: socket.socket, *parts: str) -> tuple[str, Any]:
     sock.sendall(_encode_resp_array(list(parts)))
     return _read_resp(sock)
+
+
+def _open_redis_plain_socket(host: str, port: int, timeout: float) -> socket.socket:
+    sock = socket.create_connection((host, port), timeout=timeout)
+    sock.settimeout(timeout)
+    return sock
+
+
+def _create_redis_tls_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+def _open_redis_tls_socket(host: str, port: int, timeout: float) -> ssl.SSLSocket:
+    raw_sock = socket.create_connection((host, port), timeout=timeout)
+    raw_sock.settimeout(timeout)
+    try:
+        tls_sock = _create_redis_tls_context().wrap_socket(raw_sock, server_hostname=host)
+        tls_sock.settimeout(timeout)
+        return tls_sock
+    except Exception:
+        raw_sock.close()
+        raise
 
 
 def _is_noauth_error(message: str) -> bool:
@@ -340,151 +390,230 @@ def _audit_redis_host(
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
+    last_protocol_error: str | None = None
+    last_tls_fallback_error: str | None = None
     provided_credentials = password is not None
+
+    def _base_failure_record(
+        *,
+        status: str,
+        error: str,
+        tcp_open: bool,
+        transport_mode: str | None,
+        protocol_error: str | None = None,
+        elapsed_ms: int | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "timestamp": utc_now_iso(),
+            "host": host,
+            "port": port,
+            "is_redis": False,
+            "status": status,
+            "auth_required": None,
+            "default_credentials": None,
+            "provided_credentials": provided_credentials,
+            "provided_username": username,
+            "provided_password": password if provided_credentials else None,
+            "provided_credentials_ok": None,
+            "defcreds_enabled": defcreds,
+            "default_credentials_attempted": False,
+            "show_keys": show_keys,
+            "show_keys_limit": show_keys_limit,
+            "dump_keys": dump_keys,
+            "query_key": query_key,
+            "key_count": None,
+            "keys": None,
+            "key_values": None,
+            "key_value_entries": None,
+            "query_key_value": None,
+            "query_key_entry": None,
+            "elapsed_ms": elapsed_ms,
+            "tcp_open": bool(tcp_open),
+            "transport_mode": transport_mode,
+            "protocol_error": protocol_error,
+            "tls_fallback_error": last_tls_fallback_error,
+            "error": error,
+        }
+
+    def _audit_connected_socket(sock: socket.socket, *, started: float, transport_mode: str) -> dict[str, Any]:
+        ping_type, ping_value = _send_cmd(sock, "PING")
+        auth_required = False
+        if ping_type == "simple" and str(ping_value).upper() == "PONG":
+            auth_required = False
+        elif ping_type == "error" and _is_noauth_error(str(ping_value)):
+            auth_required = True
+        else:
+            return {
+                "timestamp": utc_now_iso(),
+                "host": host,
+                "port": port,
+                "is_redis": True,
+                "status": "fail",
+                "auth_required": None,
+                "default_credentials": None,
+                "provided_credentials": provided_credentials,
+                "provided_username": username,
+                "provided_password": password if provided_credentials else None,
+                "provided_credentials_ok": None,
+                "defcreds_enabled": defcreds,
+                "show_keys": show_keys,
+                "show_keys_limit": show_keys_limit,
+                "dump_keys": dump_keys,
+                "query_key": query_key,
+                "key_count": None,
+                "keys": None,
+                "key_values": None,
+                "key_value_entries": None,
+                "query_key_value": None,
+                "query_key_entry": None,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "tcp_open": True,
+                "transport_mode": transport_mode,
+                "protocol_error": None,
+                "error": f"unexpected PING response: {ping_type} {ping_value}",
+            }
+
+        default_credentials = False
+        default_credentials_attempted = False
+        provided_credentials_ok: bool | None = None
+        auth_error: str | None = None
+
+        if auth_required:
+            if defcreds:
+                default_credentials_attempted = True
+                default_credentials, default_error = _check_default_credentials(sock)
+                if default_credentials:
+                    auth_error = None
+                else:
+                    auth_error = default_error
+
+            if not default_credentials:
+                provided_credentials_ok, provided_error = _check_provided_credentials(sock, username, password)
+                if provided_credentials_ok:
+                    auth_error = None
+                elif provided_error:
+                    auth_error = provided_error or auth_error
+
+        key_count: int | None = None
+        keys: list[str] | None = None
+        key_values: list[str] | None = None
+        key_value_entries: list[dict[str, str | None]] | None = None
+        query_key_value: str | None = None
+        query_key_entry: dict[str, str | None] | None = None
+        can_read_keys = (not auth_required) or default_credentials or bool(provided_credentials_ok)
+        if can_read_keys:
+            key_count, count_error = _count_redis_keys(sock)
+            if count_error:
+                auth_error = count_error if auth_error is None else f"{auth_error}; {count_error}"
+
+        if (show_keys or dump_keys) and can_read_keys:
+            scan_limit = show_keys_limit if show_keys and not dump_keys else None
+            keys, key_error = _scan_redis_keys(sock, limit=scan_limit)
+            if key_error:
+                auth_error = key_error if auth_error is None else f"{auth_error}; {key_error}"
+            if key_count is None and isinstance(keys, list):
+                key_count = len(keys)
+            if dump_keys and isinstance(keys, list):
+                dumped_entries: list[dict[str, str | None]] = []
+                for key_name in sorted(str(item) for item in keys):
+                    value_text, value_error = _dump_redis_key_value(sock, key_name)
+                    if value_error:
+                        dumped_entries.append(_redis_kv_entry(key_name, error=_format_redis_text(value_error)))
+                    else:
+                        dumped_entries.append(_redis_kv_entry(key_name, value_text))
+                    if dump_keys_limit is not None and len(dumped_entries) >= dump_keys_limit:
+                        break
+                key_value_entries = dumped_entries
+                key_values = [_redis_kv_entry_text(item) for item in dumped_entries]
+
+        if query_key and can_read_keys:
+            key_name = query_key.strip()
+            if key_name:
+                value_text, value_error = _dump_redis_key_value(sock, key_name)
+                if value_error:
+                    auth_error = value_error if auth_error is None else f"{auth_error}; {value_error}"
+                else:
+                    query_key_entry = _redis_kv_entry(key_name, value_text)
+                    query_key_value = _redis_kv_entry_text(query_key_entry)
+
+        if not auth_required:
+            status = "open_no_auth"
+        elif default_credentials:
+            status = "weak_default_creds"
+        elif provided_credentials_ok:
+            status = "valid_credentials"
+        else:
+            status = "auth_required"
+
+        return {
+            "timestamp": utc_now_iso(),
+            "host": host,
+            "port": port,
+            "is_redis": True,
+            "status": status,
+            "auth_required": auth_required,
+            "default_credentials": default_credentials,
+            "provided_credentials": provided_credentials,
+            "provided_username": username,
+            "provided_password": password if provided_credentials else None,
+            "provided_credentials_ok": provided_credentials_ok,
+            "defcreds_enabled": defcreds,
+            "default_credentials_attempted": default_credentials_attempted,
+            "show_keys": show_keys,
+            "show_keys_limit": show_keys_limit,
+            "dump_keys": dump_keys,
+            "query_key": query_key,
+            "key_count": key_count,
+            "keys": keys,
+            "key_values": key_values,
+            "key_value_entries": key_value_entries,
+            "query_key_value": query_key_value,
+            "query_key_entry": query_key_entry,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "tcp_open": True,
+            "transport_mode": transport_mode,
+            "protocol_error": None,
+            "error": auth_error,
+        }
 
     for attempt in range(attempts):
         started = time.monotonic()
         try:
-            with socket.create_connection((host, port), timeout=timeout) as sock:
-                sock.settimeout(timeout)
-
-                ping_type, ping_value = _send_cmd(sock, "PING")
-                auth_required = False
-                if ping_type == "simple" and str(ping_value).upper() == "PONG":
-                    auth_required = False
-                elif ping_type == "error" and _is_noauth_error(str(ping_value)):
-                    auth_required = True
-                else:
-                    return {
-                        "timestamp": utc_now_iso(),
-                        "host": host,
-                        "port": port,
-                        "is_redis": True,
-                        "status": "fail",
-                        "auth_required": None,
-                        "default_credentials": None,
-                        "provided_credentials": provided_credentials,
-                        "provided_username": username,
-                        "provided_credentials_ok": None,
-                        "defcreds_enabled": defcreds,
-                        "show_keys": show_keys,
-                        "show_keys_limit": show_keys_limit,
-                        "dump_keys": dump_keys,
-                        "query_key": query_key,
-                        "key_count": None,
-                        "keys": None,
-                        "key_values": None,
-                        "key_value_entries": None,
-                        "query_key_value": None,
-                        "query_key_entry": None,
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        "error": f"unexpected PING response: {ping_type} {ping_value}",
-                    }
-
-                default_credentials = False
-                default_credentials_attempted = False
-                provided_credentials_ok: bool | None = None
-                auth_error: str | None = None
-
-                if auth_required:
-                    if defcreds:
-                        default_credentials_attempted = True
-                        default_credentials, default_error = _check_default_credentials(sock)
-                        if default_credentials:
-                            auth_error = None
-                        else:
-                            auth_error = default_error
-
-                    if not default_credentials:
-                        provided_credentials_ok, provided_error = _check_provided_credentials(sock, username, password)
-                        if provided_credentials_ok:
-                            auth_error = None
-                        elif provided_error:
-                            auth_error = provided_error or auth_error
-
-                key_count: int | None = None
-                keys: list[str] | None = None
-                key_values: list[str] | None = None
-                key_value_entries: list[dict[str, str | None]] | None = None
-                query_key_value: str | None = None
-                query_key_entry: dict[str, str | None] | None = None
-                can_read_keys = (not auth_required) or default_credentials or bool(provided_credentials_ok)
-                if can_read_keys:
-                    key_count, count_error = _count_redis_keys(sock)
-                    if count_error:
-                        auth_error = count_error if auth_error is None else f"{auth_error}; {count_error}"
-
-                if (show_keys or dump_keys) and can_read_keys:
-                    scan_limit = show_keys_limit if show_keys and not dump_keys else None
-                    keys, key_error = _scan_redis_keys(sock, limit=scan_limit)
-                    if key_error:
-                        auth_error = key_error if auth_error is None else f"{auth_error}; {key_error}"
-                    if key_count is None and isinstance(keys, list):
-                        key_count = len(keys)
-                    if dump_keys and isinstance(keys, list):
-                        dumped_entries: list[dict[str, str | None]] = []
-                        for key_name in sorted(str(item) for item in keys):
-                            value_text, value_error = _dump_redis_key_value(sock, key_name)
-                            if value_error:
-                                dumped_entries.append(_redis_kv_entry(key_name, error=_format_redis_text(value_error)))
-                            else:
-                                dumped_entries.append(_redis_kv_entry(key_name, value_text))
-                            if dump_keys_limit is not None and len(dumped_entries) >= dump_keys_limit:
-                                break
-                        key_value_entries = dumped_entries
-                        key_values = [_redis_kv_entry_text(item) for item in dumped_entries]
-
-                if query_key and can_read_keys:
-                    key_name = query_key.strip()
-                    if key_name:
-                        value_text, value_error = _dump_redis_key_value(sock, key_name)
-                        if value_error:
-                            auth_error = value_error if auth_error is None else f"{auth_error}; {value_error}"
-                        else:
-                            query_key_entry = _redis_kv_entry(key_name, value_text)
-                            query_key_value = _redis_kv_entry_text(query_key_entry)
-
-                if not auth_required:
-                    status = "open_no_auth"
-                elif default_credentials:
-                    status = "weak_default_creds"
-                elif provided_credentials_ok:
-                    status = "valid_credentials"
-                else:
-                    status = "auth_required"
-
-                return {
-                    "timestamp": utc_now_iso(),
-                    "host": host,
-                    "port": port,
-                    "is_redis": True,
-                    "status": status,
-                    "auth_required": auth_required,
-                    "default_credentials": default_credentials,
-                    "provided_credentials": provided_credentials,
-                    "provided_username": username,
-                    "provided_password": password if provided_credentials else None,
-                    "provided_credentials_ok": provided_credentials_ok,
-                    "defcreds_enabled": defcreds,
-                    "default_credentials_attempted": default_credentials_attempted,
-                    "show_keys": show_keys,
-                    "show_keys_limit": show_keys_limit,
-                    "dump_keys": dump_keys,
-                    "query_key": query_key,
-                    "key_count": key_count,
-                    "keys": keys,
-                    "key_values": key_values,
-                    "key_value_entries": key_value_entries,
-                    "query_key_value": query_key_value,
-                    "query_key_entry": query_key_entry,
-                    "elapsed_ms": int((time.monotonic() - started) * 1000),
-                    "error": auth_error,
-                }
+            sock = _open_redis_plain_socket(host, port, timeout)
         except (OSError, ValueError, ConnectionError) as exc:
             last_error = str(exc)
             if attempt >= attempts - 1:
                 break
             time.sleep(_retry_delay(attempt))
+            continue
+
+        try:
+            with sock:
+                return _audit_connected_socket(sock, started=started, transport_mode="plaintext")
+        except (OSError, ValueError, ConnectionError) as exc:
+            last_error = str(exc)
+            if _is_protocol_closed_error(exc):
+                last_protocol_error = _protocol_closed_error_text(exc)
+                try:
+                    with _open_redis_tls_socket(host, port, timeout) as tls_sock:
+                        return _audit_connected_socket(tls_sock, started=started, transport_mode="tls")
+                except (OSError, ValueError, ConnectionError, ssl.SSLError) as tls_exc:
+                    last_tls_fallback_error = str(tls_exc)
+            if attempt >= attempts - 1:
+                break
+            time.sleep(_retry_delay(attempt))
+
+    if last_protocol_error:
+        error = last_protocol_error
+        if last_tls_fallback_error:
+            error = f"{error}; tls_fallback_err={last_tls_fallback_error}"
+        return _base_failure_record(
+            status="tcp_open_protocol_failed",
+            error=error,
+            tcp_open=True,
+            transport_mode="plaintext",
+            protocol_error=last_protocol_error,
+        )
 
     return {
         "timestamp": utc_now_iso(),
@@ -511,6 +640,10 @@ def _audit_redis_host(
         "query_key_value": None,
         "query_key_entry": None,
         "elapsed_ms": None,
+        "tcp_open": False,
+        "transport_mode": None,
+        "protocol_error": None,
+        "tls_fallback_error": None,
         "error": last_error or "connection failed",
     }
 
@@ -666,6 +799,13 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             base = f"{prefix} [-] authentication required"
         return base
 
+    if status == "tcp_open_protocol_failed":
+        protocol_error = _clip(str(record.get("protocol_error") or record.get("error") or "-"), 96)
+        fail_line = f"{prefix} [!] protocol closed before RESP reply"
+        if protocol_error != "-":
+            return f"{fail_line} err={protocol_error}"
+        return fail_line
+
     fail_line = f"{prefix} [!] connection failed"
     if err != "-":
         return f"{fail_line} err={err}"
@@ -688,6 +828,9 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "service": "redis",
                 "detected": bool(record.get("is_redis")),
                 "auth_required": auth_required_value,
+                "tcp_open": bool(record.get("tcp_open")),
+                "transport_mode": record.get("transport_mode"),
+                "protocol_error": record.get("protocol_error"),
             },
             ensure_ascii=False,
         )
@@ -773,7 +916,7 @@ def _call_audit_redis_host_with_stage_debug(
             f"result={stage_result} error={entry['error'] or '-'}"
         )
 
-    detect_result = "ok" if is_redis else ("error" if status == "fail" else "skip")
+    detect_result = "ok" if is_redis else ("error" if status in {"fail", "tcp_open_protocol_failed"} else "skip")
     _push_stage(
         "detect_protocol", detect_result, str(result.get("error") or "") if detect_result == "error" else None, 0
     )

@@ -67,7 +67,8 @@ def run_redis_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process redis output: {exc}")
         return 2
-    if result.detected_count == 0 and hasattr(console, "warn"):
+    tcp_open_seen = any(bool(record.get("tcp_open")) for record in result.records)
+    if result.detected_count == 0 and not tcp_open_seen and hasattr(console, "warn"):
         console.warn("all redis targets are unreachable")
     return 0
 
