@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
-import sys
 import threading
 import time
 from collections import Counter
@@ -34,11 +32,6 @@ from ...clients.zookeeper import (
 )
 from ...console import Console
 from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line
-from ...stage_runtime import (
-    AuditHookContext,
-    AuditRecord,
-    _invoke_module_host_stage,
-)
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
@@ -111,46 +104,15 @@ def _retry_delay(attempt_index: int) -> float:
 
 
 def _friendly_error_text(value: str) -> str:
-    text = (value or "").strip()
-    if not text:
-        return "connection failed"
+    from ...utils import friendly_error_text
 
-    lower = text.lower()
-    if "connection refused" in lower:
-        return "connection refused (service is not listening on target port)"
-    if "timed out" in lower or "timeout" in lower:
-        return "connection timeout"
-    if "name or service not known" in lower or "nodename nor servname provided" in lower:
-        return "dns lookup failed"
-    if "temporary failure in name resolution" in lower:
-        return "dns lookup temporary failure"
-    if "no route to host" in lower or "network is unreachable" in lower:
-        return "network unreachable"
-    if "operation not permitted" in lower:
-        return "operation not permitted by local environment"
-
-    match = re.search(r"\[errno\s+(-?\d+)\]\s*(.*)", text, flags=re.IGNORECASE)
-    if match:
-        errno_num = match.group(1)
-        detail = (match.group(2) or "").strip()
-        if errno_num in {"61", "111"}:
-            return "connection refused (service is not listening on target port)"
-        if errno_num in {"60", "110"}:
-            return "connection timeout"
-        if errno_num in {"8", "-2"}:
-            return "dns lookup failed"
-        if errno_num in {"65", "101", "113"}:
-            return "network unreachable"
-        if detail:
-            return detail
-
-    return text
+    return friendly_error_text(value)
 
 
 def _friendly_error_from_exception(exc: BaseException) -> str:
-    if isinstance(exc, TimeoutError):
-        return "connection timeout"
-    return _friendly_error_text(str(exc))
+    from ...utils import friendly_error_from_exception
+
+    return friendly_error_from_exception(exc)
 
 
 def _is_connection_refused_error(value: Any) -> bool:
@@ -1781,42 +1743,4 @@ def _update_debug_stats(debug_stats: dict[str, Any], record: dict[str, Any]) -> 
 
 
 # Typed runner boundary -----------------------------------------------------
-
-
-def record_from_mapping(payload: dict[str, Any]) -> AuditRecord:
-    """Convert module protocol payloads to the typed runtime model."""
-
-    return AuditRecord.from_mapping(payload, module="zookeeper", service="zookeeper")
-
-
-def _credential_is_anonymous(ctx: AuditHookContext) -> bool:
-    return ctx.credential.username is None and ctx.credential.password is None and ctx.credential.token is None
-
-
-def _run_host_stage(ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
-    return _invoke_module_host_stage(
-        sys.modules[__name__],
-        module="zookeeper",
-        ctx=ctx,
-        run_deep_checks=run_deep_checks,
-    )
-
-
-def detect(ctx: AuditHookContext) -> AuditRecord:
-    return _run_host_stage(ctx, run_deep_checks=False)
-
-
-def auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-    if _credential_is_anonymous(ctx) and not bool(getattr(ctx.args, "defcreds", False)):
-        return record
-    return _run_host_stage(ctx, run_deep_checks=False)
-
-
-def capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-    _ = ctx
-    return record
-
-
-def data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-    _ = record
-    return _run_host_stage(ctx, run_deep_checks=True)
+host_stage = _call_audit_host_with_thread_debug

@@ -36,10 +36,7 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
         module="gitlab",
         label="GITLAB",
         default_port=_DEFAULT_PORT,
-        detect=actions.detect,
-        auth=actions.auth,
-        capabilities=actions.capabilities,
-        data=actions.data,
+        host_stage=actions.host_stage,
         render=_render,
     )
 
@@ -67,7 +64,7 @@ def run_gitlab_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process gitlab output: {exc}")
         return 2
-    if result.detected_count == 0 and hasattr(console, "warn"):
+    if bool(getattr(args, "debug", False)) and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all gitlab targets are unreachable")
     return 0
 

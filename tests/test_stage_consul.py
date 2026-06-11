@@ -15,8 +15,8 @@ from redposture_core import stage_consul as consul
 from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
-def test_consul_lab_uses_multiarch_official_image() -> None:
-    compose = Path("lab/full/docker-compose.yml").read_text(encoding="utf-8")
+def test_consul_lab_uses_multiarch_official_image(lab_full_compose_path: Path) -> None:
+    compose = lab_full_compose_path.read_text(encoding="utf-8")
     consul_block = compose.split("  consul:", 1)[1].split("  consul-seed:", 1)[0]
     consul_seed_block = compose.split("  consul-seed:", 1)[1].split("  consul-acl:", 1)[0]
     consul_acl_block = compose.split("  consul-acl:", 1)[1].split("  consul-acl-seed:", 1)[0]
@@ -1432,7 +1432,7 @@ def test_run_consul_stage_warns_for_token_override_and_unreachable_targets(monke
     assert captured and captured[0]["username"] is None and captured[0]["password"] is None
     warnings = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
     assert any("--token is set; Basic auth credentials are ignored" in msg for msg in warnings)
-    assert any("all consul targets are unreachable" in msg for msg in warnings)
+    assert not any("all consul targets are unreachable" in msg for msg in warnings)
 
 
 def test_run_consul_stage_listener_path_starts_local_listener(monkeypatch: pytest.MonkeyPatch) -> None:

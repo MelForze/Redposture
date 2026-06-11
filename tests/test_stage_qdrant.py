@@ -99,8 +99,8 @@ def test_qdrant_collections_from_payload_deduplicates() -> None:
     assert qdrant._qdrant_collections_from_payload(payload) == ["a", "b"]
 
 
-def test_qdrant_lab_seed_is_fail_fast_and_verifies_collections() -> None:
-    compose = Path("lab/full/docker-compose.yml").read_text(encoding="utf-8")
+def test_qdrant_lab_seed_is_fail_fast_and_verifies_collections(lab_full_compose_path: Path) -> None:
+    compose = lab_full_compose_path.read_text(encoding="utf-8")
     seed_block = compose.split("  qdrant-seed:", 1)[1].split("  elastic-open:", 1)[0]
 
     assert ">/dev/null || true" not in seed_block

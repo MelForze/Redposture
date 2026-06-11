@@ -81,7 +81,7 @@ def _tls_over_tls_exchange(
     server_hostname: str,
     request_payload: bytes,
     response_cap: int,
-) -> bytes:
+) -> tuple[bytes, bool]:
     incoming = ssl.MemoryBIO()
     outgoing = ssl.MemoryBIO()
     tls = context.wrap_bio(incoming, outgoing, server_side=False, server_hostname=server_hostname)
@@ -117,8 +117,13 @@ def _tls_over_tls_exchange(
 
     chunks: list[bytes] = []
     total = 0
+    truncated = False
+    # Headroom over the body cap for status line + headers + chunk framing.
     max_bytes = max(0, int(response_cap)) + 65536
-    while total <= max_bytes:
+    while True:
+        if total > max_bytes:
+            truncated = True
+            break
         try:
             chunk = tls.read(65536)
             if chunk:
@@ -134,31 +139,51 @@ def _tls_over_tls_exchange(
             incoming.write(outer)
         except ssl.SSLEOFError:
             break
-    return b"".join(chunks)
+    return b"".join(chunks), truncated
 
 
-def _decode_chunked_body(body: bytes) -> bytes:
+def _decode_chunked_body(body: bytes, *, allow_partial: bool = False) -> bytes:
+    """Decode an HTTP/1.1 chunked body.
+
+    Raises ``ValueError`` on malformed framing so a corrupt response is not
+    silently returned as a (partial) valid body. When ``allow_partial`` is True —
+    used only when the upstream read was cut short by the response cap — partial
+    decoding is tolerated instead of raising.
+    """
+
     output = bytearray()
     remaining = body
+    completed = False
     while remaining:
         line, sep, rest = remaining.partition(b"\r\n")
         if not sep:
-            break
+            if allow_partial:
+                break
+            raise ValueError("malformed chunked body: incomplete chunk header")
         try:
             size = int(line.split(b";", 1)[0].strip() or b"0", 16)
-        except ValueError:
-            return bytes(output) if output else body
+        except ValueError as exc:
+            if allow_partial:
+                return bytes(output)
+            raise ValueError("malformed chunked body: invalid chunk size") from exc
         if size == 0:
+            completed = True
             break
         if len(rest) < size:
-            output.extend(rest)
-            break
+            if allow_partial:
+                output.extend(rest)
+                break
+            raise ValueError("malformed chunked body: truncated chunk")
         output.extend(rest[:size])
         remaining = rest[size + 2 :] if rest[size : size + 2] == b"\r\n" else rest[size:]
+    if not completed and not allow_partial:
+        raise ValueError("malformed chunked body: missing terminator")
     return bytes(output)
 
 
-def _parse_http_response_bytes(raw: bytes, *, response_cap: int) -> tuple[int, dict[str, str], bytes]:
+def _parse_http_response_bytes(
+    raw: bytes, *, response_cap: int, truncated: bool = False
+) -> tuple[int, dict[str, str], bytes]:
     header_bytes, separator, body = raw.partition(b"\r\n\r\n")
     if not separator:
         raise OSError("invalid HTTP response from target")
@@ -173,8 +198,9 @@ def _parse_http_response_bytes(raw: bytes, *, response_cap: int) -> tuple[int, d
             continue
         key, value = line.split(":", 1)
         headers[key.strip()] = value.strip()
-    if headers.get("Transfer-Encoding", "").lower() == "chunked":
-        body = _decode_chunked_body(body)
+    header_lookup = {key.lower(): value for key, value in headers.items()}
+    if header_lookup.get("transfer-encoding", "").strip().lower() == "chunked":
+        body = _decode_chunked_body(body, allow_partial=truncated)
     cap = max(0, int(response_cap))
     if len(body) > cap:
         body = body[:cap]
@@ -184,9 +210,12 @@ def _parse_http_response_bytes(raw: bytes, *, response_cap: int) -> tuple[int, d
 class HttpApiClient:
     """Small stdlib HTTP client with normalized errors and shared config.
 
-    Proxy support is intentionally compatible with the global
-    `proxy_socket_context`: modules pass the parsed proxy in config for telemetry,
-    while the actual socket routing is handled by the shared socket patch.
+    Proxying uses two cooperating paths, both driven by the same parsed
+    `ProxyConfig`: the plain urllib path is routed by the ambient
+    `proxy_socket_context` (a global `socket.create_connection` patch installed
+    by `cli.py`), while `config.proxy` directly drives the manual
+    HTTPS-target-over-HTTPS-proxy tunnel. `config.proxy` already accepts a parsed
+    `ProxyConfig`, so the runtime hands one through and no re-parsing occurs.
     """
 
     def __init__(self, config: HttpClientConfig | None = None) -> None:
@@ -376,10 +405,13 @@ class HttpApiClient:
             host_header = f"[{host}]" if ":" in host and not host.startswith("[") else host
 
         headers = {str(k): str(v) for k, v in req.header_items()}
-        headers.setdefault("Host", host_header)
-        headers.setdefault("Connection", "close")
-        if body is not None:
-            headers.setdefault("Content-Length", str(len(body)))
+        present_keys = {key.lower() for key in headers}
+        if "host" not in present_keys:
+            headers["Host"] = host_header
+        if "connection" not in present_keys:
+            headers["Connection"] = "close"
+        if body is not None and "content-length" not in present_keys:
+            headers["Content-Length"] = str(len(body))
 
         request_head = [f"{req.get_method()} {path} HTTP/1.1"]
         request_head.extend(f"{key}: {value}" for key, value in headers.items())
@@ -390,7 +422,7 @@ class HttpApiClient:
             outer = open_connection_via_proxy(proxy, (host, port), timeout=timeout_value)
             outer.settimeout(timeout_value)
             tls_context = self._context or _ssl_context(False, self.config.ca_file)
-            response_raw = _tls_over_tls_exchange(
+            response_raw, response_truncated = _tls_over_tls_exchange(
                 outer,
                 tls_context,
                 server_hostname=host,
@@ -400,6 +432,7 @@ class HttpApiClient:
             status, response_headers, response_body = _parse_http_response_bytes(
                 response_raw,
                 response_cap=max(0, int(self.config.response_size_cap)),
+                truncated=response_truncated,
             )
             return HttpResponse(status=status, body=response_body, headers=response_headers, error=None)
         except Exception as exc:

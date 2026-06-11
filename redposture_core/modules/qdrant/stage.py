@@ -36,10 +36,7 @@ def build_qdrant_spec(args: Any) -> ModuleAuditSpec:
         module="qdrant",
         label="QDRANT",
         default_port=_DEFAULT_PORT,
-        detect=actions.detect,
-        auth=actions.auth,
-        capabilities=actions.capabilities,
-        data=actions.data,
+        host_stage=actions.host_stage,
         render=_render,
     )
 

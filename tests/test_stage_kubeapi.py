@@ -811,7 +811,7 @@ def test_run_kubeapi_stage_warns_on_token_override_and_all_unreachable(monkeypat
     assert captured and captured[0]["username"] is None and captured[0]["password"] is None
     warnings = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
     assert any("--token is set; Basic auth credentials are ignored" in msg for msg in warnings)
-    assert any("all kubeapi targets are unreachable" in msg for msg in warnings)
+    assert not any("all kubeapi targets are unreachable" in msg for msg in warnings)
 
 
 def test_run_kubeapi_stage_debug_flow_passes_logger_and_append_output(monkeypatch: pytest.MonkeyPatch) -> None:

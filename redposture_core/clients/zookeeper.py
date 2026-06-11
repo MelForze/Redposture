@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import re
 import socket
 import struct
 import threading
@@ -39,43 +38,15 @@ _ROOT_QUERY_ERR_124_PREFIX = "root query failed: err_-124"
 
 
 def _friendly_error_text(value: str) -> str:
-    text = (value or "").strip()
-    if not text:
-        return "connection failed"
-    lower = text.lower()
-    if "connection refused" in lower:
-        return "connection refused (service is not listening on target port)"
-    if "timed out" in lower or "timeout" in lower:
-        return "connection timeout"
-    if "name or service not known" in lower or "nodename nor servname provided" in lower:
-        return "dns lookup failed"
-    if "temporary failure in name resolution" in lower:
-        return "dns lookup temporary failure"
-    if "no route to host" in lower or "network is unreachable" in lower:
-        return "network unreachable"
-    if "operation not permitted" in lower:
-        return "operation not permitted by local environment"
-    match = re.search(r"\[errno\s+(-?\d+)\]\s*(.*)", text, flags=re.IGNORECASE)
-    if match:
-        errno_num = match.group(1)
-        detail = (match.group(2) or "").strip()
-        if errno_num in {"61", "111"}:
-            return "connection refused (service is not listening on target port)"
-        if errno_num in {"60", "110"}:
-            return "connection timeout"
-        if errno_num in {"8", "-2"}:
-            return "dns lookup failed"
-        if errno_num in {"65", "101", "113"}:
-            return "network unreachable"
-        if detail:
-            return detail
-    return text
+    from ..utils import friendly_error_text
+
+    return friendly_error_text(value)
 
 
 def _friendly_error_from_exception(exc: BaseException) -> str:
-    if isinstance(exc, (socket.timeout, TimeoutError)):
-        return "connection timeout"
-    return _friendly_error_text(str(exc))
+    from ..utils import friendly_error_from_exception
+
+    return friendly_error_from_exception(exc)
 
 
 def _retry_delay(attempt_index: int) -> float:

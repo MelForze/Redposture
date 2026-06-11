@@ -517,7 +517,7 @@ def test_audit_redis_targets_json_output_and_suppression(monkeypatch: pytest.Mon
     assert any(item.get("status") == "auth_required" for item in payloads)
 
 
-def test_audit_redis_targets_suppresses_connection_refused_status_line_only(
+def test_audit_redis_targets_suppresses_pre_detect_connection_noise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     records = iter(
@@ -595,7 +595,7 @@ def test_audit_redis_targets_suppresses_connection_refused_status_line_only(
     )
 
     assert totals == (2, 0, 0, 0, 0, 2)
-    assert any("connection timeout" in line for line in emitted)
+    assert emitted == []
     assert all("Connection refused" not in line for line in emitted)
 
 
@@ -698,13 +698,48 @@ def test_run_redis_stage_connection_refused_suppression_matches_debug(
     assert captured.get("suppress_connection_refused_status_lines") is (not debug)
 
 
-def test_run_redis_stage_non_debug_shows_unreachable_summary(
+def test_run_redis_stage_non_debug_suppresses_unreachable_summary(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     patch_runner_for_legacy_target_fake(monkeypatch, "redis", lambda *_args, **_kwargs: (1, 0, 0, 0, 0, 1))
 
     args = SimpleNamespace(
         debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        username=None,
+        password=None,
+        defcreds=False,
+        show_keys=False,
+        dump=False,
+        key=None,
+        output=None,
+        output_format="txt",
+        port=6379,
+        ports=None,
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+    )
+
+    class _DummyLogger:
+        def log(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+    rc = redis_stage.run_redis_stage(args, _DummyLogger())
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "all redis targets are unreachable" not in captured.out
+
+
+def test_run_redis_stage_debug_shows_unreachable_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    patch_runner_for_legacy_target_fake(monkeypatch, "redis", lambda *_args, **_kwargs: (1, 0, 0, 0, 0, 1))
+
+    args = SimpleNamespace(
+        debug=True,
         timeout=1.0,
         retries=0,
         workers=1,
