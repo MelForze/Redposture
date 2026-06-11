@@ -9,7 +9,6 @@ import re
 import secrets
 import ssl
 import string
-import sys
 import time
 import urllib.error
 import urllib.parse
@@ -20,9 +19,6 @@ from ...clients.http_api import HttpApiClient, HttpClientConfig
 from ...console import Console
 from ...rendering import BooleanColorRule, render_colored_marker_line
 from ...stage_runtime import (
-    AuditHookContext,
-    AuditRecord,
-    _invoke_module_host_stage,
     merge_stage_records,
 )
 from ...utils import (
@@ -130,57 +126,15 @@ def _retry_delay(attempt_index: int) -> float:
 
 
 def _friendly_error_text(value: str) -> str:
-    text = (value or "").strip()
-    if not text:
-        return "connection failed"
+    from ...utils import friendly_error_text
 
-    if text.startswith("<urlopen error ") and text.endswith(">"):
-        text = text[len("<urlopen error ") : -1].strip()
-
-    lower = text.lower()
-    if "certificate verify failed" in lower or "self signed certificate" in lower:
-        return "tls verification failed (try --insecure)"
-    if "wrong version number" in lower or ("ssl" in lower and "http request" in lower):
-        return "tls/http protocol mismatch"
-    if "connection refused" in lower:
-        return "connection refused (service is not listening on target port)"
-    if "timed out" in lower or "timeout" in lower:
-        return "connection timeout"
-    if "name or service not known" in lower or "nodename nor servname provided" in lower:
-        return "dns lookup failed"
-    if "temporary failure in name resolution" in lower:
-        return "dns lookup temporary failure"
-    if "no route to host" in lower or "network is unreachable" in lower:
-        return "network unreachable"
-    if "operation not permitted" in lower:
-        return "operation not permitted by local environment"
-
-    match = re.search(r"\[errno\s+(-?\d+)\]\s*(.*)", text, flags=re.IGNORECASE)
-    if match:
-        errno_num = match.group(1)
-        detail = (match.group(2) or "").strip()
-        if errno_num in {"61", "111"}:
-            return "connection refused (service is not listening on target port)"
-        if errno_num in {"60", "110"}:
-            return "connection timeout"
-        if errno_num in {"8", "-2"}:
-            return "dns lookup failed"
-        if errno_num in {"65", "101", "113"}:
-            return "network unreachable"
-        if detail:
-            return detail
-    return text
+    return friendly_error_text(value, tls_hint="try --insecure")
 
 
 def _friendly_error_from_exception(exc: BaseException) -> str:
-    if isinstance(exc, urllib.error.URLError):
-        reason = exc.reason
-        if isinstance(reason, BaseException):
-            return _friendly_error_text(str(reason))
-        return _friendly_error_text(str(reason or exc))
-    if isinstance(exc, TimeoutError):
-        return "connection timeout"
-    return _friendly_error_text(str(exc))
+    from ...utils import friendly_error_from_exception
+
+    return friendly_error_from_exception(exc, tls_hint="try --insecure")
 
 
 def _is_connection_refused_error(value: Any) -> bool:
@@ -1960,42 +1914,4 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 
 # Typed runner boundary -----------------------------------------------------
-
-
-def record_from_mapping(payload: dict[str, Any]) -> AuditRecord:
-    """Convert module protocol payloads to the typed runtime model."""
-
-    return AuditRecord.from_mapping(payload, module="proxmox", service="proxmox")
-
-
-def _credential_is_anonymous(ctx: AuditHookContext) -> bool:
-    return ctx.credential.username is None and ctx.credential.password is None and ctx.credential.token is None
-
-
-def _run_host_stage(ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
-    return _invoke_module_host_stage(
-        sys.modules[__name__],
-        module="proxmox",
-        ctx=ctx,
-        run_deep_checks=run_deep_checks,
-    )
-
-
-def detect(ctx: AuditHookContext) -> AuditRecord:
-    return _run_host_stage(ctx, run_deep_checks=False)
-
-
-def auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-    if _credential_is_anonymous(ctx) and not bool(getattr(ctx.args, "defcreds", False)):
-        return record
-    return _run_host_stage(ctx, run_deep_checks=False)
-
-
-def capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-    _ = ctx
-    return record
-
-
-def data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-    _ = record
-    return _run_host_stage(ctx, run_deep_checks=True)
+host_stage = _call_audit_proxmox_host_with_stage_debug

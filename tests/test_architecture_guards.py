@@ -4,6 +4,8 @@ import importlib
 import re
 from pathlib import Path
 
+from redposture_core.module_registry import AUDIT_MODULE_NAMES
+
 _ROOT = Path(__file__).resolve().parents[1]
 _CORE = _ROOT / "redposture_core"
 
@@ -183,28 +185,16 @@ def test_cli_dispatch_and_parser_are_registry_backed() -> None:
     assert "def resolve_command_runner" in registry_source
 
 
+def test_audit_module_names_match_module_directories() -> None:
+    dir_names = {
+        entry.name for entry in (_CORE / "modules").iterdir() if entry.is_dir() and not entry.name.startswith("__")
+    }
+    assert set(AUDIT_MODULE_NAMES) == dir_names
+
+
 def test_module_runtime_dispatch_uses_module_package_boundaries() -> None:
     registry_source = (_CORE / "module_registry.py").read_text(encoding="utf-8")
-    for module in (
-        "redis",
-        "postgres",
-        "kafka",
-        "elastic",
-        "grafana",
-        "gitlab",
-        "consul",
-        "qdrant",
-        "kubeapi",
-        "registry",
-        "proxmox",
-        "etcd",
-        "mongodb",
-        "docker",
-        "oracle",
-        "grpc",
-        "clickhouse",
-        "zookeeper",
-    ):
+    for module in AUDIT_MODULE_NAMES:
         package_stage = _CORE / "modules" / module / "stage.py"
         assert package_stage.is_file(), module
         assert f"redposture_core.modules.{module}.stage" in registry_source
@@ -221,26 +211,7 @@ def test_module_stage_files_are_runtime_entrypoint_facades() -> None:
         "as_completed",
         "output_written",
     )
-    for module in (
-        "redis",
-        "postgres",
-        "kafka",
-        "elastic",
-        "grafana",
-        "gitlab",
-        "consul",
-        "qdrant",
-        "kubeapi",
-        "registry",
-        "proxmox",
-        "etcd",
-        "mongodb",
-        "docker",
-        "oracle",
-        "grpc",
-        "clickhouse",
-        "zookeeper",
-    ):
+    for module in AUDIT_MODULE_NAMES:
         source = (_CORE / "modules" / module / "stage.py").read_text(encoding="utf-8")
         assert f"Runtime entrypoint for the {module} audit module" in source
         assert f"run_{module}_stage" in source
@@ -307,12 +278,18 @@ def test_module_actions_are_typed_hook_facades_not_command_runtimes() -> None:
         if not module_dir.is_dir() or module_dir.name.startswith("__"):
             continue
         source = (module_dir / "actions.py").read_text(encoding="utf-8")
-        assert "AuditRecord" in source, module_dir.name
-        assert "def record_from_mapping" in source, module_dir.name
-        assert "def detect(ctx: AuditHookContext) -> AuditRecord" in source, module_dir.name
-        assert "def auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord" in source, module_dir.name
-        assert "def capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord" in source, module_dir.name
-        assert "def data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord" in source, module_dir.name
+        # Modules expose only their real host action; the runner owns the
+        # detect/auth/capabilities/data lifecycle. The per-module hook copy and
+        # the `_invoke_module_host_stage` indirection must be gone.
+        assert "host_stage = " in source, module_dir.name
+        for copied in (
+            "def detect(ctx: AuditHookContext)",
+            "def auth(ctx: AuditHookContext",
+            "def capabilities(ctx: AuditHookContext",
+            "def data(ctx: AuditHookContext",
+            "_invoke_module_host_stage",
+        ):
+            assert copied not in source, f"{module_dir.name}: {copied}"
         offenders = [token for token in forbidden_tokens if token in source]
         assert offenders == [], module_dir.name
 

@@ -13,8 +13,8 @@ from redposture_core import stage_gitlab as gitlab
 from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
-def test_gitlab_lab_mock_has_readiness_healthcheck() -> None:
-    compose = Path("lab/full/docker-compose.yml").read_text(encoding="utf-8")
+def test_gitlab_lab_mock_has_readiness_healthcheck(lab_full_compose_path: Path) -> None:
+    compose = lab_full_compose_path.read_text(encoding="utf-8")
     block = compose.split("  gitlab-web-mock:", 1)[1].split("  nexus:", 1)[0]
 
     assert "healthcheck:" in block

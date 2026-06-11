@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import sys
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -198,7 +199,11 @@ class ModuleAuditSpec:
     module: str
     label: str
     default_port: int
-    detect: Callable[[AuditHookContext], AuditRecord]
+    # Modules normally supply only `host_stage` (their real host audit function);
+    # the runner drives the detect/auth/data lifecycle generically. The per-phase
+    # callables below are optional overrides for custom modules and tests.
+    host_stage: Callable[..., AuditRecord | dict[str, Any]] | None = None
+    detect: Callable[[AuditHookContext], AuditRecord] | None = None
     auth: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
     capabilities: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
     data: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
@@ -303,6 +308,7 @@ class AuditCommandResult:
     detected_count: int
     emitted_lines: int
     typed_records: list[AuditRecord]
+    suppressed_records: int = 0
 
 
 @dataclass(frozen=True)
@@ -535,14 +541,35 @@ def validate_basic_module_args(
     return None
 
 
-def _invoke_module_host_stage(
-    actions_module: Any,
+def _credential_is_anonymous(ctx: AuditHookContext) -> bool:
+    credential = ctx.credential
+    return credential.username is None and credential.password is None and credential.token is None
+
+
+def _resolve_host_stage(func: Callable[..., Any]) -> Callable[..., Any]:
+    """Re-resolve a host action by its qualified name at call time.
+
+    Specs capture the host action at import time, but tests monkeypatch it by
+    name on the actions module. Resolving `module.<name>` here keeps that late
+    binding working without the old multi-candidate name guessing.
+    """
+
+    module_name = getattr(func, "__module__", "") or ""
+    name = getattr(func, "__name__", "") or ""
+    owner = sys.modules.get(module_name)
+    if owner is not None and name:
+        return getattr(owner, name, func)
+    return func
+
+
+def _invoke_host_stage(
+    func: Callable[..., Any],
     *,
     module: str,
     ctx: AuditHookContext,
     run_deep_checks: bool | None = None,
 ) -> AuditRecord:
-    func = _select_host_action(actions_module, module)
+    func = _resolve_host_stage(func)
     signature = inspect.signature(func)
     if run_deep_checks is not None:
         ctx = AuditHookContext(
@@ -580,21 +607,6 @@ def _invoke_module_host_stage(
     if isinstance(payload, dict):
         return AuditRecord.from_mapping(payload, module=module, service=module)
     raise TypeError(f"{module} host hook must return AuditRecord-compatible payload")
-
-
-def _select_host_action(actions_module: Any, module: str) -> Callable[..., Any]:
-    candidates = (
-        f"_call_audit_{module}_host_with_stage_debug",
-        f"_call_audit_{module}_host_with_thread_debug",
-        f"_audit_{module}_host_stage",
-        "_call_audit_host_with_thread_debug",
-        f"_audit_{module}_host",
-    )
-    for name in candidates:
-        func = getattr(actions_module, name, None)
-        if callable(func):
-            return func
-    raise AttributeError(f"{module} actions module does not expose a host audit hook")
 
 
 def render_record_with_module(
@@ -636,6 +648,76 @@ def _record_looks_detected(record: dict[str, Any]) -> bool:
         return True
     status = str(record.get("status") or "")
     return status not in {"fail", "not_detected", "not_found", "not_service"}
+
+
+_PRE_DETECT_NOISE_MARKERS = (
+    "connection refused",
+    "connection reset",
+    "reset by peer",
+    "connection aborted",
+    "operation not permitted",
+    "connection timeout",
+    "timed out",
+    "timeout",
+    "unexpected eof",
+    "protocol closed before",
+    "closed before",
+    "remote end closed",
+    "server closed",
+    "no route to host",
+    "network unreachable",
+    "host is down",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "nodename nor servname",
+    "getaddrinfo",
+    "proxy tunnel",
+    "proxy connect",
+    "socks",
+    "tunnel failed",
+)
+
+
+def _record_noise_text(record: dict[str, Any]) -> str:
+    values: list[str] = []
+    for key in ("error", "protocol_error", "detect_error", "last_error"):
+        value = record.get(key)
+        if value:
+            values.append(str(value))
+    stage_failed_at = record.get("stage_failed_at")
+    if stage_failed_at:
+        values.append(f"stage_failed_at={stage_failed_at}")
+    stages = record.get("stages")
+    if isinstance(stages, list):
+        for stage in stages:
+            if isinstance(stage, dict) and stage.get("error"):
+                values.append(str(stage.get("error")))
+    debug_events = record.get("debug_events")
+    if isinstance(debug_events, list):
+        for event in debug_events:
+            if isinstance(event, str):
+                values.append(event)
+    return " ".join(values).lower()
+
+
+def is_pre_detect_network_noise(record: AuditRecord | dict[str, Any]) -> bool:
+    """Return true for non-service network/protocol noise before detection.
+
+    These records are useful in debug/JSON, but noisy in normal TXT scans over
+    large target lists. The check intentionally refuses to suppress anything
+    that already looks like a detected service or an auth/data failure.
+    """
+
+    payload = record.to_dict() if isinstance(record, AuditRecord) else dict(record)
+    if _record_looks_detected(payload):
+        return False
+    status = str(payload.get("status") or "").lower()
+    if status and status not in {"fail", "not_detected", "not_found", "not_service"} and not status.startswith("not_"):
+        return False
+    text = _record_noise_text(payload)
+    if not text:
+        return False
+    return any(marker in text for marker in _PRE_DETECT_NOISE_MARKERS)
 
 
 def _can_call_detail_renderer(func: Callable[..., Any]) -> bool:
@@ -687,6 +769,13 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext) -> Any:
         return bool(getattr(args, "debug", False))
     if name == "debug_emit":
         return ctx.debug_emit
+    if name == "proxy":
+        # `cli.py` parses --proxy once into `args._proxy_config` (a ProxyConfig).
+        # Hand that parsed object through so clients reuse it instead of
+        # re-parsing the raw string. Bare test args fall back to the raw value.
+        if hasattr(args, "_proxy_config"):
+            return args._proxy_config
+        return getattr(args, "proxy", None)
     if name == "max_messages":
         raw_max_messages = getattr(args, "max_messages", None)
         if raw_max_messages is not None:
@@ -769,7 +858,6 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext) -> Any:
         "tls_ca": "tls_ca",
         "tls_cert": "tls_cert",
         "tls_key": "tls_key",
-        "proxy": "proxy",
         "ca_file": "ca_file",
         "preferred_scheme": "scheme",
         "container_selector": "container",
@@ -799,7 +887,43 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext) -> Any:
         return []
     if name.startswith(("do_", "delete_", "insecure", "clone", "harbor", "gitlab", "nexus", "assets", "inspect")):
         return False
-    return None
+    # Optional scalar inputs that default to None when absent on args. Declared
+    # explicitly so the catch-all below stays loud for genuinely-unknown names.
+    if name in {
+        "agent_dump_name",
+        "check_dump_id",
+        "container_selector",
+        "document_selector",
+        "exec_cmd",
+        "exec_pod",
+        "fs_mode",
+        "index_filter",
+        "invoke_path",
+        "invoke_request_json",
+        "listener_dump",
+        "metadata",
+        "nne_check",
+        "node_dump_name",
+        "nosql_command",
+        "on_credential_finding",
+        "on_discovered_url",
+        "on_status_ready",
+        "os_read_path",
+        "preferred_scheme",
+        "privesc_check",
+        "protocol",
+        "query_filter",
+        "revshell_enabled",
+        "service_name",
+        "tls_ca",
+        "tls_cert",
+        "tls_key",
+    }:
+        return getattr(args, aliases.get(name, name), None)
+    raise ValueError(
+        f"unresolved hook argument {name!r}: add an explicit mapping in _argument_value_for_hook "
+        "(silent None fallback was removed)"
+    )
 
 
 class AuditCommandRunner:
@@ -833,8 +957,12 @@ class AuditCommandRunner:
         )
         sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append)
         records_by_idx: dict[int, AuditRecord] = {}
+        worker_count = max(1, int(plan.workers or getattr(self.args, "workers", 1) or 1))
         scheduler: BoundedScheduler[tuple[int, str, int, ScanTargetSpec | None], AuditRecord] = BoundedScheduler(
-            max_workers=max(1, int(plan.workers or getattr(self.args, "workers", 1) or 1))
+            max_workers=worker_count
+        )
+        deep_scheduler: BoundedScheduler[tuple[int, str, int, ScanTargetSpec | None, AuditRecord], AuditRecord] = (
+            BoundedScheduler(max_workers=worker_count)
         )
         emitted_lines = 0
         debug_emit = getattr(self.args, "debug_emit", None) if bool(getattr(self.args, "debug", False)) else None
@@ -876,10 +1004,12 @@ class AuditCommandRunner:
 
             if detected_targets:
                 progress.add_total(len(detected_targets))
-            for idx, host, port, target, detect_record in detected_targets:
-                final_record = self._run_deep_lifecycle(
-                    host, port, target, detect_record, plan.credential_runs, debug_emit
-                )
+            for (idx, _host, _port, _target, _detect_record), final_record in deep_scheduler.iter_completed(
+                detected_targets,
+                lambda item: self._run_deep_lifecycle(
+                    item[1], item[2], item[3], item[4], plan.credential_runs, debug_emit
+                ),
+            ):
                 records_by_idx[int(idx)] = final_record
                 processed_deep += int(self._deep_gate(final_record)[0])
                 progress.advance(1)
@@ -890,12 +1020,16 @@ class AuditCommandRunner:
 
         typed_records = [records_by_idx[idx] for idx, _host, _port, _target in indexed_targets if idx in records_by_idx]
         records = [record.to_dict() for record in typed_records]
+        suppressed_records = 0
         if plan.output_format == "json":
             json_lines = [json.dumps(record, ensure_ascii=False) for record in records]
             emitted_lines += len(json_lines)
             sink.emit_many(json_lines)
         elif self.spec.render is not None:
             for record in typed_records:
+                if not bool(getattr(self.args, "debug", False)) and is_pre_detect_network_noise(record):
+                    suppressed_records += 1
+                    continue
                 lines = list(self.spec.render(record))
                 emitted_lines += len(lines)
                 sink.emit_many(lines)
@@ -904,6 +1038,7 @@ class AuditCommandRunner:
             detected_count=sum(1 for record in typed_records if self._is_detected(record)),
             emitted_lines=emitted_lines,
             typed_records=typed_records,
+            suppressed_records=suppressed_records,
         )
 
     def _ctx(
@@ -942,7 +1077,7 @@ class AuditCommandRunner:
             run_deep_checks=False,
             debug_emit=debug_emit,
         )
-        return _record_to_model(self.spec.detect(ctx))
+        return self._detect(ctx)
 
     def _run_deep_lifecycle(
         self,
@@ -957,11 +1092,7 @@ class AuditCommandRunner:
         candidates = credential_runs or (AuditCredentialRun(source="anonymous"),)
         for credential in candidates:
             ctx = self._ctx(host, port, target, credential, run_deep_checks=False, debug_emit=debug_emit)
-            if self.spec.auth is None:
-                auth_record = detect_record
-            else:
-                auth_record = _record_to_model(self.spec.auth(ctx, detect_record))
-            auth_records.append((credential, auth_record))
+            auth_records.append((credential, self._auth(ctx, detect_record)))
 
         selected_credential, selected_record, gate_reason = self._select_deep_record(detect_record, auth_records)
         gate = self._deep_gate(selected_record)
@@ -973,11 +1104,43 @@ class AuditCommandRunner:
             debug_emit(format_stage2_gate(host, int(port), "run", gate[1] or gate_reason))
 
         deep_ctx = self._ctx(host, port, target, selected_credential, run_deep_checks=True, debug_emit=debug_emit)
-        record = selected_record
+        record = self._capabilities(deep_ctx, selected_record)
+        record = self._data(deep_ctx, record)
+        return record
+
+    def _host_stage(self, ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
+        if self.spec.host_stage is None:
+            raise TypeError(f"{self.spec.module} spec exposes neither hook overrides nor host_stage")
+        return _invoke_host_stage(
+            self.spec.host_stage, module=self.spec.module, ctx=ctx, run_deep_checks=run_deep_checks
+        )
+
+    def _detect(self, ctx: AuditHookContext) -> AuditRecord:
+        if self.spec.detect is not None:
+            return _record_to_model(self.spec.detect(ctx))
+        if self.spec.host_stage is not None:
+            return self._host_stage(ctx, run_deep_checks=False)
+        raise TypeError(f"{self.spec.module} spec requires either detect or host_stage")
+
+    def _auth(self, ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRecord:
+        if self.spec.auth is not None:
+            return _record_to_model(self.spec.auth(ctx, detect_record))
+        if self.spec.host_stage is not None:
+            if _credential_is_anonymous(ctx) and not bool(getattr(ctx.args, "defcreds", False)):
+                return detect_record
+            return self._host_stage(ctx, run_deep_checks=False)
+        return detect_record
+
+    def _capabilities(self, ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         if self.spec.capabilities is not None:
-            record = _record_to_model(self.spec.capabilities(deep_ctx, record))
+            return _record_to_model(self.spec.capabilities(ctx, record))
+        return record
+
+    def _data(self, ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         if self.spec.data is not None:
-            record = _record_to_model(self.spec.data(deep_ctx, record))
+            return _record_to_model(self.spec.data(ctx, record))
+        if self.spec.host_stage is not None:
+            return self._host_stage(ctx, run_deep_checks=True)
         return record
 
     def _select_deep_record(
@@ -996,20 +1159,18 @@ class AuditCommandRunner:
     def _is_detected(self, record: AuditRecord) -> bool:
         if self.spec.is_detected is not None:
             return bool(self.spec.is_detected(record))
-        payload = record.to_dict()
         marker = f"is_{self.spec.module}"
-        if marker in payload and payload.get(marker) is False:
+        if record.extra.get(marker) is False:
             return False
-        status = str(payload.get("status") or "")
+        status = str(record.status or "")
         return status not in {"not_detected", "not_found", "not_service", f"not_{self.spec.module}"}
 
     def _not_detected_reason(self, record: AuditRecord) -> str:
-        payload = record.to_dict()
-        status = str(payload.get("status") or "")
+        status = str(record.status or "")
         if status.startswith("not_"):
             return status
         marker = f"is_{self.spec.module}"
-        if marker in payload and payload.get(marker) is False:
+        if record.extra.get(marker) is False:
             return f"not_{self.spec.module}"
         return "not_detected"
 
@@ -1019,7 +1180,7 @@ class AuditCommandRunner:
         return self._default_deep_gate(record)
 
     def _default_deep_gate(self, record: AuditRecord) -> tuple[bool, str]:
-        status = str(record.to_dict().get("status") or "unknown")
+        status = str(record.status or "unknown")
         allowed = {
             "ok",
             "open",
