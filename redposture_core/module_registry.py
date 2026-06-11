@@ -115,6 +115,14 @@ _STAGE_RUNNER_MODULES: dict[str, str] = {
 }
 
 
+# Canonical list of audit-module command names (those whose runner lives under
+# `redposture_core.modules.<name>`). Single source of truth for tests and tools
+# that need to enumerate the audit modules instead of hard-coding the list.
+AUDIT_MODULE_NAMES: tuple[str, ...] = tuple(
+    name for name, target in _STAGE_RUNNER_MODULES.items() if target.startswith("redposture_core.modules.")
+)
+
+
 def resolve_command_runner(spec: RuntimeCommandSpec) -> Callable[..., int]:
     """Resolve a registered command runner lazily.
 
@@ -654,6 +662,7 @@ __all__ = [
     "COMMAND_SELFCERT",
     "COMMAND_TRIGGER",
     "COMMAND_ZOOKEEPER",
+    "AUDIT_MODULE_NAMES",
     "COMMAND_SPECS",
     "COMMAND_SPECS_BY_NAME",
     "CommandSpec",

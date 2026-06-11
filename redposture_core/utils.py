@@ -6,6 +6,7 @@ import base64
 import os
 import re
 import socket
+import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -34,6 +35,8 @@ __all__ = [
     "collect_scan_target_specs",
     "collect_scan_targets",
     "filter_open_tcp_hosts_for_credential_file",
+    "friendly_error_from_exception",
+    "friendly_error_text",
     "is_http_inline_command",
     "is_http_request_prefix",
     "is_signature_compat_typeerror",
@@ -49,6 +52,69 @@ __all__ = [
 ]
 
 _UNEXPECTED_KWARG_RE = re.compile(r"(?:got an )?unexpected keyword argument ['\"](?P<kw>[^'\"]+)['\"]")
+
+_ERRNO_HINT_RE = re.compile(r"\[errno\s+(-?\d+)\]\s*(.*)", flags=re.IGNORECASE)
+
+
+def friendly_error_text(value: str, *, tls_hint: str | None = None) -> str:
+    """Normalize a raw transport error string into a stable, human-friendly message.
+
+    Shared by audit modules and protocol clients (previously copy-pasted into
+    several drifted variants). Pass `tls_hint` to opt into TLS-specific messages
+    with a module-appropriate remediation hint (e.g. ``"try --insecure"``).
+    """
+
+    text = (value or "").strip()
+    if not text:
+        return "connection failed"
+    if text.startswith("<urlopen error ") and text.endswith(">"):
+        text = text[len("<urlopen error ") : -1].strip()
+    lower = text.lower()
+    if tls_hint is not None:
+        if "certificate verify failed" in lower or "self signed certificate" in lower:
+            return f"tls verification failed ({tls_hint})"
+        if "wrong version number" in lower or ("ssl" in lower and "http request" in lower):
+            return "tls/http protocol mismatch"
+    if "connection refused" in lower:
+        return "connection refused (service is not listening on target port)"
+    if "timed out" in lower or "timeout" in lower:
+        return "connection timeout"
+    if "name or service not known" in lower or "nodename nor servname provided" in lower:
+        return "dns lookup failed"
+    if "temporary failure in name resolution" in lower:
+        return "dns lookup temporary failure"
+    if "no route to host" in lower or "network is unreachable" in lower:
+        return "network unreachable"
+    if "operation not permitted" in lower:
+        return "operation not permitted by local environment"
+    match = _ERRNO_HINT_RE.search(text)
+    if match:
+        errno_num = match.group(1)
+        detail = (match.group(2) or "").strip()
+        if errno_num in {"61", "111"}:
+            return "connection refused (service is not listening on target port)"
+        if errno_num in {"60", "110"}:
+            return "connection timeout"
+        if errno_num in {"8", "-2"}:
+            return "dns lookup failed"
+        if errno_num in {"65", "101", "113"}:
+            return "network unreachable"
+        if detail:
+            return detail
+    return text
+
+
+def friendly_error_from_exception(exc: BaseException, *, tls_hint: str | None = None) -> str:
+    """Map a transport exception to a friendly message (see `friendly_error_text`)."""
+
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, BaseException):
+            return friendly_error_text(str(reason), tls_hint=tls_hint)
+        return friendly_error_text(str(reason or exc), tls_hint=tls_hint)
+    if isinstance(exc, TimeoutError):  # socket.timeout is an alias on py>=3.10
+        return "connection timeout"
+    return friendly_error_text(str(exc), tls_hint=tls_hint)
 
 
 @dataclass(frozen=True)

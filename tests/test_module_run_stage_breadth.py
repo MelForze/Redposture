@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core.cli_args import parse_args
+from redposture_core.module_registry import AUDIT_MODULE_NAMES
 from redposture_core.stage_runtime import AuditCommandResult
 
 RUN_CASES = {
@@ -28,6 +29,10 @@ RUN_CASES = {
     "clickhouse": ["clickhouse", "-t", "127.0.0.1"],
     "zookeeper": ["zookeeper", "-t", "127.0.0.1"],
 }
+
+
+def test_run_cases_cover_every_registered_audit_module() -> None:
+    assert set(RUN_CASES) == set(AUDIT_MODULE_NAMES)
 
 
 @pytest.mark.parametrize("module_name", sorted(RUN_CASES))

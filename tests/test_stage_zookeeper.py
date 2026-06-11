@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import struct
 from collections import Counter
 from types import SimpleNamespace
@@ -3297,7 +3298,7 @@ def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch:
         def group(self, index: int = 0) -> str:
             return self._group1 if index == 1 else ""
 
-    real_search = zookeeper_stage.re.search
+    real_search = re.search
 
     def _overlap_search(pattern: str, text: str):
         if pattern == r"\(znodes:(\d+)(?:\+)?(?: [^)]*)?\)":
@@ -3308,7 +3309,7 @@ def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch:
             return None
         return real_search(pattern, text)
 
-    monkeypatch.setattr("redposture_core.stage_zookeeper.re.search", _overlap_search)
+    monkeypatch.setattr("re.search", _overlap_search)
     overlap_console = _RenderConsole()
     assert zookeeper_stage._render_colored_zookeeper_line(
         overlap_console, "ZOOKEEPER\t127.0.0.1\t2181\t [*] znodes-tail"

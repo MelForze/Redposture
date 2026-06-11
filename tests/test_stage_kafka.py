@@ -15,8 +15,8 @@ from redposture_core.stage_runtime import AuditCommandResult
 from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
-def test_kafka_lab_seed_has_health_markers_and_nonempty_topic_guards() -> None:
-    compose = Path("lab/full/docker-compose.yml").read_text(encoding="utf-8")
+def test_kafka_lab_seed_has_health_markers_and_nonempty_topic_guards(lab_full_compose_path: Path) -> None:
+    compose = lab_full_compose_path.read_text(encoding="utf-8")
     open_seed = compose.split("  kafka-open-seed:", 1)[1].split("  kafka-auth:", 1)[0]
     auth_seed = compose.split("  kafka-auth-seed:", 1)[1].split("  registry-open:", 1)[0]
 
@@ -806,7 +806,7 @@ def test_run_kafka_stage_uses_dump_count_as_message_limit(monkeypatch: pytest.Mo
     assert (True, True, 3) in captured
 
 
-def test_run_kafka_stage_warns_when_all_targets_are_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_kafka_stage_suppresses_unreachable_summary_without_debug(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
     monkeypatch.setattr(kafka, "collect_scan_ports", lambda *_args, **_kwargs: [])
@@ -815,7 +815,7 @@ def test_run_kafka_stage_warns_when_all_targets_are_unreachable(monkeypatch: pyt
     rc = kafka.run_kafka_stage(_kafka_args(), logger=object())  # type: ignore[arg-type]
     assert rc == 0
     warnings = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
-    assert any("all kafka targets are unreachable" in msg for msg in warnings)
+    assert not any("all kafka targets are unreachable" in msg for msg in warnings)
 
 
 def test_run_kafka_stage_debug_flow_passes_logger_and_append_output(monkeypatch: pytest.MonkeyPatch) -> None:

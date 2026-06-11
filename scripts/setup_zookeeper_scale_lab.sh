@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_FILE="${ROOT_DIR}/lab/services/zookeeper-scale/docker-compose.yml"
+LAB_DIR="${REDPOSTURE_LAB_DIR:-${ROOT_DIR}/lab}"
+COMPOSE_FILE="${LAB_DIR}/services/zookeeper-scale/docker-compose.yml"
 PROJECT_NAME="${ZK_SCALE_PROJECT:-redposture-zk-scale}"
 ZK_SCALE_PORT="${ZK_SCALE_PORT:-32181}"
 CHUNK_SIZE="${ZK_SCALE_CHUNK_SIZE:-5000}"
@@ -70,6 +71,12 @@ compose() {
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "[error] docker is required" >&2
+  exit 2
+fi
+
+if [[ ! -f "${COMPOSE_FILE}" ]]; then
+  echo "[error] local zookeeper-scale compose not found: ${COMPOSE_FILE}" >&2
+  echo "[error] set REDPOSTURE_LAB_DIR to your local lab directory" >&2
   exit 2
 fi
 

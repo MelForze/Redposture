@@ -36,10 +36,7 @@ def build_docker_spec(args: Any) -> ModuleAuditSpec:
         module="docker",
         label="DOCKER",
         default_port=_DEFAULT_PORT,
-        detect=actions.detect,
-        auth=actions.auth,
-        capabilities=actions.capabilities,
-        data=actions.data,
+        host_stage=actions.host_stage,
         render=_render,
     )
 
@@ -67,7 +64,7 @@ def run_docker_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process docker output: {exc}")
         return 2
-    if result.detected_count == 0 and hasattr(console, "warn"):
+    if bool(getattr(args, "debug", False)) and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all docker targets are unreachable")
     return 0
 

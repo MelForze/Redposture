@@ -36,10 +36,7 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
         module="consul",
         label="CONSUL",
         default_port=_DEFAULT_PORT,
-        detect=actions.detect,
-        auth=actions.auth,
-        capabilities=actions.capabilities,
-        data=actions.data,
+        host_stage=actions.host_stage,
         render=_render,
     )
 
@@ -69,7 +66,7 @@ def run_consul_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process consul output: {exc}")
         return 2
-    if result.detected_count == 0:
+    if bool(getattr(args, "debug", False)) and result.detected_count == 0:
         console.warn("all consul targets are unreachable")
     if listener_info is not None:
         registered = any(bool(record.get("script_revshell")) for record in result.records)

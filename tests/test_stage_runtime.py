@@ -18,6 +18,7 @@ from redposture_core.stage_runtime import (
     format_retry_decision,
     format_stage2_gate,
     format_stage_trace,
+    is_pre_detect_network_noise,
     merge_stage_records,
     progress_total_from_groups,
     should_use_global_progress,
@@ -333,6 +334,137 @@ def test_audit_command_runner_requires_typed_hook_records() -> None:
     assert result.records[0]["capabilities"] == {"read": True}
     assert result.records[0]["legacy"] == "kept"
     assert emitted == ["127.0.0.1:6379 open_no_auth"]
+
+
+def test_audit_command_runner_suppresses_pre_detect_noise_in_non_debug_txt() -> None:
+    emitted: list[str] = []
+
+    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="redis",
+            service="redis",
+            status="fail",
+            extra={
+                "is_redis": False,
+                "error": "protocol closed before RESP reply (unexpected EOF)",
+                "protocol_error": "unexpected EOF",
+            },
+        )
+
+    spec = ModuleAuditSpec(
+        module="redis",
+        label="REDIS",
+        default_port=6379,
+        detect=detect,
+        render=lambda record: [f"{record.host}:{record.port} {record.status} {record.extra.get('error')}"],
+    )
+    plan = AuditCommandPlan(targets_by_port={6379: ("127.0.0.1",)}, output_format="txt")
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
+
+    assert emitted == []
+    assert result.emitted_lines == 0
+    assert result.suppressed_records == 1
+    assert result.records[0]["protocol_error"] == "unexpected EOF"
+    assert is_pre_detect_network_noise(result.typed_records[0]) is True
+
+
+def test_audit_command_runner_keeps_pre_detect_noise_in_debug_txt() -> None:
+    emitted: list[str] = []
+    args = type("Args", (), {"debug": True})()
+
+    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        return AuditRecord.from_mapping(
+            {
+                "host": ctx.host,
+                "port": ctx.port,
+                "service": "kafka",
+                "module": "kafka",
+                "status": "fail",
+                "is_kafka": False,
+                "error": "connection reset by peer",
+            },
+            module="kafka",
+            service="kafka",
+        )
+
+    spec = ModuleAuditSpec(
+        module="kafka",
+        label="KAFKA",
+        default_port=9092,
+        detect=detect,
+        render=lambda record: [f"{record.host}:{record.port} {record.extra.get('error')}"],
+    )
+    plan = AuditCommandPlan(targets_by_port={9092: ("127.0.0.1",)}, output_format="txt")
+
+    result = AuditCommandRunner(args=args, spec=spec, emit_line=emitted.append).run_plan(plan)
+
+    assert emitted == ["127.0.0.1:9092 connection reset by peer"]
+    assert result.suppressed_records == 0
+
+
+def test_audit_command_runner_keeps_noise_diagnostics_in_json() -> None:
+    emitted: list[str] = []
+
+    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        return AuditRecord.from_mapping(
+            {
+                "host": ctx.host,
+                "port": ctx.port,
+                "service": "grpc",
+                "module": "grpc",
+                "status": "fail",
+                "is_grpc": False,
+                "error": "connection timeout",
+            },
+            module="grpc",
+            service="grpc",
+        )
+
+    spec = ModuleAuditSpec(module="grpc", label="GRPC", default_port=50051, detect=detect)
+    plan = AuditCommandPlan(targets_by_port={50051: ("127.0.0.1",)}, output_format="json")
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
+
+    assert len(emitted) == 1
+    assert '"error": "connection timeout"' in emitted[0]
+    assert result.suppressed_records == 0
+
+
+def test_audit_command_runner_does_not_suppress_detected_auth_or_data_errors() -> None:
+    emitted: list[str] = []
+
+    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+        return AuditRecord.from_mapping(
+            {
+                "host": ctx.host,
+                "port": ctx.port,
+                "service": "postgres",
+                "module": "postgres",
+                "status": "auth_required",
+                "is_postgres": True,
+                "error": "connection timeout while reading optional details",
+            },
+            module="postgres",
+            service="postgres",
+        )
+
+    spec = ModuleAuditSpec(
+        module="postgres",
+        label="POSTGRES",
+        default_port=5432,
+        detect=detect,
+        render=lambda record: [f"{record.host}:{record.port} {record.status}"],
+    )
+    plan = AuditCommandPlan(targets_by_port={5432: ("127.0.0.1",)}, output_format="txt")
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
+
+    assert emitted == ["127.0.0.1:5432 auth_required"]
+    assert result.suppressed_records == 0
+    assert is_pre_detect_network_noise(result.typed_records[0]) is False
 
 
 def test_audit_command_runner_rejects_dict_hook_records() -> None:

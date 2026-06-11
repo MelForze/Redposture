@@ -9,7 +9,12 @@ export DOCKER_CONTEXT="${DOCKER_CONTEXT:-default}"
 OUT_DIR="${1:-/tmp/redposture_lab_matrix_$(date +%Y%m%d_%H%M%S)}"
 STATUS_FILE="${OUT_DIR}/matrix-status.tsv"
 VERIFY_SCRIPT="${ROOT_DIR}/scripts/verify_postrun.py"
-COMPOSE_FILE="${ROOT_DIR}/lab/full/docker-compose.yml"
+LAB_DIR="${REDPOSTURE_LAB_DIR:-${ROOT_DIR}/lab}"
+LAB_DOCKER_DIR="${REDPOSTURE_LAB_DOCKER_DIR:-${LAB_DIR}/full/docker}"
+if [ ! -d "${LAB_DOCKER_DIR}" ] && [ -d "${LAB_DIR}/docker" ]; then
+  LAB_DOCKER_DIR="${LAB_DIR}/docker"
+fi
+COMPOSE_FILE="${LAB_DIR}/full/docker-compose.yml"
 if [ -n "${PYTHON_BIN:-}" ]; then
   PYTHON_BIN="${PYTHON_BIN}"
 elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
@@ -23,6 +28,12 @@ EXPORTER_PORTS="7777,9100,9102,9104,9113,9114,9116,9117,9119,9121,9127,9128,9131
 mkdir -p "${OUT_DIR}"
 mkdir -p "${OUT_DIR}/logs"
 mkdir -p "${OUT_DIR}/json"
+
+if [ ! -f "${COMPOSE_FILE}" ]; then
+  echo "[error] local lab compose not found: ${COMPOSE_FILE}" >&2
+  echo "[error] set REDPOSTURE_LAB_DIR to your local lab directory" >&2
+  exit 2
+fi
 
 compose() {
   docker compose -f "${COMPOSE_FILE}" "$@"
@@ -138,23 +149,23 @@ fi
 wait_healthy_compose
 HAS_KUBE_TOKENS=1
 HAS_CONSUL_TOKENS=1
-wait_nonempty_file "${ROOT_DIR}/docker/kubeapi/output/kubeapi_tokens.env" || HAS_KUBE_TOKENS=0
-wait_nonempty_file "${ROOT_DIR}/docker/consul/output/consul_acl_tokens.env" || HAS_CONSUL_TOKENS=0
+wait_nonempty_file "${LAB_DOCKER_DIR}/kubeapi/output/kubeapi_tokens.env" || HAS_KUBE_TOKENS=0
+wait_nonempty_file "${LAB_DOCKER_DIR}/consul/output/consul_acl_tokens.env" || HAS_CONSUL_TOKENS=0
 
 CONSUL_READ_TOKEN=""
 CONSUL_MGMT_TOKEN=""
 KUBE_AUDITOR_TOKEN=""
 KUBE_ADMIN_TOKEN=""
 if [ "${HAS_CONSUL_TOKENS}" -eq 1 ]; then
-  CONSUL_READ_TOKEN="$(grep '^CONSUL_ACL_READ_TOKEN=' docker/consul/output/consul_acl_tokens.env | cut -d= -f2-)"
-  CONSUL_MGMT_TOKEN="$(grep '^CONSUL_ACL_MANAGEMENT_TOKEN=' docker/consul/output/consul_acl_tokens.env | cut -d= -f2-)"
+  CONSUL_READ_TOKEN="$(grep '^CONSUL_ACL_READ_TOKEN=' "${LAB_DOCKER_DIR}/consul/output/consul_acl_tokens.env" | cut -d= -f2-)"
+  CONSUL_MGMT_TOKEN="$(grep '^CONSUL_ACL_MANAGEMENT_TOKEN=' "${LAB_DOCKER_DIR}/consul/output/consul_acl_tokens.env" | cut -d= -f2-)"
 else
   echo "[error] consul ACL tokens are unavailable; strict matrix cannot continue" >&2
   exit 1
 fi
 if [ "${HAS_KUBE_TOKENS}" -eq 1 ]; then
-  KUBE_AUDITOR_TOKEN="$(grep '^KUBEAPI_AUDITOR_TOKEN=' docker/kubeapi/output/kubeapi_tokens.env | cut -d= -f2-)"
-  KUBE_ADMIN_TOKEN="$(grep '^KUBEAPI_ADMIN_TOKEN=' docker/kubeapi/output/kubeapi_tokens.env | cut -d= -f2-)"
+  KUBE_AUDITOR_TOKEN="$(grep '^KUBEAPI_AUDITOR_TOKEN=' "${LAB_DOCKER_DIR}/kubeapi/output/kubeapi_tokens.env" | cut -d= -f2-)"
+  KUBE_ADMIN_TOKEN="$(grep '^KUBEAPI_ADMIN_TOKEN=' "${LAB_DOCKER_DIR}/kubeapi/output/kubeapi_tokens.env" | cut -d= -f2-)"
 else
   echo "[error] kubeapi tokens are unavailable; strict matrix cannot continue" >&2
   exit 1

@@ -849,7 +849,7 @@ def test_run_etcd_stage_verbose_multi_group_uses_single_global_progress(monkeypa
     assert progress_advances == [1, 1]
 
 
-def test_run_etcd_stage_warns_when_all_targets_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_etcd_stage_suppresses_unreachable_summary_without_debug(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(etcd, "Console", _ConsoleCapture)
     monkeypatch.setattr(etcd, "collect_scan_ports", lambda *_args, **_kwargs: [2379])
@@ -867,4 +867,4 @@ def test_run_etcd_stage_warns_when_all_targets_unreachable(monkeypatch: pytest.M
     rc = etcd.run_etcd_stage(_etcd_args(), logger=object())  # type: ignore[arg-type]
     assert rc == 0
     warns = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
-    assert any("all etcd targets are unreachable" in msg for msg in warns)
+    assert not any("all etcd targets are unreachable" in msg for msg in warns)

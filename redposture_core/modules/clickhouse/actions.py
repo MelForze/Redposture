@@ -6,7 +6,6 @@ import datetime as dt
 import json
 import logging
 import re
-import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,9 +20,6 @@ from ...show_limits import (
     limit_sequence,
 )
 from ...stage_runtime import (
-    AuditHookContext,
-    AuditRecord,
-    _invoke_module_host_stage,
     merge_stage_records,
 )
 from ...utils import (
@@ -2062,42 +2058,4 @@ def _audit_clickhouse_host_with_port_fallback(
 
 
 # Typed runner boundary -----------------------------------------------------
-
-
-def record_from_mapping(payload: dict[str, Any]) -> AuditRecord:
-    """Convert module protocol payloads to the typed runtime model."""
-
-    return AuditRecord.from_mapping(payload, module="clickhouse", service="clickhouse")
-
-
-def _credential_is_anonymous(ctx: AuditHookContext) -> bool:
-    return ctx.credential.username is None and ctx.credential.password is None and ctx.credential.token is None
-
-
-def _run_host_stage(ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
-    return _invoke_module_host_stage(
-        sys.modules[__name__],
-        module="clickhouse",
-        ctx=ctx,
-        run_deep_checks=run_deep_checks,
-    )
-
-
-def detect(ctx: AuditHookContext) -> AuditRecord:
-    return _run_host_stage(ctx, run_deep_checks=False)
-
-
-def auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-    if _credential_is_anonymous(ctx) and not bool(getattr(ctx.args, "defcreds", False)):
-        return record
-    return _run_host_stage(ctx, run_deep_checks=False)
-
-
-def capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-    _ = ctx
-    return record
-
-
-def data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-    _ = record
-    return _run_host_stage(ctx, run_deep_checks=True)
+host_stage = _call_audit_clickhouse_host_with_stage_debug

@@ -10,6 +10,11 @@ OUT_DIR="${1:-/tmp/redposture_lab_matrix_seq_$(date +%Y%m%d_%H%M%S)}"
 STATUS_FILE="${OUT_DIR}/matrix-status.tsv"
 VERIFY_SCRIPT="${ROOT_DIR}/scripts/verify_postrun.py"
 MATRIX_PROFILE="${REDPOSTURE_MATRIX_PROFILE:-balanced}"
+LAB_DIR="${REDPOSTURE_LAB_DIR:-${ROOT_DIR}/lab}"
+LAB_DOCKER_DIR="${REDPOSTURE_LAB_DOCKER_DIR:-${LAB_DIR}/full/docker}"
+if [ ! -d "${LAB_DOCKER_DIR}" ] && [ -d "${LAB_DIR}/docker" ]; then
+  LAB_DOCKER_DIR="${LAB_DIR}/docker"
+fi
 case "${MATRIX_PROFILE}" in
   balanced|extended)
     ;;
@@ -30,6 +35,12 @@ EXPORTER_PORTS="7777,9100,9102,9104,9113,9114,9116,9117,9119,9121,9127,9128,9131
 
 mkdir -p "${OUT_DIR}/logs" "${OUT_DIR}/json"
 
+if [ ! -d "${LAB_DIR}/services" ]; then
+  echo "[error] local lab services directory not found: ${LAB_DIR}/services" >&2
+  echo "[error] set REDPOSTURE_LAB_DIR to your local lab directory" >&2
+  exit 2
+fi
+
 is_extended_matrix() {
   [ "${MATRIX_PROFILE}" = "extended" ]
 }
@@ -38,7 +49,12 @@ CURRENT_SERVICE=""
 compose_service() {
   local service="$1"
   shift
-  docker compose -f "${ROOT_DIR}/lab/services/${service}/docker-compose.yml" "$@"
+  local compose_file="${LAB_DIR}/services/${service}/docker-compose.yml"
+  if [ ! -f "${compose_file}" ]; then
+    echo "[error] local lab service compose not found: ${compose_file}" >&2
+    return 2
+  fi
+  docker compose -f "${compose_file}" "$@"
 }
 
 cleanup_current_service() {
@@ -242,11 +258,11 @@ run_gitlab_cases() {
 }
 
 run_consul_cases() {
-  wait_nonempty_file "${ROOT_DIR}/docker/consul/output/consul_acl_tokens.env"
+  wait_nonempty_file "${LAB_DOCKER_DIR}/consul/output/consul_acl_tokens.env"
   local consul_read_token
   local consul_mgmt_token
-  consul_read_token="$(grep '^CONSUL_ACL_READ_TOKEN=' docker/consul/output/consul_acl_tokens.env | cut -d= -f2-)"
-  consul_mgmt_token="$(grep '^CONSUL_ACL_MANAGEMENT_TOKEN=' docker/consul/output/consul_acl_tokens.env | cut -d= -f2-)"
+  consul_read_token="$(grep '^CONSUL_ACL_READ_TOKEN=' "${LAB_DOCKER_DIR}/consul/output/consul_acl_tokens.env" | cut -d= -f2-)"
+  consul_mgmt_token="$(grep '^CONSUL_ACL_MANAGEMENT_TOKEN=' "${LAB_DOCKER_DIR}/consul/output/consul_acl_tokens.env" | cut -d= -f2-)"
   if [ -z "${consul_read_token}" ] || [ -z "${consul_mgmt_token}" ]; then
     echo "[error] consul tokens are empty" >&2
     return 1
@@ -265,11 +281,11 @@ run_consul_cases() {
 }
 
 run_kubeapi_cases() {
-  wait_nonempty_file "${ROOT_DIR}/docker/kubeapi/output/kubeapi_tokens.env"
+  wait_nonempty_file "${LAB_DOCKER_DIR}/kubeapi/output/kubeapi_tokens.env"
   local kube_auditor_token
   local kube_admin_token
-  kube_auditor_token="$(grep '^KUBEAPI_AUDITOR_TOKEN=' docker/kubeapi/output/kubeapi_tokens.env | cut -d= -f2-)"
-  kube_admin_token="$(grep '^KUBEAPI_ADMIN_TOKEN=' docker/kubeapi/output/kubeapi_tokens.env | cut -d= -f2-)"
+  kube_auditor_token="$(grep '^KUBEAPI_AUDITOR_TOKEN=' "${LAB_DOCKER_DIR}/kubeapi/output/kubeapi_tokens.env" | cut -d= -f2-)"
+  kube_admin_token="$(grep '^KUBEAPI_ADMIN_TOKEN=' "${LAB_DOCKER_DIR}/kubeapi/output/kubeapi_tokens.env" | cut -d= -f2-)"
   if [ -z "${kube_auditor_token}" ] || [ -z "${kube_admin_token}" ]; then
     echo "[error] kubeapi tokens are empty" >&2
     return 1
@@ -358,7 +374,7 @@ run_docker_cases() {
   run_case docker docker_exec 0 docker -t 127.0.0.1 --port 2375 --container redposture-web --exec-cmd "id"
   run_text_case docker docker_debug_smoke 0 docker -t 127.0.0.1 --port 2375 --debug
   if is_extended_matrix; then
-    run_case docker docker_extended_tls_files_pairing_error 2 docker -t 127.0.0.1 --port 2376 --tls-cert "${ROOT_DIR}/lab/services/proxy-isolated/certs/proxy-cert.pem"
+    run_case docker docker_extended_tls_files_pairing_error 2 docker -t 127.0.0.1 --port 2376 --tls-cert "${LAB_DIR}/services/proxy-isolated/certs/proxy-cert.pem"
     run_case docker docker_extended_exec_worker 0 docker -t 127.0.0.1 --port 2375 --container redposture-worker --exec-cmd "hostname && whoami"
   fi
 }
@@ -487,12 +503,12 @@ run_proxy_isolated_cases() {
   run_case exporters proxy_exporters_socks4a 0 exporters scan -t proxy-node-exporter -p 9100 --proxy socks4a://127.0.0.1:11080
   run_case exporters proxy_exporters_socks5h 0 exporters scan -t proxy-node-exporter -p 9100 --proxy socks5h://127.0.0.1:11081
   run_case exporters proxy_exporters_http 0 exporters scan -t proxy-node-exporter -p 9100 --proxy http://127.0.0.1:18080
-  SSL_CERT_FILE="${ROOT_DIR}/lab/services/proxy-isolated/certs/proxy-ca.pem" \
+  SSL_CERT_FILE="${LAB_DIR}/services/proxy-isolated/certs/proxy-ca.pem" \
     run_case exporters proxy_exporters_https 0 exporters scan -t proxy-node-exporter -p 9100 --proxy https://127.0.0.1:18443
   run_case redis proxy_redis_socks4a 0 redis -t proxy-redis --port 6379 --proxy socks4a://127.0.0.1:11080 --show-keys 3
   run_case redis proxy_redis_socks5h 0 redis -t proxy-redis --port 6379 --proxy socks5h://127.0.0.1:11081 --show-keys 3
   run_case redis proxy_redis_http 0 redis -t proxy-redis --port 6379 --proxy http://127.0.0.1:18080 --show-keys 3
-  SSL_CERT_FILE="${ROOT_DIR}/lab/services/proxy-isolated/certs/proxy-ca.pem" \
+  SSL_CERT_FILE="${LAB_DIR}/services/proxy-isolated/certs/proxy-ca.pem" \
     run_case redis proxy_redis_https 0 redis -t proxy-redis --port 6379 --proxy https://127.0.0.1:18443 --show-keys 3
 }
 
