@@ -8,9 +8,6 @@
   <a href="https://github.com/MelForze/Redposture/actions/workflows/ci.yml">
     <img src="https://img.shields.io/github/actions/workflow/status/MelForze/Redposture/ci.yml?branch=main&style=flat-square&label=CI" alt="CI">
   </a>
-  <a href="https://github.com/MelForze/Redposture/actions/workflows/release-smoke.yml">
-    <img src="https://github.com/MelForze/Redposture/actions/workflows/release-smoke.yml/badge.svg?branch=main" alt="Release smoke">
-  </a>
   <img src="https://img.shields.io/badge/Python-3.10%2B-2b2f36?style=flat-square" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/install-pipx-2b2f36?style=flat-square" alt="Install with pipx">
   <a href="https://github.com/MelForze/Redposture/stargazers">
