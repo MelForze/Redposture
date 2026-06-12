@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+from typing import Any, cast
 
 from ..show_limits import optional_dump_count_kwargs, optional_show_count_kwargs
 
@@ -28,7 +29,7 @@ def configure_postgres_parser(
     positive_int: Callable[[str], int],
 ) -> None:
     common = postgres_parser.add_argument_group("Common")
-    add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
+    add_scan_host_flags(common, include_profiles=False)
     common.add_argument(
         "--port",
         dest="port",
@@ -52,7 +53,7 @@ def configure_postgres_parser(
         help="Postgres audit output format for stdout/file.",
     )
     add_log_flag(common)
-    add_output_flags(common, short=False)  # type: ignore[arg-type]
+    add_output_flags(common, short=False)
 
     auth = postgres_parser.add_argument_group("Database / Auth")
     discovery = postgres_parser.add_argument_group("Discovery / Dump")
@@ -148,7 +149,7 @@ def configure_postgres_parser(
         metavar="command",
         help="Try executing OS command via Postgres COPY FROM PROGRAM and print output.",
     )
-    execute_action._hide_metavar_in_help = True
+    cast(Any, execute_action)._hide_metavar_in_help = True
     exec_group.add_argument(
         "--os-read",
         dest="os_read",

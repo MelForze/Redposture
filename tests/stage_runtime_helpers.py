@@ -203,7 +203,7 @@ def patch_runner_for_legacy_target_fake(monkeypatch, module: str, fake) -> None:
     from redposture_core import stage_runtime
     from redposture_core.stage_runtime import AuditCommandResult
 
-    def _run_plan(self, plan):  # type: ignore[no-untyped-def]
+    def _run_plan(self, plan):
         has_file_credentials = any(credential.source == "file" for credential in plan.credential_runs)
         skip_anonymous_file_detect = module == "redis" and has_file_credentials
         work_items = [

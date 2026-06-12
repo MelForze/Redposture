@@ -278,12 +278,12 @@ def test_audit_qdrant_host_open_access_dump_and_ssrf(monkeypatch: pytest.MonkeyP
 
 
 def test_audit_qdrant_host_uses_api_key_when_anonymous_is_denied(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_root(*_args, headers=None, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_root(*_args, headers=None, **_kwargs):
         if headers is None:
             return 401, {"status": {"error": "forbidden"}}, None
         return 200, {"version": "1.16.0"}, None
 
-    def fake_collections(*_args, headers=None, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_collections(*_args, headers=None, **_kwargs):
         if headers is None:
             return 403, {"status": {"error": "forbidden"}}, None
         return 200, {"result": {"collections": [{"name": "secret"}]}}, None
@@ -1048,7 +1048,7 @@ def test_run_qdrant_stage_multi_instance_uses_single_global_progress(monkeypatch
 
     calls: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         calls.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))

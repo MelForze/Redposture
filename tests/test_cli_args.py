@@ -39,10 +39,10 @@ def test_help_color_is_disabled_when_supported() -> None:
         return
 
     assert parser_color is False
-    root_action = parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
+    root_action = parser._subparsers._group_actions[0]
     exporters_parser = root_action.choices["exporters"]
     assert getattr(exporters_parser, "color", None) is False
-    exporters_action = exporters_parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
+    exporters_action = exporters_parser._subparsers._group_actions[0]
     scan_parser = exporters_action.choices["scan"]
     assert getattr(scan_parser, "color", None) is False
 
@@ -65,7 +65,7 @@ def test_exporters_listen_parser_builder_wires_shared_flags() -> None:
 
 def _command_help(command: str) -> str:
     parser = build_parser()
-    root_action = parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
+    root_action = parser._subparsers._group_actions[0]
     command_parser = root_action.choices[command]
     return command_parser.format_help()
 
@@ -224,9 +224,9 @@ def test_module_help_has_grouped_sections_in_stable_order(command: str, sections
 
 def test_exporters_subcommands_help_has_grouped_sections() -> None:
     parser = build_parser()
-    root_action = parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
+    root_action = parser._subparsers._group_actions[0]
     exporters_parser = root_action.choices["exporters"]
-    exporters_action = exporters_parser._subparsers._group_actions[0]  # type: ignore[attr-defined]
+    exporters_action = exporters_parser._subparsers._group_actions[0]
 
     scan_help = exporters_action.choices["scan"].format_help()
     collect_help = exporters_action.choices["collect"].format_help()

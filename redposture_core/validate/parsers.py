@@ -1080,11 +1080,11 @@ def _extract_vulnerable_login_pairs_from_text(text: str) -> list[tuple[str, str]
         password_text = _clean_value_text(password)
         if not password_text:
             continue
-        key = (user_text, password_text)
-        if key in seen:
+        pair_key = (user_text, password_text)
+        if pair_key in seen:
             continue
-        seen.add(key)
-        result.append(key)
+        seen.add(pair_key)
+        result.append(pair_key)
     return result
 
 
@@ -1403,7 +1403,7 @@ def _scan_body_hits(
 
     # Fallback to line-by-line text heuristics for truncated/invalid JSON and plaintext outputs.
     line_mode = input_format
-    hits: list[dict[str, str | int]] = []
+    hits = []
     for line_no, raw_line in enumerate(lines, start=1):
         reasons = _detect_line_hits(
             raw_line,

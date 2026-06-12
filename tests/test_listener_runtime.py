@@ -62,7 +62,7 @@ def test_parse_services_normalizes_and_validates() -> None:
 
 def test_build_bind_error_distinguishes_address_in_use() -> None:
     in_use = OSError("Address already in use")
-    in_use.errno = 48  # type: ignore[attr-defined]
+    in_use.errno = 48
     assert (
         _build_bind_error("postgres", "127.0.0.1", 5432, in_use) == "postgres listener 127.0.0.1:5432 is already in use"
     )

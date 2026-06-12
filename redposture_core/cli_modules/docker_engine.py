@@ -18,7 +18,7 @@ def configure_docker_parser(
     port_type: Callable[[str], int],
 ) -> None:
     common = parser.add_argument_group("Common")
-    add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
+    add_scan_host_flags(common, include_profiles=False)
     common.add_argument(
         "--port",
         dest="port",
@@ -40,7 +40,7 @@ def configure_docker_parser(
         help="Docker audit output format for stdout/file.",
     )
     add_log_flag(common)
-    add_output_flags(common, short=False)  # type: ignore[arg-type]
+    add_output_flags(common, short=False)
 
     tls = parser.add_argument_group("TLS")
     tls.add_argument("--insecure", action="store_true", help="Disable Docker API TLS certificate verification.")

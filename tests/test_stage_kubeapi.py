@@ -226,8 +226,8 @@ def test_format_detect_record_and_status_summary() -> None:
     assert "err=denied" in summary_token_fail
 
 
-def test_audit_kubeapi_targets_json_output_is_machine_readable(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
-    def fake_audit_kubeapi_host(*args, **kwargs):  # type: ignore[no-untyped-def]
+def test_audit_kubeapi_targets_json_output_is_machine_readable(monkeypatch, tmp_path) -> None:
+    def fake_audit_kubeapi_host(*args, **kwargs):
         _ = (args, kwargs)
         return {
             "timestamp": "2026-03-26T18:01:08Z",
@@ -297,7 +297,7 @@ def test_audit_kubeapi_host_open_no_auth_with_tls_fallback_and_exec(monkeypatch:
         token: str | None = None,
         username: str | None = None,
         password: str | None = None,
-    ):  # type: ignore[no-untyped-def]
+    ):
         _ = (use_https, ca_file, token, username, password)
         if not insecure:
             return 0, None, {}, "tls verification failed"
@@ -379,7 +379,7 @@ def test_audit_kubeapi_host_uses_token_when_anonymous_is_denied(monkeypatch: pyt
         ),
     )
 
-    def fake_list_namespaces(*_args, token=None, username=None, password=None, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_list_namespaces(*_args, token=None, username=None, password=None, **_kwargs):
         _ = (username, password)
         if token:
             return ["default", "kube-system"], 200, None
@@ -480,7 +480,7 @@ def test_audit_kubeapi_host_basic_auth_failure_and_exec_argument_errors(monkeypa
         ),
     )
 
-    def fake_list_namespaces(*_args, token=None, username=None, password=None, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_list_namespaces(*_args, token=None, username=None, password=None, **_kwargs):
         if token or username or password:
             return None, 403, "forbidden"
         return None, 403, "authentication required"
@@ -595,7 +595,7 @@ def test_kube_list_helpers_and_secret_decoding(monkeypatch: pytest.MonkeyPatch) 
         token: str | None = None,
         username: str | None = None,
         password: str | None = None,
-    ):  # type: ignore[no-untyped-def]
+    ):
         _ = (use_https, insecure, ca_file, token, username, password)
         return pages[path]
 
@@ -670,7 +670,7 @@ def test_kube_list_helpers_and_secret_decoding(monkeypatch: pytest.MonkeyPatch) 
     ]
 
 
-def test_format_detail_records_and_target_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_format_detail_records_and_target_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     record = {
         "host": "127.0.0.1",
         "port": 16443,
@@ -702,7 +702,7 @@ def test_format_detail_records_and_target_dispatch(monkeypatch: pytest.MonkeyPat
     assert "[-] exec failed (exit:126) err=exit 126" in joined
     assert "[*] STDERR" in joined
 
-    def fake_audit_kubeapi_host(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_kubeapi_host(*args, **kwargs):
         _ = (args, kwargs)
         return {
             "timestamp": "2026-03-27T00:00:00Z",
@@ -780,7 +780,7 @@ def test_run_kubeapi_stage_validation_errors(
 ) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kube, "Console", _ConsoleCapture)
-    rc = kube.run_kubeapi_stage(_kube_args(**overrides), logger=object())  # type: ignore[arg-type]
+    rc = kube.run_kubeapi_stage(_kube_args(**overrides), logger=object())
     assert rc == 2
     assert any(expected_message in msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "error")
 
@@ -796,7 +796,7 @@ def test_run_kubeapi_stage_warns_on_token_override_and_all_unreachable(monkeypat
     )
     captured: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         captured.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -805,7 +805,7 @@ def test_run_kubeapi_stage_warns_on_token_override_and_all_unreachable(monkeypat
     patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
     rc = kube.run_kubeapi_stage(
         _kube_args(token="tok", username="alice", password="secret"),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     assert captured and captured[0]["username"] is None and captured[0]["password"] is None
@@ -826,7 +826,7 @@ def test_run_kubeapi_stage_debug_flow_passes_logger_and_append_output(monkeypatc
 
     captured: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         captured.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -836,7 +836,7 @@ def test_run_kubeapi_stage_debug_flow_passes_logger_and_append_output(monkeypatc
     patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
     rc = kube.run_kubeapi_stage(
         _kube_args(debug=True, output="kube.json", output_format="json", namespaces=True, pod="api", exec_command="id"),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     assert len(captured) == 2
@@ -887,14 +887,14 @@ def test_run_kubeapi_stage_multi_group_uses_single_global_progress(monkeypatch: 
 
     captured: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         captured.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
         return (len(kwargs["hosts"]), 1, 0)
 
     patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
-    rc = kube.run_kubeapi_stage(_kube_args(), logger=object())  # type: ignore[arg-type]
+    rc = kube.run_kubeapi_stage(_kube_args(), logger=object())
     assert rc == 0
     assert len(captured) == 2
     assert all(call["show_progress"] is False for call in captured)
@@ -922,7 +922,7 @@ def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.Monk
         ),
     )
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         kwargs["emit_line"]("KUBEAPI\t127.0.0.1\t16443\tpayload only")
         return 1, 1, 0
 
@@ -937,7 +937,7 @@ def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.Monk
             targets=None,
             hosts_file="hosts.txt",
         ),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
@@ -948,7 +948,7 @@ def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.Monk
     patch_runner_for_legacy_target_fake(
         monkeypatch, "kubeapi", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
     )
-    rc = kube.run_kubeapi_stage(_kube_args(output="kube.json"), logger=object())  # type: ignore[arg-type]
+    rc = kube.run_kubeapi_stage(_kube_args(output="kube.json"), logger=object())
     assert rc == 2
     assert any(
         "failed to process kubeapi output: disk full" in msg
@@ -1146,7 +1146,7 @@ def test_http_request_and_ws_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None
         def __enter__(self) -> _Resp:
             return self
 
-        def __exit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+        def __exit__(self, exc_type, exc, tb) -> None:
             _ = (exc_type, exc, tb)
             return None
 
@@ -1627,7 +1627,7 @@ def test_kube_status_summary_detail_and_renderer_branches() -> None:
     assert console.lines
 
 
-def test_kube_run_stage_and_audit_output_branches(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_kube_run_stage_and_audit_output_branches(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     class _Console:
         instances: list[_Console] = []
 

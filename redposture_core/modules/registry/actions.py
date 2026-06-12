@@ -255,7 +255,7 @@ def _fetch_registry_catalog(
                     continue
                 seen.add(repo)
                 repositories.append(repo)
-        next_path = _parse_link_next(resp_headers.get("link"))
+        next_path = _parse_link_next(resp_headers.get("link")) or ""
 
     repositories.sort()
     return repositories, None
@@ -2536,11 +2536,11 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                 lines.append(f"{prefix} [-] {probe_error}")
             if not suppress_vendor_inventory and gitlab_repository_details:
                 lines.append(f"{prefix} [*] GitLab Repositories")
-                for item in gitlab_repository_details:
-                    repo_name = str(item.get("repository") or "").strip() or "-"
-                    tags_count = item.get("tags_count")
-                    latest_tag = str(item.get("latest_tag") or "").strip() or "-"
-                    last_pushed = str(item.get("last_pushed") or "").strip() or "-"
+                for gitlab_repo in gitlab_repository_details:
+                    repo_name = str(gitlab_repo.get("repository") or "").strip() or "-"
+                    tags_count = gitlab_repo.get("tags_count")
+                    latest_tag = str(gitlab_repo.get("latest_tag") or "").strip() or "-"
+                    last_pushed = str(gitlab_repo.get("last_pushed") or "").strip() or "-"
                     tags_count_text = str(tags_count) if isinstance(tags_count, int) else "-"
                     lines.append(
                         f"{prefix} {repo_name} (tags:{tags_count_text}) (latest:{latest_tag}) (last pushed:{last_pushed})"
@@ -2617,12 +2617,12 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         if nexus:
             if not suppress_vendor_inventory and nexus_repository_details:
                 lines.append(f"{prefix} [*] Nexus Repositories")
-                for item in nexus_repository_details:
-                    repo_name = str(item.get("name") or "").strip() or "-"
-                    repo_type = str(item.get("type") or "").strip() or "-"
-                    online_raw = item.get("online")
+                for nexus_repo in nexus_repository_details:
+                    repo_name = str(nexus_repo.get("name") or "").strip() or "-"
+                    repo_type = str(nexus_repo.get("type") or "").strip() or "-"
+                    online_raw = nexus_repo.get("online")
                     online_text = "True" if online_raw is True else "False" if online_raw is False else "unknown"
-                    components_raw = item.get("components")
+                    components_raw = nexus_repo.get("components")
                     components_text = str(components_raw) if isinstance(components_raw, int) else "-"
                     lines.append(
                         f"{prefix} {repo_name} (type:{repo_type}) (online:{online_text}) (components:{components_text})"
@@ -2662,36 +2662,36 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         if inspection_error:
             lines.append(f"{prefix} [-] {inspection_error}")
         if inspections:
-            for item in inspections:
-                image_name = str(item.get("image") or image_raw or "-")
-                error = str(item.get("error") or "").strip()
+            for inspection in inspections:
+                image_name = str(inspection.get("image") or image_raw or "-")
+                error = str(inspection.get("error") or "").strip()
                 if error:
                     lines.append(f"{prefix} [-] Inspect {image_name} err={error}")
                     continue
 
-                layer_count = int(item.get("layer_count") or 0)
-                total_size = _human_bytes(int(item.get("total_size") or 0))
+                layer_count = int(inspection.get("layer_count") or 0)
+                total_size = _human_bytes(int(inspection.get("total_size") or 0))
                 lines.append(f"{prefix} [*] Inspect {image_name} (layers:{layer_count}) (size:{total_size})")
 
-                env_values = item.get("env")
+                env_values = inspection.get("env")
                 if isinstance(env_values, list):
                     lines.append(f"{prefix} [*] ENV")
                     for env_item in env_values:
                         lines.append(f"{prefix} {env_item}")
 
-                exposed_ports = item.get("exposed_ports")
+                exposed_ports = inspection.get("exposed_ports")
                 if isinstance(exposed_ports, list):
                     lines.append(f"{prefix} [*] Exposed Ports")
                     for port_item in exposed_ports:
                         lines.append(f"{prefix} {port_item}")
 
-                labels = item.get("labels")
+                labels = inspection.get("labels")
                 if isinstance(labels, list):
                     lines.append(f"{prefix} [*] Labels")
                     for label_item in labels:
                         lines.append(f"{prefix} {label_item}")
 
-                cmd_items = item.get("cmd")
+                cmd_items = inspection.get("cmd")
                 if isinstance(cmd_items, list):
                     lines.append(f"{prefix} [*] CMD")
                     if cmd_items:
@@ -2699,13 +2699,13 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     else:
                         lines.append(f"{prefix} <empty>")
 
-                history = item.get("history")
+                history = inspection.get("history")
                 if isinstance(history, list):
                     lines.append(f"{prefix} [*] History")
                     for history_item in history:
                         lines.append(f"{prefix} {history_item}")
 
-                suspicious = item.get("suspicious")
+                suspicious = inspection.get("suspicious")
                 if isinstance(suspicious, list) and suspicious:
                     lines.append(f"{prefix} [!] Possible Secret Indicators")
                     for suspicious_item in suspicious:

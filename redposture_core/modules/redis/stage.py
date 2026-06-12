@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...audit_models import AuditRecord
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
-    AuditCommandRunner,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    render_record_with_module,
+    run_basic_host_audit,
 )
 from . import actions, policy, render
 
@@ -24,49 +22,27 @@ def build_redis_plan(args: Any) -> AuditCommandPlan:
 
 
 def build_redis_spec(args: Any) -> ModuleAuditSpec:
-    def _render(record: AuditRecord) -> list[str]:
-        return render_record_with_module(
-            render,
-            record,
-            str(getattr(args, "output_format", "txt") or "txt"),
-            debug=bool(getattr(args, "debug", False)),
-        )
-
     return ModuleAuditSpec(
         module="redis",
         label="REDIS",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
-        render=_render,
+        render_module=render,
+        colorize=render._render_colored_redis_line,
     )
 
 
 def run_redis_stage(args: Any, logger: Any) -> int:
     console = Console(debug=bool(getattr(args, "debug", False)))
-    validation_rc = policy.validate_args(args, console)
-    if validation_rc is not None:
-        return int(validation_rc)
-    try:
-        plan = build_redis_plan(args)
-    except ValueError as exc:
-        console.error(str(exc))
-        return 2
-    if bool(getattr(args, "debug", False)) and not getattr(args, "debug_emit", None):
-        args.debug_emit = console.info
-    if bool(getattr(args, "debug", False)):
-        suffix = f" format={getattr(args, 'output_format', 'txt') or 'txt'}"
-        if getattr(args, "output", None):
-            suffix += f" output={args.output}"
-        console.info("redis audit started:" + suffix)
-    runner = AuditCommandRunner(args=args, spec=build_redis_spec(args), logger=logger, emit_line=console.plain)
-    try:
-        result = runner.run_plan(plan)
-    except OSError as exc:
-        console.error(f"failed to process redis output: {exc}")
-        return 2
-    if bool(getattr(args, "debug", False)) and result.detected_count == 0 and hasattr(console, "warn"):
-        console.warn("all redis targets are unreachable")
-    return 0
+    return run_basic_host_audit(
+        args,
+        logger,
+        console=console,
+        label="REDIS",
+        validate=policy.validate_args,
+        build_plan=build_redis_plan,
+        build_spec=build_redis_spec,
+    )
 
 
 __all__ = ["build_redis_plan", "build_redis_spec", "run_redis_stage"]

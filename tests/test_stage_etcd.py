@@ -193,7 +193,7 @@ def test_is_suppressed_fail_record_for_any_fail_status() -> None:
     assert _is_suppressed_fail_record({"status": "auth_required", "error": "dns lookup failed"}) is False
 
 
-def test_audit_etcd_host_open_v2_collects_keys_and_query(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_etcd_host_open_v2_collects_keys_and_query(monkeypatch) -> None:
     def fake_http_json_request(
         host: str,
         port: int,
@@ -232,7 +232,7 @@ def test_audit_etcd_host_open_v2_collects_keys_and_query(monkeypatch) -> None:  
     assert record["query_key_value"] == "/a:1"
 
 
-def test_audit_etcd_host_v3_auth_required_and_unknown_auth(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_etcd_host_v3_auth_required_and_unknown_auth(monkeypatch) -> None:
     auth_required_calls: list[str] = []
 
     def fake_auth_required(
@@ -304,7 +304,7 @@ def test_audit_etcd_host_v3_auth_required_and_unknown_auth(monkeypatch) -> None:
     assert "/v3/kv/range returned status 500" in str(unknown_record["error"])
 
 
-def test_audit_etcd_host_v3_range_probe_uses_valid_all_range_payload(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_etcd_host_v3_range_probe_uses_valid_all_range_payload(monkeypatch) -> None:
     seen_payloads: list[dict[str, object] | None] = []
 
     def fake_request(
@@ -347,7 +347,7 @@ def test_audit_etcd_host_v3_range_probe_uses_valid_all_range_payload(monkeypatch
     assert record["key_count"] == 8
 
 
-def test_audit_etcd_host_marks_non_etcd_and_retries_failures(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_etcd_host_marks_non_etcd_and_retries_failures(monkeypatch) -> None:
     def fake_not_etcd(
         host: str,
         port: int,
@@ -409,7 +409,7 @@ def test_audit_etcd_host_marks_non_etcd_and_retries_failures(monkeypatch) -> Non
     assert failed_record["error"] == "connection timeout"
 
 
-def test_audit_etcd_targets_emits_detect_status_and_key_lines(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_etcd_targets_emits_detect_status_and_key_lines(monkeypatch) -> None:
     def fake_audit(
         host: str,
         port: int,
@@ -466,7 +466,7 @@ def test_audit_etcd_targets_emits_detect_status_and_key_lines(monkeypatch) -> No
     assert any("[*] Dump Keys" in line for line in lines)
 
 
-def test_call_audit_etcd_host_with_stage_debug_adds_stage_telemetry(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_call_audit_etcd_host_with_stage_debug_adds_stage_telemetry(monkeypatch) -> None:
     def fake_audit(*_args, **_kwargs):
         return {
             "timestamp": "2026-03-27T00:00:00Z",
@@ -497,7 +497,7 @@ def test_call_audit_etcd_host_with_stage_debug_adds_stage_telemetry(monkeypatch)
     assert any("stage_trace stage_name=detect_protocol" in line for line in debug_lines)
 
 
-def test_audit_etcd_targets_emits_two_pass_debug_markers(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_etcd_targets_emits_two_pass_debug_markers(monkeypatch) -> None:
     def fake_stage_call(
         host: str,
         port: int,
@@ -737,7 +737,7 @@ def test_run_etcd_stage_validation_paths(
 ) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(etcd, "Console", _ConsoleCapture)
-    rc = etcd.run_etcd_stage(_etcd_args(**overrides), logger=object())  # type: ignore[arg-type]
+    rc = etcd.run_etcd_stage(_etcd_args(**overrides), logger=object())
     assert rc == 2
     assert any(expected in msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "error")
 
@@ -745,7 +745,7 @@ def test_run_etcd_stage_validation_paths(
 def test_run_etcd_stage_rejects_https_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(etcd, "Console", _ConsoleCapture)
-    rc = etcd.run_etcd_stage(_etcd_args(targets="https://127.0.0.1:2379"), logger=object())  # type: ignore[arg-type]
+    rc = etcd.run_etcd_stage(_etcd_args(targets="https://127.0.0.1:2379"), logger=object())
     assert rc == 2
     assert any(
         "etcd accepts only http:// URL targets for -t/--targets" in msg
@@ -774,7 +774,7 @@ def test_run_etcd_stage_debug_flow_uses_single_global_progress(monkeypatch: pyte
 
     calls: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         calls.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -782,7 +782,7 @@ def test_run_etcd_stage_debug_flow_uses_single_global_progress(monkeypatch: pyte
         return (1, 1, 0, 0)
 
     patch_runner_for_legacy_target_fake(monkeypatch, "etcd", fake_audit_targets)
-    rc = etcd.run_etcd_stage(_etcd_args(debug=True), logger=object())  # type: ignore[arg-type]
+    rc = etcd.run_etcd_stage(_etcd_args(debug=True), logger=object())
     assert rc == 0
     assert len(calls) == 2
     assert calls[0]["show_progress"] is False
@@ -812,7 +812,7 @@ def test_run_etcd_stage_verbose_multi_group_uses_single_global_progress(monkeypa
 
     calls: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         calls.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -841,7 +841,7 @@ def test_run_etcd_stage_verbose_multi_group_uses_single_global_progress(monkeypa
         lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
     )
 
-    rc = etcd.run_etcd_stage(_etcd_args(show_keys=True), logger=object())  # type: ignore[arg-type]
+    rc = etcd.run_etcd_stage(_etcd_args(show_keys=True), logger=object())
     assert rc == 0
     assert len(calls) == 2
     assert [bool(call["show_progress"]) for call in calls] == [False, False]
@@ -864,7 +864,7 @@ def test_run_etcd_stage_suppresses_unreachable_summary_without_debug(monkeypatch
         lambda _specs, _ports, include_scheme_in_key=False: [SimpleNamespace(hosts=["127.0.0.1"], port=2379)],
     )
     patch_runner_for_legacy_target_fake(monkeypatch, "etcd", lambda **_kwargs: (1, 0, 0, 1))
-    rc = etcd.run_etcd_stage(_etcd_args(), logger=object())  # type: ignore[arg-type]
+    rc = etcd.run_etcd_stage(_etcd_args(), logger=object())
     assert rc == 0
     warns = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
     assert not any("all etcd targets are unreachable" in msg for msg in warns)

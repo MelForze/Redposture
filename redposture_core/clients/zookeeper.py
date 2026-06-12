@@ -644,7 +644,7 @@ def _enumerate_znodes_parallel(
                 enum_error = f"getChildren failed for {parent}: {item_error}"
                 break
 
-            err = int(item.get("err")) if item.get("err") is not None else _ZK_ERR_OK
+            err = int(err_raw) if (err_raw := item.get("err")) is not None else _ZK_ERR_OK
             children = item.get("children")
             stat = item.get("stat")
             parent_meta = listed_meta.get(parent) if collect_paths else None

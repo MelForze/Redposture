@@ -141,7 +141,7 @@ def test_proxmox_collection_and_secret_helpers_cover_common_paths() -> None:
     assert _looks_like_cloud_init_secret_blob(cloud_init) is True
 
 
-def test_audit_proxmox_collects_credential_hits(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_collects_credential_hits(monkeypatch) -> None:
     def fake_request(
         _host: str,
         _port: int,
@@ -232,7 +232,7 @@ def test_audit_proxmox_collects_credential_hits(monkeypatch) -> None:  # type: i
     assert any("password" in str(item.get("reason", "")).lower() for item in findings if isinstance(item, dict))
 
 
-def test_audit_proxmox_add_user_success(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_add_user_success(monkeypatch) -> None:
     created_forms: list[dict[str, str]] = []
     acl_forms: list[dict[str, str]] = []
 
@@ -303,7 +303,7 @@ def test_audit_proxmox_add_user_success(monkeypatch) -> None:  # type: ignore[no
     assert record.get("add_user_privileges_error") is None
 
 
-def test_audit_proxmox_add_user_shows_error_when_creation_fails(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_add_user_shows_error_when_creation_fails(monkeypatch) -> None:
     def fake_request(
         _host: str,
         _port: int,
@@ -393,7 +393,7 @@ def test_format_add_user_detail_records_warns_when_privileges_not_granted() -> N
     ]
 
 
-def test_audit_proxmox_add_user_reports_acl_grant_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_add_user_reports_acl_grant_error(monkeypatch) -> None:
     def fake_request(
         _host: str,
         _port: int,
@@ -447,7 +447,7 @@ def test_audit_proxmox_add_user_reports_acl_grant_error(monkeypatch) -> None:  #
     assert "permission" in str(record.get("add_user_privileges_error") or "").lower()
 
 
-def test_audit_proxmox_marks_auth_failed_on_401(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_marks_auth_failed_on_401(monkeypatch) -> None:
     def fake_request(*_args, **_kwargs):
         return 401, b'{"errors":"permission denied"}', {}, None
 
@@ -468,7 +468,7 @@ def test_audit_proxmox_marks_auth_failed_on_401(monkeypatch) -> None:  # type: i
     assert record["is_proxmox"] is True
 
 
-def test_audit_proxmox_marks_insufficient_privileges_on_403(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_marks_insufficient_privileges_on_403(monkeypatch) -> None:
     def fake_request(
         _host: str,
         _port: int,
@@ -512,7 +512,7 @@ def test_audit_proxmox_marks_insufficient_privileges_on_403(monkeypatch) -> None
     assert "permission" in str(record.get("error") or "").lower()
 
 
-def test_audit_proxmox_marks_insufficient_privileges_on_401_permission_message(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_marks_insufficient_privileges_on_401_permission_message(monkeypatch) -> None:
     def fake_request(
         _host: str,
         _port: int,
@@ -549,7 +549,7 @@ def test_audit_proxmox_marks_insufficient_privileges_on_401_permission_message(m
     assert record["is_proxmox"] is True
 
 
-def test_audit_proxmox_returns_fail_on_network_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_returns_fail_on_network_error(monkeypatch) -> None:
     def fake_request(*_args, **_kwargs):
         return 0, b"", {}, "connection refused (service is not listening on target port)"
 
@@ -573,7 +573,7 @@ def test_audit_proxmox_returns_fail_on_network_error(monkeypatch) -> None:  # ty
     assert record["is_proxmox"] is False
 
 
-def test_audit_proxmox_skips_credential_discovery_by_default(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_skips_credential_discovery_by_default(monkeypatch) -> None:
     requested_paths: list[str] = []
 
     def fake_request(
@@ -618,7 +618,7 @@ def test_audit_proxmox_skips_credential_discovery_by_default(monkeypatch) -> Non
     assert int(record.get("credential_hits") or 0) == 0
 
 
-def test_audit_proxmox_skips_discovery_crawl_when_caps_are_false(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_skips_discovery_crawl_when_caps_are_false(monkeypatch) -> None:
     requested_paths: list[str] = []
 
     def fake_request(
@@ -669,7 +669,7 @@ def test_audit_proxmox_skips_discovery_crawl_when_caps_are_false(monkeypatch) ->
     assert int(record.get("credential_hits") or 0) == 0
 
 
-def test_audit_proxmox_stream_callbacks_receive_urls_and_findings(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_stream_callbacks_receive_urls_and_findings(monkeypatch) -> None:
     def fake_request(
         _host: str,
         _port: int,
@@ -735,7 +735,7 @@ def test_audit_proxmox_stream_callbacks_receive_urls_and_findings(monkeypatch) -
     assert any("password" in str(item.get("reason") or "").lower() for item in streamed_findings)
 
 
-def test_audit_proxmox_denylist_ignores_csrfpreventiontoken(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_denylist_ignores_csrfpreventiontoken(monkeypatch) -> None:
     def fake_request(
         _host: str,
         _port: int,
@@ -782,7 +782,7 @@ def test_audit_proxmox_denylist_ignores_csrfpreventiontoken(monkeypatch) -> None
     assert not any("csrfpreventiontoken" in str(item.get("reason") or "").lower() for item in findings)
 
 
-def test_audit_proxmox_detects_uri_jwt_and_base64_cloud_init(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_detects_uri_jwt_and_base64_cloud_init(monkeypatch) -> None:
     cloud_init = "#cloud-config\nchpasswd:\n  list: |\n    root:SuperSecret2026!\n  expire: false\n"
     cloud_init_b64 = base64.b64encode(cloud_init.encode("utf-8")).decode("ascii")
 
@@ -1003,7 +1003,7 @@ def test_stream_proxmox_status_emits_detect_once_and_can_suppress_fail_line() ->
     assert not any("connection failed" in line for line in lines)
 
 
-def test_audit_proxmox_targets_streams_discovery_and_suppresses_duplicate_status(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_targets_streams_discovery_and_suppresses_duplicate_status(monkeypatch) -> None:
     def fake_audit(
         host: str,
         port: int,
@@ -1088,7 +1088,7 @@ def test_audit_proxmox_targets_streams_discovery_and_suppresses_duplicate_status
     assert any("credential candidate reason=text_password" in line for line in lines)
 
 
-def test_audit_proxmox_targets_can_suppress_fail_status_lines(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_targets_can_suppress_fail_status_lines(monkeypatch) -> None:
     def fake_audit(*_args, **_kwargs):
         return {
             "timestamp": "2026-03-27T00:00:00Z",
@@ -1135,7 +1135,7 @@ def test_audit_proxmox_targets_can_suppress_fail_status_lines(monkeypatch) -> No
     assert lines == []
 
 
-def test_audit_proxmox_targets_emits_stage_debug_markers(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_targets_emits_stage_debug_markers(monkeypatch) -> None:
     calls: list[tuple[str, bool, bool, bool, str | None]] = []
 
     def fake_audit(
@@ -1235,7 +1235,7 @@ def test_audit_proxmox_targets_emits_stage_debug_markers(monkeypatch) -> None:  
     assert any("pass=2 deep complete processed=1" in line for line in debug_lines)
 
 
-def test_audit_proxmox_unexpected_http_marks_not_detected(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_proxmox_unexpected_http_marks_not_detected(monkeypatch) -> None:
     def fake_request(*_args, **_kwargs):
         return 500, b'{"errors":"internal"}', {}, None
 
@@ -1271,7 +1271,7 @@ def test_proxmox_error_helpers_cover_tls_and_transport_cases() -> None:
     assert _is_connection_timeout_error("connection timeout") is True
 
 
-def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> None:
     class _FakeConsole:
         def __init__(self, debug: bool = False) -> None:
             self.debug = debug
@@ -1352,7 +1352,7 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
     assert any("proxmox audit started:" in item for item in fake_console.infos)
 
 
-def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:
     class _FakeConsole:
         def __init__(self, debug: bool = False) -> None:
             self.debug = debug
@@ -1388,7 +1388,7 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None: 
 
     calls: list[dict[str, object]] = []
 
-    def fake_audit_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(*_args, **kwargs):
         calls.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -1430,7 +1430,7 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None: 
     assert [(call["username"], call["password"], call["defcreds"]) for call in calls] == [("root@pam", "proxmox", True)]
 
 
-def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatch) -> None:
     class _FakeConsole:
         def __init__(self, debug: bool = False) -> None:
             self.debug = debug
@@ -1473,7 +1473,7 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
 
     calls: list[dict[str, object]] = []
 
-    def fake_audit_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(*_args, **kwargs):
         calls.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -1531,7 +1531,7 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
     assert progress_advances == [1, 1, 1]
 
 
-def test_proxmox_request_once_and_retry_paths(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_proxmox_request_once_and_retry_paths(monkeypatch) -> None:
     proxy = ProxyConfig(
         scheme="http",
         host="127.0.0.1",

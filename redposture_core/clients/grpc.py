@@ -719,7 +719,7 @@ def _extract_descriptors(descriptor_bytes: list[bytes]) -> tuple[list[dict[str, 
             if not service_name:
                 continue
             full_service = f"{package_name}.{service_name}" if package_name else service_name
-            service_entry = {
+            service_entry: dict[str, Any] = {
                 "service": full_service,
                 "methods": [],
             }
@@ -850,7 +850,7 @@ def _compile_proto_files(proto_files: list[str], proto_paths: list[str]) -> list
         )
         argv.extend(resolved_proto_files)
         try:
-            from grpc_tools import protoc  # type: ignore[import-not-found]
+            from grpc_tools import protoc
 
             rc = int(protoc.main(argv))
             if rc != 0:
@@ -979,6 +979,7 @@ def _invoke_unary_method(
         request_msg = input_cls()
         json_format.ParseDict(request_json, request_msg)
         payload = request_msg.SerializeToString()
+        call: _GrpcCallResult | _GrpcWebCallResult
         if protocol_flavor == "grpc-web":
             call = _grpc_web_call(
                 host,

@@ -120,7 +120,7 @@ def test_zkclient_require_sock_and_next_xid() -> None:
 
 def test_zkclient_request_with_xid_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 0.5)
-    client.sock = object()  # type: ignore[assignment]
+    client.sock = object()
     monkeypatch.setattr("redposture_core.clients.zookeeper._send_frame", lambda *_a, **_k: None)
     monkeypatch.setattr("redposture_core.clients.zookeeper._recv_frame", lambda *_a, **_k: b"\x00" * 15)
     with pytest.raises(ValueError):
@@ -178,7 +178,7 @@ def test_zkclient_close_ignores_send_and_close_errors(monkeypatch: pytest.Monkey
             raise OSError("close failed")
 
     client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 1.0)
-    client.sock = _BadSocket()  # type: ignore[assignment]
+    client.sock = _BadSocket()
     client.close()
     assert client.sock is None
 
@@ -320,7 +320,7 @@ def test_enumerate_znodes_handles_noauth_and_truncation() -> None:
                 return [], _ZK_ERR_OK, None
             return [], _ZK_ERR_NONODE, None
 
-    nodes, total_count, truncated, meta, error = _enumerate_znodes(_FakeClient(), 2)  # type: ignore[arg-type]
+    nodes, total_count, truncated, meta, error = _enumerate_znodes(_FakeClient(), 2)
     assert nodes == ["/brokers", "/brokers/ids"]
     assert total_count == 3
     assert truncated is True
@@ -341,7 +341,7 @@ def test_enumerate_znodes_count_only_mode_skips_path_collection() -> None:
                 return [], _ZK_ERR_OK, None
             return [], _ZK_ERR_NONODE, None
 
-    nodes, total_count, truncated, meta, error = _enumerate_znodes(  # type: ignore[arg-type]
+    nodes, total_count, truncated, meta, error = _enumerate_znodes(
         _FakeClient(),
         2,
         collect_paths=False,
@@ -443,7 +443,7 @@ def test_audit_host_uses_count_only_enumeration_when_details_not_requested(monke
     assert record["znode_details"] is None
 
 
-def test_audit_zookeeper_suppresses_unexpected_eof_when_suppression_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_zookeeper_suppresses_unexpected_eof_when_suppression_enabled(monkeypatch) -> None:
     def fake_audit(*_args, **_kwargs):
         return {
             "timestamp": "2026-03-02T00:00:00Z",
@@ -762,7 +762,7 @@ def test_audit_zookeeper_live_debug_streaming_avoids_duplicates(monkeypatch: pyt
         def get_data(self, _path: str):
             return b"", _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
 
-    def _enum(_client, _max_znodes, progress_hook=None, collect_paths=True):  # type: ignore[no-untyped-def]
+    def _enum(_client, _max_znodes, progress_hook=None, collect_paths=True):
         _ = collect_paths
         if callable(progress_hook):
             progress_hook(
@@ -1096,7 +1096,7 @@ def test_stage4_timeout_retries_with_shared_policy_and_keeps_status(monkeypatch:
     assert any("retry_decision stage=data" in line for line in rec.get("debug_events") or [])
 
 
-def test_audit_zookeeper_marks_provided_credentials_invalid_on_anonymous_open_target(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_zookeeper_marks_provided_credentials_invalid_on_anonymous_open_target(monkeypatch) -> None:
     calls = {"auth": 0}
 
     class _FakeZkClient:
@@ -1147,7 +1147,7 @@ def test_audit_zookeeper_marks_provided_credentials_invalid_on_anonymous_open_ta
     assert "[-] admin:admin" in line
 
 
-def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypatch) -> None:
     calls = {"auth": 0}
 
     class _FakeZkClient:
@@ -1204,7 +1204,7 @@ def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypat
     assert "/clickhouse:<Access Denied>" in znode_values
 
 
-def test_audit_zookeeper_valid_credentials_when_auth_was_required(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_zookeeper_valid_credentials_when_auth_was_required(monkeypatch) -> None:
     calls = {"auth": 0}
 
     class _FakeZkClient:
@@ -1261,7 +1261,7 @@ def test_audit_zookeeper_valid_credentials_when_auth_was_required(monkeypatch) -
     assert record["auth_probe_trace"] == ["/:noauth"]
 
 
-def test_audit_zookeeper_valid_credentials_after_retryable_root_query(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_zookeeper_valid_credentials_after_retryable_root_query(monkeypatch) -> None:
     calls = {"auth": 0}
 
     class _FakeZkClient:
@@ -1317,7 +1317,7 @@ def test_audit_zookeeper_valid_credentials_after_retryable_root_query(monkeypatc
     assert record["auth_inference_source"] == "probe_retryable_124"
 
 
-def test_audit_zookeeper_infers_auth_required_true_from_anonymous_probes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_zookeeper_infers_auth_required_true_from_anonymous_probes(monkeypatch) -> None:
     class _FakeZkClient:
         def __init__(self, host: str, port: int, timeout: float) -> None:
             _ = (host, port, timeout)
@@ -1362,7 +1362,7 @@ def test_audit_zookeeper_infers_auth_required_true_from_anonymous_probes(monkeyp
     assert "/zookeeper:noauth" in record["auth_probe_trace"]
 
 
-def test_audit_zookeeper_infers_auth_required_false_from_anonymous_probes(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_zookeeper_infers_auth_required_false_from_anonymous_probes(monkeypatch) -> None:
     class _FakeZkClient:
         def __init__(self, host: str, port: int, timeout: float) -> None:
             _ = (host, port, timeout)
@@ -1495,7 +1495,7 @@ def test_audit_zookeeper_inference_maps_consistent_err_124_to_auth_required(
     assert record["auth_probe_trace"] == ["/:err_-124", "/zookeeper:err_-124", "/zookeeper/config:err_-124"]
 
 
-def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(monkeypatch) -> None:
     calls = {"auth": 0}
 
     class _FakeZkClient:
@@ -1617,7 +1617,7 @@ def test_format_record_shows_zookeeper_password_for_valid_credentials() -> None:
     assert "[+] admin:admin" in line
 
 
-def test_audit_zookeeper_retries_retryable_root_query_and_reports_query_auth(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_zookeeper_retries_retryable_root_query_and_reports_query_auth(monkeypatch) -> None:
     calls = {"root": 0}
 
     class _FakeZkClient:
@@ -2362,7 +2362,7 @@ def test_format_znodes_detail_records_extra_paths() -> None:
     assert any("<no data>" in line for line in lines)
 
 
-def test_render_colored_zookeeper_line_and_emit_line(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_render_colored_zookeeper_line_and_emit_line(tmp_path) -> None:
     class _FakeConsole:
         def __init__(self) -> None:
             self.lines: list[str] = []
@@ -2594,7 +2594,7 @@ def test_friendly_error_extra_branches_and_decode_edge_cases() -> None:
             return b""
 
     with pytest.raises(ConnectionError):
-        _recv_exact(_EmptySocket(), 1)  # type: ignore[arg-type]
+        _recv_exact(_EmptySocket(), 1)
     with pytest.raises(ValueError):
         _decode_zk_string(b"\x00\x00\x00")
     assert _decode_zk_buffer(struct.pack(">i", -1)) == (None, 4)
@@ -2604,7 +2604,7 @@ def test_friendly_error_extra_branches_and_decode_edge_cases() -> None:
 
 def test_zkclient_more_branches_and_enumerate_edges(monkeypatch: pytest.MonkeyPatch) -> None:
     client = zookeeper_stage._ZkClient("127.0.0.1", 2181, 1.0)
-    client.sock = object()  # type: ignore[assignment]
+    client.sock = object()
     monkeypatch.setattr("redposture_core.clients.zookeeper._send_frame", lambda *_a, **_k: None)
     monkeypatch.setattr(
         "redposture_core.clients.zookeeper._recv_frame",
@@ -2639,7 +2639,7 @@ def test_zkclient_more_branches_and_enumerate_edges(monkeypatch: pytest.MonkeyPa
                 return None, _ZK_ERR_OK, None
             return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
 
-    nodes, total_count, truncated, meta, enum_error = _enumerate_znodes(_EnumClient(), 100)  # type: ignore[arg-type]
+    nodes, total_count, truncated, meta, enum_error = _enumerate_znodes(_EnumClient(), 100)
     assert "/dup" in nodes
     assert total_count >= 3
     assert truncated is False
@@ -2888,7 +2888,7 @@ def test_enumerate_znodes_children_none_with_ok_error_is_ignored() -> None:
                 return None, _ZK_ERR_OK, None
             return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
 
-    nodes, total_count, truncated, meta, enum_error = _enumerate_znodes(_Client(), 100)  # type: ignore[arg-type]
+    nodes, total_count, truncated, meta, enum_error = _enumerate_znodes(_Client(), 100)
     assert nodes == ["/none"]
     assert total_count == 1
     assert truncated is False
@@ -3630,7 +3630,7 @@ def test_run_stage_debug_summaries(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_call_audit_zookeeper_wrapper_fallbacks_for_legacy_signature(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
-    def fake_audit(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit(*args, **kwargs):
         calls.append((args, dict(kwargs)))
         if "enum_workers" in kwargs:
             raise TypeError("got an unexpected keyword argument 'enum_workers'")
@@ -3661,7 +3661,7 @@ def test_call_audit_zookeeper_wrapper_fallbacks_for_legacy_signature(monkeypatch
 
 
 def test_call_audit_zookeeper_wrapper_propagates_unexpected_typeerror(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_audit(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **_kwargs):
         raise TypeError("boom")
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._audit_zookeeper_host", fake_audit)

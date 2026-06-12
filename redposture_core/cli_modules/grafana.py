@@ -20,9 +20,9 @@ def configure_grafana_parser(
     grafana_auth = grafana_parser.add_argument_group("Auth")
     grafana_actions = grafana_parser.add_argument_group("Actions")
     grafana_ssrf = grafana_parser.add_argument_group("SSRF / Probes")
-    add_output_flags(grafana_common)  # type: ignore[arg-type]
+    add_output_flags(grafana_common)
     add_log_flag(grafana_common)
-    add_scan_host_flags(grafana_common, include_profiles=False)  # type: ignore[arg-type]
+    add_scan_host_flags(grafana_common, include_profiles=False)
     grafana_common.add_argument(
         "--port",
         dest="port",

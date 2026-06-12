@@ -356,7 +356,7 @@ def test_query_table_columns_with_filter(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_query_table_rows_builds_sql_and_rows(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
-    def fake_query(_session, query: str):  # type: ignore[no-untyped-def]
+    def fake_query(_session, query: str):
         seen.append(query)
         return [[b"a", 1]], None
 
@@ -402,7 +402,7 @@ def test_collect_capabilities_upgrades_read_when_probe_succeeds(
         clickhouse_stage, "_query_show_grants", lambda *_args, **_kwargs: (["GRANT USAGE ON *.*"], None)
     )
 
-    def fake_query_rows(_session, query: str):  # type: ignore[no-untyped-def]
+    def fake_query_rows(_session, query: str):
         if query == "SELECT name FROM system.tables LIMIT 1":
             return [["events"]], None
         if query.startswith("SELECT output FROM executable("):
@@ -452,7 +452,7 @@ def test_run_sql_query_truncates(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_run_execute_command_uses_executable_for_os_command(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
-    def fake_query_rows(_session, query: str):  # type: ignore[no-untyped-def]
+    def fake_query_rows(_session, query: str):
         seen.append(query)
         return [["uid=101(clickhouse)"]], None
 
@@ -469,7 +469,7 @@ def test_run_execute_command_uses_executable_for_os_command(monkeypatch: pytest.
 def test_run_execute_command_keeps_system_statement(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
-    def fake_query_rows(_session, query: str):  # type: ignore[no-untyped-def]
+    def fake_query_rows(_session, query: str):
         seen.append(query)
         return [], None
 
@@ -797,7 +797,7 @@ def test_audit_clickhouse_host_with_port_fallback_returns_last_fail(monkeypatch:
 def test_audit_clickhouse_host_with_port_fallback_supports_auto_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
-    def fake_host(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_host(*_args, **kwargs):
         calls.append(str(kwargs["protocol"]))
         return {
             "timestamp": "2026-01-01T00:00:00Z",
@@ -925,7 +925,7 @@ def test_run_clickhouse_stage_sql_shell_uses_first_default_port(monkeypatch: pyt
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_connect_module", lambda: object)
     monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
-    def fake_audit(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **kwargs):
         called.append((int(kwargs["port"]), str(kwargs["protocol"])))
         return {
             "timestamp": "2026-01-01T00:00:00Z",
@@ -961,7 +961,7 @@ def test_run_clickhouse_stage_calls_audit_with_port_protocols(monkeypatch: pytes
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_connect_module", lambda: object)
     monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
-    def fake_audit(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **kwargs):
         calls.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -1132,7 +1132,7 @@ def test_audit_clickhouse_host_on_protocol_dump_serializes_datetime_rows(
             return _session(), None
         return None, "Code: 516. Authentication failed"
 
-    def fake_query_rows(_session_obj, query: str):  # type: ignore[no-untyped-def]
+    def fake_query_rows(_session_obj, query: str):
         if "FROM `default`.`events`" in query:
             return [[ts, b"ok"]], None
         return [], None

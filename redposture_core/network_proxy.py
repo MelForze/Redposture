@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any
+from typing import Any, cast
 
 _SOCKET_DEFAULT_TIMEOUT: Any = getattr(socket, "_GLOBAL_DEFAULT_TIMEOUT", object())
 _RAW_SOCKET_CREATE_CONNECTION = socket.create_connection
@@ -359,7 +359,7 @@ class ProxySocketPatch:
             proxy = cls._active_proxy
             original = cls._active_original_create_connection or _RAW_SOCKET_CREATE_CONNECTION
         if proxy is None:
-            return original(address, timeout=timeout, source_address=source_address)
+            return original(address, timeout=cast("float | None", timeout), source_address=source_address)
         return open_connection_via_proxy(proxy, address, timeout=timeout, source_address=source_address)
 
     def __enter__(self) -> ProxySocketPatch:
@@ -394,7 +394,7 @@ class ProxySocketPatch:
             if cls._refcount == 0:
                 original = cls._active_original_create_connection
                 if callable(original):
-                    socket.create_connection = original  # type: ignore[assignment]
+                    socket.create_connection = original
                 cls._active_original_create_connection = None
                 cls._active_proxy = None
         self._active = False

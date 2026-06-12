@@ -61,6 +61,7 @@ from ...stage_runtime import (
     merge_stage_records,
 )
 from ...utils import (
+    as_list,
     utc_now_iso,
 )
 
@@ -953,11 +954,11 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         return []
 
     services = [str(item).strip() for item in (record.get("services") or []) if str(item).strip()]
-    methods_raw = record.get("methods") if isinstance(record.get("methods"), list) else []
+    methods_raw = as_list(record.get("methods"))
     methods = [item for item in methods_raw if isinstance(item, dict)]
-    descriptors_raw = record.get("descriptors") if isinstance(record.get("descriptors"), list) else []
+    descriptors_raw = as_list(record.get("descriptors"))
     descriptors = [item for item in descriptors_raw if isinstance(item, dict)]
-    health_checks_raw = record.get("health_checks") if isinstance(record.get("health_checks"), list) else []
+    health_checks_raw = as_list(record.get("health_checks"))
     health_checks = [item for item in health_checks_raw if isinstance(item, dict)]
     invoke_result = record.get("invoke_result") if isinstance(record.get("invoke_result"), dict) else None
     reflection_enabled = record.get("reflection_enabled")
@@ -1036,7 +1037,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         return lines
 
     prefix = _nxc_prefix(record)
-    lines: list[str] = []
+    lines = []
 
     lines.append(f"{prefix} [*] Reflection (enabled:{_auth_required_text(reflection_enabled)})")
     if reflection_enabled is True:
@@ -1069,7 +1070,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         for descriptor in descriptors:
             file_name = str(descriptor.get("file") or "-")
             package_name = str(descriptor.get("package") or "-")
-            service_list = descriptor.get("services") if isinstance(descriptor.get("services"), list) else []
+            service_list = as_list(descriptor.get("services"))
             lines.append(f"{prefix} file={file_name} package={package_name} services={len(service_list)}")
 
     lines.append(f"{prefix} [*] Health (supported:{_auth_required_text(health_supported)})")
@@ -1304,7 +1305,7 @@ def _call_audit_grpc_host_with_stage_debug(
             f"backoff={_retry_delay(0):.2f}s reason=error"
         )
 
-    stage_entries = [
+    stage_entries: list[dict[str, Any]] = [
         {
             "stage_name": _STAGE_DETECT_PROTOCOL,
             "attempt": attempts_used,

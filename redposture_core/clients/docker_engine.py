@@ -93,7 +93,7 @@ def _ssl_context(*, insecure: bool, ca_file: str | None, cert_file: str | None, 
     else:
         context = ssl.create_default_context()
     if cert_file or key_file:
-        context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+        context.load_cert_chain(certfile=cert_file or "", keyfile=key_file)
     return context
 
 

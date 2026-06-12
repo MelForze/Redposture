@@ -7,7 +7,7 @@ import pytest
 from redposture_core.scanner import scan_exporter_presence
 
 
-def test_scan_exporter_presence_detects_known_exporter_on_custom_port(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_scan_exporter_presence_detects_known_exporter_on_custom_port(monkeypatch) -> None:
     def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         if ":19400/" in url:
             return {
@@ -55,7 +55,7 @@ def test_scan_exporter_presence_detects_known_exporter_on_custom_port(monkeypatc
     assert hits[0]["port"] == 19400
 
 
-def test_scan_exporter_presence_classifies_by_markers_not_expected_port(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_scan_exporter_presence_classifies_by_markers_not_expected_port(monkeypatch) -> None:
     def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         if ":9100/" in url:
             return {
@@ -126,7 +126,7 @@ def test_scan_exporter_presence_classifies_by_markers_not_expected_port(monkeypa
 )
 def test_scan_exporter_presence_detects_new_exporters_by_marker(
     monkeypatch, exporter_name: str, marker: str, port: int
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         if f":{port}/" in url:
             return {
@@ -208,7 +208,7 @@ def test_scan_exporter_presence_detects_new_exporters_by_marker(
     assert hits[0]["port"] == port
 
 
-def test_scan_exporter_presence_passes_body_limit_to_metrics_requests(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_scan_exporter_presence_passes_body_limit_to_metrics_requests(monkeypatch) -> None:
     requested_limits: list[object] = []
 
     def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
@@ -244,7 +244,7 @@ def test_scan_exporter_presence_passes_body_limit_to_metrics_requests(monkeypatc
     assert requested_limits == [256 * 1024]
 
 
-def test_scan_exporter_presence_handles_unexpected_task_exception(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_scan_exporter_presence_handles_unexpected_task_exception(monkeypatch) -> None:
     def fake_http_get_details(url: str, timeout: float, retries: int = 1, **kwargs) -> dict[str, object]:
         _ = (timeout, retries, kwargs)
         if ":19410/" in url:
@@ -285,7 +285,7 @@ def test_scan_exporter_presence_handles_unexpected_task_exception(monkeypatch) -
     assert failed["error"] == "boom"
 
 
-def test_scan_exporter_presence_deduplicates_mixed_host_variants(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_scan_exporter_presence_deduplicates_mixed_host_variants(monkeypatch) -> None:
     calls: list[tuple[str, int]] = []
 
     def fake_scan_task(

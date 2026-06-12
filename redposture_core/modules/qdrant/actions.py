@@ -16,6 +16,7 @@ from typing import Any
 from ...clients.http_api import HttpApiClient, HttpClientConfig
 from ...console import Console
 from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line
+from ...servers import server_listen_port
 from ...stage_runtime import (
     merge_stage_records,
 )
@@ -565,7 +566,7 @@ def _normalize_ssrf_urls(targets_str: str | None, ports_str: str | None, path_st
             scheme = parsed.scheme.lower() or "http"
             if scheme not in {"http", "https"}:
                 scheme = "http"
-            host = parsed.hostname
+            host = parsed.hostname or ""
             if not host:
                 continue
             path = parsed.path or "/"
@@ -635,7 +636,7 @@ class _QdrantSsrfCaptureHandler(BaseHTTPRequestHandler):
 
         hit = {
             "timestamp": utc_now_iso(),
-            "port": int(self.server.server_address[1]),  # type: ignore[attr-defined]
+            "port": server_listen_port(self.server),
             "client_host": str(self.client_address[0]),
             "client_port": int(self.client_address[1]),
             "method": str(self.command or "-"),
@@ -649,8 +650,8 @@ class _QdrantSsrfCaptureHandler(BaseHTTPRequestHandler):
             "headers": header_lines,
             "raw_request": raw_request_text,
         }
-        lock = getattr(self.server, "capture_lock", None)  # type: ignore[attr-defined]
-        hits = getattr(self.server, "capture_hits", None)  # type: ignore[attr-defined]
+        lock = getattr(self.server, "capture_lock", None)
+        hits = getattr(self.server, "capture_hits", None)
         if hits is not None and isinstance(hits, list) and lock is not None and hasattr(lock, "__enter__"):
             with lock:
                 hits.append(hit)

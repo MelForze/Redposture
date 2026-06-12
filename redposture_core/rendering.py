@@ -78,15 +78,15 @@ def collect_color_spans(
             spans.append((idx, idx + len(fragment), color))
             start = idx + len(fragment)
 
-    for rule in regexes:
-        if isinstance(rule, RegexColorRule):
-            pattern = rule.pattern
-            color = rule.color
-            skip_zero_group = rule.skip_zero_group
-        elif len(rule) == 3:
-            pattern, color, skip_zero_group = rule
+    for regex_rule in regexes:
+        if isinstance(regex_rule, RegexColorRule):
+            pattern = regex_rule.pattern
+            color = regex_rule.color
+            skip_zero_group = regex_rule.skip_zero_group
+        elif len(regex_rule) == 3:
+            pattern, color, skip_zero_group = regex_rule
         else:
-            pattern, color = rule
+            pattern, color = regex_rule
             skip_zero_group = None
         compiled = re.compile(pattern) if isinstance(pattern, str) else pattern
         for match in compiled.finditer(text):

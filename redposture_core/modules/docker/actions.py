@@ -24,7 +24,7 @@ from ...stage_runtime import (
     AuditRecord,
     StageTelemetryBuilder,
 )
-from ...utils import utc_now_iso
+from ...utils import as_dict, utc_now_iso
 
 _DOCKER_TAG = "DOCKER"
 _DOCKER_DEFAULT_PORTS = [2375, 2376, 4243]
@@ -183,7 +183,7 @@ def _volume_count(record: dict[str, Any]) -> int:
 
 
 def _caps_suffix(record: dict[str, Any]) -> str:
-    capabilities = record.get("capabilities") if isinstance(record.get("capabilities"), dict) else {}
+    capabilities = as_dict(record.get("capabilities"))
     parts: list[str] = []
     if capabilities.get("can_list_containers") is True:
         parts.append(f"(containers:{_container_count(record)})")
@@ -407,7 +407,7 @@ def _audit_docker_host_stage(
     telemetry.stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
     if run_deep_checks and status in _DOCKER_DEEP_STATUSES:
         telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
-        exec_result = record.get("exec_result") if isinstance(record.get("exec_result"), dict) else {}
+        exec_result = as_dict(record.get("exec_result"))
         data_error = exec_result.get("error") if exec_result and not exec_result.get("ok") else None
         telemetry.stage(
             _STAGE_DATA, "error" if data_error else "ok", str(data_error) if data_error else None, elapsed_ms
@@ -591,8 +591,8 @@ def _format_system_lines(record: dict[str, Any], output_format: str) -> list[str
             )
         ]
     prefix = _nxc_prefix(record)
-    info = system.get("info") if isinstance(system.get("info"), dict) else {}
-    df = system.get("df") if isinstance(system.get("df"), dict) else {}
+    info = as_dict(system.get("info"))
+    df = as_dict(system.get("df"))
     lines = [f"{prefix} [*] System"]
     if info:
         lines.append(

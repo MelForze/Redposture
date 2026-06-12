@@ -46,7 +46,7 @@ class BoundedScheduler(Generic[T, R]):
                 return worker(item)
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            pending: dict[object, int] = {}
+            pending: dict[Future[R], int] = {}
             cursor = 0
             while cursor < len(indexed) or pending:
                 while cursor < len(indexed) and len(pending) < self.max_inflight:

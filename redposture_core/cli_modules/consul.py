@@ -25,9 +25,9 @@ def configure_consul_parser(
     ssrf_options = parser.add_argument_group("SSRF / Probes")
     revshell_options = parser.add_argument_group("Revshell")
 
-    add_output_flags(common)  # type: ignore[arg-type]
+    add_output_flags(common)
     add_log_flag(common)
-    add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
+    add_scan_host_flags(common, include_profiles=False)
     common.add_argument(
         "--port",
         dest="port",

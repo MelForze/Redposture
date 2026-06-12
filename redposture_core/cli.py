@@ -67,8 +67,8 @@ def _tee_console_output(log_path: str) -> Iterator[None]:
         stdout_orig = sys.stdout
         stderr_orig = sys.stderr
         lock = threading.Lock()
-        sys.stdout = _TeeStream(stdout_orig, log_fh, lock)  # type: ignore[assignment]
-        sys.stderr = _TeeStream(stderr_orig, log_fh, lock)  # type: ignore[assignment]
+        sys.stdout = _TeeStream(stdout_orig, log_fh, lock)
+        sys.stderr = _TeeStream(stderr_orig, log_fh, lock)
         try:
             yield
         finally:
@@ -83,9 +83,9 @@ def _tee_console_output(log_path: str) -> Iterator[None]:
 def _run_command(args: Any, logger: AttemptLogger) -> int:
     if args.command == COMMAND_EXPORTERS:
         action = getattr(args, "exporters_action", None)
-        spec = EXPORTERS_ACTION_SPECS_BY_NAME.get(str(action or ""))
-        if spec is not None:
-            return int(resolve_command_runner(spec)(args, logger))
+        action_spec = EXPORTERS_ACTION_SPECS_BY_NAME.get(str(action or ""))
+        if action_spec is not None:
+            return int(resolve_command_runner(action_spec)(args, logger))
         print(f"[error] unsupported exporters action: {action}", file=sys.stderr)
         return 2
 

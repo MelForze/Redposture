@@ -28,7 +28,7 @@ def configure_mongodb_parser(
     positive_int: Callable[[str], int],
 ) -> None:
     common = parser.add_argument_group("Common")
-    add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
+    add_scan_host_flags(common, include_profiles=False)
     common.add_argument(
         "--port",
         dest="port",
@@ -50,7 +50,7 @@ def configure_mongodb_parser(
         help="MongoDB audit output format for stdout/file.",
     )
     add_log_flag(common)
-    add_output_flags(common, short=False)  # type: ignore[arg-type]
+    add_output_flags(common, short=False)
 
     auth = parser.add_argument_group("Database / Auth")
     discovery = parser.add_argument_group("Discovery / Dump")

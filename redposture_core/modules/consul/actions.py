@@ -20,6 +20,8 @@ from ...clients.http_api import HttpApiClient, HttpClientConfig
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line
 from ...utils import (
+    as_dict,
+    as_list,
     collect_scan_ports,
     collect_scan_targets,
     is_signature_compat_typeerror,
@@ -604,7 +606,7 @@ def _normalize_ssrf_urls(targets_str: str | None, ports_str: str | None, path_st
             scheme = parsed.scheme.lower() or "http"
             if scheme not in {"http", "https"}:
                 scheme = "http"
-            host = parsed.hostname
+            host = parsed.hostname or ""
             if not host:
                 continue
             path = parsed.path or "/"
@@ -1008,7 +1010,7 @@ def _consul_agent_members_list(
     for entry in payload:
         if not isinstance(entry, dict):
             continue
-        tags = entry.get("Tags") if isinstance(entry.get("Tags"), dict) else {}
+        tags = as_dict(entry.get("Tags"))
         name = str(entry.get("Name") or "").strip()
         if not name:
             continue
@@ -1176,9 +1178,9 @@ def _consul_health_service_instances(
     for entry in payload:
         if not isinstance(entry, dict):
             continue
-        node_obj = entry.get("Node") if isinstance(entry.get("Node"), dict) else {}
-        service_obj = entry.get("Service") if isinstance(entry.get("Service"), dict) else {}
-        checks_obj = entry.get("Checks") if isinstance(entry.get("Checks"), list) else []
+        node_obj = as_dict(entry.get("Node"))
+        service_obj = as_dict(entry.get("Service"))
+        checks_obj = as_list(entry.get("Checks"))
 
         node_name = str(node_obj.get("Node") or "").strip() or "-"
         node_addr = str(node_obj.get("Address") or "").strip() or "-"
@@ -1190,7 +1192,7 @@ def _consul_health_service_instances(
             svc_port = int(svc_port_raw) if svc_port_raw is not None else None
         except (TypeError, ValueError):
             svc_port = None
-        svc_meta = service_obj.get("Meta") if isinstance(service_obj.get("Meta"), dict) else {}
+        svc_meta = as_dict(service_obj.get("Meta"))
 
         parsed_checks: list[dict[str, Any]] = []
         for check in checks_obj:
@@ -2870,7 +2872,7 @@ def _audit_consul_host(
                 error=auth_error,
             )
 
-            base_record = {
+            base_record: dict[str, Any] = {
                 "timestamp": utc_now_iso(),
                 "host": host,
                 "port": port,
@@ -3185,7 +3187,7 @@ def _detect_line(record: dict[str, Any], output_format: str) -> str:
             return f"{prefix} [-] not a Consul API"
         return f"{prefix} [!] connection failed err={_clip(str(record.get('error') or 'connection failed'), 96)}"
 
-    anon_scopes = record.get("anonymous_scopes") if isinstance(record.get("anonymous_scopes"), dict) else {}
+    anon_scopes = as_dict(record.get("anonymous_scopes"))
     auth_required = (not _all_scopes_ok(anon_scopes)) or _anonymous_acl_denied_with_filtered_empty(record, anon_scopes)
     version = str(record.get("version") or "-")
     return f"{prefix} [*] Consul Agent (auth required:{_bool_text(auth_required)}) (version:{version})"
@@ -3195,7 +3197,7 @@ def _summary_line(record: dict[str, Any]) -> str | None:
     if not bool(record.get("is_consul")):
         return None
 
-    anonymous_scopes = record.get("anonymous_scopes") if isinstance(record.get("anonymous_scopes"), dict) else {}
+    anonymous_scopes = as_dict(record.get("anonymous_scopes"))
     if _anonymous_acl_denied_with_filtered_empty(record, anonymous_scopes):
         return None
     if _all_scopes_ok(anonymous_scopes):
@@ -3217,7 +3219,7 @@ def _auth_summary_line(record: dict[str, Any]) -> str | None:
         return None
 
     auth_valid = record.get("auth_valid")
-    auth_scopes = record.get("auth_scopes") if isinstance(record.get("auth_scopes"), dict) else {}
+    auth_scopes = as_dict(record.get("auth_scopes"))
     auth_error = str(record.get("auth_error") or "").strip()
     if auth_mode == "token":
         label = "token auth"
@@ -3244,7 +3246,7 @@ def _detail_lines(record: dict[str, Any], output_format: str, *, debug: bool = F
     prefix = _cx_prefix(record)
     lines: list[str] = []
 
-    anonymous_scopes = record.get("anonymous_scopes") if isinstance(record.get("anonymous_scopes"), dict) else {}
+    anonymous_scopes = as_dict(record.get("anonymous_scopes"))
     if anonymous_scopes:
         for item in _scope_status_detail_lines(prefix, anonymous_scopes):
             lines.append(item)
@@ -3269,7 +3271,7 @@ def _detail_lines(record: dict[str, Any], output_format: str, *, debug: bool = F
         if bool(record.get("rce")):
             lines.append(f"{prefix} [!] RCE! (EnableLocalScriptChecks:True) (EnableRemoteScriptChecks:True)")
 
-    auth_scopes = record.get("auth_scopes") if isinstance(record.get("auth_scopes"), dict) else {}
+    auth_scopes = as_dict(record.get("auth_scopes"))
     if auth_scopes:
         for item in _scope_status_detail_lines(prefix, auth_scopes):
             lines.append(item)
@@ -3325,12 +3327,8 @@ def _detail_lines(record: dict[str, Any], output_format: str, *, debug: bool = F
         services_error = str(record.get("services_list_error") or "").strip()
         services_source = str(record.get("services_list_source") or "").strip()
         service_dump_name = str(record.get("service_dump_name") or "").strip()
-        service_instances_map = (
-            record.get("service_instances") if isinstance(record.get("service_instances"), dict) else {}
-        )
-        service_instances_errors = (
-            record.get("service_instances_errors") if isinstance(record.get("service_instances_errors"), dict) else {}
-        )
+        service_instances_map = as_dict(record.get("service_instances"))
+        service_instances_errors = as_dict(record.get("service_instances_errors"))
         source_suffix = f" (source:{services_source})" if debug and services_source else ""
         filter_suffix = f" (service:{service_dump_name})" if service_dump_name else ""
         lines.append(f"{prefix} [*] Services{filter_suffix}{source_suffix}")
@@ -3586,9 +3584,9 @@ def _detail_lines(record: dict[str, Any], output_format: str, *, debug: bool = F
         else:
             verb = "delete" if action == "delete" else "create"
             err = _clip(str(service_result.get("error") or "service action failed"), 120)
-            status = service_result.get("status")
-            if debug and isinstance(status, int) and status > 0:
-                lines.append(f"{prefix} [-] service {verb} failed err={err} status={status}")
+            status_code = service_result.get("status")
+            if debug and isinstance(status_code, int) and status_code > 0:
+                lines.append(f"{prefix} [-] service {verb} failed err={err} status={status_code}")
             else:
                 lines.append(f"{prefix} [-] service {verb} failed err={err}")
 
@@ -3651,9 +3649,9 @@ def _detail_lines(record: dict[str, Any], output_format: str, *, debug: bool = F
                             lines.append(f"{prefix} [+] check deregistered id={check_id}")
                         else:
                             err = str(item.get("error") or "").strip()
-                            status = item.get("status")
-                            if not err and status is not None:
-                                err = f"status={status}"
+                            status_code = item.get("status")
+                            if not err and status_code is not None:
+                                err = f"status={status_code}"
                             lines.append(
                                 f"{prefix} [-] check deregister failed id={check_id} err={_clip(err or 'unknown', 120)}"
                             )
@@ -3679,12 +3677,12 @@ def _detail_lines(record: dict[str, Any], output_format: str, *, debug: bool = F
                     if script_revshell.get("deregistered"):
                         lines.append(f"{prefix} [+] check deregistered")
                     else:
-                        dereg_err = script_revshell.get("deregister_error")
+                        dereg_err_value = script_revshell.get("deregister_error")
                         dereg_status = script_revshell.get("deregister_status")
-                        if not dereg_err and dereg_status is not None:
-                            dereg_err = f"status={dereg_status}"
+                        if not dereg_err_value and dereg_status is not None:
+                            dereg_err_value = f"status={dereg_status}"
                         lines.append(
-                            f"{prefix} [-] check deregister failed err={_clip(str(dereg_err or 'unknown'), 120)}"
+                            f"{prefix} [-] check deregister failed err={_clip(str(dereg_err_value or 'unknown'), 120)}"
                         )
                 else:
                     lines.append(f"{prefix} [*] check left registered (use --delete --check-id {check_id})")

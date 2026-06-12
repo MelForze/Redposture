@@ -128,7 +128,7 @@ def test_start_server_starts_daemon_thread() -> None:
     assert started == [True]
 
 
-def test_postgres_listener_handler_logs_http_probe(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_postgres_listener_handler_logs_http_probe(tmp_path) -> None:
     logger = AttemptLogger()
     log_path = tmp_path / "postgres-http.log"
     logger.set_text_output(str(log_path))
@@ -153,7 +153,7 @@ def test_postgres_listener_handler_logs_http_probe(tmp_path) -> None:  # type: i
     assert "protocol=http" in attempts
 
 
-def test_postgres_listener_handler_logs_cleartext_password(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_postgres_listener_handler_logs_cleartext_password(tmp_path) -> None:
     logger = AttemptLogger()
     log_path = tmp_path / "postgres-auth.log"
     logger.set_text_output(str(log_path))
@@ -181,7 +181,7 @@ def test_postgres_listener_handler_logs_cleartext_password(tmp_path) -> None:  #
     assert "'database': 'appdb'" in attempts
 
 
-def test_redis_listener_handler_logs_auth_and_http_probe(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_redis_listener_handler_logs_auth_and_http_probe(tmp_path) -> None:
     logger = AttemptLogger()
     log_path = tmp_path / "redis.log"
     logger.set_text_output(str(log_path))
@@ -218,7 +218,7 @@ def test_redis_listener_handler_logs_auth_and_http_probe(tmp_path) -> None:  # t
     assert "protocol=http" in attempts
 
 
-def test_make_proxmox_handler_serves_login_and_logs_basic_and_token_auth(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_make_proxmox_handler_serves_login_and_logs_basic_and_token_auth(tmp_path) -> None:
     logger = AttemptLogger()
     log_path = tmp_path / "proxmox.log"
     logger.set_text_output(str(log_path))
@@ -299,7 +299,7 @@ def test_make_proxmox_handler_serves_login_and_logs_basic_and_token_auth(tmp_pat
     assert "user=admin@pve!token" in attempts
 
 
-def test_make_blackbox_handler_logs_probe_metrics_and_parse_error(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_make_blackbox_handler_logs_probe_metrics_and_parse_error(tmp_path) -> None:
     logger = AttemptLogger()
     log_path = tmp_path / "blackbox.log"
     logger.set_text_output(str(log_path))
@@ -386,7 +386,7 @@ def test_make_http_server_wraps_socket_and_build_ssl_context_loads_chain(monkeyp
     handler = servers.make_blackbox_handler(AttemptLogger())
     dummy = _DummySSLContext()
     monkeypatch.setattr(servers, "ThreadingHTTPReuseServer", _DummyHTTPServer)
-    server = servers.make_http_server("127.0.0.1", 0, handler, ssl_context=dummy)  # type: ignore[arg-type]
+    server = servers.make_http_server("127.0.0.1", 0, handler, ssl_context=dummy)
     assert server.server_address == ("127.0.0.1", 0)
     assert dummy.calls == [(sentinel_socket, True)]
 
@@ -411,7 +411,7 @@ def test_generate_self_signed_cert_surfaces_openssl_errors(monkeypatch: pytest.M
     with pytest.raises(ValueError, match="openssl boom"):
         servers._generate_self_signed_cert("/tmp/cert.pem", "/tmp/key.pem")
 
-    def raise_oserror(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def raise_oserror(*args, **kwargs):
         raise OSError("missing openssl")
 
     monkeypatch.setattr(servers.subprocess, "run", raise_oserror)

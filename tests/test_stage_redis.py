@@ -13,8 +13,8 @@ class _DummySocket:
     def __enter__(self) -> _DummySocket:
         return self
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-        return False
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
 
     def settimeout(self, timeout: float) -> None:
         _ = timeout
@@ -385,7 +385,7 @@ def test_resp_readers_and_send_cmd_cover_types() -> None:
 
 
 def test_count_scan_and_dump_key_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_send_cmd(_sock: object, *parts: str):  # type: ignore[no-untyped-def]
+    def fake_send_cmd(_sock: object, *parts: str):
         if parts == ("DBSIZE",):
             return "integer", 3
         if parts == ("SCAN", "0", "COUNT", "500"):
@@ -435,7 +435,7 @@ def test_count_scan_and_dump_key_helpers(monkeypatch: pytest.MonkeyPatch) -> Non
     assert redis_stage._dump_redis_key_value(object(), "stream-key") == ("stream_len=7", None)
 
 
-def test_audit_redis_targets_json_output_and_suppression(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_audit_redis_targets_json_output_and_suppression(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     records = iter(
         [
             {
@@ -488,7 +488,7 @@ def test_audit_redis_targets_json_output_and_suppression(monkeypatch: pytest.Mon
             },
         ]
     )
-    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))
 
     output_path = tmp_path / "redis.json"
     emitted: list[str] = []
@@ -572,7 +572,7 @@ def test_audit_redis_targets_suppresses_pre_detect_connection_noise(
             },
         ]
     )
-    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))
 
     emitted: list[str] = []
     totals = run_module_targets_for_test(
@@ -630,7 +630,7 @@ def test_audit_redis_targets_keeps_non_refused_fail_lines_when_suppression_enabl
             }
         ]
     )
-    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))
 
     emitted: list[str] = []
     totals = run_module_targets_for_test(
@@ -663,7 +663,7 @@ def test_run_redis_stage_connection_refused_suppression_matches_debug(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_redis_targets(*_args, **kwargs):
         captured.update(kwargs)
         return (1, 0, 0, 0, 0, 1)
 
@@ -771,7 +771,7 @@ def test_run_redis_stage_debug_shows_unreachable_summary(
 def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_calls: list[dict[str, object]] = []
 
-    def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_redis_targets(*_args, **kwargs):
         captured_calls.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -830,12 +830,12 @@ def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypa
 
 def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
     monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     creds_file = tmp_path / "creds.txt"
     creds_file.write_text("bad:bad\ngood:good\n", encoding="utf-8")
     captured_calls: list[dict[str, object]] = []
 
-    def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_redis_targets(*_args, **kwargs):
         captured_calls.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -897,14 +897,14 @@ def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
     assert progress_advances == [1, 1]
 
 
-def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     creds_file = tmp_path / "creds.txt"
     creds_file.write_text("bad:bad\ngood:good\n", encoding="utf-8")
     targets_file = tmp_path / "targets.txt"
     targets_file.write_text("closed\nopen-a\nopen-b\n", encoding="utf-8")
     captured_calls: list[dict[str, object]] = []
 
-    def fake_audit_redis_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_redis_targets(*_args, **kwargs):
         captured_calls.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -970,7 +970,7 @@ def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pyte
 
 
 def test_call_audit_redis_host_with_stage_debug_adds_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_audit(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **_kwargs):
         return {
             "timestamp": "2026-03-27T00:00:00Z",
             "host": "127.0.0.1",
@@ -1023,7 +1023,7 @@ def test_audit_redis_targets_emits_two_pass_debug_markers(monkeypatch: pytest.Mo
         *,
         run_deep_checks: bool,
         debug: bool,
-        debug_emit,  # type: ignore[no-untyped-def]
+        debug_emit,
     ) -> dict[str, object]:
         _ = (port, timeout, retries, username, password, defcreds, show_keys, dump_keys, query_key, debug, debug_emit)
         base = {

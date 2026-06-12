@@ -49,7 +49,7 @@ class _FakeOpener:
         return self.result
 
 
-def test_http_api_client_get_success(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_http_api_client_get_success(monkeypatch) -> None:
     opener = _FakeOpener(_FakeResponse(b'{"status":"ok"}', {"X-Test": "1"}))
     monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", opener.open)
 
@@ -66,7 +66,7 @@ def test_http_api_client_get_success(monkeypatch) -> None:  # type: ignore[no-un
     assert req.get_header("Accept") == "application/json"
 
 
-def test_http_api_client_post_json_and_response_cap(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_http_api_client_post_json_and_response_cap(monkeypatch) -> None:
     opener = _FakeOpener(_FakeResponse(b"abcdef"))
     monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", opener.open)
 
@@ -79,7 +79,7 @@ def test_http_api_client_post_json_and_response_cap(monkeypatch) -> None:  # typ
     assert req.get_header("Content-type") == "application/json"
 
 
-def test_http_api_client_http_error_is_response(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_http_api_client_http_error_is_response(monkeypatch) -> None:
     error = urllib.error.HTTPError(
         "http://127.0.0.1/api",
         403,
@@ -97,7 +97,7 @@ def test_http_api_client_http_error_is_response(monkeypatch) -> None:  # type: i
     assert response.error is None
 
 
-def test_http_api_client_transport_error_is_normalized(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_http_api_client_transport_error_is_normalized(monkeypatch) -> None:
     opener = _FakeOpener(urllib.error.URLError("[Errno 111] Connection refused"))
     monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", opener.open)
 
@@ -108,7 +108,7 @@ def test_http_api_client_transport_error_is_normalized(monkeypatch) -> None:  # 
     assert normalize_http_error(urllib.error.URLError("timed out"))
 
 
-def test_http_api_client_https_target_via_https_proxy_uses_manual_tunnel(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_http_api_client_https_target_via_https_proxy_uses_manual_tunnel(monkeypatch) -> None:
     class _FakeSocket:
         def __init__(self) -> None:
             self.closed = False
@@ -165,7 +165,7 @@ def test_parse_http_response_bytes_dechunks_lowercase_transfer_encoding() -> Non
     assert decoded == body
 
 
-def test_https_target_via_https_proxy_does_not_duplicate_content_length(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_https_target_via_https_proxy_does_not_duplicate_content_length(monkeypatch) -> None:
     class _FakeSocket:
         def settimeout(self, value: float) -> None:
             return None
@@ -198,7 +198,7 @@ def test_https_target_via_https_proxy_does_not_duplicate_content_length(monkeypa
     assert head.lower().count(b"content-length:") == 1
 
 
-def test_https_target_via_https_proxy_reuses_parsed_proxyconfig_without_reparse(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_https_target_via_https_proxy_reuses_parsed_proxyconfig_without_reparse(monkeypatch) -> None:
     from redposture_core.network_proxy import ProxyConfig
 
     class _FakeSocket:
@@ -270,7 +270,7 @@ def test_parse_http_response_bytes_raises_on_malformed_chunked_when_complete() -
     assert decoded == b"hello"
 
 
-def test_https_tunnel_surfaces_malformed_chunked_as_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_https_tunnel_surfaces_malformed_chunked_as_error(monkeypatch) -> None:
     class _FakeSocket:
         def settimeout(self, value: float) -> None:
             return None

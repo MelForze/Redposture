@@ -27,7 +27,7 @@ from redposture_core.modules.postgres import actions as pg_actions
 from redposture_core.modules.postgres import stage as pg_stage
 
 
-def _signature_checking_proxy(real_fn: Any, return_value: dict[str, Any]):  # type: ignore[no-untyped-def]
+def _signature_checking_proxy(real_fn: Any, return_value: dict[str, Any]):
     signature = inspect.signature(real_fn)
 
     def proxy(*args: Any, **kwargs: Any) -> dict[str, Any]:

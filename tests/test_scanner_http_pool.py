@@ -35,7 +35,7 @@ def test_http_get_text_retries_http_exception_with_active_pool(monkeypatch: pyte
 
     monkeypatch.setattr("redposture_core.scanner.time.sleep", sleep_calls.append)
 
-    with scanner._activate_http_pool(pool):  # type: ignore[arg-type]
+    with scanner._activate_http_pool(pool):
         status, body = scanner.http_get_text("http://example.test/metrics", timeout=1.5, retries=1)
 
     assert status == 200
@@ -58,7 +58,7 @@ def test_http_get_details_reports_error_after_pooled_http_exception_retries_exha
 
     monkeypatch.setattr("redposture_core.scanner.time.sleep", sleep_calls.append)
 
-    with scanner._activate_http_pool(pool):  # type: ignore[arg-type]
+    with scanner._activate_http_pool(pool):
         result = scanner.http_get_details("http://example.test/debug/vars", timeout=2.0, retries=1)
 
     assert result["status"] is None
@@ -74,7 +74,7 @@ def test_activate_http_pool_restores_previous_pool() -> None:
     replacement = _DummyPool([])
     scanner._ACTIVE_HTTP_POOL = previous
 
-    with scanner._activate_http_pool(replacement):  # type: ignore[arg-type]
+    with scanner._activate_http_pool(replacement):
         assert scanner._ACTIVE_HTTP_POOL is replacement
 
     assert scanner._ACTIVE_HTTP_POOL is previous
@@ -122,8 +122,8 @@ def test_http_pool_get_propagates_keyboard_interrupt() -> None:
     def fake_release(_host: str, _port: int, _conn: _InterruptConn, reusable: bool) -> None:
         releases.append(reusable)
 
-    pool._acquire = fake_acquire  # type: ignore[method-assign]
-    pool._release = fake_release  # type: ignore[method-assign]
+    pool._acquire = fake_acquire  # type: ignore[method-assign, assignment]
+    pool._release = fake_release  # type: ignore[method-assign, assignment]
 
     with pytest.raises(KeyboardInterrupt, match="stop"):
         pool.get("http://example.test/metrics", timeout=1.0)
@@ -233,7 +233,7 @@ def test_scan_exporter_presence_restores_previous_pool_on_emit_error(monkeypatch
         )
 
     previous_pool = object()
-    scanner._ACTIVE_HTTP_POOL = previous_pool  # type: ignore[assignment]
+    scanner._ACTIVE_HTTP_POOL = previous_pool
     monkeypatch.setattr("redposture_core.scanner._HTTPConnectionPool", _ScanPool)
     monkeypatch.setattr("redposture_core.scanner._scan_presence_port_task", fake_scan_task)
 

@@ -92,7 +92,7 @@ def test_http_get_text_and_details_cover_urlopen_error_paths() -> None:
     assert sleeps == [pytest.approx(0.2)]
 
 
-def test_http_connection_pool_target_release_and_compat_paths(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_http_connection_pool_target_release_and_compat_paths(monkeypatch) -> None:
     with pytest.raises(ValueError):
         http_pool.HTTPConnectionPool._target_from_url("https://example.test/")
     with pytest.raises(ValueError):

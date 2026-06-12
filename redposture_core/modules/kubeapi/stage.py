@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...audit_models import AuditRecord
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    render_record_with_module,
 )
 from . import actions, policy, render
 
@@ -24,20 +22,13 @@ def build_kubeapi_plan(args: Any) -> AuditCommandPlan:
 
 
 def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
-    def _render(record: AuditRecord) -> list[str]:
-        return render_record_with_module(
-            render,
-            record,
-            str(getattr(args, "output_format", "txt") or "txt"),
-            debug=bool(getattr(args, "debug", False)),
-        )
-
     return ModuleAuditSpec(
         module="kubeapi",
         label="KUBEAPI",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
-        render=_render,
+        render_module=render,
+        colorize=render._render_colored_kubeapi_line,
     )
 
 
@@ -70,7 +61,7 @@ def run_kubeapi_stage(args: Any, logger: Any) -> int:
             else ("basic" if getattr(args, "username", None) is not None else "none")
         )
         console.info(f"kubeapi audit started: auth={auth_mode}" + suffix)
-    runner = AuditCommandRunner(args=args, spec=build_kubeapi_spec(args), logger=logger, emit_line=console.plain)
+    runner = AuditCommandRunner(args=args, spec=build_kubeapi_spec(args), logger=logger, console=console)
     try:
         result = runner.run_plan(plan)
     except OSError as exc:

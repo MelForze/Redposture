@@ -9,6 +9,7 @@ import socket
 import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from .constants import HTTP_METHOD_PREFIXES
 from .scheduler import BoundedScheduler
@@ -30,6 +31,8 @@ __all__ = [
     "ScanTargetSpec",
     "TargetParsePolicy",
     "UsernamePasswordCredential",
+    "as_dict",
+    "as_list",
     "build_scan_execution_groups",
     "collect_scan_ports",
     "collect_scan_target_specs",
@@ -50,6 +53,24 @@ __all__ = [
     "safe_decode",
     "utc_now_iso",
 ]
+
+
+def as_dict(value: Any) -> dict[str, Any]:
+    """Return `value` when it is a dict, else an empty dict.
+
+    Coerces loosely-typed JSON fields so callers get a real mapping (and the
+    type checker stops seeing `dict | None`). Behaviour matches the common
+    `value if isinstance(value, dict) else {}` idiom.
+    """
+
+    return value if isinstance(value, dict) else {}
+
+
+def as_list(value: Any) -> list[Any]:
+    """Return `value` when it is a list, else an empty list (see `as_dict`)."""
+
+    return value if isinstance(value, list) else []
+
 
 _UNEXPECTED_KWARG_RE = re.compile(r"(?:got an )?unexpected keyword argument ['\"](?P<kw>[^'\"]+)['\"]")
 

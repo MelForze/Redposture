@@ -241,14 +241,14 @@ def test_run_mongodb_stage_validation_and_query(monkeypatch: pytest.MonkeyPatch,
             query='{"role":"admin"}',
             dump=1,
         ),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     payload = out.read_text(encoding="utf-8")
     assert '"service": "mongodb"' in payload
     assert '"query_documents"' in payload
 
-    rc = mongodb.run_mongodb_stage(_args(query='{"role":"admin"}'), logger=object())  # type: ignore[arg-type]
+    rc = mongodb.run_mongodb_stage(_args(query='{"role":"admin"}'), logger=object())
     assert rc == 2
 
 
@@ -295,7 +295,7 @@ def test_run_mongodb_stage_document_index_and_nosql_command(monkeypatch: pytest.
             index="role_1",
             nosql_cmd='{"dbStats":1}',
         ),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     payload = out.read_text(encoding="utf-8")
@@ -309,15 +309,15 @@ def test_run_mongodb_stage_document_index_and_nosql_command(monkeypatch: pytest.
 
 def test_run_mongodb_stage_document_and_nosql_validation(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_open(monkeypatch, auth_required=False)
-    assert mongodb.run_mongodb_stage(_args(document="1"), logger=object()) == 2  # type: ignore[arg-type]
+    assert mongodb.run_mongodb_stage(_args(document="1"), logger=object()) == 2
     assert (
         mongodb.run_mongodb_stage(
             _args(collections=["demo_accounts"], document="1", query='{"role":"admin"}'), logger=object()
         )
         == 2
     )
-    assert mongodb.run_mongodb_stage(_args(nosql_cmd="[1]"), logger=object()) == 2  # type: ignore[arg-type]
-    assert mongodb.run_mongodb_stage(_args(nosql_cmd='{"ping":1}', nosql_shell=True), logger=object()) == 2  # type: ignore[arg-type]
+    assert mongodb.run_mongodb_stage(_args(nosql_cmd="[1]"), logger=object()) == 2
+    assert mongodb.run_mongodb_stage(_args(nosql_cmd='{"ping":1}', nosql_shell=True), logger=object()) == 2
 
 
 def test_mongodb_nosql_shell_session() -> None:
@@ -333,7 +333,7 @@ def test_mongodb_nosql_shell_session() -> None:
     inputs = iter(["use redposture", '{"dbStats":1}', "bad-json", "quit"])
     lines: list[str] = []
     rc = mongodb._run_mongodb_nosql_shell_session(
-        client,  # type: ignore[arg-type]
+        client,
         initial_database="admin",
         input_func=lambda _prompt: next(inputs),
         emit_line=lines.append,
@@ -437,7 +437,7 @@ def test_collect_mongodb_data_handles_collection_and_query_errors() -> None:
             raise RuntimeError("not authorized")
 
     data = mongodb._collect_mongodb_data(
-        BrokenClient(),  # type: ignore[arg-type]
+        BrokenClient(),
         database_names=["redposture"],
         selected_database=None,
         collection_targets=[],
@@ -508,7 +508,7 @@ def test_run_mongodb_stage_credential_file_prefilter(monkeypatch: pytest.MonkeyP
     out = tmp_path / "mongo.txt"
     rc = mongodb.run_mongodb_stage(
         _args(targets="127.0.0.1,127.0.0.2", username=str(creds), ports="27017,27018", output=str(out)),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     assert calls == [(["127.0.0.1", "127.0.0.2"], 27017), (["127.0.0.1", "127.0.0.2"], 27018)]

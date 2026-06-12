@@ -49,6 +49,7 @@ redposture = "redposture_core.cli:main"
 dev = [
   "mypy>=1.11.0",
   "pytest>=8.3.0",
+  "pytest-cov>=5.0.0",
   "ruff>=0.6.0",
 ]
 
@@ -70,12 +71,58 @@ testpaths = ["tests"]
 [tool.mypy]
 python_version = "3.10"
 files = ["redposture_core", "redposture.py", "tests"]
+explicit_package_bases = true
+namespace_packages = true
+mypy_path = "."
+exclude = ["redposture_core/proto/"]
 show_error_codes = true
 pretty = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
 check_untyped_defs = true
+
+# Third-party libraries that ship without type stubs. Treat their imports as
+# `Any` (the existing behaviour) instead of failing the run with `import-untyped`,
+# which otherwise halts mypy before it can check the rest of the tree.
+[[tool.mypy.overrides]]
+module = [
+    "oracledb.*",
+    "pymongo.*",
+    "bson.*",
+    "clickhouse_connect.*",
+    "clickhouse_driver.*",
+    "grpc.*",
+    "grpc_tools.*",
+    "google.protobuf.*",
+]
+ignore_missing_imports = true
+
+# Tests are type-checked (no blanket ignore) for real defects: undefined names,
+# bad imports, missing annotations, return-value mistakes, redefinitions. Only the
+# error codes that exclusively flag the intentional gap between deliberately-minimal
+# duck-typed doubles (fake consoles/streams/sockets, argparse-internals
+# introspection) and the concrete types they stand in for are relaxed here.
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disable_error_code = [
+    "arg-type",
+    "attr-defined",
+    "call-overload",
+    "func-returns-value",
+    "index",
+    "list-item",
+    "operator",
+    "union-attr",
+    "var-annotated",
+]
+
+# Generated protobuf/gRPC stubs (no py.typed); treat as untyped so attribute
+# access on them is `Any` rather than a stream of attr-defined errors.
+[[tool.mypy.overrides]]
+module = ["redposture_core.proto.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 120
@@ -91,3 +138,19 @@ per-file-ignores = { "redposture_core/proto/*_pb2.py" = ["I001", "UP009"] }
 quote-style = "double"
 indent-style = "space"
 line-ending = "lf"
+
+# Coverage is collected via tox/CI or `pytest --cov=redposture_core
+# --cov-report=term-missing`. `addopts` deliberately omits `--cov` so plain
+# `pytest` works without pytest-cov installed; the `fail_under` floor below only
+# applies when coverage is actually collected.
+[tool.coverage.run]
+source = ["redposture_core"]
+branch = true
+omit = ["redposture_core/proto/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# Floor set a few points below the current ~79% so it catches a real regression
+# without flapping on small branch-coverage drift. Ratchet up as coverage grows.
+fail_under = 75

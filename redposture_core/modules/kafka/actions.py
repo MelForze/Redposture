@@ -10,7 +10,6 @@ from typing import Any
 from ...clients import kafka as _kafka_client
 from ...clients.kafka import (
     KAFKA_AUTH_ERROR_CODES,
-    _authenticate_and_fetch_metadata,
     _build_credential_runs,
     _build_metadata_request_body,
     _build_request_header,
@@ -33,13 +32,9 @@ from ...clients.kafka import (
     _parse_list_offsets_response,
     _parse_metadata_response,
     _probe_apiversions,
-    _read_dump_topics,
-    _read_topic_messages,
     _recv_exact,
     _recv_kafka_frame,
     _retry_delay,
-    _sasl_authenticate_plain,
-    _sasl_handshake_plain,
     _send_kafka_request,
     open_kafka_socket,
 )
@@ -106,11 +101,13 @@ _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _KAFKA_DEEP_STATUSES = {"open_no_auth", "valid_credentials", "invalid_credentials_anonymous"}
 
-_CLIENT_AUTHENTICATE_AND_FETCH_METADATA = _authenticate_and_fetch_metadata
-_CLIENT_READ_DUMP_TOPICS = _read_dump_topics
-_CLIENT_READ_TOPIC_MESSAGES = _read_topic_messages
-_CLIENT_SASL_AUTHENTICATE_PLAIN = _sasl_authenticate_plain
-_CLIENT_SASL_HANDSHAKE_PLAIN = _sasl_handshake_plain
+# Capture the original client functions before the local override-aware wrappers
+# below shadow these names (kept via the module to avoid an import/def name clash).
+_CLIENT_AUTHENTICATE_AND_FETCH_METADATA = _kafka_client._authenticate_and_fetch_metadata
+_CLIENT_READ_DUMP_TOPICS = _kafka_client._read_dump_topics
+_CLIENT_READ_TOPIC_MESSAGES = _kafka_client._read_topic_messages
+_CLIENT_SASL_AUTHENTICATE_PLAIN = _kafka_client._sasl_authenticate_plain
+_CLIENT_SASL_HANDSHAKE_PLAIN = _kafka_client._sasl_handshake_plain
 
 
 def _with_kafka_client_overrides(callback, *args, **kwargs):
@@ -218,7 +215,7 @@ def _audit_kafka_via_sasl_fallback(
             topic_map: dict[str, int] | None = None
             error_parts: list[str] = []
 
-            if provided_credentials:
+            if username is not None and password is not None:
                 auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
                 provided_credentials_ok = auth_ok
                 if auth_ok:
@@ -423,7 +420,7 @@ def _audit_kafka_host(
                         error_parts.append(metadata_error)
 
                 provided_credentials_ok: bool | None = None
-                if provided_credentials:
+                if username is not None and password is not None:
                     auth_ok, auth_metadata, auth_error = _authenticate_and_fetch_metadata(
                         host, port, timeout, username, password
                     )
@@ -803,7 +800,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
         return lines
 
     prefix = _nxc_prefix(record)
-    lines: list[str] = []
+    lines = []
     if show_topics and topic_names:
         total = record.get("topic_count")
         if show_topics_limit is not None and isinstance(total, int) and total > len(displayed_topic_names):

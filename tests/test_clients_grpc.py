@@ -235,7 +235,7 @@ def test_descriptor_helpers_dedup_protoset_and_error_normalization(tmp_path, mon
     assert result["error"] == "connection timeout"
 
 
-def test_grpc_http2_call_success_path_with_fake_h2(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_grpc_http2_call_success_path_with_fake_h2(monkeypatch) -> None:
     class FakeResponseReceived:
         def __init__(self) -> None:
             self.headers = [(b":status", b"200"), (b"content-type", b"application/grpc")]
@@ -322,7 +322,7 @@ def test_grpc_http2_call_success_path_with_fake_h2(monkeypatch) -> None:  # type
     assert fake_sock.closed is True
 
 
-def test_grpc_web_call_success_and_helpers(monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_grpc_web_call_success_and_helpers(monkeypatch, tmp_path) -> None:
     trailer = b"grpc-status: 0\r\ngrpc-message: OK\r\n"
     body = b"\x00" + (3).to_bytes(4, "big") + b"abc" + b"\x80" + len(trailer).to_bytes(4, "big") + trailer
     response = (

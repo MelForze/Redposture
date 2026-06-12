@@ -148,7 +148,7 @@ def test_trigger_uses_explicit_port_batches(monkeypatch: pytest.MonkeyPatch) -> 
 def test_gitlab_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[tuple[str | None, int, str, str]] = []
 
-    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:
         captured.append((target.scheme if target else None, int(port), target.path, target.query))
         return AuditRecord(host=host, port=int(port), module="gitlab", service="gitlab", status="open_no_auth")
 
@@ -167,7 +167,7 @@ def test_gitlab_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatc
 def test_kubeapi_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[tuple[str | None, int, str]] = []
 
-    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:
         captured.append((target.scheme if target else None, int(port), target.path))
         return AuditRecord(host=host, port=int(port), module="kubeapi", service="kubeapi", status="open_no_auth")
 
@@ -183,7 +183,7 @@ def test_kubeapi_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPat
 def test_proxmox_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[tuple[str | None, int, str]] = []
 
-    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:
         captured.append((target.scheme if target else None, int(port), target.path))
         return AuditRecord(host=host, port=int(port), module="proxmox", service="proxmox", status="valid_credentials")
 
@@ -209,7 +209,7 @@ def test_proxmox_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPat
 def test_consul_passes_preferred_scheme_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[tuple[str | None, int, str]] = []
 
-    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:
         captured.append((target.scheme if target else None, int(port), target.path))
         return AuditRecord(host=host, port=int(port), module="consul", service="consul", status="open_no_auth")
 
@@ -225,7 +225,7 @@ def test_consul_passes_preferred_scheme_hint(monkeypatch: pytest.MonkeyPatch) ->
 def test_elastic_passes_preferred_scheme_hint(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[tuple[str | None, int, str]] = []
 
-    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:
         captured.append((target.scheme if target else None, int(port), target.path))
         return AuditRecord(host=host, port=int(port), module="elastic", service="elastic", status="auth_required")
 

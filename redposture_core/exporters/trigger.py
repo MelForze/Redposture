@@ -258,7 +258,9 @@ def scan_exporters_and_trigger(
     http_get_text_fn: HttpGetText | None = None,
 ) -> dict[str, Any]:
     if http_get_text_fn is None:
-        from .http_client import http_get_text as http_get_text_fn
+        from .http_client import http_get_text
+
+        http_get_text_fn = http_get_text
 
     exporters = list(trigger_exporters or SCAN_EXPORTERS)
     callback_list = list(dict.fromkeys(callback_targets))

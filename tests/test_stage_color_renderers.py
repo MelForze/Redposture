@@ -26,7 +26,7 @@ class _RecordingConsole:
         self.paint_calls: list[tuple[str, str]] = []
         self.rendered_lines: list[str] = []
 
-    def _paint(self, text: str, color: str, stream) -> str:  # type: ignore[no-untyped-def]
+    def _paint(self, text: str, color: str, stream) -> str:
         _ = stream
         self.paint_calls.append((text, color))
         return text

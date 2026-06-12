@@ -186,7 +186,7 @@ def test_validate_basic_module_args_treats_empty_password_as_provided_for_auth_m
     assert console.errors == []
 
 
-def test_validate_basic_module_args_allows_redis_password_only_and_username_file_empty_password(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_validate_basic_module_args_allows_redis_password_only_and_username_file_empty_password(tmp_path) -> None:
     console = _ConsoleRecorder()
     args = type(
         "Args",
@@ -236,7 +236,7 @@ def test_validate_basic_module_args_still_rejects_missing_password() -> None:
     assert "--username and --password must be set together" in console.errors[-1]
 
 
-def test_line_output_sink_emits_to_callback_and_file(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_line_output_sink_emits_to_callback_and_file(tmp_path) -> None:
     emitted: list[str] = []
     callback_sink = LineOutputSink(None, emitted.append)
     callback_sink.emit_many([""])
@@ -339,7 +339,7 @@ def test_audit_command_runner_requires_typed_hook_records() -> None:
 def test_audit_command_runner_suppresses_pre_detect_noise_in_non_debug_txt() -> None:
     emitted: list[str] = []
 
-    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def detect(ctx) -> AuditRecord:
         return AuditRecord(
             host=ctx.host,
             port=ctx.port,
@@ -375,7 +375,7 @@ def test_audit_command_runner_keeps_pre_detect_noise_in_debug_txt() -> None:
     emitted: list[str] = []
     args = type("Args", (), {"debug": True})()
 
-    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def detect(ctx) -> AuditRecord:
         return AuditRecord.from_mapping(
             {
                 "host": ctx.host,
@@ -408,7 +408,7 @@ def test_audit_command_runner_keeps_pre_detect_noise_in_debug_txt() -> None:
 def test_audit_command_runner_keeps_noise_diagnostics_in_json() -> None:
     emitted: list[str] = []
 
-    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def detect(ctx) -> AuditRecord:
         return AuditRecord.from_mapping(
             {
                 "host": ctx.host,
@@ -436,7 +436,7 @@ def test_audit_command_runner_keeps_noise_diagnostics_in_json() -> None:
 def test_audit_command_runner_does_not_suppress_detected_auth_or_data_errors() -> None:
     emitted: list[str] = []
 
-    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def detect(ctx) -> AuditRecord:
         return AuditRecord.from_mapping(
             {
                 "host": ctx.host,
@@ -488,6 +488,42 @@ def test_audit_command_runner_rejects_dict_hook_records() -> None:
         raise AssertionError("dict hook result was accepted")
 
 
+def test_audit_command_runner_isolates_per_host_task_exceptions() -> None:
+    def detect(ctx):
+        if ctx.host == "bad":
+            raise RuntimeError("boom on this host")
+        return AuditRecord(host=ctx.host, port=ctx.port, module="redis", service="redis", status="open_no_auth")
+
+    spec = ModuleAuditSpec(
+        module="redis",
+        label="REDIS",
+        default_port=6379,
+        detect=detect,
+        render=lambda record: [f"{record.host} {record.status}"],
+    )
+    plan = AuditCommandPlan(targets_by_port={6379: ("good", "bad")}, output_format="txt")
+
+    # One host raising an operational error must not abort the scan or escape run_plan.
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+
+    by_host = {record["host"]: record for record in result.records}
+    assert by_host["good"]["status"] == "open_no_auth"
+    assert by_host["bad"]["status"] == "fail"
+    assert "boom on this host" in by_host["bad"]["error"]
+
+
+def test_audit_command_runner_reraises_contract_typeerror_loudly() -> None:
+    # A TypeError (typed-hook/spec contract violation) affects every host and must
+    # stay loud rather than being isolated into per-host fail records.
+    def detect(ctx):
+        raise TypeError("contract violation")
+
+    spec = ModuleAuditSpec(module="redis", label="REDIS", default_port=6379, detect=detect)
+    plan = AuditCommandPlan(targets_by_port={6379: ("127.0.0.1",)})
+    with pytest.raises(TypeError, match="contract violation"):
+        AuditCommandRunner(args=object(), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+
+
 def test_audit_command_plan_tracks_targets_credentials_and_summary() -> None:
     plan = AuditCommandPlan(
         targets_by_port={6379: ("a", "b"), 6380: ("c",)},
@@ -534,7 +570,7 @@ def test_audit_command_runner_run_plan_uses_one_typed_path_for_multi_port_target
     emitted: list[str] = []
     seen: list[tuple[str, int]] = []
 
-    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def detect(ctx) -> AuditRecord:
         seen.append((ctx.host, ctx.port))
         return AuditRecord(
             host=ctx.host,
@@ -566,7 +602,7 @@ def test_audit_command_runner_detects_once_auths_all_and_runs_data_once() -> Non
     debug_events: list[str] = []
     calls: list[tuple[str, str, str | None]] = []
 
-    def detect(ctx) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def detect(ctx) -> AuditRecord:
         calls.append(("detect", ctx.host, ctx.credential.username))
         return AuditRecord(
             host=ctx.host,
@@ -577,12 +613,12 @@ def test_audit_command_runner_detects_once_auths_all_and_runs_data_once() -> Non
             extra={"is_demo": True},
         )
 
-    def auth(ctx, record: AuditRecord) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def auth(ctx, record: AuditRecord) -> AuditRecord:
         calls.append(("auth", ctx.host, ctx.credential.username))
         status = "valid_credentials" if ctx.credential.username == "good" else "invalid_credentials"
         return AuditRecord.from_mapping({**record.to_dict(), "status": status}, module="demo", service="demo")
 
-    def data(ctx, record: AuditRecord) -> AuditRecord:  # type: ignore[no-untyped-def]
+    def data(ctx, record: AuditRecord) -> AuditRecord:
         calls.append(("data", ctx.host, ctx.credential.username))
         return AuditRecord.from_mapping({**record.to_dict(), "deep": True}, module="demo", service="demo")
 
