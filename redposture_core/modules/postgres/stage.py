@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...audit_models import AuditRecord
 from ...console import Console
 from ...show_limits import dump_flag_enabled, dump_flag_limit
 from ...stage_runtime import (
@@ -14,7 +13,6 @@ from ...stage_runtime import (
     ModuleAuditSpec,
     build_basic_audit_plan,
     has_username_password_credential_file,
-    render_record_with_module,
 )
 from . import actions, policy, render
 
@@ -27,20 +25,13 @@ def build_postgres_plan(args: Any) -> AuditCommandPlan:
 
 
 def build_postgres_spec(args: Any) -> ModuleAuditSpec:
-    def _render(record: AuditRecord) -> list[str]:
-        return render_record_with_module(
-            render,
-            record,
-            str(getattr(args, "output_format", "txt") or "txt"),
-            debug=bool(getattr(args, "debug", False)),
-        )
-
     return ModuleAuditSpec(
         module="postgres",
         label="POSTGRES",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
-        render=_render,
+        render_module=render,
+        colorize=render._render_colored_postgres_line,
     )
 
 
@@ -77,7 +68,7 @@ def run_postgres_stage(args: Any, logger: Any) -> int:
         if getattr(args, "output", None):
             suffix += f" output={args.output}"
         console.info("postgres audit started:" + suffix)
-    runner = AuditCommandRunner(args=args, spec=build_postgres_spec(args), logger=logger, emit_line=console.plain)
+    runner = AuditCommandRunner(args=args, spec=build_postgres_spec(args), logger=logger, console=console)
     try:
         result = runner.run_plan(plan)
     except OSError as exc:

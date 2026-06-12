@@ -216,8 +216,12 @@ def test_module_stage_files_are_runtime_entrypoint_facades() -> None:
         assert f"Runtime entrypoint for the {module} audit module" in source
         assert f"run_{module}_stage" in source
         assert "run_legacy_command" not in source
-        assert "AuditCommandRunner" in source
-        assert ".run_plan(" in source
+        # Stage files must drive the staged runtime — either directly
+        # (AuditCommandRunner + run_plan) or via the shared run_basic_host_audit
+        # helper that wraps exactly that for modules with no custom pre/post logic.
+        uses_runner = "AuditCommandRunner" in source and ".run_plan(" in source
+        uses_helper = "run_basic_host_audit" in source
+        assert uses_runner or uses_helper, module
         offenders = [token for token in forbidden_tokens if token in source]
         assert offenders == [], module
 

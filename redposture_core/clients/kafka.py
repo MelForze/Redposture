@@ -872,8 +872,8 @@ def _read_dump_topics(
     max_messages: int,
     username: str | None,
     password: str | None,
-) -> tuple[dict[str, list[str]], dict[str, str]]:
-    dump_results: dict[str, list[str]] = {}
+) -> tuple[dict[str, list[str] | None], dict[str, str]]:
+    dump_results: dict[str, list[str] | None] = {}
     dump_errors: dict[str, str] = {}
     for topic_name in topics:
         read_items, read_error = _read_topic_messages(

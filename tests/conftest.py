@@ -8,6 +8,26 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _force_color_in_tests() -> Iterable[None]:
+    """Color output is now gated on ``isatty()``; pytest captures stdout to a
+    non-tty, so force color on for the suite (mirrors a real terminal) and clear
+    any inherited ``NO_COLOR`` so the color-assertion tests stay deterministic."""
+    prev_force = os.environ.get("FORCE_COLOR")
+    prev_no = os.environ.get("NO_COLOR")
+    os.environ["FORCE_COLOR"] = "1"
+    os.environ.pop("NO_COLOR", None)
+    try:
+        yield
+    finally:
+        if prev_force is None:
+            os.environ.pop("FORCE_COLOR", None)
+        else:
+            os.environ["FORCE_COLOR"] = prev_force
+        if prev_no is not None:
+            os.environ["NO_COLOR"] = prev_no
+
+
 @pytest.fixture
 def write_json_payload(tmp_path: Path) -> Callable[[str, object], Path]:
     def _write(name: str, payload: object) -> Path:

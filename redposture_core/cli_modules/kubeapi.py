@@ -20,9 +20,9 @@ def configure_kubeapi_parser(
     auth = parser.add_argument_group("Auth")
     actions = parser.add_argument_group("Actions")
 
-    add_output_flags(common)  # type: ignore[arg-type]
+    add_output_flags(common)
     add_log_flag(common)
-    add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
+    add_scan_host_flags(common, include_profiles=False)
     common.add_argument(
         "--port",
         dest="port",

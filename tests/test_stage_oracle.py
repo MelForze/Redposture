@@ -348,13 +348,13 @@ def test_audit_oracle_targets_two_pass_debug_and_output(monkeypatch: pytest.Monk
 def test_run_oracle_stage_validation_and_json(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _patch_open(monkeypatch, auth_required=False)
     out = tmp_path / "oracle.jsonl"
-    rc = oracle.run_oracle_stage(_args(output=str(out), output_format="json", show_pdbs=True), logger=object())  # type: ignore[arg-type]
+    rc = oracle.run_oracle_stage(_args(output=str(out), output_format="json", show_pdbs=True), logger=object())
     assert rc == 0
     assert '"service": "oracle"' in out.read_text(encoding="utf-8")
-    assert oracle.run_oracle_stage(_args(service="FREEPDB1", sid="XE"), logger=object()) == 2  # type: ignore[arg-type]
-    assert oracle.run_oracle_stage(_args(query="delete from users"), logger=object()) == 2  # type: ignore[arg-type]
-    assert oracle.run_oracle_stage(_args(os_write="badpair"), logger=object()) == 2  # type: ignore[arg-type]
-    assert oracle.run_oracle_stage(_args(download="badpair"), logger=object()) == 2  # type: ignore[arg-type]
+    assert oracle.run_oracle_stage(_args(service="FREEPDB1", sid="XE"), logger=object()) == 2
+    assert oracle.run_oracle_stage(_args(query="delete from users"), logger=object()) == 2
+    assert oracle.run_oracle_stage(_args(os_write="badpair"), logger=object()) == 2
+    assert oracle.run_oracle_stage(_args(download="badpair"), logger=object()) == 2
 
 
 def test_oracle_helpers_parse_credentials_and_targets(tmp_path: Path) -> None:

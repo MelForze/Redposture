@@ -30,7 +30,7 @@ class MongoNotMongoError(MongoClientError):
 
 def _load_pymongo() -> Any:
     try:
-        import pymongo  # type: ignore[import-not-found]
+        import pymongo
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised by stage-level fallback tests
         raise MongoDependencyError(
             "pymongo is required for mongodb module; install redposture with dependencies"
@@ -40,7 +40,7 @@ def _load_pymongo() -> Any:
 
 def _load_bson_json_util() -> Any | None:
     try:
-        from bson import json_util  # type: ignore[import-not-found]
+        from bson import json_util
     except ModuleNotFoundError:
         return None
     return json_util

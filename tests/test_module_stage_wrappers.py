@@ -27,12 +27,12 @@ MODULES = {
 }
 
 
-def test_module_stage_wrappers_route_to_audit_command_runner(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_module_stage_wrappers_route_to_audit_command_runner(monkeypatch) -> None:
     for module_name, (label, default_port) in MODULES.items():
         stage = importlib.import_module(f"redposture_core.modules.{module_name}.stage")
         calls: list[tuple[str, int, object]] = []
 
-        def fake_run_plan(self, plan, calls=calls):  # type: ignore[no-untyped-def]
+        def fake_run_plan(self, plan, calls=calls):
             calls.append((self.spec.label, self.spec.default_port, plan))
             return AuditCommandResult(records=[], detected_count=0, emitted_lines=0, typed_records=[])
 

@@ -2096,12 +2096,12 @@ def _audit_elastic_host(
         primary_probe = detect_decision.get("primary_probe")
         if isinstance(primary_probe, dict):
             status = int(primary_probe.get("status") or status)
-            probe_payload = primary_probe.get("payload")
-            if isinstance(probe_payload, (bytes, bytearray)):
-                payload = bytes(probe_payload)
-            probe_headers = primary_probe.get("headers")
-            if isinstance(probe_headers, dict):
-                root_headers = {str(key): str(value) for key, value in probe_headers.items()}
+            primary_probe_payload = primary_probe.get("payload")
+            if isinstance(primary_probe_payload, (bytes, bytearray)):
+                payload = bytes(primary_probe_payload)
+            primary_probe_headers = primary_probe.get("headers")
+            if isinstance(primary_probe_headers, dict):
+                root_headers = {str(key): str(value) for key, value in primary_probe_headers.items()}
             probe_error = primary_probe.get("error")
             if isinstance(probe_error, str):
                 error = probe_error
@@ -2355,7 +2355,7 @@ def _audit_elastic_host(
         rights_error: str | None = None
         access_level = "unknown"
         api_key_probe_status = "not_run"
-        api_key_probe_error: str | None = None
+        api_key_probe_error = None
         if auth_provided:
             can_read, can_write, can_manage, can_manage_security, rights_error = _check_privileges(
                 host,
@@ -2382,7 +2382,9 @@ def _audit_elastic_host(
                     ca_file=ca_file,
                     auth_headers=auth_headers,
                 )
-            stage3_error = "; ".join(item for item in (rights_error, api_key_probe_error) if str(item or "").strip())
+            stage3_error = "; ".join(
+                str(item) for item in (rights_error, api_key_probe_error) if str(item or "").strip()
+            )
             _stage_trace(
                 _STAGE_ACCESS_CAPABILITIES,
                 attempt=attempt + 1,
@@ -2474,7 +2476,7 @@ def _audit_elastic_host(
                 auth_headers=auth_headers,
             )
         stage4_error = "; ".join(
-            item
+            str(item)
             for item in (endpoints_error, plugins_error, cluster_error, misconfig_error, users_error, discover_error)
             if str(item or "").strip()
         )
@@ -2882,7 +2884,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             )
         return lines
 
-    lines: list[str] = []
+    lines = []
 
     if bool(record.get("show_endpoints")):
         endpoints = record.get("cat_endpoints")

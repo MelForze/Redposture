@@ -2297,7 +2297,7 @@ def _format_table_columns_detail_records(record: dict[str, Any], output_format: 
         return lines
 
     prefix = _nxc_prefix(record)
-    lines: list[str] = []
+    lines = []
     for item in table_columns_info:
         if not isinstance(item, dict):
             continue
@@ -2411,7 +2411,7 @@ def _format_table_dump_detail_records(record: dict[str, Any], output_format: str
         return lines
 
     prefix = _nxc_prefix(record)
-    lines: list[str] = []
+    lines = []
     for item in table_dumps:
         if not isinstance(item, dict):
             continue

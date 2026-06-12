@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...audit_models import AuditRecord
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -13,7 +12,6 @@ from ...stage_runtime import (
     ModuleAuditSpec,
     build_basic_audit_plan,
     has_username_password_credential_file,
-    render_record_with_module,
 )
 from . import actions, policy, render
 
@@ -26,20 +24,13 @@ def build_elastic_plan(args: Any) -> AuditCommandPlan:
 
 
 def build_elastic_spec(args: Any) -> ModuleAuditSpec:
-    def _render(record: AuditRecord) -> list[str]:
-        return render_record_with_module(
-            render,
-            record,
-            str(getattr(args, "output_format", "txt") or "txt"),
-            debug=bool(getattr(args, "debug", False)),
-        )
-
     return ModuleAuditSpec(
         module="elastic",
         label="ELASTIC",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
-        render=_render,
+        render_module=render,
+        colorize=render._render_colored_elastic_line,
     )
 
 
@@ -77,7 +68,7 @@ def run_elastic_stage(args: Any, logger: Any) -> int:
         if getattr(args, "output", None):
             suffix += f" output={args.output}"
         console.info("elastic audit started:" + suffix)
-    runner = AuditCommandRunner(args=args, spec=build_elastic_spec(args), logger=logger, emit_line=console.plain)
+    runner = AuditCommandRunner(args=args, spec=build_elastic_spec(args), logger=logger, console=console)
     try:
         result = runner.run_plan(plan)
     except OSError as exc:

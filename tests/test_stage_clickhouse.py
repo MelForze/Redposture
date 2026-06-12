@@ -972,7 +972,7 @@ def test_run_clickhouse_stage_processes_all_ports_without_short_circuit(
 
     called_ports: list[int] = []
 
-    def fake_audit_clickhouse_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_clickhouse_targets(*_args, **kwargs):
         called_ports.append(int(kwargs["port"]))
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -1030,7 +1030,7 @@ def test_run_clickhouse_stage_multi_port_verbose_uses_single_global_progress(
 
     show_progress_flags: list[bool] = []
 
-    def fake_audit_clickhouse_targets(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_clickhouse_targets(*_args, **kwargs):
         show_progress_flags.append(bool(kwargs["show_progress"]))
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))

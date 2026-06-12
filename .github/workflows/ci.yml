@@ -35,8 +35,7 @@ jobs:
       - name: Ruff format check
         run: ruff format --check .
 
-      - name: Mypy (advisory)
-        continue-on-error: true
+      - name: Mypy
         run: mypy
 
       - name: CLI help smoke
@@ -71,7 +70,7 @@ jobs:
           python -m compileall -q redposture_core tests
 
       - name: Pytest
-        run: pytest -q
+        run: pytest -q --cov=redposture_core --cov-report=term-missing
 
       - name: CLI version smoke
         run: redposture --version

@@ -93,10 +93,14 @@ def _start_servers(
         )
 
     postgres_ssl_context = (
-        build_ssl_context(cert_path, key_path) if ("postgres" in services and args.postgres_tls) else None
+        build_ssl_context(cert_path, key_path)
+        if (cert_path and key_path and "postgres" in services and args.postgres_tls)
+        else None
     )
     proxmox_ssl_context = (
-        build_ssl_context(cert_path, key_path) if ("proxmox" in services and args.proxmox_tls) else None
+        build_ssl_context(cert_path, key_path)
+        if (cert_path and key_path and "proxmox" in services and args.proxmox_tls)
+        else None
     )
 
     if "postgres" in services:

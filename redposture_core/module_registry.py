@@ -618,13 +618,13 @@ def configure_cli_subcommands(
         required=True,
         parser_class=parser_class,
     )
-    for spec in EXPORTERS_ACTION_SPECS:
+    for action_spec in EXPORTERS_ACTION_SPECS:
         child = exporters_subparsers.add_parser(
-            spec.name,
-            help=spec.help,
+            action_spec.name,
+            help=action_spec.help,
             formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         )
-        spec.configure_parser(child, helpers)
+        action_spec.configure_parser(child, helpers)
 
     for spec in COMMAND_SPECS:
         parser_kwargs: dict[str, Any] = {

@@ -10,7 +10,7 @@ import pytest
 from redposture_core.scanner import collect_exporter_debug_data
 
 
-def test_collect_output_is_emitted_as_soon_as_requests_complete(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_collect_output_is_emitted_as_soon_as_requests_complete(monkeypatch) -> None:
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
         # Force out-of-order completion to ensure final output is explicitly sorted.
         if "/debug/vars" in url:
@@ -56,7 +56,7 @@ def test_collect_output_is_emitted_as_soon_as_requests_complete(monkeypatch) -> 
     assert positions[("10.0.0.1", "/debug/pprof/cmdline?debug=1")] < positions[("10.0.0.1", "/debug/vars")]
 
 
-def test_collect_txt_line_contains_display_name_and_full_url(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_collect_txt_line_contains_display_name_and_full_url(monkeypatch) -> None:
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
         return {
             "status": 200,
@@ -117,7 +117,7 @@ def test_collect_txt_line_contains_display_name_and_full_url(monkeypatch) -> Non
 )
 def test_collect_txt_line_contains_display_name_for_new_exporters(
     monkeypatch, exporter_name: str, display_name: str, port: int
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
         return {
             "status": 200,
@@ -153,7 +153,7 @@ def test_collect_txt_line_contains_display_name_for_new_exporters(
     assert f"url=http://10.0.0.1:{port}/debug/vars" in hit_lines[0]
 
 
-def test_collect_can_save_raw_responses_and_index(tmp_path: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_collect_can_save_raw_responses_and_index(tmp_path: Path, monkeypatch) -> None:
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
         return {
             "status": 200,
@@ -197,7 +197,7 @@ def test_collect_can_save_raw_responses_and_index(tmp_path: Path, monkeypatch) -
     assert "password=redis" in saved_file.read_text(encoding="utf-8")
 
 
-def test_collect_skips_deep_pprof_when_pprof_index_is_unavailable(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_collect_skips_deep_pprof_when_pprof_index_is_unavailable(monkeypatch) -> None:
     called_urls: list[str] = []
 
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
@@ -249,7 +249,7 @@ def test_collect_skips_deep_pprof_when_pprof_index_is_unavailable(monkeypatch) -
     assert sorted(endpoints) == sorted(["/debug/vars", "/debug/pprof/", "/metrics"])
 
 
-def test_collect_reuses_pprof_probe_response_without_duplicate_request(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_collect_reuses_pprof_probe_response_without_duplicate_request(monkeypatch) -> None:
     call_count: dict[str, int] = {}
 
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
@@ -290,7 +290,7 @@ def test_collect_reuses_pprof_probe_response_without_duplicate_request(monkeypat
     assert sorted(endpoints) == sorted(["/debug/vars", "/debug/pprof/", "/debug/pprof/goroutine?debug=1"])
 
 
-def test_collect_disables_pprof_preflight_for_large_target_sets(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_collect_disables_pprof_preflight_for_large_target_sets(monkeypatch) -> None:
     monkeypatch.setattr("redposture_core.scanner._COLLECT_PPROF_PREFLIGHT_MAX_TARGETS", 1)
 
     called_urls: list[str] = []
@@ -339,7 +339,7 @@ def test_collect_disables_pprof_preflight_for_large_target_sets(monkeypatch) -> 
     assert sum(1 for url in called_urls if url.endswith("/debug/pprof/goroutine?debug=1")) == 2
 
 
-def test_collect_resume_skips_completed_jobs(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+def test_collect_resume_skips_completed_jobs(monkeypatch, tmp_path: Path) -> None:
     called_urls: list[str] = []
 
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
@@ -381,7 +381,7 @@ def test_collect_resume_skips_completed_jobs(monkeypatch, tmp_path: Path) -> Non
     assert checkpoint.exists()
 
 
-def test_collect_writes_checkpoint_records(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+def test_collect_writes_checkpoint_records(monkeypatch, tmp_path: Path) -> None:
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
         _ = (url, timeout, retries)
         return {
@@ -422,7 +422,7 @@ def test_collect_writes_checkpoint_records(monkeypatch, tmp_path: Path) -> None:
     assert payloads[0]["endpoint"] == "/debug/vars"
 
 
-def test_collect_adaptive_preflight_collapses_stale_targets(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_collect_adaptive_preflight_collapses_stale_targets(monkeypatch) -> None:
     called_urls: list[str] = []
 
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
@@ -488,7 +488,7 @@ def test_collect_adaptive_preflight_collapses_stale_targets(monkeypatch) -> None
     assert all("/debug/pprof/goroutine?debug=1" not in item for item in called_urls)
 
 
-def test_collect_record_callback_runs_in_postprocess_thread(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_collect_record_callback_runs_in_postprocess_thread(monkeypatch) -> None:
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
         _ = (url, timeout, retries)
         return {

@@ -58,7 +58,7 @@ def _clip_text(value: str, width: int) -> str:
     return value[: width - 3] + "..."
 
 
-def _safe_int(value: object) -> int | None:
+def _safe_int(value: Any) -> int | None:
     try:
         return int(value) if value is not None else None
     except (TypeError, ValueError):

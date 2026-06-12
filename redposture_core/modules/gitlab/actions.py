@@ -971,16 +971,16 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             for item in clone_results:
                 if not isinstance(item, dict):
                     continue
-                project = str(item.get("project") or "-")
+                project_name = str(item.get("project") or "-")
                 dest = str(item.get("dest") or "-")
                 status = str(item.get("status") or "failed")
                 error = str(item.get("error") or "").strip()
                 if status == "cloned":
-                    lines.append(f"{prefix} [+] {project} -> {dest}")
+                    lines.append(f"{prefix} [+] {project_name} -> {dest}")
                 elif status == "exists":
-                    lines.append(f"{prefix} [*] {project} already exists -> {dest}")
+                    lines.append(f"{prefix} [*] {project_name} already exists -> {dest}")
                 else:
-                    body = f"{project}"
+                    body = f"{project_name}"
                     if error:
                         body += f" err={_clip(error, 96)}"
                     lines.append(f"{prefix} [-] clone failed {body}")

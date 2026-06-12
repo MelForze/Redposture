@@ -78,7 +78,7 @@ def test_safe_repo_relative_path_sanitizes_escape_segments() -> None:
     assert gitlab._safe_repo_relative_path("/../../") == "item"
 
 
-def test_clone_project_sanitizes_path_traversal_destination(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_clone_project_sanitizes_path_traversal_destination(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     clone_root = tmp_path / "gitlab-clones"
     clone_root.mkdir()
     captured: dict[str, object] = {}
@@ -181,7 +181,7 @@ def test_format_detail_records_with_invalid_token_and_clone_results() -> None:
     assert any("[-] clone failed group/miss err=not found" in line for line in lines)
 
 
-def test_audit_gitlab_host_detects_public_projects_and_open_endpoints(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_gitlab_host_detects_public_projects_and_open_endpoints(monkeypatch) -> None:
     def fake_http_request(
         host: str,
         port: int,
@@ -245,7 +245,7 @@ def test_audit_gitlab_host_detects_public_projects_and_open_endpoints(monkeypatc
     assert any("group/app (visibility:public)" in line for line in detail_lines)
 
 
-def test_audit_gitlab_host_valid_token_probes_access_and_clones(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_gitlab_host_valid_token_probes_access_and_clones(monkeypatch) -> None:
     def fake_http_request(
         host: str,
         port: int,
@@ -372,7 +372,7 @@ def test_audit_gitlab_host_valid_token_probes_access_and_clones(monkeypatch) -> 
     assert any("[+] group/app -> /tmp/gitlab/group_app" in line for line in detail_lines)
 
 
-def test_audit_gitlab_host_marks_not_gitlab_and_retries_failures(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_gitlab_host_marks_not_gitlab_and_retries_failures(monkeypatch) -> None:
     def fake_not_gitlab(
         host: str,
         port: int,

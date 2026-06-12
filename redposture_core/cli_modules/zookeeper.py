@@ -22,9 +22,9 @@ def configure_zookeeper_parser(
     common = parser.add_argument_group("Common")
     auth = parser.add_argument_group("Auth")
     actions = parser.add_argument_group("Actions")
-    add_output_flags(common)  # type: ignore[arg-type]
+    add_output_flags(common)
     add_log_flag(common)
-    add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
+    add_scan_host_flags(common, include_profiles=False)
     # ZooKeeper often requires a longer handshake window on real networks.
     # Keep module-local default timeout at 5s without changing other modules.
     for action in parser._actions:

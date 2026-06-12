@@ -786,7 +786,7 @@ def _list_secrets(
         )
         if items is None:
             return None, error
-        iter_items = [(None, item) for item in items]
+        iter_items: list[tuple[str | None, dict[str, Any]]] = [(None, item) for item in items]
     else:
         per_ns_items: list[tuple[str | None, dict[str, Any]]] = []
         for namespace in namespaces:
@@ -1474,7 +1474,7 @@ def _audit_kubeapi_host(
                 can_exec_pod = False
 
             data_error = "; ".join(
-                item
+                str(item)
                 for item in (
                     namespaces_error,
                     pods_error,
