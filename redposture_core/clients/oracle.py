@@ -82,7 +82,7 @@ def _oracle_sql_identifier(raw: str) -> str | None:
 
 def _load_oracledb() -> Any:
     try:
-        import oracledb  # type: ignore[import-not-found]
+        import oracledb
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised through stage fallback/unit monkeypatches
         raise OracleDependencyError(
             "python-oracledb is required for oracle module; install redposture with dependencies"

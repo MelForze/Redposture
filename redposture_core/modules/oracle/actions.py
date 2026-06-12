@@ -35,6 +35,8 @@ from ...stage_runtime import (
     merge_stage_records,
 )
 from ...utils import (
+    as_dict,
+    as_list,
     utc_now_iso,
 )
 
@@ -609,7 +611,7 @@ def _collect_oracle_data(
         target_schema = schema
         target_table = table
         if not target_schema or not target_table:
-            table_rows = data.get("tables") if isinstance(data.get("tables"), list) else []
+            table_rows = as_list(data.get("tables"))
             if table_rows:
                 target_schema = str(table_rows[0].get("owner") or table_rows[0].get("schema_name") or "")
                 target_table = str(table_rows[0].get("table_name") or "")
@@ -1023,7 +1025,7 @@ def _audit_oracle_host(
                     protocol=protocol_candidates[0] if protocol_candidates else "tcp",
                     insecure=insecure,
                 )
-                summary = bare_listener.get("summary") if isinstance(bare_listener.get("summary"), dict) else {}
+                summary = as_dict(bare_listener.get("summary"))
                 raw_payload = json.dumps(bare_listener, ensure_ascii=False)
                 if bare_listener.get("status_ok") or summary.get("password_protected") or "TNS-" in raw_payload:
                     record["listener_dump"] = bare_listener
@@ -1533,7 +1535,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             )
         else:
             prefix = _nxc_prefix(record)
-            summary = value.get("summary") if isinstance(value.get("summary"), dict) else {}
+            summary = as_dict(value.get("summary"))
             lines.append(f"{prefix} [*] Listener Dump")
             lines.append(
                 f"{prefix} status_ok={value.get('status_ok')} services_ok={value.get('services_ok')} "
@@ -1733,7 +1735,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             prefix = _nxc_prefix(record)
             lines.append(f"{prefix} [*] PrivEsc Chain Execution")
             for item in record.get("privesc_chain_executed") or []:
-                result = item.get("result") if isinstance(item.get("result"), dict) else {}
+                result = as_dict(item.get("result"))
                 method = item.get("method") or result.get("method") or item.get("procedure") or "-"
                 status = "ok" if item.get("ok") is True else "fail" if item.get("ok") is False else "unknown"
                 evidence = (

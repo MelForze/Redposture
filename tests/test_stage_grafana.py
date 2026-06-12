@@ -224,7 +224,7 @@ def test_run_temp_prometheus_check_success_and_failure(monkeypatch: pytest.Monke
     assert invalid["create_error"] == "invalid target url"
 
 
-def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypatch) -> None:
     def fake_http_request(
         host: str,
         port: int,
@@ -286,7 +286,7 @@ def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypat
     assert "[-] credentials invalid (anonymous access)" in line
 
 
-def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkeypatch) -> None:
     verify_calls: list[tuple[str, str]] = []
 
     def fake_http_request(
@@ -355,7 +355,7 @@ def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkey
     assert bool(auth_attempts[0].get("ok")) is True
 
 
-def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> None:
     verify_calls: list[tuple[str, str]] = []
 
     def fake_http_request(
@@ -415,7 +415,7 @@ def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> 
     ]
 
 
-def test_audit_grafana_emits_auth_attempt_lines_before_status(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_grafana_emits_auth_attempt_lines_before_status(monkeypatch) -> None:
     def fake_audit_host(
         host: str,
         port: int,
@@ -499,7 +499,7 @@ def test_audit_grafana_emits_auth_attempt_lines_before_status(monkeypatch) -> No
     assert "[-] admin:prom-operator" in emitted_lines[3]
 
 
-def test_audit_grafana_auth_required_after_datasource_denial(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_grafana_auth_required_after_datasource_denial(monkeypatch) -> None:
     def fake_http_request(
         host: str,
         port: int,
@@ -544,7 +544,7 @@ def test_audit_grafana_auth_required_after_datasource_denial(monkeypatch) -> Non
     assert record["datasource_count"] is None
 
 
-def test_audit_grafana_formats_datasources_and_check_failures(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_grafana_formats_datasources_and_check_failures(monkeypatch) -> None:
     def fake_http_request(
         host: str,
         port: int,
@@ -571,7 +571,7 @@ def test_audit_grafana_formats_datasources_and_check_failures(monkeypatch) -> No
         return (
             [
                 {"name": "prometheus", "type": "prometheus", "url": "http://127.0.0.1:9090", "access": "proxy"},
-                "skip-me",  # type: ignore[list-item]
+                "skip-me",
             ],
             None,
             200,
@@ -627,7 +627,7 @@ def test_audit_grafana_formats_datasources_and_check_failures(monkeypatch) -> No
     assert any('"type": "datasources_dump"' in line for line in json_lines)
 
 
-def test_audit_grafana_marks_non_grafana_and_retries_failures(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_grafana_marks_non_grafana_and_retries_failures(monkeypatch) -> None:
     def fake_not_grafana(
         host: str,
         port: int,

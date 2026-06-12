@@ -1210,17 +1210,17 @@ def _audit_proxmox_host(
 
     permissions_status, permissions_payload, permissions_error = fetch("/access/permissions?path=/")
     if permissions_error:
-        cap_adduser: bool | None = None
-        cap_read: bool | None = None
-        cap_modify: bool | None = None
-        cap_backup: bool | None = None
+        cap_adduser = None
+        cap_read = None
+        cap_modify = None
+        cap_backup = None
     elif permissions_status != 200:
         cap_adduser = None
         cap_read = None
         cap_modify = None
         cap_backup = None
     else:
-        permission_tokens: set[str] = set()
+        permission_tokens = set()
         _collect_permission_tokens(_unwrap_api_data(_parse_json_payload(permissions_payload)), permission_tokens)
         caps = _derive_permission_caps(permission_tokens)
         cap_adduser = caps["adduser"]
@@ -1280,8 +1280,8 @@ def _audit_proxmox_host(
                     add_user_privileges_granted = True
                     add_user_privileges_role = _ADD_USER_PRIV_ROLE
 
-    users: list[str] | None = None
-    users_error: str | None = None
+    users = None
+    users_error = None
     if show_users:
         users_status, users_payload, users_fetch_error = fetch("/access/users")
         if users_fetch_error:
@@ -1517,7 +1517,7 @@ def _format_findings_detail_records(record: dict[str, Any], output_format: str) 
         return lines
 
     prefix = _nxc_prefix(record)
-    lines: list[str] = []
+    lines = []
     for finding in findings:
         if not isinstance(finding, dict):
             continue

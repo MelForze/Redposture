@@ -278,16 +278,16 @@ def _dump_v2_key(host: str, port: int, key: str, timeout: float) -> tuple[dict[s
 def _dump_v3_all(
     host: str, port: int, timeout: float, *, limit: int | None = None
 ) -> tuple[list[dict[str, str | None]] | None, str | None]:
-    payload: dict[str, Any] = {"key": _ETCD_V3_ALL_RANGE_KEY_B64, "range_end": _ETCD_V3_ALL_RANGE_KEY_B64}
+    request_payload: dict[str, Any] = {"key": _ETCD_V3_ALL_RANGE_KEY_B64, "range_end": _ETCD_V3_ALL_RANGE_KEY_B64}
     if limit is not None:
-        payload["limit"] = limit
+        request_payload["limit"] = limit
     status, body = _http_json_request(
         host,
         port,
         "POST",
         "/v3/kv/range",
         timeout,
-        payload=payload,
+        payload=request_payload,
     )
     if status in (401, 403) or _body_indicates_auth_required(body):
         return None, "authentication required"
@@ -725,7 +725,7 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
         return lines
 
     prefix = _nxc_prefix(record)
-    lines: list[str] = []
+    lines = []
     if show_keys and key_names:
         total = record.get("key_count")
         if show_keys_limit is not None and isinstance(total, int) and total > len(displayed_key_names):

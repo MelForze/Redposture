@@ -1388,7 +1388,7 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
 
     captured: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         captured.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -1431,7 +1431,7 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
 
 def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
     monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     class _Console:
         def __init__(self, debug: bool = False) -> None:
             self.debug = debug
@@ -1497,7 +1497,7 @@ def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
 
     captured: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         captured.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -2033,7 +2033,7 @@ def test_collect_discover_results_mixed_and_truncated(monkeypatch: pytest.Monkey
         if index_name == "denied":
             return 0, None, "Access Denied"
         if index_name == "big":
-            hits = [
+            hits: list[dict[str, object]] = [
                 {"id": f"doc-{idx}", "source": {"k": idx}}
                 for idx in range(elastic_stage._DISCOVER_MAX_PRINT_PER_INDEX + 3)
             ]
@@ -2460,7 +2460,7 @@ def test_elastic_record_and_renderer_variants() -> None:
     assert console.lines
 
 
-def test_elastic_audit_targets_counts_and_logger_branches(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_elastic_audit_targets_counts_and_logger_branches(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     def fake_call(
         host: str,
         port: int,
@@ -2619,7 +2619,7 @@ def test_call_audit_elastic_wrapper_fallbacks_for_signature_mismatch(
 ) -> None:
     calls: list[dict[str, object]] = []
 
-    def fake_audit(*_args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **kwargs):
         calls.append(dict(kwargs))
         if "run_deep_checks" in kwargs:
             raise TypeError("got an unexpected keyword argument 'run_deep_checks'")
@@ -2655,7 +2655,7 @@ def test_call_audit_elastic_wrapper_fallbacks_for_signature_mismatch(
 def test_call_audit_elastic_wrapper_propagates_unexpected_typeerror(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_audit(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit(*_args, **_kwargs):
         raise TypeError("boom")
 
     monkeypatch.setattr(elastic_stage, "_audit_elastic_host", fake_audit)

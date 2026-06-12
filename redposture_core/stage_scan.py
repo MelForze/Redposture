@@ -152,7 +152,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         )
         checks = 0
         found = 0
-        found_by_host: dict[str, list[dict[str, object]]] = {host: [] for host in hosts}
+        found_by_host = {host: [] for host in hosts}
         seen_hits: dict[str, set[tuple[str, int]]] = {host: set() for host in hosts}
         use_single_global_progress = should_use_global_progress(args.output_format, len(execution_groups))
         outer_progress = None
@@ -186,7 +186,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
                     for hit in hits:
                         exporter = str(hit.get("exporter") or "")
                         try:
-                            hit_port = int(hit.get("port"))
+                            hit_port = int(hit.get("port", ""))
                         except (TypeError, ValueError):
                             continue
                         hit_key = (exporter, hit_port)

@@ -296,7 +296,7 @@ def _normalize_check_urls(targets_str: str | None, ports_str: str | None, path_s
             if scheme not in {"http", "https"}:
                 scheme = "http"
 
-            host = parsed.hostname
+            host = parsed.hostname or ""
             if not host:
                 continue
 
@@ -940,7 +940,7 @@ def _format_check_detail_records(record: dict[str, Any], output_format: str) -> 
         return lines
 
     prefix = _nxc_prefix(record)
-    lines: list[str] = []
+    lines = []
 
     for i, res in enumerate(check_results, 1):
         url = str(res.get("target_url") or "-")

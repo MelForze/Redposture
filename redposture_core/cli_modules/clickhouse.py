@@ -22,9 +22,9 @@ def configure_clickhouse_parser(
     auth = parser.add_argument_group("Auth")
     actions = parser.add_argument_group("Actions")
     exec_group = parser.add_argument_group("Execute / Shell")
-    add_output_flags(common, short=False)  # type: ignore[arg-type]
+    add_output_flags(common, short=False)
     add_log_flag(common)
-    add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
+    add_scan_host_flags(common, include_profiles=False)
     common.add_argument(
         "--port",
         dest="port",

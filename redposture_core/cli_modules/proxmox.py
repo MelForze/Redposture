@@ -19,9 +19,9 @@ def configure_proxmox_parser(
     common = parser.add_argument_group("Common")
     auth = parser.add_argument_group("Auth")
     actions = parser.add_argument_group("Actions")
-    add_output_flags(common)  # type: ignore[arg-type]
+    add_output_flags(common)
     add_log_flag(common)
-    add_scan_host_flags(common, include_profiles=False)  # type: ignore[arg-type]
+    add_scan_host_flags(common, include_profiles=False)
     parser.set_defaults(timeout=3.0)
     common.add_argument(
         "--port",

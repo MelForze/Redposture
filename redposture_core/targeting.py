@@ -234,7 +234,7 @@ def parse_scan_target_specs(
                 )
             return
 
-        host = normalize_scan_host(item)
+        host = normalize_scan_host(item) or ""
         if not host:
             return
         _append_spec(

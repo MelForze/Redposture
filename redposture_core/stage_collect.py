@@ -8,7 +8,7 @@ import os
 import re
 import sys
 import time
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 
 from .console import Console
 from .constants import COLLECT_DEEP_ENDPOINT_TEMPLATES
@@ -83,7 +83,7 @@ def _load_collect_completed_jobs(path: str, *, console: Console | None = None) -
                 exporter = str(payload.get("exporter") or "").strip()
                 endpoint = str(payload.get("endpoint") or "").strip()
                 try:
-                    port = int(payload.get("port"))
+                    port = int(payload.get("port", ""))
                 except (TypeError, ValueError):
                     continue
                 if not host or not exporter or not endpoint or port <= 0:
@@ -427,7 +427,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 show=COLLECT_VALIDATE_SHOW,
                 fail_on_creds=COLLECT_VALIDATE_FAIL_ON_CREDS,
                 debug=bool(args.debug),
-                console=validate_console,
+                console=cast("Console", validate_console),
                 source="stream",
             )
         finally:
@@ -461,7 +461,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             return 2
     else:
         default_ports = list(
-            dict.fromkeys(int(item.get("port")) for item in discovery_exporters if item.get("port") is not None)
+            dict.fromkeys(int(port_raw) for item in discovery_exporters if (port_raw := item.get("port")) is not None)
         )
         execution_groups = build_scan_execution_groups(
             target_specs,
@@ -470,7 +470,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         )
         scan_checks = 0
         scan_found = 0
-        found_by_host: dict[str, list[dict[str, object]]] = {host: [] for host in hosts}
+        found_by_host = {host: [] for host in hosts}
         seen_hits: dict[str, set[tuple[str, int]]] = {host: set() for host in hosts}
         try:
             for group in execution_groups:
@@ -496,7 +496,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     for hit in hits:
                         exporter = str(hit.get("exporter") or "")
                         try:
-                            hit_port = int(hit.get("port"))
+                            hit_port = int(hit.get("port", ""))
                         except (TypeError, ValueError):
                             continue
                         hit_key = (exporter, hit_port)

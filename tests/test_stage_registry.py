@@ -338,7 +338,7 @@ def test_audit_registry_host_open_access_collects_vendor_data_and_downloads(monk
         _timeout: float,
         *,
         headers: dict[str, str] | None = None,
-    ):  # type: ignore[no-untyped-def]
+    ):
         _ = headers
         return {
             "image": f"{repo}:{ref}",
@@ -516,7 +516,7 @@ def test_audit_registry_host_marks_non_registry_and_retries_failures(monkeypatch
 def test_audit_registry_host_debug_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = {"count": 0}
 
-    def fake_legacy(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_legacy(*_args, **_kwargs):
         calls["count"] += 1
         show_images = bool(_kwargs.get("show_images"))
         base = {
@@ -614,7 +614,7 @@ def test_audit_registry_host_debug_stage_telemetry(monkeypatch: pytest.MonkeyPat
 
 
 def test_audit_registry_targets_two_pass_gate_and_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_call(*_args, run_deep_checks: bool, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_call(*_args, run_deep_checks: bool, **_kwargs):
         host = str(_args[0])
         base = {
             "timestamp": "2026-04-10T00:00:00Z",
@@ -974,7 +974,7 @@ def test_vendor_helper_fetchers_cover_harbor_gitlab_and_nexus(monkeypatch: pytes
     ]
 
 
-def test_plain_registry_renderers_and_target_dispatcher(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_plain_registry_renderers_and_target_dispatcher(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     console = _PlainConsole()
     assert registry._render_plain_registry_line(console, "REGISTRY\t127.0.0.1\t5000\trepo/app:latest", suspicious=True)
     assert console.calls == [("REGISTRY\t127.0.0.1\t5000\trepo/app:latest", "REGISTRY", "orange")]
@@ -983,7 +983,7 @@ def test_plain_registry_renderers_and_target_dispatcher(monkeypatch: pytest.Monk
     assert registry._looks_like_registry_data_row("REGISTRY\t127.0.0.1\t5000\tdownloadUrl=http://nexus/a") is True
     assert registry._looks_like_registry_data_row("REGISTRY\t127.0.0.1\t5000\tgitlab/project-api") is True
 
-    def fake_audit_registry_host(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_registry_host(*args, **kwargs):
         _ = (args, kwargs)
         return {
             "timestamp": "2026-03-27T00:00:00Z",
@@ -1107,7 +1107,7 @@ def _registry_args(**overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**data)
 
 
-def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     http_error = urllib.error.HTTPError(
         "http://registry.local/v2/",
         401,
@@ -1116,7 +1116,7 @@ def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, 
         io.BytesIO(b'{"errors":[{"code":"UNAUTHORIZED"}]}'),
     )
 
-    def raise_http_error(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+    def raise_http_error(*_args, **_kwargs):
         raise http_error
 
     monkeypatch.setattr(registry.urllib.request, "urlopen", raise_http_error)
@@ -1125,7 +1125,7 @@ def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, 
     assert b"UNAUTHORIZED" in body
     assert headers.get("www-authenticate", "").startswith("Bearer")
 
-    def raise_url_error(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+    def raise_url_error(*_args, **_kwargs):
         raise urllib.error.URLError(TimeoutError("timed out"))
 
     monkeypatch.setattr(registry.urllib.request, "urlopen", raise_url_error)
@@ -1190,7 +1190,7 @@ def test_run_registry_stage_validation_errors(
 ) -> None:
     _RegistryConsoleCapture.instances.clear()
     monkeypatch.setattr(registry, "Console", _RegistryConsoleCapture)
-    rc = registry.run_registry_stage(_registry_args(**overrides), logger=object())  # type: ignore[arg-type]
+    rc = registry.run_registry_stage(_registry_args(**overrides), logger=object())
     assert rc == 2
     errors = [msg for level, msg in _RegistryConsoleCapture.instances[-1].messages if level == "error"]
     assert any(expected_error in msg for msg in errors)
@@ -1199,7 +1199,7 @@ def test_run_registry_stage_validation_errors(
 def test_run_registry_stage_https_target_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     _RegistryConsoleCapture.instances.clear()
     monkeypatch.setattr(registry, "Console", _RegistryConsoleCapture)
-    rc = registry.run_registry_stage(_registry_args(targets="https://registry.local:5000/v2/_catalog"), logger=object())  # type: ignore[arg-type]
+    rc = registry.run_registry_stage(_registry_args(targets="https://registry.local:5000/v2/_catalog"), logger=object())
     assert rc == 2
     errors = [msg for level, msg in _RegistryConsoleCapture.instances[-1].messages if level == "error"]
     assert any("accepts only http:// URL targets" in msg for msg in errors)
@@ -1225,13 +1225,13 @@ def test_run_registry_stage_debug_and_unreachable_summary(monkeypatch: pytest.Mo
     )
     captured_kwargs: list[dict[str, object]] = []
 
-    def fake_audit_registry_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_registry_targets(**kwargs):
         captured_kwargs.append(kwargs)
         # total=1, open=0, valid=0, auth=0, not_registry=0, fail=1
         return 1, 0, 0, 0, 0, 1
 
     patch_runner_for_legacy_target_fake(monkeypatch, "registry", fake_audit_registry_targets)
-    rc = registry.run_registry_stage(_registry_args(debug=True, docker=True, images=True), logger=object())  # type: ignore[arg-type]
+    rc = registry.run_registry_stage(_registry_args(debug=True, docker=True, images=True), logger=object())
     assert rc == 0
     assert len(captured_kwargs) == 2
     assert captured_kwargs[0]["port"] == 15000
@@ -1268,7 +1268,7 @@ def test_should_download_large_non_tty_and_prompt_paths(monkeypatch: pytest.Monk
     assert registry._should_download_large(1024 * 1024 * 512, "repo/app:latest", console) is False
 
 
-def test_download_image_success_and_failure_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_download_image_success_and_failure_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     console = Console()
     missing_repo = registry._download_image(
         "registry.local",
@@ -1459,7 +1459,7 @@ def test_render_colored_registry_line_paths() -> None:
         def __init__(self) -> None:
             self.lines: list[str] = []
 
-        def _paint(self, text: str, color: str, _stream) -> str:  # type: ignore[no-untyped-def]
+        def _paint(self, text: str, color: str, _stream) -> str:
             return f"<{color}>{text}</{color}>"
 
         def plain(self, message: str, color: str | None = None) -> None:
@@ -1649,7 +1649,7 @@ def test_audit_registry_host_staged_retry_and_detect_only(monkeypatch: pytest.Mo
         ]
     )
 
-    def fake_legacy(*_args, show_images: bool, show_tags: bool, inspect: bool, **_kwargs):  # type: ignore[no-untyped-def]
+    def fake_legacy(*_args, show_images: bool, show_tags: bool, inspect: bool, **_kwargs):
         calls.append((show_images, show_tags, inspect))
         try:
             item = dict(next(responses))
@@ -1837,9 +1837,9 @@ def test_http_request_url_and_render_colored_registry_line_branches(monkeypatch:
         def __enter__(self):
             return self
 
-        def __exit__(self, exc_type, exc, tb) -> bool:  # type: ignore[no-untyped-def]
+        def __exit__(self, exc_type, exc, tb) -> None:
             _ = (exc_type, exc, tb)
-            return False
+            return None
 
         def read(self) -> bytes:
             return b'{"token":"ok"}'
@@ -1875,7 +1875,7 @@ def test_http_request_url_and_render_colored_registry_line_branches(monkeypatch:
         def __init__(self) -> None:
             self.lines: list[str] = []
 
-        def _paint(self, text: str, color: str, _stream) -> str:  # type: ignore[no-untyped-def]
+        def _paint(self, text: str, color: str, _stream) -> str:
             return f"<{color}>{text}</{color}>"
 
         def plain(self, line: str, color: str | None = None) -> None:
@@ -1963,7 +1963,7 @@ def test_run_registry_stage_debug_file_output_logs_mode(monkeypatch: pytest.Monk
             image="repo/app:latest",
             download=True,
         ),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     infos = [msg for level, msg in _RegistryConsoleCapture.instances[-1].messages if level == "info"]
@@ -2086,7 +2086,7 @@ def test_run_registry_stage_multi_port_uses_single_global_progress(monkeypatch: 
     )
     captured: list[dict[str, object]] = []
 
-    def fake_audit(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit(**kwargs):
         captured.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -2094,7 +2094,7 @@ def test_run_registry_stage_multi_port_uses_single_global_progress(monkeypatch: 
 
     patch_runner_for_legacy_target_fake(monkeypatch, "registry", fake_audit)
 
-    rc = registry.run_registry_stage(_registry_args(), logger=object())  # type: ignore[arg-type]
+    rc = registry.run_registry_stage(_registry_args(), logger=object())
     assert rc == 0
     assert len(captured) == 2
     assert all(call["show_progress"] is False for call in captured)

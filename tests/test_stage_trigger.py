@@ -254,7 +254,7 @@ def test_trigger_credential_checks_postgres_passes_sql_command_none(monkeypatch:
     monkeypatch.setattr("redposture_core.stage_postgres._audit_postgres_host", fake_audit_postgres_host)
 
     args = argparse.Namespace(timeout=1.0, retries=0)
-    _run_trigger_credential_checks(args, _DummyLogger(), Console(debug=False))  # type: ignore[arg-type]
+    _run_trigger_credential_checks(args, _DummyLogger(), Console(debug=False))
 
     assert captured_kwargs
     assert captured_kwargs[0].get("sql_command") is None
@@ -287,7 +287,7 @@ def test_trigger_credential_checks_redis_hides_auth_error_details_without_debug(
     monkeypatch.setattr("redposture_core.stage_redis._audit_redis_host", fake_audit_redis_host)
 
     args = argparse.Namespace(timeout=1.0, retries=0, debug=False)
-    _run_trigger_credential_checks(args, _DummyLogger(), Console(debug=False))  # type: ignore[arg-type]
+    _run_trigger_credential_checks(args, _DummyLogger(), Console(debug=False))
 
     out = capsys.readouterr().out
     assert "default:password auth failed" in out
@@ -321,7 +321,7 @@ def test_trigger_credential_checks_redis_shows_auth_error_details_in_debug(
     monkeypatch.setattr("redposture_core.stage_redis._audit_redis_host", fake_audit_redis_host)
 
     args = argparse.Namespace(timeout=1.0, retries=0, debug=True)
-    _run_trigger_credential_checks(args, _DummyLogger(), Console(debug=True))  # type: ignore[arg-type]
+    _run_trigger_credential_checks(args, _DummyLogger(), Console(debug=True))
 
     out = capsys.readouterr().out
     assert "default:password auth failed" in out
@@ -462,11 +462,11 @@ def test_trigger_txt_multi_batch_uses_single_dynamic_progress(monkeypatch: pytes
     assert rc == 0
     assert len(progress_instances) == 1
     progress = progress_instances[0]
-    assert progress.label == "TRIGGER"  # type: ignore[attr-defined]
-    assert progress.total == 6  # type: ignore[attr-defined]
-    assert progress.set_totals == [5, 6]  # type: ignore[attr-defined]
-    assert sum(progress.advances) == 6  # type: ignore[attr-defined]
-    assert progress.closed is True  # type: ignore[attr-defined]
+    assert progress.label == "TRIGGER"
+    assert progress.total == 6
+    assert progress.set_totals == [5, 6]
+    assert sum(progress.advances) == 6
+    assert progress.closed is True
 
 
 def test_trigger_json_does_not_start_progress(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -826,7 +826,7 @@ def test_trigger_with_listen_debug_disables_callback_dedup(monkeypatch: pytest.M
             super().__init__()
             self.calls: list[bool] = []
 
-        def set_trigger_callback_mode(  # type: ignore[override]
+        def set_trigger_callback_mode(
             self,
             enabled: bool,
             callback_targets: list[str] | tuple[str, ...] | None = None,

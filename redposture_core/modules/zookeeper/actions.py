@@ -1650,7 +1650,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
         return lines
 
     prefix = _nxc_prefix(record)
-    lines: list[str] = []
+    lines = []
     if show_znodes and znode_details:
         lines.append(f"{prefix} [*] Show Znodes")
         if unknown_note:

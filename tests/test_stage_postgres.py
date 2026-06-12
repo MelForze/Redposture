@@ -46,8 +46,8 @@ class _DummySocket:
     def __enter__(self) -> _DummySocket:
         return self
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
-        return False
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
 
     def settimeout(self, timeout: float) -> None:
         _ = timeout
@@ -333,7 +333,7 @@ def test_collect_postgres_privileges_and_query_helpers(monkeypatch: pytest.Monke
 def test_postgres_os_read_prefers_pg_read_file(monkeypatch: pytest.MonkeyPatch) -> None:
     queries: list[str] = []
 
-    def fake_query(_sock, query: str):  # type: ignore[no-untyped-def]
+    def fake_query(_sock, query: str):
         queries.append(query)
         return [["pg-host"]], None
 
@@ -351,7 +351,7 @@ def test_postgres_os_read_prefers_pg_read_file(monkeypatch: pytest.MonkeyPatch) 
 def test_postgres_os_read_falls_back_to_lo_import(monkeypatch: pytest.MonkeyPatch) -> None:
     queries: list[str] = []
 
-    def fake_query(_sock, query: str):  # type: ignore[no-untyped-def]
+    def fake_query(_sock, query: str):
         queries.append(query)
         if "pg_read_file" in query:
             return [], "permission denied"
@@ -384,7 +384,7 @@ def test_postgres_os_read_falls_back_to_lo_import(monkeypatch: pytest.MonkeyPatc
 
 
 def test_postgres_os_read_reports_both_method_failures(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_query(_sock, query: str):  # type: ignore[no-untyped-def]
+    def fake_query(_sock, query: str):
         if "pg_read_file" in query:
             return [], "permission denied"
         if "lo_import" in query:
@@ -426,7 +426,7 @@ def test_run_postgres_stage_validation_errors(
 ) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(postgres, "Console", _ConsoleCapture)
-    rc = postgres.run_postgres_stage(_postgres_args(**overrides), logger=object())  # type: ignore[arg-type]
+    rc = postgres.run_postgres_stage(_postgres_args(**overrides), logger=object())
     assert rc == 2
     assert any(
         expected_message in message for level, message in _ConsoleCapture.instances[-1].messages if level == "error"
@@ -513,17 +513,17 @@ def test_run_postgres_stage_shell_modes_and_main_flow(monkeypatch: pytest.Monkey
     shell_inputs = iter(["id", "exit", "select 1", "quit"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(shell_inputs))
 
-    rc = postgres.run_postgres_stage(_postgres_args(os_shell=True), logger=object())  # type: ignore[arg-type]
+    rc = postgres.run_postgres_stage(_postgres_args(os_shell=True), logger=object())
     assert rc == 0
     assert executed_commands == ["id"]
 
-    rc = postgres.run_postgres_stage(_postgres_args(sql_shell=True), logger=object())  # type: ignore[arg-type]
+    rc = postgres.run_postgres_stage(_postgres_args(sql_shell=True), logger=object())
     assert rc == 0
     assert sql_queries == ["select 1"]
 
     captured: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         captured.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -533,7 +533,7 @@ def test_run_postgres_stage_shell_modes_and_main_flow(monkeypatch: pytest.Monkey
     patch_runner_for_legacy_target_fake(monkeypatch, "postgres", fake_audit_targets)
     rc = postgres.run_postgres_stage(
         _postgres_args(debug=True, output_format="txt", execute=None, sql_cmd=None),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     assert captured and captured[0]["suppress_timeout_status_lines"] is False
@@ -553,7 +553,7 @@ def test_run_postgres_stage_additional_output_and_error_paths(
 
     captured: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         captured.append(kwargs)
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -573,7 +573,7 @@ def test_run_postgres_stage_additional_output_and_error_paths(
             dump=5,
             rows=True,
         ),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     assert len(captured) == 2
@@ -586,7 +586,7 @@ def test_run_postgres_stage_additional_output_and_error_paths(
     patch_runner_for_legacy_target_fake(
         monkeypatch, "postgres", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
     )
-    rc = postgres.run_postgres_stage(_postgres_args(output="postgres.json"), logger=object())  # type: ignore[arg-type]
+    rc = postgres.run_postgres_stage(_postgres_args(output="postgres.json"), logger=object())
     assert rc == 2
     assert any(
         "failed to process postgres output: disk full" in msg
@@ -598,7 +598,7 @@ def test_run_postgres_stage_additional_output_and_error_paths(
     monkeypatch.setattr(postgres, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1", "127.0.0.2"])
     rc = postgres.run_postgres_stage(
         _postgres_args(os_shell=True, targets="127.0.0.1,127.0.0.2"),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 2
     assert any(
@@ -618,7 +618,7 @@ def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
 
     show_progress_flags: list[bool] = []
 
-    def fake_audit_targets(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_audit_targets(**kwargs):
         show_progress_flags.append(bool(kwargs["show_progress"]))
         if kwargs.get("command_progress") is not None:
             kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
@@ -655,7 +655,7 @@ def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
             password="postgres",
             show_databases=True,
         ),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     assert show_progress_flags == [False, False, False, False, False]
@@ -664,7 +664,7 @@ def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
     assert progress_closed == 1
 
 
-def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:
     dumped_tables: list[str] = []
     dumped_columns_queries: list[str] = []
 
@@ -737,7 +737,7 @@ def test_dump_without_table_uses_all_readable_tables(monkeypatch) -> None:  # ty
     assert record["table_dumps"][0]["columns"] == ["id", "payload"]
 
 
-def test_dump_with_table_and_columns_uses_only_selected(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_dump_with_table_and_columns_uses_only_selected(monkeypatch) -> None:
     dumped: list[tuple[str, list[str] | None]] = []
     column_targets: list[str] = []
 
@@ -810,7 +810,7 @@ def test_dump_with_table_and_columns_uses_only_selected(monkeypatch) -> None:  #
     assert record["table_targets"] == ["public.users"]
 
 
-def test_show_columns_with_dump_prints_columns_and_dump(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_show_columns_with_dump_prints_columns_and_dump(monkeypatch) -> None:
     dumped: list[tuple[str, list[str] | None]] = []
     column_targets: list[str] = []
 
@@ -909,7 +909,7 @@ def test_table_dump_txt_renders_columns_header_line() -> None:
     assert any('{"id":1,"email":"admin@example.com"}' in line for line in lines)
 
 
-def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(monkeypatch) -> None:
     def fake_audit(*_args, **_kwargs):
         return {
             "timestamp": "2026-03-02T00:00:00Z",
@@ -1006,7 +1006,7 @@ def test_caps_suffix_reports_database_count_and_not_tables() -> None:
     assert "(tables:" not in suffix
 
 
-def test_defcreds_is_reported_when_anonymous_access_is_allowed(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_defcreds_is_reported_when_anonymous_access_is_allowed(monkeypatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
@@ -1047,7 +1047,7 @@ def test_defcreds_is_reported_when_anonymous_access_is_allowed(monkeypatch) -> N
     assert record["status"] == "weak_default_creds"
 
 
-def test_show_tables_without_database_walks_all_accessible_databases(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_show_tables_without_database_walks_all_accessible_databases(monkeypatch) -> None:
     remote_calls: list[str] = []
 
     monkeypatch.setattr(
@@ -1139,7 +1139,7 @@ def test_show_tables_without_database_walks_all_accessible_databases(monkeypatch
     assert record["readable_tables"] == 2
 
 
-def test_database_limits_table_enumeration_to_selected_database(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_database_limits_table_enumeration_to_selected_database(monkeypatch) -> None:
     current_calls: list[str] = []
     remote_calls: list[str] = []
 
@@ -1265,7 +1265,7 @@ def test_show_tables_txt_renders_inline_row_counts() -> None:
     assert any("appdb.public.events (Rows:unknown)" in line for line in lines)
 
 
-def test_rows_flag_enables_show_tables_and_inline_counts(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_rows_flag_enables_show_tables_and_inline_counts(monkeypatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
@@ -1327,7 +1327,7 @@ def test_rows_flag_enables_show_tables_and_inline_counts(monkeypatch) -> None:  
 
 def test_show_databases_keeps_full_inventory_while_table_walk_uses_only_accessible_databases(
     monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
+) -> None:
     remote_calls: list[str] = []
 
     monkeypatch.setattr(
@@ -1410,7 +1410,7 @@ def test_show_databases_keeps_full_inventory_while_table_walk_uses_only_accessib
     assert remote_calls == ["appdb"]
 
 
-def test_dump_with_limit_passes_limit_to_query(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_dump_with_limit_passes_limit_to_query(monkeypatch) -> None:
     seen_limits: list[int | None] = []
 
     monkeypatch.setattr(
@@ -1474,7 +1474,7 @@ def test_dump_with_limit_passes_limit_to_query(monkeypatch) -> None:  # type: ig
     assert record["dump_row_limit"] == 5
 
 
-def test_database_prefixed_table_target_routes_to_matching_database(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_database_prefixed_table_target_routes_to_matching_database(monkeypatch) -> None:
     current_calls: list[str] = []
     remote_calls: list[tuple[str, list[str]]] = []
 
@@ -1546,7 +1546,7 @@ def test_database_prefixed_table_target_routes_to_matching_database(monkeypatch)
     assert remote_calls == [("appdb", ["public.users"])]
 
 
-def test_scram_client_final_avoids_zip_strict_for_py39_compat(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_scram_client_final_avoids_zip_strict_for_py39_compat(monkeypatch) -> None:
     def forbidden_zip(*_args, **_kwargs):
         raise AssertionError("zip() should not be used in SCRAM proof generation")
 
@@ -1563,7 +1563,7 @@ def test_scram_client_final_avoids_zip_strict_for_py39_compat(monkeypatch) -> No
     assert isinstance(server_signature, str) and server_signature != ""
 
 
-def test_audit_postgres_handles_pg_audit_error_paths(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_postgres_handles_pg_audit_error_paths(monkeypatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
@@ -1630,7 +1630,7 @@ def test_audit_postgres_handles_pg_audit_error_paths(monkeypatch) -> None:  # ty
     assert fail_record["error"] == "not postgres"
 
 
-def test_audit_postgres_collects_execute_and_sql_outputs(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_postgres_collects_execute_and_sql_outputs(monkeypatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
@@ -1710,7 +1710,7 @@ def test_postgres_privesc_check_collector(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: (2, None))
     monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: ([["public.safe_definer"]], None))
 
-    checks, summary = _pg_collect_privesc_checks(object(), None)  # type: ignore[arg-type]
+    checks, summary = _pg_collect_privesc_checks(object(), None)
     assert len(checks) == 11
     assert checks[0]["name"] == "Superuser session"
     assert checks[1]["name"] == "pg_shadow readable"
@@ -1824,7 +1824,7 @@ def test_postgres_detail_and_status_renderers_cover_text_and_json_paths() -> Non
     assert "[+] postgres:<empty>" in status_line
 
 
-def test_audit_postgres_targets_emits_detect_status_and_all_detail_sections(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_postgres_targets_emits_detect_status_and_all_detail_sections(monkeypatch) -> None:
     def fake_audit(*_args, **_kwargs):
         return {
             "timestamp": "2026-03-27T00:00:00Z",
@@ -1937,7 +1937,7 @@ def test_audit_postgres_targets_emits_detect_status_and_all_detail_sections(monk
     assert any("[*] PrivEsc Check" in line for line in lines)
 
 
-def test_call_audit_postgres_host_with_stage_debug_adds_stage_telemetry(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_call_audit_postgres_host_with_stage_debug_adds_stage_telemetry(monkeypatch) -> None:
     def fake_audit(*_args, **_kwargs):
         return {
             "timestamp": "2026-03-27T00:00:00Z",
@@ -1982,7 +1982,7 @@ def test_call_audit_postgres_host_with_stage_debug_adds_stage_telemetry(monkeypa
     assert any("stage_trace stage_name=detect_protocol" in line for line in debug_lines)
 
 
-def test_audit_postgres_targets_emits_two_pass_debug_markers(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_audit_postgres_targets_emits_two_pass_debug_markers(monkeypatch) -> None:
     def fake_stage_call(
         host: str,
         port: int,

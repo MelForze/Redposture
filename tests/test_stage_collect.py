@@ -637,7 +637,7 @@ def test_collect_stage_builds_deep_endpoints_with_custom_seconds(monkeypatch: py
     )
 
     assert rc == 0
-    endpoints = tuple(captured["collect_debug_endpoints"])  # type: ignore[arg-type]
+    endpoints = tuple(captured["collect_debug_endpoints"])
     assert "/debug/vars" in endpoints
     assert "/debug/pprof/profile?seconds=11" in endpoints
     assert "/debug/pprof/trace?seconds=4" in endpoints

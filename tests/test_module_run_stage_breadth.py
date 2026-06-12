@@ -36,11 +36,11 @@ def test_run_cases_cover_every_registered_audit_module() -> None:
 
 
 @pytest.mark.parametrize("module_name", sorted(RUN_CASES))
-def test_package_stage_run_functions_cover_runner_plan_path(monkeypatch, module_name: str) -> None:  # type: ignore[no-untyped-def]
+def test_package_stage_run_functions_cover_runner_plan_path(monkeypatch, module_name: str) -> None:
     stage = importlib.import_module(f"redposture_core.modules.{module_name}.stage")
     calls: list[object] = []
 
-    def fake_run_plan(self, plan):  # type: ignore[no-untyped-def]
+    def fake_run_plan(self, plan):
         calls.append(plan)
         return AuditCommandResult(records=[], detected_count=0, emitted_lines=0, typed_records=[])
 

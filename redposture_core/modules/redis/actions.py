@@ -611,7 +611,7 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
         return lines
 
     prefix = _nxc_prefix(record)
-    lines: list[str] = []
+    lines = []
     if show_keys and key_names:
         total = record.get("key_count")
         if key_limit is not None and isinstance(total, int) and total > len(displayed_key_names):

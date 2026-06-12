@@ -119,7 +119,7 @@ def _parse_document_selector(raw: str | None) -> tuple[Any | None, Any | None, s
         return None, None, "--document must not be empty"
     if len(text) == 24 and all(char in "0123456789abcdefABCDEF" for char in text):
         try:
-            from bson import ObjectId  # type: ignore[import-not-found]
+            from bson import ObjectId
 
             value = ObjectId(text)
             return value, json_safe(value), None
@@ -773,19 +773,19 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [+] {username}:{password} {_caps_suffix(record)}"
     if status == "valid_credentials":
         username = str(record.get("effective_username") or record.get("provided_username") or "-")
-        password = record.get("provided_password")
-        password_text = "<empty>" if password == "" else str(password or "")
+        provided_password = record.get("provided_password")
+        password_text = "<empty>" if provided_password == "" else str(provided_password or "")
         return f"{prefix} [+] {username}:{password_text} {_caps_suffix(record)}"
     if status == "invalid_credentials_anonymous":
         username = str(record.get("provided_username") or "-")
-        password = record.get("provided_password")
-        password_text = "<empty>" if password == "" else str(password or "")
+        provided_password = record.get("provided_password")
+        password_text = "<empty>" if provided_password == "" else str(provided_password or "")
         return f"{prefix} [!] invalid credentials {username}:{password_text}; anonymous access still available {_caps_suffix(record)}"
     if status == "auth_required":
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "-")
-            password = record.get("provided_password")
-            password_text = "<empty>" if password == "" else str(password or "")
+            provided_password = record.get("provided_password")
+            password_text = "<empty>" if provided_password == "" else str(provided_password or "")
             return f"{prefix} [-] {username}:{password_text}"
         return f"{prefix} [-] authentication required"
     err = _clip(str(record.get("error") or "connection failed"), 96)

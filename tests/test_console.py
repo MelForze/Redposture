@@ -1,10 +1,49 @@
 from __future__ import annotations
 
+import io
 import sys
 
 import pytest
 
-from redposture_core.console import Console, set_console_no_color
+from redposture_core.console import Console, set_console_no_color, should_use_color
+
+
+class _FakeStream(io.StringIO):
+    def __init__(self, *, tty: bool) -> None:
+        super().__init__()
+        self._tty = tty
+
+    def isatty(self) -> bool:
+        return self._tty
+
+
+def test_should_use_color_gates_on_isatty_when_no_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    assert should_use_color(_FakeStream(tty=True)) is True
+    assert should_use_color(_FakeStream(tty=False)) is False
+
+
+def test_should_use_color_no_color_env_disables(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert should_use_color(_FakeStream(tty=True)) is False
+
+
+def test_should_use_color_force_color_overrides_non_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    assert should_use_color(_FakeStream(tty=False)) is True
+
+
+def test_console_paint_skips_ansi_when_piped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    console = Console(debug=False)
+    piped = _FakeStream(tty=False)
+    assert console._paint("hello", "green", stream=piped) == "hello"
+    tty = _FakeStream(tty=True)
+    assert "\x1b[" in console._paint("hello", "green", stream=tty)
 
 
 def test_paint_returns_plain_text_for_unknown_color() -> None:

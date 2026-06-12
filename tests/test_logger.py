@@ -141,7 +141,7 @@ def test_logger_suspends_progress_around_stdout_print(
     events: list[str] = []
 
     @contextmanager
-    def fake_suspend(stream: object):  # type: ignore[no-untyped-def]
+    def fake_suspend(stream: object):
         events.append(f"begin:{id(stream)}")
         try:
             yield

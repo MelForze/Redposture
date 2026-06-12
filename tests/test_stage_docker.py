@@ -173,7 +173,7 @@ def test_run_docker_stage_json_output(monkeypatch: pytest.MonkeyPatch, tmp_path)
     out = tmp_path / "docker.jsonl"
     rc = docker_stage.run_docker_stage(
         _args(output=str(out), output_format="json", containers=True, port=2376, insecure=True),
-        logger=object(),  # type: ignore[arg-type]
+        logger=object(),
     )
     assert rc == 0
     payload = out.read_text(encoding="utf-8")
@@ -182,14 +182,14 @@ def test_run_docker_stage_json_output(monkeypatch: pytest.MonkeyPatch, tmp_path)
 
 
 def test_run_docker_stage_validates_exec_pair(capsys) -> None:
-    assert docker_stage.run_docker_stage(_args(container="web"), logger=object()) == 2  # type: ignore[arg-type]
+    assert docker_stage.run_docker_stage(_args(container="web"), logger=object()) == 2
     assert "--container and --exec-cmd" in capsys.readouterr().err
 
 
 def test_run_docker_stage_validates_tls_cert_key_pair(capsys, tmp_path) -> None:
     cert = tmp_path / "client.crt"
     cert.write_text("not-a-real-cert", encoding="utf-8")
-    assert docker_stage.run_docker_stage(_args(tls_cert=str(cert)), logger=object()) == 2  # type: ignore[arg-type]
+    assert docker_stage.run_docker_stage(_args(tls_cert=str(cert)), logger=object()) == 2
     assert "--tls-cert and --tls-key" in capsys.readouterr().err
 
 

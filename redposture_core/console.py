@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from typing import TextIO
 
@@ -31,14 +32,47 @@ def is_console_no_color() -> bool:
     return _FORCE_NO_COLOR
 
 
+def _env_present(name: str) -> bool:
+    """True when ``name`` is set to a non-empty value (a presence flag)."""
+    value = os.environ.get(name)
+    return bool(value and value.strip())
+
+
+def _env_truthy(name: str) -> bool:
+    """True when ``name`` is set to anything other than a falsy token."""
+    value = os.environ.get(name)
+    return value is not None and value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def should_use_color(stream: TextIO | None = None) -> bool:
+    """Whether ANSI color should be written to ``stream`` (default stdout).
+
+    This is the shared environment/terminal policy: ``NO_COLOR`` disables color,
+    ``FORCE_COLOR`` forces it on (pager, CI, tests), otherwise color is emitted
+    only when the destination is a real terminal so redirected or piped output
+    stays clean (matching the progress bar's gating). The ``--no-color`` flag is
+    layered on by the callers (`Console._use_color` / `logger._paint`).
+    """
+    if _env_present("NO_COLOR"):
+        return False
+    if _env_truthy("FORCE_COLOR"):
+        return True
+    target = sys.stdout if stream is None else stream
+    try:
+        return bool(target.isatty())
+    except Exception:
+        return False
+
+
 class Console:
     def __init__(self, debug: bool = False, *, no_color: bool | None = None) -> None:
         self.debug_enabled = debug
         self._no_color = _FORCE_NO_COLOR if no_color is None else bool(no_color)
 
     def _use_color(self, stream: TextIO) -> bool:
-        _ = stream
-        return not self._no_color
+        if self._no_color:
+            return False
+        return should_use_color(stream)
 
     def _paint(self, text: str, color: str, stream: TextIO) -> str:
         if not self._use_color(stream):

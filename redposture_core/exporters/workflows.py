@@ -79,7 +79,7 @@ def build_collect_targets(
             if exporter_name not in enabled_exporters:
                 continue
             try:
-                port = int(hit.get("port"))
+                port = int(hit.get("port", ""))
             except (TypeError, ValueError):
                 continue
             collect_targets.append((host, exporter_name, port))

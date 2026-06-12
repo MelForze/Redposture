@@ -218,7 +218,7 @@ def scan_presence_port_task(
 
     detected = winner is not None
     exporter_name = str((winner or {}).get("name") or "unknown")
-    if detected:
+    if winner is not None:
         marker_hit = str(winner.get("marker_hit") or "")
     elif candidates:
         marker_hit = str(candidates[0].get("marker_hit") or "")
@@ -296,7 +296,7 @@ def scan_exporter_presence(
         ports = list(dict.fromkeys(int(port) for port in custom_ports))
     else:
         ports = list(
-            dict.fromkeys(int(exporter.get("port")) for exporter in exporters if exporter.get("port") is not None)
+            dict.fromkeys(int(port_raw) for exporter in exporters if (port_raw := exporter.get("port")) is not None)
         )
     total_checks = 0
     total_found = 0

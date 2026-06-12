@@ -35,6 +35,11 @@ from .utils import (
 )
 
 
+def server_listen_port(server: Any) -> int:
+    """Return the listening port from a socketserver instance's address tuple."""
+    return int(server.server_address[1])
+
+
 def build_http_ok_response(body: bytes = b"ok\n") -> bytes:
     return (
         b"HTTP/1.1 200 OK\r\n"
@@ -91,7 +96,7 @@ class PostgresListenerHandler(socketserver.BaseRequestHandler):
 
         sock.settimeout(20)
         remote = self.client_address
-        listen_port = int(self.server.server_address[1])  # type: ignore[attr-defined]
+        listen_port = server_listen_port(self.server)
         params: dict[str, str] = {}
         user: str | None = None
 
@@ -246,7 +251,7 @@ class RedisListenerHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         self.connection.settimeout(20)
         remote = self.client_address
-        listen_port = int(self.server.server_address[1])  # type: ignore[attr-defined]
+        listen_port = server_listen_port(self.server)
 
         while True:
             try:
@@ -320,7 +325,7 @@ def make_proxmox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
             return self.client_address[0], self.client_address[1]
 
         def _listen_port(self) -> int:
-            return int(self.server.server_address[1])
+            return server_listen_port(self.server)
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
@@ -448,7 +453,7 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
             return self.client_address[0], self.client_address[1]
 
         def _listen_port(self) -> int:
-            return int(self.server.server_address[1])
+            return server_listen_port(self.server)
 
         def _extract_probe_params(self, parsed_path: Any) -> tuple[str | None, str]:
             query = parse_qs(parsed_path.query)

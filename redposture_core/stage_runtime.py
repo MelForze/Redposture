@@ -175,6 +175,20 @@ class LineOutputSink:
         self.output_written = True
 
 
+def _build_colored_emit(console: Any, colorize: Callable[[Any, str], bool] | None) -> Callable[[str], None]:
+    """Build a stdout emitter that colorizes marker lines via the spec's explicit
+    `colorize` hook, falling back to plain output. The colorizer no-ops (returns
+    `False`) on lines that don't start with its tag, so JSON output stays clean;
+    file output never reaches here (the sink writes files directly)."""
+
+    def emit(line: str) -> None:
+        if colorize is not None and colorize(console, line):
+            return
+        console.plain(line)
+
+    return emit
+
+
 @dataclass(frozen=True)
 class AuditHookContext:
     args: Any
@@ -207,10 +221,15 @@ class ModuleAuditSpec:
     auth: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
     capabilities: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
     data: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
+    # Output: either an explicit `render` callable, or a `render_module` whose
+    # `_format_*` functions the runner introspects (via `render_record_with_module`).
+    # `colorize` is the module's explicit `_render_colored_*_line` hook; the runner
+    # applies it to stdout (no `__all__` name-magic in the call site).
     render: Callable[[AuditRecord], Iterable[str]] | None = None
+    render_module: Any = None
+    colorize: Callable[[Any, str], bool] | None = None
     is_detected: Callable[[AuditRecord], bool] | None = None
     deep_gate: Callable[[AuditRecord], tuple[bool, str]] | None = None
-    build_credentials: Callable[[Any], tuple[AuditCredentialRun, ...]] | None = None
 
 
 @dataclass(frozen=True)
@@ -510,7 +529,7 @@ def validate_basic_module_args(
         return 2
 
     dump_value = getattr(args, "dump", None)
-    if dump_value not in (None, False, True):
+    if dump_value is not None and dump_value not in (False, True):
         try:
             if int(dump_value) <= 0:
                 raise ValueError
@@ -941,11 +960,29 @@ class AuditCommandRunner:
         spec: ModuleAuditSpec,
         logger: Any = None,
         emit_line: Callable[[str], None] | None = None,
+        console: Any = None,
     ) -> None:
         self.args = args
         self.spec = spec
         self.logger = logger
-        self.emit_line = emit_line or print
+        if emit_line is not None:
+            self.emit_line = emit_line
+        elif console is not None:
+            self.emit_line = _build_colored_emit(console, spec.colorize)
+        else:
+            self.emit_line = print
+
+    def _render_record(self, record: AuditRecord) -> list[str]:
+        if self.spec.render is not None:
+            return [line for line in self.spec.render(record) if line]
+        if self.spec.render_module is not None:
+            return render_record_with_module(
+                self.spec.render_module,
+                record,
+                str(getattr(self.args, "output_format", "txt") or "txt"),
+                debug=bool(getattr(self.args, "debug", False)),
+            )
+        return []
 
     def run_plan(self, plan: AuditCommandPlan) -> AuditCommandResult:
         indexed_targets = plan.iter_target_specs()
@@ -954,6 +991,7 @@ class AuditCommandRunner:
             self.spec.label,
             len(indexed_targets),
             enabled=should_use_global_progress(plan.output_format, len(indexed_targets)),
+            leave=False,
         )
         sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append)
         records_by_idx: dict[int, AuditRecord] = {}
@@ -970,12 +1008,13 @@ class AuditCommandRunner:
             debug_emit(format_pass_marker(1, "detect", "start", total=len(indexed_targets)))
 
         detected_targets: list[tuple[int, str, int, ScanTargetSpec | None, AuditRecord]] = []
-        debug_deep_total = 0
         processed_deep = 0
         try:
             for (idx, host, port, target), detect_record in scheduler.iter_completed(
                 indexed_targets,
-                lambda item: self._run_detect(item[1], item[2], item[3], debug_emit),
+                lambda item: self._safe_record(
+                    item[1], item[2], lambda: self._run_detect(item[1], item[2], item[3], debug_emit)
+                ),
             ):
                 records_by_idx[int(idx)] = detect_record
                 if self._is_detected(detect_record):
@@ -989,7 +1028,6 @@ class AuditCommandRunner:
                 for idx, host, port, target, detect_record in detected_targets
                 if self._deep_gate(detect_record)[0]
             ]
-            debug_deep_total = len(initial_deep_candidates)
             if debug_emit is not None:
                 debug_emit(
                     format_pass_marker(
@@ -1006,8 +1044,12 @@ class AuditCommandRunner:
                 progress.add_total(len(detected_targets))
             for (idx, _host, _port, _target, _detect_record), final_record in deep_scheduler.iter_completed(
                 detected_targets,
-                lambda item: self._run_deep_lifecycle(
-                    item[1], item[2], item[3], item[4], plan.credential_runs, debug_emit
+                lambda item: self._safe_record(
+                    item[1],
+                    item[2],
+                    lambda: self._run_deep_lifecycle(
+                        item[1], item[2], item[3], item[4], plan.credential_runs, debug_emit
+                    ),
                 ),
             ):
                 records_by_idx[int(idx)] = final_record
@@ -1016,7 +1058,7 @@ class AuditCommandRunner:
         finally:
             progress.close()
         if debug_emit is not None:
-            debug_emit(format_pass_marker(2, "deep", "complete", processed=processed_deep or debug_deep_total))
+            debug_emit(format_pass_marker(2, "deep", "complete", processed=processed_deep))
 
         typed_records = [records_by_idx[idx] for idx, _host, _port, _target in indexed_targets if idx in records_by_idx]
         records = [record.to_dict() for record in typed_records]
@@ -1025,12 +1067,12 @@ class AuditCommandRunner:
             json_lines = [json.dumps(record, ensure_ascii=False) for record in records]
             emitted_lines += len(json_lines)
             sink.emit_many(json_lines)
-        elif self.spec.render is not None:
+        elif self.spec.render is not None or self.spec.render_module is not None:
             for record in typed_records:
                 if not bool(getattr(self.args, "debug", False)) and is_pre_detect_network_noise(record):
                     suppressed_records += 1
                     continue
-                lines = list(self.spec.render(record))
+                lines = self._render_record(record)
                 emitted_lines += len(lines)
                 sink.emit_many(lines)
         return AuditCommandResult(
@@ -1107,6 +1149,34 @@ class AuditCommandRunner:
         record = self._capabilities(deep_ctx, selected_record)
         record = self._data(deep_ctx, record)
         return record
+
+    def _safe_record(self, host: str, port: int, task: Callable[[], AuditRecord]) -> AuditRecord:
+        """Run a per-host task, converting an operational exception into a fail record.
+
+        Without this, a single host raising (e.g. a driver bug or a malformed
+        response) would propagate out of `scheduler.iter_completed`, abort the
+        whole batch, and crash the command (`run_*_stage` only catches `OSError`).
+        Isolating it keeps the scan going; the bad host surfaces as `status=fail`.
+
+        `TypeError` is deliberately re-raised: the runner's typed-hook/spec contract
+        checks raise `TypeError`, and those are configuration/dev errors that affect
+        every host identically — they should fail loud, not produce N fail records.
+        """
+
+        try:
+            return task()
+        except TypeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - deliberate per-host isolation boundary
+            message = str(exc).strip() or exc.__class__.__name__
+            return AuditRecord(
+                host=str(host),
+                port=int(port),
+                module=self.spec.module,
+                service=self.spec.module,
+                status="fail",
+                extra={"error": message},
+            )
 
     def _host_stage(self, ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
         if self.spec.host_stage is None:
@@ -1199,6 +1269,48 @@ class AuditCommandRunner:
         if status.startswith("not_"):
             return False, status
         return False, f"status={status}"
+
+
+def run_basic_host_audit(
+    args: Any,
+    logger: Any,
+    *,
+    console: Any,
+    label: str,
+    validate: Callable[[Any, Any], int | None],
+    build_plan: Callable[[Any], AuditCommandPlan],
+    build_spec: Callable[[Any], ModuleAuditSpec],
+) -> int:
+    """Standard module entrypoint: validate args, plan targets, run the staged
+    audit, emit colored results. Modules with extra pre/post logic (shells,
+    listeners, credential expansion) keep their own `run_*_stage`; the byte
+    -identical ones delegate here to avoid duplicating the skeleton. The module
+    creates and passes `console` so it stays patchable in module-level tests."""
+    name = label.lower()
+    validation_rc = validate(args, console)
+    if validation_rc is not None:
+        return int(validation_rc)
+    try:
+        plan = build_plan(args)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
+    if bool(getattr(args, "debug", False)) and not getattr(args, "debug_emit", None):
+        args.debug_emit = console.info
+    if bool(getattr(args, "debug", False)):
+        suffix = f" format={getattr(args, 'output_format', 'txt') or 'txt'}"
+        if getattr(args, "output", None):
+            suffix += f" output={args.output}"
+        console.info(f"{name} audit started:" + suffix)
+    runner = AuditCommandRunner(args=args, spec=build_spec(args), logger=logger, console=console)
+    try:
+        result = runner.run_plan(plan)
+    except OSError as exc:
+        console.error(f"failed to process {name} output: {exc}")
+        return 2
+    if bool(getattr(args, "debug", False)) and result.detected_count == 0 and hasattr(console, "warn"):
+        console.warn(f"all {name} targets are unreachable")
+    return 0
 
 
 def get_command_progress_owner(args: Any) -> CommandProgressOwner | None:

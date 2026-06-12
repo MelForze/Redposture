@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from redposture_core.scanner import scan_exporters_and_trigger
 
 
-def test_scan_then_trigger_phase_order(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_scan_then_trigger_phase_order(monkeypatch) -> None:
     detect_calls: list[str] = []
     trigger_calls: list[str] = []
     emitted_phases: list[str] = []
@@ -72,7 +72,7 @@ def test_scan_then_trigger_phase_order(monkeypatch) -> None:  # type: ignore[no-
     assert all(phase == "detect_hit" for phase in emitted_phases[:first_callback_idx])
 
 
-def test_trigger_progress_callbacks_cover_detect_and_deep(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_trigger_progress_callbacks_cover_detect_and_deep(monkeypatch) -> None:
     exporters = [
         {
             "name": "fast_exporter",
@@ -123,7 +123,7 @@ def test_trigger_progress_callbacks_cover_detect_and_deep(monkeypatch) -> None: 
     assert sum(advances) == 6
 
 
-def test_trigger_progress_callbacks_detect_only_no_hits(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_trigger_progress_callbacks_detect_only_no_hits(monkeypatch) -> None:
     exporters = [
         {
             "name": "missing_exporter",
