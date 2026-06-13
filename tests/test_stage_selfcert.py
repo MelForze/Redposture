@@ -63,3 +63,32 @@ def test_stage_selfcert_debug_emits_staged_markers(monkeypatch, capsys) -> None:
     assert "pass=2 deep start total=1" in out
     assert "stage2_gate=run reason=status=ready" in out
     assert "stage_timing_summary status=ok attempts=1/1" in out
+
+
+def test_stage_selfcert_debug_validation_error_emits_skip_markers(monkeypatch, capsys) -> None:
+    def fake_write(_cert_path: str, _key_path: str, *, force: bool) -> tuple[str, str]:
+        _ = force
+        raise ValueError("bad args")
+
+    monkeypatch.setattr("redposture_core.stage_selfcert.write_self_signed_cert_files", fake_write)
+    rc = run_selfcert_stage(_args(debug=True))
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "pass=1 detect complete success=0" in out
+    assert "stage2_gate=skip reason=error" in out
+    assert "stage_timing_summary status=error attempts=1/1" in out
+    assert "bad args" in out
+
+
+def test_stage_selfcert_debug_os_error_emits_skip_markers(monkeypatch, capsys) -> None:
+    def fake_write(_cert_path: str, _key_path: str, *, force: bool) -> tuple[str, str]:
+        _ = force
+        raise OSError("disk full")
+
+    monkeypatch.setattr("redposture_core.stage_selfcert.write_self_signed_cert_files", fake_write)
+    rc = run_selfcert_stage(_args(debug=True))
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "stage_trace stage_name=detect_protocol" in captured.out
+    assert "stage2_gate=skip reason=error" in captured.out
+    assert "failed to write cert/key files: disk full" in captured.err

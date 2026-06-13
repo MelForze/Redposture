@@ -4,7 +4,10 @@ import pytest
 
 from redposture_core.clients.mongodb import (
     MongoAuditClient,
+    MongoDependencyError,
     MongoNotMongoError,
+    _load_bson_json_util,
+    _load_pymongo,
     build_mongodb_uri,
     close_quietly,
     is_auth_error,
@@ -77,6 +80,12 @@ def test_build_mongodb_uri_escapes_auth_and_auth_source() -> None:
     uri = build_mongodb_uri("127.0.0.1", 27017, username="root@x", password="p:a/s", auth_db="admin")
     assert uri == "mongodb://root%40x:p%3Aa%2Fs@127.0.0.1:27017/?authSource=admin&directConnection=true"
 
+    empty_password_uri = build_mongodb_uri("mongo.local", 27017, username="root", password="", auth_db="")
+    assert empty_password_uri == "mongodb://root:@mongo.local:27017/?authSource=admin&directConnection=true"
+
+    password_only_uri = build_mongodb_uri("mongo.local", 27017, username=None, password="", auth_db="auth/db")
+    assert password_only_uri == "mongodb://:@mongo.local:27017/?authSource=auth%2Fdb&directConnection=true"
+
 
 def test_mongo_audit_client_wraps_database_collection_helpers() -> None:
     client = MongoAuditClient(_RawClient())
@@ -102,6 +111,8 @@ def test_json_safe_and_database_filter_helpers() -> None:
         "redposture",
         "billing",
     ]
+    assert json_safe((Weird(), {"nested": Weird()})) == ["weird-value", {"nested": "weird-value"}]
+    assert non_system_databases(["", None, "config", "local", "admin"]) == []
 
 
 def test_mongo_audit_client_hello_normalizes_non_json_values() -> None:
@@ -128,8 +139,13 @@ def test_normalize_mongodb_error_and_auth_detection() -> None:
         "connection refused (service is not listening on target port)"
     )
     assert normalize_mongodb_error(RuntimeError("[Errno -2] Name or service not known")) == "dns lookup failed"
+    assert normalize_mongodb_error(RuntimeError("[Errno 60] Operation timed out")) == "connection timeout"
+    assert normalize_mongodb_error(RuntimeError("[Errno 13] Permission denied")) == "Permission denied"
     assert normalize_mongodb_error(RuntimeError("Authentication failed.")) == "authentication failed"
+    assert normalize_mongodb_error(RuntimeError("not authorized on admin")) == "authentication failed"
+    assert normalize_mongodb_error(RuntimeError("temporary failure in name resolution")) == "dns lookup failed"
     assert is_auth_error("Command requires authentication code 13") is True
+    assert is_auth_error("Auth error code 18") is True
     assert is_auth_error("plain network error") is False
 
 
@@ -156,6 +172,20 @@ def test_open_mongodb_client_uses_fake_client_without_pymongo_import() -> None:
     assert kwargs["connectTimeoutMS"] == 2500
     assert kwargs["socketTimeoutMS"] == 2500
     assert kwargs["appname"] == "redposture"
+
+
+def test_mongodb_optional_dependency_loaders(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = __import__
+
+    def fake_import(name: str, *args: object, **kwargs: object):
+        if name in {"pymongo", "bson"} or name.startswith("bson."):
+            raise ModuleNotFoundError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    with pytest.raises(MongoDependencyError, match="pymongo is required"):
+        _load_pymongo()
+    assert _load_bson_json_util() is None
 
 
 def test_mongo_audit_client_fallbacks_and_close_quietly() -> None:
@@ -220,3 +250,28 @@ def test_mongo_audit_client_rejects_non_mongo_hello() -> None:
 
     with pytest.raises(MongoNotMongoError):
         MongoAuditClient(Raw()).hello()
+
+
+def test_mongo_audit_client_rejects_non_document_hello_and_wraps_non_dict_results() -> None:
+    class Raw:
+        def __getitem__(self, name: str):
+            class Db:
+                def command(self, command):
+                    if command == "hello":
+                        return "not-a-document"
+                    return ["ok"]
+
+            return Db()
+
+        def server_info(self):
+            return "not-a-dict"
+
+    client = MongoAuditClient(Raw())
+    with pytest.raises(MongoNotMongoError, match="hello did not return"):
+        client.hello()
+    assert client.server_info() == {}
+    assert client.run_command("admin", {"ping": 1}) == {"result": ["ok"]}
+
+
+def test_mongo_audit_client_close_quietly_without_close_method() -> None:
+    close_quietly(object())

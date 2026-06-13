@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import os
@@ -160,20 +161,30 @@ class LineOutputSink:
         self.output_path = output_path
         self.emit_line = emit_line
         self.output_written = bool(append)
+        self._handle: Any = None
 
     def emit_many(self, lines: Iterable[str]) -> None:
         buffered = [line for line in lines if line]
         if not buffered:
             return
         if self.output_path:
-            os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
-            with open(self.output_path, "a" if self.output_written else "w", encoding="utf-8") as out_fh:
-                for line in buffered:
-                    out_fh.write(line + "\n")
+            if self._handle is None:
+                # Open once and keep the handle: render emits per record, so a
+                # per-call open/close would re-open the file for every finding.
+                os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
+                self._handle = open(self.output_path, "a" if self.output_written else "w", encoding="utf-8")
+            for line in buffered:
+                self._handle.write(line + "\n")
+            self._handle.flush()
         else:
             for line in buffered:
                 self.emit_line(line)
         self.output_written = True
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
 
 
 def _build_colored_emit(console: Any, colorize: Callable[[Any, str], bool] | None) -> Callable[[str], None]:
@@ -568,6 +579,12 @@ def _credential_is_anonymous(ctx: AuditHookContext) -> bool:
     return credential.username is None and credential.password is None and credential.token is None
 
 
+@functools.cache
+def _cached_signature(func: Callable[..., Any]) -> inspect.Signature:
+    """Cache `inspect.signature` per function (called per host / per render record)."""
+    return inspect.signature(func)
+
+
 def _resolve_host_stage(func: Callable[..., Any]) -> Callable[..., Any]:
     """Re-resolve a host action by its qualified name at call time.
 
@@ -592,7 +609,7 @@ def _invoke_host_stage(
     run_deep_checks: bool | None = None,
 ) -> AuditRecord:
     func = _resolve_host_stage(func)
-    signature = inspect.signature(func)
+    signature = _cached_signature(func)
     if run_deep_checks is not None:
         ctx = AuditHookContext(
             args=ctx.args,
@@ -604,10 +621,11 @@ def _invoke_host_stage(
             run_deep_checks=bool(run_deep_checks),
             debug_emit=ctx.debug_emit,
         )
+    cfg = AuditConfig.from_namespace(ctx.args)
     positional: list[Any] = []
     keyword: dict[str, Any] = {}
     for name, parameter in signature.parameters.items():
-        value = _argument_value_for_hook(name, ctx)
+        value = _argument_value_for_hook(name, ctx, cfg)
         if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
             positional.append(value)
         elif parameter.kind is inspect.Parameter.KEYWORD_ONLY:
@@ -617,8 +635,8 @@ def _invoke_host_stage(
                 [
                     ctx.host,
                     int(ctx.port),
-                    float(getattr(ctx.args, "timeout", 5.0) or 5.0),
-                    int(getattr(ctx.args, "retries", 0) or 0),
+                    cfg.timeout,
+                    cfg.retries,
                 ]
             )
         elif parameter.kind is inspect.Parameter.VAR_KEYWORD:
@@ -631,20 +649,20 @@ def _invoke_host_stage(
     raise TypeError(f"{module} host hook must return AuditRecord-compatible payload")
 
 
-def render_record_with_module(
-    render_module: Any, record: AuditRecord, output_format: str, *, debug: bool = False
-) -> list[str]:
-    record_payload = record.to_dict()
-    lines: list[str] = []
+@dataclass(frozen=True)
+class RenderPlan:
+    """Precomputed render dispatch for a module (constant across records)."""
+
+    detect: Callable[..., Any] | None
+    summary: Callable[..., Any] | None
+    details: tuple[tuple[Callable[..., Any], bool], ...]  # (func, takes_debug)
+
+
+def build_render_plan(render_module: Any) -> RenderPlan:
+    """Resolve a module's `_format_*` renderers once (reflection done here, not per record)."""
     detect = getattr(render_module, "_format_detect_record", None) or getattr(render_module, "_detect_line", None)
-    if callable(detect) and _record_looks_detected(record_payload):
-        try:
-            lines.append(str(detect(record_payload, output_format)))
-        except TypeError:
-            pass
     summary = getattr(render_module, "_format_record", None)
-    if callable(summary):
-        lines.append(str(summary(record_payload, output_format)))
+    details: list[tuple[Callable[..., Any], bool]] = []
     for name in getattr(render_module, "__all__", ()):
         if name in {"_format_detect_record", "_format_record", "_detect_line"}:
             continue
@@ -653,16 +671,41 @@ def render_record_with_module(
         func = getattr(render_module, name, None)
         if not callable(func) or not _can_call_detail_renderer(func):
             continue
+        details.append((func, "debug" in _cached_signature(func).parameters))
+    return RenderPlan(
+        detect if callable(detect) else None,
+        summary if callable(summary) else None,
+        tuple(details),
+    )
+
+
+def render_with_plan(
+    plan: RenderPlan, record_payload: dict[str, Any], output_format: str, *, debug: bool = False
+) -> list[str]:
+    lines: list[str] = []
+    if plan.detect is not None and _record_looks_detected(record_payload):
         try:
-            if "debug" in inspect.signature(func).parameters:
-                rendered = func(record_payload, output_format, debug=debug)
-            else:
-                rendered = func(record_payload, output_format)
+            lines.append(str(plan.detect(record_payload, output_format)))
+        except TypeError:
+            pass
+    if plan.summary is not None:
+        lines.append(str(plan.summary(record_payload, output_format)))
+    for func, takes_debug in plan.details:
+        try:
+            rendered = (
+                func(record_payload, output_format, debug=debug) if takes_debug else func(record_payload, output_format)
+            )
         except TypeError:
             continue
         if rendered:
             lines.extend(str(line) for line in rendered if line)
     return [line for line in lines if line]
+
+
+def render_record_with_module(
+    render_module: Any, record: AuditRecord, output_format: str, *, debug: bool = False
+) -> list[str]:
+    return render_with_plan(build_render_plan(render_module), record.to_dict(), output_format, debug=debug)
 
 
 def _record_looks_detected(record: dict[str, Any]) -> bool:
@@ -743,7 +786,7 @@ def is_pre_detect_network_noise(record: AuditRecord | dict[str, Any]) -> bool:
 
 
 def _can_call_detail_renderer(func: Callable[..., Any]) -> bool:
-    signature = inspect.signature(func)
+    signature = _cached_signature(func)
     required = [
         name
         for name, parameter in signature.parameters.items()
@@ -753,9 +796,8 @@ def _can_call_detail_renderer(func: Callable[..., Any]) -> bool:
     return len(required) <= 2
 
 
-def _argument_value_for_hook(name: str, ctx: AuditHookContext) -> Any:
+def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig) -> Any:
     args = ctx.args
-    cfg = AuditConfig.from_namespace(args)
     credential = ctx.credential
     target_scheme = str(ctx.target.scheme).lower() if ctx.target is not None and ctx.target.scheme else None
     if name == "host":
@@ -976,16 +1018,13 @@ class AuditCommandRunner:
         else:
             self.emit_line = print
 
-    def _render_record(self, record: AuditRecord) -> list[str]:
+    def _render_record(
+        self, record: AuditRecord, render_plan: RenderPlan | None, output_format: str, debug: bool
+    ) -> list[str]:
         if self.spec.render is not None:
             return [line for line in self.spec.render(record) if line]
-        if self.spec.render_module is not None:
-            return render_record_with_module(
-                self.spec.render_module,
-                record,
-                str(getattr(self.args, "output_format", "txt") or "txt"),
-                debug=bool(getattr(self.args, "debug", False)),
-            )
+        if render_plan is not None:
+            return render_with_plan(render_plan, record.to_dict(), output_format, debug=debug)
         return []
 
     def run_plan(self, plan: AuditCommandPlan) -> AuditCommandResult:
@@ -1067,18 +1106,25 @@ class AuditCommandRunner:
         typed_records = [records_by_idx[idx] for idx, _host, _port, _target in indexed_targets if idx in records_by_idx]
         records = [record.to_dict() for record in typed_records]
         suppressed_records = 0
-        if plan.output_format == "json":
-            json_lines = [json.dumps(record, ensure_ascii=False) for record in records]
-            emitted_lines += len(json_lines)
-            sink.emit_many(json_lines)
-        elif self.spec.render is not None or self.spec.render_module is not None:
-            for record in typed_records:
-                if not bool(getattr(self.args, "debug", False)) and is_pre_detect_network_noise(record):
-                    suppressed_records += 1
-                    continue
-                lines = self._render_record(record)
-                emitted_lines += len(lines)
-                sink.emit_many(lines)
+        try:
+            if plan.output_format == "json":
+                json_lines = [json.dumps(record, ensure_ascii=False) for record in records]
+                emitted_lines += len(json_lines)
+                sink.emit_many(json_lines)
+            elif self.spec.render is not None or self.spec.render_module is not None:
+                render_plan = (
+                    build_render_plan(self.spec.render_module) if self.spec.render_module is not None else None
+                )
+                debug = bool(getattr(self.args, "debug", False))
+                for record in typed_records:
+                    if not debug and is_pre_detect_network_noise(record):
+                        suppressed_records += 1
+                        continue
+                    lines = self._render_record(record, render_plan, plan.output_format, debug)
+                    emitted_lines += len(lines)
+                    sink.emit_many(lines)
+        finally:
+            sink.close()
         return AuditCommandResult(
             records=records,
             detected_count=sum(1 for record in typed_records if self._is_detected(record)),

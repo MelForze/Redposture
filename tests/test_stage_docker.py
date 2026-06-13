@@ -220,6 +220,207 @@ def test_auth_required_and_not_docker_branches(monkeypatch: pytest.MonkeyPatch) 
     assert "not Docker Engine API endpoint" in docker_stage._format_record(not_docker, "txt")
 
 
+def test_probe_docker_transport_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    class InfoFallbackClient:
+        def __init__(self, transport: str) -> None:
+            self.transport = transport
+
+        def ping(self) -> None:
+            return None
+
+        def version(self) -> dict[str, Any]:
+            raise docker_stage.DockerEngineHTTPError(404, "missing")
+
+        def info(self) -> dict[str, Any]:
+            return {"ServerVersion": "26.0.0", "ApiVersion": "1.46", "OSType": "linux"}
+
+    clients: list[str] = []
+
+    def fake_client(_host: str, _port: int, transport: str, *_args: object, **_kwargs: object) -> InfoFallbackClient:
+        clients.append(transport)
+        return InfoFallbackClient(transport)
+
+    monkeypatch.setattr(docker_stage, "_docker_client", fake_client)
+    client, version, transport, error, auth_required = docker_stage._probe_docker(
+        "127.0.0.1",
+        2376,
+        1.0,
+        insecure=True,
+        tls_ca=None,
+        tls_cert=None,
+        tls_key=None,
+    )
+    assert isinstance(client, InfoFallbackClient)
+    assert version == {"Version": "26.0.0", "ApiVersion": "1.46", "Os": "linux"}
+    assert transport == "tls"
+    assert error is None
+    assert auth_required is False
+    assert clients == ["tls"]
+
+    class ForbiddenClient(InfoFallbackClient):
+        def ping(self) -> None:
+            raise docker_stage.DockerEngineHTTPError(403, "forbidden")
+
+    monkeypatch.setattr(docker_stage, "_docker_client", lambda *_args, **_kwargs: ForbiddenClient("plaintext"))
+    client, version, transport, error, auth_required = docker_stage._probe_docker(
+        "127.0.0.1",
+        2375,
+        1.0,
+        insecure=False,
+        tls_ca=None,
+        tls_cert=None,
+        tls_key=None,
+    )
+    assert isinstance(client, ForbiddenClient)
+    assert version is None
+    assert transport == "plaintext"
+    assert "forbidden" in str(error)
+    assert auth_required is True
+
+
+def test_docker_small_helpers_and_probe_failure_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert docker_stage._clip("abcdef", 3) == "abc"
+    assert docker_stage._retry_delay(10) == 1.5
+    assert docker_stage._transport_order(2376) == ["tls", "plaintext"]
+    assert docker_stage._transport_order(2375) == ["plaintext", "tls"]
+    assert docker_stage._image_count({"images": "not-list"}) == 0
+    assert docker_stage._network_count({"networks": "not-list"}) == 0
+    assert docker_stage._volume_count({"volumes": "not-list"}) == 0
+    assert docker_stage._caps_suffix({"capabilities": {"can_list_images": True}, "images": [{}]}) == " (images:1)"
+
+    created: list[dict[str, object]] = []
+
+    class FakeClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created.append({"args": args, "kwargs": kwargs})
+
+    monkeypatch.setattr(docker_stage, "DockerEngineClient", FakeClient)
+    assert docker_stage._docker_client(
+        "docker.local",
+        2376,
+        "tls",
+        2.0,
+        insecure=True,
+        tls_ca="ca.pem",
+        tls_cert="cert.pem",
+        tls_key="key.pem",
+    )
+    assert created[0]["args"] == ("docker.local", 2376)
+    assert created[0]["kwargs"]["transport"] == "tls"
+    assert created[0]["kwargs"]["ca_file"] == "ca.pem"
+
+    class BadVersionClient:
+        def __init__(self, kind: str) -> None:
+            self.kind = kind
+
+        def ping(self) -> None:
+            if self.kind == "conn-auth":
+                raise docker_stage.DockerEngineConnectionError("client certificate required")
+            return None
+
+        def version(self) -> dict[str, Any]:
+            if self.kind == "version-500":
+                raise docker_stage.DockerEngineHTTPError(500, "boom")
+            if self.kind == "bad-json":
+                raise ValueError("bad json")
+            return {}
+
+        def info(self) -> dict[str, Any]:
+            return {}
+
+    sequence = iter([BadVersionClient("version-500"), BadVersionClient("bad-json")])
+    monkeypatch.setattr(docker_stage, "_docker_client", lambda *_args, **_kwargs: next(sequence))
+    client, version, transport, error, auth_required = docker_stage._probe_docker(
+        "127.0.0.1",
+        2375,
+        1.0,
+        insecure=False,
+        tls_ca=None,
+        tls_cert=None,
+        tls_key=None,
+    )
+    assert client is None
+    assert version is None
+    assert transport is None
+    assert "bad json" in str(error)
+    assert auth_required is False
+
+    monkeypatch.setattr(docker_stage, "_docker_client", lambda *_args, **_kwargs: BadVersionClient("conn-auth"))
+    client, version, transport, error, auth_required = docker_stage._probe_docker(
+        "127.0.0.1",
+        2375,
+        1.0,
+        insecure=False,
+        tls_ca=None,
+        tls_cert=None,
+        tls_key=None,
+    )
+    assert isinstance(client, BadVersionClient)
+    assert version is None
+    assert transport == "plaintext"
+    assert auth_required is True
+
+
+def test_docker_inventory_error_and_empty_exec_output_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ErrorClient(_FakeDockerClient):
+        def images(self) -> list[dict[str, Any]]:
+            raise docker_stage.DockerEngineError("images denied")
+
+        def networks(self) -> list[dict[str, Any]]:
+            raise docker_stage.DockerEngineError("networks denied")
+
+        def volumes(self) -> list[dict[str, Any]]:
+            raise docker_stage.DockerEngineError("volumes denied")
+
+        def info(self) -> dict[str, Any]:
+            raise docker_stage.DockerEngineError("info denied")
+
+        def system_df(self) -> dict[str, Any]:
+            raise docker_stage.DockerEngineError("df denied")
+
+        def exec_command(self, container_id: str, command: str) -> dict[str, Any]:
+            _ = (container_id, command)
+            return {"stdout": "", "stderr": "", "exit_code": 0, "running": False}
+
+    monkeypatch.setattr(
+        docker_stage,
+        "_probe_docker",
+        lambda *_args, **_kwargs: (
+            ErrorClient(),
+            {"Version": "25.0.5", "ApiVersion": "1.45", "Os": "linux"},
+            "plaintext",
+            None,
+            False,
+        ),
+    )
+    record = docker_stage._audit_docker_host(
+        "127.0.0.1",
+        2375,
+        1.0,
+        0,
+        show_images=True,
+        show_networks=True,
+        show_volumes=True,
+        show_system=True,
+        container_selector="web",
+        exec_cmd="true",
+    )
+    assert record["capabilities"]["can_list_images"] is False
+    assert record["capabilities"]["can_read_system_info"] is False
+    assert "<no output>" in "\n".join(docker_stage._format_exec_lines(record, "txt"))
+
+    missing = docker_stage._audit_docker_host(
+        "127.0.0.1",
+        2375,
+        1.0,
+        0,
+        container_selector="missing",
+        exec_cmd="id",
+    )
+    assert missing["exec_result"]["ok"] is False
+    assert "container not found" in "\n".join(docker_stage._format_exec_lines(missing, "txt"))
+
+
 def test_detail_formatters_cover_inventory_system_and_exec(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_probe(monkeypatch)
     record = docker_stage._audit_docker_host(

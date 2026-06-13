@@ -345,6 +345,35 @@ def test_mongodb_nosql_shell_session() -> None:
     assert any("must be valid JSON object" in line for line in lines)
 
 
+def test_mongodb_nosql_shell_session_command_error_and_eof() -> None:
+    class BrokenShellClient:
+        def run_command(self, database: str, command: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError(f"{database}:{command}")
+
+    lines: list[str] = []
+    inputs = iter(['{"ping":1}', "exit"])
+    assert (
+        mongodb._run_mongodb_nosql_shell_session(
+            BrokenShellClient(),
+            initial_database="admin",
+            input_func=lambda _prompt: next(inputs),
+            emit_line=lines.append,
+        )
+        == 0
+    )
+    assert any("command failed" in line for line in lines)
+
+    assert (
+        mongodb._run_mongodb_nosql_shell_session(
+            BrokenShellClient(),
+            initial_database="admin",
+            input_func=lambda _prompt: (_ for _ in ()).throw(EOFError()),
+            emit_line=lambda _line: None,
+        )
+        == 0
+    )
+
+
 def test_audit_mongodb_invalid_credentials_anonymous_and_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     def anonymous_with_invalid_creds(host, port, *, username=None, password=None, auth_db="admin", timeout=1.0):
         if username is None:
@@ -456,6 +485,73 @@ def test_collect_mongodb_data_handles_collection_and_query_errors() -> None:
     assert data["query_error"] == "authentication failed"
 
 
+def test_try_credentials_and_collect_data_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    def always_denied(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("Authentication failed.")
+
+    monkeypatch.setattr(mongodb, "_open_client", always_denied)
+    selected, attempts = mongodb._try_credentials(
+        "127.0.0.1",
+        27017,
+        1.0,
+        auth_db="admin",
+        credential_candidates=[
+            {"username": "bad1", "password": "", "default": False},
+            {"username": "bad2", "password": "bad", "default": True},
+        ],
+    )
+    assert selected is None
+    assert [item["ok"] for item in attempts] == [False, False]
+    assert attempts[0]["password"] == ""
+    assert attempts[1]["default"] is True
+
+    assert mongodb._selected_databases(["admin", "config", "redposture"], None, True) == ["redposture"]
+    assert mongodb._selected_databases(["admin"], None, True) == ["admin"]
+    assert mongodb._selected_databases(["redposture"], "selected", False) == ["selected"]
+    assert mongodb._selected_databases(["redposture"], None, False) == []
+
+    class PartiallyBrokenClient:
+        def list_collection_names(self, database: str):
+            return ["users"]
+
+        def count_documents(self, database: str, collection: str):
+            return None
+
+        def list_indexes(self, database: str, collection: str):
+            raise RuntimeError("index not authorized")
+
+        def find_documents(self, database: str, collection: str, **kwargs: object):
+            raise RuntimeError("find timeout")
+
+        def run_command(self, database: str, command: dict[str, Any]):
+            raise RuntimeError("command failed")
+
+    data = mongodb._collect_mongodb_data(
+        PartiallyBrokenClient(),
+        database_names=["redposture"],
+        selected_database=None,
+        collection_targets=[],
+        collection_targets_by_database={None: ["users"]},
+        show_databases=False,
+        show_collections=True,
+        show_indexes=True,
+        dump_documents=True,
+        dump_limit=5,
+        query_filter={"role": "admin"},
+        projection={"username": 1},
+        index_filter="_id_",
+        nosql_command={"dbStats": 1},
+    )
+    assert data["collections"] == [{"database": "redposture", "collection": "users", "documents": None}]
+    assert data["indexes"] == []
+    assert data["documents"] == []
+    assert data["query_documents"] == []
+    assert data["capabilities"]["can_list_indexes"] is False
+    assert data["capabilities"]["can_read_documents"] is False
+    assert data["capabilities"]["can_run_command"] is False
+    assert data["nosql_command_error"] == "command failed"
+
+
 def test_mongodb_formatters_cover_txt_and_json_branches() -> None:
     record = {
         "timestamp": "now",
@@ -492,6 +588,83 @@ def test_mongodb_formatters_cover_txt_and_json_branches() -> None:
     assert '"type": "documents_dump"' in mongodb._format_documents_detail_records(record, "json")[0]
     assert "Query" in mongodb._format_query_detail_records(record, "txt")[0]
     assert '"type": "query"' in mongodb._format_query_detail_records(record, "json")[0]
+
+    command_record = {
+        **record,
+        "nosql_command": {"ping": 1},
+        "nosql_command_database": "admin",
+        "nosql_command_result": None,
+        "nosql_command_error": "denied",
+    }
+    assert "command failed" in "\n".join(mongodb._format_nosql_command_detail_records(command_record, "txt"))
+    assert '"type": "mongo_command"' in mongodb._format_nosql_command_detail_records(command_record, "json")[0]
+
+
+def test_open_client_for_successful_record_and_shell_access_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_open(host: str, port: int, timeout: float, *, username: str | None, password: str | None, auth_db: str):
+        calls.append(
+            {
+                "host": host,
+                "port": port,
+                "timeout": timeout,
+                "username": username,
+                "password": password,
+                "auth_db": auth_db,
+            }
+        )
+        return object()
+
+    monkeypatch.setattr(mongodb, "_open_client", fake_open)
+    assert mongodb._open_client_for_successful_record(
+        {"host": "h", "port": 1, "status": "open_no_auth"}, timeout=2.0, auth_db="admin"
+    )
+    assert mongodb._open_client_for_successful_record(
+        {
+            "host": "h",
+            "port": 2,
+            "status": "valid_credentials",
+            "effective_username": "root",
+            "provided_password": "",
+        },
+        timeout=3.0,
+        auth_db="auth",
+    )
+    assert calls[0]["username"] is None
+    assert calls[1]["username"] == "root"
+    assert calls[1]["password"] == ""
+    with pytest.raises(RuntimeError, match="requires successful access"):
+        mongodb._open_client_for_successful_record({"status": "fail"}, timeout=1.0, auth_db="admin")
+
+    monkeypatch.setattr(
+        mongodb,
+        "_audit_mongodb_host",
+        lambda *_args, **_kwargs: {
+            "host": "127.0.0.1",
+            "port": 27017,
+            "is_mongodb": True,
+            "status": "auth_required",
+            "auth_required": True,
+        },
+    )
+    lines: list[str] = []
+    assert (
+        mongodb._run_mongodb_nosql_shell(
+            host="127.0.0.1",
+            port=27017,
+            timeout=1.0,
+            retries=0,
+            credential_candidates=[],
+            auth_db="admin",
+            database="admin",
+            emit_line=lines.append,
+            shell_emit_line=lines.append,
+            input_func=lambda _prompt: "exit",
+        )
+        == 1
+    )
+    assert any("authentication required" in line for line in lines)
 
 
 def test_run_mongodb_stage_credential_file_prefilter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

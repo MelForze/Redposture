@@ -51,3 +51,117 @@ def test_package_stage_run_functions_cover_runner_plan_path(monkeypatch, module_
 
     assert rc == 0
     assert calls, module_name
+
+
+def test_grpc_stage_debug_openapi_and_output_error_branches(monkeypatch, tmp_path) -> None:
+    stage = importlib.import_module("redposture_core.modules.grpc.stage")
+    descriptor_b64 = "CgxoZWFsdGgucHJvdG8="
+    calls: list[object] = []
+
+    def fake_run_plan(self, plan):
+        calls.append(plan)
+        return AuditCommandResult(
+            records=[{"descriptor_protos_b64": [descriptor_b64]}],
+            detected_count=1,
+            emitted_lines=0,
+            typed_records=[],
+        )
+
+    written: list[tuple[str, list[bytes]]] = []
+    monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", fake_run_plan)
+    monkeypatch.setattr(stage.actions, "_write_openapi_document", lambda path, data: written.append((path, data)) or 1)
+    args = parse_args(["grpc", "-t", "127.0.0.1", "--debug", "--openapi", str(tmp_path / "openapi.json")])
+    rc = stage.run_grpc_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
+    assert rc == 0
+    assert calls
+    assert written and written[0][0].endswith("openapi.json")
+
+    def boom_run_plan(self, plan):
+        _ = (self, plan)
+        raise OSError("disk full")
+
+    monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", boom_run_plan)
+    args = parse_args(["grpc", "-t", "127.0.0.1"])
+    assert stage.run_grpc_stage(args, SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+
+
+def test_mongodb_and_qdrant_stage_error_and_listener_branches(monkeypatch) -> None:
+    mongodb_stage = importlib.import_module("redposture_core.modules.mongodb.stage")
+    qdrant_stage = importlib.import_module("redposture_core.modules.qdrant.stage")
+
+    normalized: list[object] = []
+
+    def fake_run_plan(self, plan):
+        normalized.append((self.args, plan))
+        return AuditCommandResult(records=[], detected_count=0, emitted_lines=0, typed_records=[])
+
+    monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", fake_run_plan)
+    args = parse_args(
+        [
+            "mongodb",
+            "-t",
+            "127.0.0.1",
+            "--database",
+            "redposture",
+            "--collection",
+            "redposture.demo",
+            "--document",
+            "1",
+            "--projection",
+            '{"username":1}',
+            "--debug",
+        ]
+    )
+    assert mongodb_stage.run_mongodb_stage(args, SimpleNamespace(log=lambda *_a, **_k: None)) == 0
+    assert args.query_filter == {"_id": 1}
+    assert args.projection == {"username": 1}
+    assert normalized
+
+    def boom_run_plan(self, plan):
+        _ = (self, plan)
+        raise OSError("write failed")
+
+    monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", boom_run_plan)
+    assert mongodb_stage.run_mongodb_stage(parse_args(["mongodb", "-t", "127.0.0.1"]), SimpleNamespace()) == 2
+
+    monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", fake_run_plan)
+    listener = {"started": True, "port": 19090}
+    monkeypatch.setattr(qdrant_stage.actions, "_start_qdrant_ssrf_capture_listener", lambda _port: listener)
+    monkeypatch.setattr(qdrant_stage.actions, "_qdrant_ssrf_capture_hits", lambda _listener: [{"path": "/hit"}])
+    stopped: list[object] = []
+    monkeypatch.setattr(qdrant_stage.actions, "_stop_qdrant_ssrf_capture_listener", stopped.append)
+    args = parse_args(
+        [
+            "qdrant",
+            "-t",
+            "127.0.0.1",
+            "--collection",
+            "demo",
+            "--ssrf-target",
+            "127.0.0.1",
+            "--listen",
+            "--ssrf-port",
+            "19090",
+        ]
+    )
+    assert qdrant_stage.run_qdrant_stage(args, SimpleNamespace(log=lambda *_a, **_k: None)) == 0
+    assert stopped == [listener]
+
+    monkeypatch.setattr(
+        qdrant_stage.actions, "_start_qdrant_ssrf_capture_listener", lambda _port: {"started": False, "error": "busy"}
+    )
+    args = parse_args(
+        [
+            "qdrant",
+            "-t",
+            "127.0.0.1",
+            "--collection",
+            "demo",
+            "--ssrf-target",
+            "127.0.0.1",
+            "--listen",
+            "--ssrf-port",
+            "19091",
+        ]
+    )
+    assert qdrant_stage.run_qdrant_stage(args, SimpleNamespace(log=lambda *_a, **_k: None)) == 0
