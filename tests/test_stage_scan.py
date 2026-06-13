@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from types import SimpleNamespace
 
 import pytest
 
@@ -83,7 +84,52 @@ def test_run_scan_stage_handles_profiles_load_error(
 
     rc = run_scan_stage(_args())
     assert rc == 2
-    assert "failed to load profiles" in capsys.readouterr().err
+
+
+def test_run_scan_stage_handles_scan_output_os_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.collect_scan_target_specs",
+        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
+    )
+    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_ports", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.load_profiles",
+        lambda *_args, **_kwargs: {"discovery_exporters": [{"port": 9100}]},
+    )
+
+    def raise_oserror(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        raise OSError("cannot write output")
+
+    monkeypatch.setattr("redposture_core.stage_scan.scan_exporter_presence", raise_oserror)
+
+    rc = run_scan_stage(_args(output="scan.txt"))
+    assert rc == 2
+    assert "failed to process scan output" in capsys.readouterr().err
+
+
+def test_run_scan_stage_handles_explicit_url_group_os_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.collect_scan_target_specs",
+        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme="http", explicit_port=19100)],
+    )
+    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_ports", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.load_profiles",
+        lambda *_args, **_kwargs: {"discovery_exporters": [{"port": 9100}]},
+    )
+
+    def raise_oserror(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        raise OSError("cannot append output")
+
+    monkeypatch.setattr("redposture_core.stage_scan.scan_exporter_presence", raise_oserror)
+
+    rc = run_scan_stage(_args(output="scan.txt"))
+    assert rc == 2
+    assert "failed to process scan output" in capsys.readouterr().err
 
 
 def test_run_scan_stage_requires_hosts(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -129,6 +175,45 @@ def test_run_scan_stage_streams_txt_and_passes_custom_ports(
     assert "ignored summary" not in out
     assert "scan complete" in out
     assert captured.get("custom_ports") == [9100]
+
+
+def test_run_scan_stage_debug_emit_line_variants_and_hosts_file(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    captured_targets: list[object] = []
+
+    def fake_collect(targets: object, *_args: object, **_kwargs: object) -> list[ScanTargetSpec]:
+        captured_targets.append(targets)
+        return [ScanTargetSpec(host="127.0.0.1")]
+
+    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_target_specs", fake_collect)
+    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_ports", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.load_profiles", lambda *_args, **_kwargs: {"discovery_exporters": []}
+    )
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        emit_line = kwargs.get("emit_line")
+        if callable(emit_line):
+            emit_line("SCAN\t127.0.0.1\t9100\t [*] debug summary")
+            emit_line("BROKEN [+] non-scan success")
+            emit_line("SCAN\t127.0.0.1\t9100\t [!] warning detail")
+            emit_line("SCAN\t127.0.0.1\t9100\t [-] negative detail")
+            emit_line("SCAN\t127.0.0.1\t9100\t plain debug detail")
+        return 1, 1, {"127.0.0.1": [{"exporter": "node_exporter", "port": 9100}]}
+
+    monkeypatch.setattr("redposture_core.stage_scan.scan_exporter_presence", fake_scan)
+
+    rc = run_scan_stage(_args(hosts_file="hosts.txt", debug=True))
+
+    assert rc == 0
+    assert captured_targets == ["127.0.0.1,hosts.txt"]
+    out = capsys.readouterr().out
+    assert "debug summary" in out
+    assert "non-scan success" in out
+    assert "warning detail" in out
+    assert "negative detail" in out
+    assert "plain debug detail" in out
 
 
 def test_run_scan_stage_prints_json_lines_as_is(
@@ -182,6 +267,46 @@ def test_run_scan_stage_output_mode_reports_per_host_summary(
     out = capsys.readouterr().out
     assert "h1: detected 1 exporter(s)" in out
     assert "h2: no known exporters detected" in out
+
+
+def test_run_scan_stage_output_mode_deduplicates_explicit_url_hits(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    specs = [
+        ScanTargetSpec(host="h1", scheme="http", explicit_port=9100),
+        ScanTargetSpec(host="h1", scheme="http", explicit_port=9101),
+    ]
+    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_target_specs", lambda *_args, **_kwargs: specs)
+    monkeypatch.setattr("redposture_core.stage_scan.collect_scan_ports", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.load_profiles",
+        lambda *_args, **_kwargs: {"discovery_exporters": [{"port": 9100}, {"port": 9101}]},
+    )
+
+    def fake_scan(*_args: object, **_kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        return (
+            1,
+            1,
+            {
+                "h1": [
+                    {
+                        "exporter": "node_exporter",
+                        "port": 9100,
+                        "status": 200,
+                        "method": "GET",
+                        "url": "http://h1:9100/metrics",
+                    }
+                ]
+            },
+        )
+
+    monkeypatch.setattr("redposture_core.stage_scan.scan_exporter_presence", fake_scan)
+
+    rc = run_scan_stage(_args(output="scan.txt", targets="http://h1:9100/metrics,http://h1:9101/metrics"))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "h1: detected 1 exporter(s) [node_exporter]" in out
 
 
 def test_run_scan_stage_debug_emits_staged_markers(

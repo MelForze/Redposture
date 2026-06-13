@@ -1,26 +1,16 @@
 """Shared TCP transport helpers used by audit clients and modules.
 
-These consolidate connect/recv primitives and connection-error classification
+These consolidate the framed-read primitive and connection-error classification
 that were previously copy-pasted across many modules. The classifiers use a
 **superset** match (substring + common errno spellings) so they work both on
 raw OS error text (`[Errno 61] Connection refused`) and on the already-normalized
 text some modules produce (`connection refused (...)`).
-
-Proxy routing is handled globally by the `socket.create_connection` patch in
-`network_proxy`, so `tcp_connect` is automatically proxy-aware.
 """
 
 from __future__ import annotations
 
 import socket
 from typing import Any
-
-
-def tcp_connect(host: str, port: int, *, timeout: float) -> socket.socket:
-    """Open a TCP connection (proxy-aware via the global socket patch)."""
-    sock = socket.create_connection((host, port), timeout=timeout)
-    sock.settimeout(timeout)
-    return sock
 
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:

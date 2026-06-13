@@ -362,6 +362,101 @@ def test_consul_catalog_services_and_kv_value_helpers(monkeypatch: pytest.Monkey
     assert consul._decode_consul_kv_value(123) == "123"
 
 
+def test_consul_list_helpers_error_and_nested_payload_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    checks = consul._consul_agent_checks_list(
+        {
+            "bad": "not-dict",
+            "check-a": {
+                "Name": "web",
+                "Status": "passing",
+                "ServiceID": "web-1",
+                "Definition": {
+                    "Args": ["sh", "-c", "echo ok"],
+                    "HTTP": "http://web/health",
+                    "EnterpriseMeta": {"Namespace": "edge"},
+                },
+                "EnterpriseMeta": {"Partition": "payments"},
+            },
+            "check-b": {
+                "Name": "tcp",
+                "Status": "critical",
+                "Definition": {"TCP": "db:5432", "Interval": "10s", "Timeout": "2s"},
+                "Output": "connection refused",
+            },
+        }
+    )
+    assert len(checks) == 2
+    assert checks[0]["script"] == "<from args> sh -c 'echo ok'"
+    assert checks[0]["http"] == "http://web/health"
+    assert checks[0]["namespace"] == "edge"
+    assert checks[0]["partition"] == "payments"
+    assert checks[1]["tcp"] == "db:5432"
+    assert checks[1]["output"] == "connection refused"
+
+    responses = iter(
+        [
+            (403, {}, None, False, False),
+            (200, ["not-a-map"], None, False, False),
+            (200, {"": ["skip"], "api": ["v1", ""]}, None, False, False),
+            (401, [], None, False, False),
+            (200, "bad", None, False, False),
+            (
+                200,
+                [{"Name": "", "Tags": {}}, {"Name": "node-a", "Addr": "10.0.0.1", "Tags": {"role": "server"}}],
+                None,
+                False,
+                False,
+            ),
+            (500, [], None, False, False),
+            (200, "bad", None, False, False),
+            (
+                200,
+                [{"Node": "", "Address": ""}, {"Node": "node-a", "Address": "10.0.0.1", "Datacenter": "dc1"}],
+                None,
+                False,
+                False,
+            ),
+        ]
+    )
+    monkeypatch.setattr(consul, "_consul_get_json_any", lambda *_a, **_k: next(responses))
+
+    assert consul._consul_catalog_services_list("h", 8500, 1.0, scheme="http", insecure=False) == (
+        None,
+        "Forbidden",
+    )
+    assert consul._consul_catalog_services_list("h", 8500, 1.0, scheme="http", insecure=False) == (
+        None,
+        "invalid services response",
+    )
+    services, error = consul._consul_catalog_services_list("h", 8500, 1.0, scheme="http", insecure=False)
+    assert error is None
+    assert services == [{"name": "api", "tags": ["v1"]}]
+    assert consul._consul_agent_members_list("h", 8500, 1.0, scheme="http", insecure=False) == (
+        None,
+        "Unauthorized",
+    )
+    assert consul._consul_agent_members_list("h", 8500, 1.0, scheme="http", insecure=False) == (
+        None,
+        "invalid agent members response",
+    )
+    agents, error = consul._consul_agent_members_list("h", 8500, 1.0, scheme="http", insecure=False)
+    assert error is None
+    assert agents == [
+        {"name": "node-a", "addr": "10.0.0.1", "port": None, "status": None, "role": "server", "dc": None}
+    ]
+    assert consul._consul_catalog_nodes_list("h", 8500, 1.0, scheme="http", insecure=False) == (
+        None,
+        "status=500",
+    )
+    assert consul._consul_catalog_nodes_list("h", 8500, 1.0, scheme="http", insecure=False) == (
+        None,
+        "invalid catalog nodes response",
+    )
+    nodes, error = consul._consul_catalog_nodes_list("h", 8500, 1.0, scheme="http", insecure=False)
+    assert error is None
+    assert nodes == [{"name": "node-a", "address": "10.0.0.1", "datacenter": "dc1"}]
+
+
 def test_detail_lines_cover_transport_kv_and_services() -> None:
     record = {
         "host": "127.0.0.1",
@@ -2511,3 +2606,161 @@ def test_detail_lines_branch_matrix_for_errors_and_cleanup() -> None:
     assert "matched=2 deleted=1" in joined
     assert "check deregistered id=rp-check" in joined
     assert "check deregister failed id=rp-check-2 err=status=403" in joined
+
+
+def test_consul_detail_lines_cover_inventory_action_and_revshell_branches() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 8500,
+        "is_consul": True,
+        "scheme": "https",
+        "tls_auto_insecure": True,
+        "anonymous_scopes": _scope_fixture(True, False, False),
+        "auth_scopes": _scope_fixture(False, True, True),
+        "local_script_checks": True,
+        "remote_script_checks": True,
+        "rce": True,
+        "keys_requested": True,
+        "dump_requested": True,
+        "dump_all_requested": True,
+        "kv_key_requested": "",
+        "kv_dump_items": [{"key": "config/db", "value": "postgres://u:p@db/app"}],
+        "services_list_requested": True,
+        "services_list_source": "token",
+        "service_dump_name": "web",
+        "services_list": [{"name": "web"}, {"name": "empty"}, {"name": "broken"}],
+        "service_instances": {
+            "web": [
+                {
+                    "node_name": "node-1",
+                    "node_address": "10.0.0.10",
+                    "node_datacenter": "dc1",
+                    "service_address": "10.0.0.20",
+                    "service_port": 8080,
+                    "service_id": "web-1",
+                    "meta": {"redposture_args": "--token secret", "owner": "platform"},
+                    "checks": [
+                        {
+                            "check_id": "service:web-1",
+                            "name": "HTTP health",
+                            "status": "passing",
+                            "script": "/bin/check",
+                            "type": "script",
+                            "namespace": "default",
+                            "partition": "default",
+                            "http": "http://web/health",
+                            "tcp": "web:8080",
+                            "grpc": "web:9090",
+                            "method": "GET",
+                            "args": ["/bin/sh", "-c", "id"],
+                            "interval": "10s",
+                            "timeout": "2s",
+                            "ttl": "30s",
+                            "deregister_after": "1m",
+                            "notes": "contains\nnotes",
+                            "definition_raw": "{raw}",
+                            "output": "ok\n",
+                        }
+                    ],
+                }
+            ],
+            "empty": [],
+        },
+        "service_instances_errors": {"broken": "denied"},
+        "agents_list_requested": True,
+        "agents_list_source": "token",
+        "agent_dump_name": "node-1",
+        "agents_list": [
+            {"name": "node-1", "addr": "10.0.0.10", "dc": "dc1", "role": "server", "port": 8301, "status": "alive"}
+        ],
+        "checks_list_requested": True,
+        "checks_list_source": "token",
+        "check_dump_id": "check-1",
+        "checks_list": [
+            {
+                "check_id": "check-1",
+                "name": "Shell check",
+                "status": "critical",
+                "service_id": "svc-1",
+                "script": "/bin/id",
+                "type": "script",
+                "namespace": "default",
+                "partition": "default",
+                "http": "http://svc/health",
+                "tcp": "svc:80",
+                "grpc": "svc:9090",
+                "method": "GET",
+                "args": ["id"],
+                "interval": "5s",
+                "timeout": "1s",
+                "ttl": "20s",
+                "deregister_after": "1m",
+                "notes": "line one\nline two",
+                "definition_raw": "{definition}",
+                "output": "failed\n",
+            }
+        ],
+        "nodes_list_requested": True,
+        "nodes_list_source": "token",
+        "node_dump_name": "node-1",
+        "nodes_list": [{"name": "node-1", "address": "10.0.0.10", "datacenter": "dc1"}],
+        "service_result": {
+            "name": "rp-shell",
+            "action": "create",
+            "args": "id",
+            "ok": False,
+            "error": "denied",
+            "status": 403,
+        },
+        "ssrf_results": [
+            {
+                "target_url": "http://callback.local/",
+                "registered": True,
+                "status": "critical",
+                "output": "GET / HTTP/1.1\n",
+                "deregistered": False,
+                "deregister_error": "denied",
+            }
+        ],
+        "script_revshell": {
+            "action": "create",
+            "listener": "10.0.0.1:4444",
+            "auto_cleanup": True,
+            "script": "bash -c id",
+            "registered": True,
+            "check_id": "redposture-shell-1",
+            "wait_seconds": 1.5,
+            "deregistered": False,
+            "deregister_status": 403,
+        },
+    }
+
+    lines = consul._detail_lines(record, "txt", debug=True)
+    joined = "\n".join(lines)
+
+    assert "Transport (scheme:https)" in joined
+    assert "RCE!" in joined
+    assert "KV Dump" in joined
+    assert "config/db=postgres://u:p@db/app" in joined
+    assert "Meta (service:web)" in joined
+    assert "arg[1]=-c" in joined
+    assert "service create failed err=denied status=403" in joined
+    assert "SSRF Check" in joined
+    assert "Reverse-shell script-check" in joined
+    assert "check deregister failed err=status=403" in joined
+
+    cleanup = dict(record)
+    cleanup["script_revshell"] = {
+        "action": "delete",
+        "target_check_id": "redposture-shell-1",
+        "queried": True,
+        "matched": 2,
+        "deleted": 1,
+        "items": [
+            {"check_id": "ok", "ok": True},
+            {"check_id": "bad", "ok": False, "status": 500},
+        ],
+    }
+    cleanup_lines = consul._detail_lines(cleanup, "txt", debug=True)
+    assert "Reverse-shell cleanup" in "\n".join(cleanup_lines)
+    assert "check deregister failed id=bad err=status=500" in "\n".join(cleanup_lines)

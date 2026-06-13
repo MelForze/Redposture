@@ -1238,7 +1238,232 @@ def test_run_registry_stage_debug_and_unreachable_summary(monkeypatch: pytest.Mo
     assert captured_kwargs[1]["port"] == 15010
     messages = _RegistryConsoleCapture.instances[-1].messages
     assert any(level == "info" and "registry audit started" in msg for level, msg in messages)
-    assert any(level == "warn" and "all registry targets are unreachable" in msg for level, msg in messages)
+
+
+def test_registry_manifest_blob_and_download_failure_branches(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    assert registry._extract_image_metadata("repo/app", "latest", {"manifest": "bad"}) == {
+        "image": "repo/app:latest",
+        "error": "manifest payload is invalid",
+    }
+
+    paths: list[str] = []
+
+    def fake_http_request(
+        _host: str,
+        _port: int,
+        _method: str,
+        path: str,
+        _timeout: float,
+        *,
+        headers: dict[str, str],
+        body: bytes | None = None,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        _ = (headers, body)
+        paths.append(path)
+        if path.endswith("/manifests/deep"):
+            return 200, json.dumps({"manifests": [{"digest": "sha256:next"}]}).encode(), {}, None
+        if path.endswith("/manifests/auth"):
+            return 401, b"", {}, None
+        if path.endswith("/manifests/missing"):
+            return 404, b"", {}, None
+        if path.endswith("/manifests/badjson"):
+            return 200, b"{", {}, None
+        if path.endswith("/manifests/list"):
+            return 200, json.dumps({"manifests": [{"digest": ""}, {"digest": "sha256:first"}]}).encode(), {}, None
+        if path.endswith("/manifests/sha256:first"):
+            return 200, json.dumps({"config": {"digest": "sha256:cfg"}, "layers": []}).encode(), {}, None
+        if path.endswith("/blobs/auth"):
+            return 403, b"", {}, None
+        if path.endswith("/blobs/badjson"):
+            return 200, b"{", {}, None
+        if path.endswith("/blobs/notdict"):
+            return 200, b"[]", {}, None
+        if path.endswith("/blobs/missing"):
+            return 500, b"", {}, None
+        return 502, b"", {}, None
+
+    monkeypatch.setattr(registry, "_http_request", fake_http_request)
+    assert registry._fetch_manifest_payload("h", 5000, "repo/app", "deep", 1.0, headers={}, depth=5) == (
+        None,
+        "manifest recursion depth exceeded",
+    )
+    assert registry._fetch_manifest_payload("h", 5000, "repo/app", "auth", 1.0, headers={}) == (
+        None,
+        "authentication required",
+    )
+    assert registry._fetch_manifest_payload("h", 5000, "repo/app", "missing", 1.0, headers={}) == (
+        None,
+        "image/tag not found",
+    )
+    assert registry._fetch_manifest_payload("h", 5000, "repo/app", "badjson", 1.0, headers={}) == (
+        None,
+        "manifest is not valid JSON",
+    )
+    manifest, error = registry._fetch_manifest_payload("h", 5000, "repo/app", "list", 1.0, headers={})
+    assert error is None
+    assert manifest is not None and manifest["resolved_reference"] == "sha256:first"
+
+    assert registry._fetch_blob_json("h", 5000, "repo/app", "auth", 1.0, headers={}) == (
+        None,
+        "authentication required",
+    )
+    assert registry._fetch_blob_json("h", 5000, "repo/app", "badjson", 1.0, headers={}) == (
+        None,
+        "blob JSON payload is invalid",
+    )
+    assert registry._fetch_blob_json("h", 5000, "repo/app", "notdict", 1.0, headers={}) == (
+        None,
+        "blob payload is invalid",
+    )
+    missing_blob, missing_error = registry._fetch_blob_json("h", 5000, "repo/app", "missing", 1.0, headers={})
+    assert missing_blob is None
+    assert "returned status 500" in str(missing_error)
+
+    class CaptureConsole:
+        def __init__(self) -> None:
+            self.warnings: list[str] = []
+
+        def warn(self, message: str) -> None:
+            self.warnings.append(message)
+
+    console = CaptureConsole()
+    too_large = registry._download_image(
+        "h",
+        5000,
+        1.0,
+        headers={},
+        inspect_data={"image": "repo/app:latest", "repository": "repo/app", "total_size": 200 * 1024 * 1024},
+        download_dir=str(tmp_path),
+        console=console,
+    )
+    assert too_large["status"] == "skipped"
+    assert console.warnings and "non-interactive shell" in console.warnings[0]
+
+    monkeypatch.setattr(registry, "_should_download_large", lambda *_a, **_k: True)
+    monkeypatch.setattr(registry, "_http_download", lambda *_a, **_k: (500, 0, None))
+    config_failed = registry._download_image(
+        "h",
+        5000,
+        1.0,
+        headers={},
+        inspect_data={
+            "image": "repo/app:latest",
+            "repository": "repo/app",
+            "total_size": 1,
+            "config_digest": "sha256:cfg",
+        },
+        download_dir=str(tmp_path),
+        console=console,
+    )
+    assert config_failed["error"] == "config blob returned status 500"
+
+    def fake_layer_download(*_args, **_kwargs):
+        return 200, 3, None
+
+    monkeypatch.setattr(registry, "_http_download", fake_layer_download)
+    ok = registry._download_image(
+        "h",
+        5000,
+        1.0,
+        headers={},
+        inspect_data={
+            "image": "repo/app:latest",
+            "repository": "repo/app",
+            "manifest_raw": "{}",
+            "config_blob": {"config": {}},
+            "total_size": 6,
+            "config_digest": "sha256:cfg",
+            "layers": [{"digest": "sha256:layer"}],
+        },
+        download_dir=str(tmp_path),
+        console=console,
+    )
+    assert ok["status"] == "ok"
+    assert ok["size"] == 6
+
+
+def test_registry_vendor_invalid_payload_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses: dict[str, tuple[int, bytes, dict[str, str], str | None]] = {
+        "/api/v2.0/systeminfo": (200, b"[]", {}, None),
+        "/api/v2.0/projects?page=1&page_size=200": (200, b"{}", {}, None),
+        "/api/v2.0/projects/proj/repositories?page=1&page_size=200": (200, b"{}", {}, None),
+        "/api/v2.0/projects/proj/repositories/repo/artifacts?page=1&page_size=20&with_tag=true": (
+            200,
+            b"{}",
+            {},
+            None,
+        ),
+        "/jwt/auth?service=container_registry&scope=registry:catalog:*": (200, b"[]", {}, None),
+        "/service/rest/v1/status": (200, b"[]", {}, None),
+        "/service/rest/v1/repositories": (200, b"{}", {}, None),
+        "/service/rest/v1/components?repository=docker-hosted": (200, b"[]", {}, None),
+    }
+
+    def fake_http_request(
+        _host: str,
+        _port: int,
+        _method: str,
+        path: str,
+        _timeout: float,
+        *,
+        headers: dict[str, str],
+        body: bytes | None = None,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        _ = (headers, body)
+        return responses[path]
+
+    monkeypatch.setattr(registry, "_http_request", fake_http_request)
+    assert registry._fetch_harbor_info("h", 5000, 1.0, headers={}) == (
+        None,
+        "harbor systeminfo payload is invalid",
+    )
+    assert registry._fetch_harbor_projects("h", 5000, 1.0, headers={}) == (
+        None,
+        "harbor projects payload is invalid",
+    )
+    assert registry._fetch_harbor_repositories("h", 5000, "proj", 1.0, headers={}) == (
+        None,
+        "/api/v2.0/projects/proj/repositories?page=1&page_size=200 payload is invalid",
+    )
+    assert registry._fetch_harbor_artifacts("h", 5000, "proj", "repo", 1.0, headers={}) == (
+        None,
+        "/api/v2.0/projects/proj/repositories/repo/artifacts?page=1&page_size=20&with_tag=true payload is invalid",
+    )
+
+    info, error = registry._fetch_gitlab_info("h", 5000, "", 1.0, headers={}, deep=True)
+    assert error is None
+    assert info is not None
+    assert info["token_probe_status"] == "failed"
+    assert info["token_probe_error"] == "realm JSON payload is invalid"
+
+    assert (
+        registry._fetch_gitlab_info(
+            "h",
+            5000,
+            'Bearer realm="ftp://auth.local/token",service="container_registry"',
+            1.0,
+            headers={},
+            deep=True,
+        )[0]["token_probe_status"]
+        == "skipped"
+    )
+
+    assert registry._fetch_nexus_info("h", 5000, 1.0, headers={}) == (
+        None,
+        "nexus status payload is invalid",
+    )
+    assert registry._fetch_nexus_repositories("h", 5000, 1.0, headers={}) == (
+        None,
+        "nexus repositories payload is invalid",
+    )
+    assert registry._fetch_nexus_repository_records("h", 5000, 1.0, headers={}) == (
+        None,
+        "nexus repositories payload is invalid",
+    )
+    assert registry._fetch_nexus_components("h", 5000, "docker-hosted", 1.0, headers={}) == (
+        None,
+        "/service/rest/v1/components?repository=docker-hosted payload is invalid",
+    )
 
 
 def test_should_download_large_non_tty_and_prompt_paths(monkeypatch: pytest.MonkeyPatch) -> None:

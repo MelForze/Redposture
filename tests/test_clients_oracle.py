@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+from typing import Any
+
+import pytest
+
 from redposture_core.clients.oracle import (
     OracleAuditClient,
+    OracleClientError,
+    OracleConnectConfig,
+    _oracle_sql_identifier,
+    _recv_tns_packets,
+    _rows_to_dicts,
     build_oracle_dsn,
     build_tns_connect_packet,
     classify_nne_policy,
     classify_oracle_error,
+    close_quietly,
     json_safe,
     normalize_oracle_error,
     parse_listener_dump,
     parse_tns_packet,
+    tns_listener_command,
 )
 
 
@@ -87,6 +98,127 @@ def test_tns_packet_and_listener_dump_helpers() -> None:
     assert "FREE" in dump["sids"]
     assert dump["summary"]["restricted"] is False
 
+    with pytest.raises(Exception, match="truncated TNS packet header"):
+        parse_tns_packet(b"short")
+    with pytest.raises(Exception, match="invalid TNS packet length"):
+        parse_tns_packet(b"\x00\x04\x00\x00\x06\x00\x00\x00")
+    with pytest.raises(Exception, match="truncated TNS packet body"):
+        parse_tns_packet(b"\x00\x09\x00\x00\x06\x00\x00\x00")
+
+
+def test_tns_recv_and_listener_command_success_and_error(monkeypatch) -> None:
+    class FakeSocket:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = list(chunks)
+            self.sent: list[bytes] = []
+            self.closed = False
+
+        def settimeout(self, _value: float) -> None:
+            return None
+
+        def recv(self, _size: int) -> bytes:
+            if not self.chunks:
+                return b""
+            return self.chunks.pop(0)
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        def close(self) -> None:
+            self.closed = True
+
+    payload = b"(SERVICE_NAME=FREEPDB1)(SID=FREE)(ERR=12528)TNS-01169 PASSWORD LISTENER"
+    response = (len(payload) + 8).to_bytes(2, "big") + b"\x00\x00\x06\x00\x00\x00" + payload
+    sock = FakeSocket([response[:3], response[3:8], response[8:20], response[20:]])
+
+    packets = _recv_tns_packets(sock, timeout=1.0)
+    assert packets[0]["type"] == 6
+    assert "FREEPDB1" in packets[0]["text"]
+
+    command_sock = FakeSocket([response])
+    monkeypatch.setattr("redposture_core.clients.oracle.socket.create_connection", lambda *_a, **_k: command_sock)
+    result = tns_listener_command("db.local", 1521, "status;ignored", timeout=1.0)
+    assert result["ok"] is True
+    assert result["command"] == "statusignored"
+    assert result["fields"]["SERVICE_NAME"] == ["FREEPDB1"]
+    assert result["listener_password_protected"] is True
+    assert result["listener_restricted"] is True
+    assert command_sock.closed is True
+
+    monkeypatch.setattr(
+        "redposture_core.clients.oracle.socket.create_connection",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("Connection refused")),
+    )
+    failed = tns_listener_command("db.local", 1521, "", timeout=1.0)
+    assert failed["ok"] is False
+    assert failed["command"] == "status"
+    assert "connection refused" in str(failed["error"])
+
+    assert _oracle_sql_identifier("") is None
+    assert _oracle_sql_identifier('"bad') is None
+    assert _oracle_sql_identifier('"weird""name"') == '"weird""name"'
+    assert _oracle_sql_identifier("bad-name") is None
+
+
+def test_tns_listener_command_tcps_and_recv_timeout(monkeypatch) -> None:
+    class TimeoutSocket:
+        def settimeout(self, _value: float) -> None:
+            return None
+
+        def recv(self, _size: int) -> bytes:
+            raise TimeoutError
+
+    assert _recv_tns_packets(TimeoutSocket(), timeout=0.1) == []
+
+    class FakeSocket:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = list(chunks)
+            self.sent: list[bytes] = []
+            self.closed = False
+
+        def settimeout(self, _value: float | None) -> None:
+            return None
+
+        def recv(self, _size: int) -> bytes:
+            if not self.chunks:
+                return b""
+            return self.chunks.pop(0)
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        def close(self) -> None:
+            self.closed = True
+
+    payload = b"(SERVICE_NAME=FREEPDB1)(SECURITY=ON)"
+    response = (len(payload) + 8).to_bytes(2, "big") + b"\x00\x00\x06\x00\x00\x00" + payload
+    raw_sock = FakeSocket([])
+    wrapped_sock = FakeSocket([response])
+    monkeypatch.setattr("redposture_core.clients.oracle.socket.create_connection", lambda *_a, **_k: raw_sock)
+
+    class FakeContext:
+        check_hostname = True
+        verify_mode = None
+
+        def wrap_socket(self, sock, *, server_hostname: str):
+            assert sock is raw_sock
+            assert server_hostname == "db.local"
+            return wrapped_sock
+
+    context = FakeContext()
+    monkeypatch.setattr("redposture_core.clients.oracle.ssl.create_default_context", lambda: context)
+    monkeypatch.setattr("redposture_core.clients.oracle.ssl.CERT_NONE", "CERT_NONE")
+
+    result = tns_listener_command("db.local", 2484, "services", timeout=1.0, protocol="tcps", insecure=True)
+
+    assert result["ok"] is True
+    assert result["protocol"] == "tcps"
+    assert result["fields"]["SECURITY"] == ["ON"]
+    assert context.check_hostname is False
+    assert context.verify_mode == "CERT_NONE"
+    assert wrapped_sock.closed is True
+    assert raw_sock.closed is False
+
 
 def test_listener_dump_password_protected_and_nne_policy() -> None:
     dump = parse_listener_dump(
@@ -107,6 +239,15 @@ def test_listener_dump_password_protected_and_nne_policy() -> None:
         normalize_oracle_error(RuntimeError("DPY-6005: cannot connect"))
         == "connection refused (listener is not available)"
     )
+    assert classify_oracle_error("ORA-12541") == "not_oracle"
+    assert classify_oracle_error("DPY-6003 timeout") == "fail"
+    encrypted = classify_nne_policy(
+        tcp_available=True,
+        tcps_available=True,
+        banners=["Encryption service for Linux: AES256", "Crypto-checksumming service"],
+    )
+    assert encrypted["status"] == "encrypted"
+    assert encrypted["crypto_checksum"] is True
 
 
 def test_oracle_audit_client_query_execute_and_json_safe() -> None:
@@ -121,6 +262,37 @@ def test_oracle_audit_client_query_execute_and_json_safe() -> None:
             return "weird"
 
     assert json_safe({"x": Weird()}) == {"x": "weird"}
+    assert _rows_to_dicts(type("Cursor", (), {"description": []})(), [("a", "b")]) == [{"0": "a", "1": "b"}]
+
+
+def test_connect_oracle_wallet_dn_and_timeout_fallback() -> None:
+    class Driver:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def connect(self, **kwargs):
+            self.calls.append(kwargs)
+            return "ok"
+
+    driver = Driver()
+    config = OracleConnectConfig(
+        "db.local",
+        2484,
+        service="FREEPDB1",
+        protocol="tcps",
+        wallet="/wallet",
+        ssl_server_dn="CN=db.local",
+        insecure=False,
+    )
+    from redposture_core.clients.oracle import connect_oracle
+
+    assert connect_oracle(config, username="app", password="", timeout="bad", driver=driver) == "ok"
+    kwargs = driver.calls[0]
+    assert kwargs["config_dir"] == "/wallet"
+    assert kwargs["wallet_location"] == "/wallet"
+    assert kwargs["wallet_password"] is None
+    assert kwargs["ssl_server_dn_match"] is True
+    assert kwargs["ssl_server_cert_dn"] == "CN=db.local"
 
 
 class _SmartCursor:
@@ -201,6 +373,41 @@ class _SmartConnection:
         pass
 
 
+class _FailingConnection:
+    def __init__(self, results: dict[str, list[dict[str, object]]] | None = None) -> None:
+        self.results = results or {}
+
+    def cursor(self):
+        parent = self
+
+        class Cursor:
+            description: list[tuple[str]] = []
+            rows: list[tuple[object, ...]] = []
+            rowcount = 0
+
+            def execute(self, sql, params=None):
+                lower = sql.lower()
+                for token, rows in parent.results.items():
+                    if token in lower:
+                        keys = list(rows[0].keys()) if rows else []
+                        self.description = [(key.upper(),) for key in keys]
+                        self.rows = [tuple(row[key] for key in keys) for row in rows]
+                        self.rowcount = len(self.rows)
+                        return
+                raise RuntimeError("query denied")
+
+            def fetchall(self):
+                return self.rows
+
+            def fetchmany(self, count):
+                return self.rows[:count]
+
+            def close(self):
+                return None
+
+        return Cursor()
+
+
 def test_oracle_audit_client_metadata_privesc_and_exfil_helpers() -> None:
     client = OracleAuditClient(_SmartConnection())
     assert client.server_banner()["version"] == "23ai"
@@ -233,6 +440,36 @@ def test_oracle_audit_client_metadata_privesc_and_exfil_helpers() -> None:
     assert "uid=" in java["output"]
 
 
+def test_oracle_audit_client_metadata_fallback_and_empty_paths() -> None:
+    client = OracleAuditClient(
+        _FailingConnection(
+            {
+                "select banner_full from v$version": [],
+                "select banner from v$version": [{"banner": "Oracle Database 19c Enterprise Edition"}],
+                "select user as username": [{"username": "APP"}],
+                "dba_directories": [{"directory_name": "DATA_PUMP_DIR", "directory_path": "/dpdump"}],
+                "user_db_links": [{"db_link": "APP_LINK", "username": "APP", "host": "db"}],
+            }
+        )
+    )
+
+    assert client.server_banner()["version"] == "19c"
+    assert client.network_service_banners() == []
+    assert client.list_pdbs() == []
+    assert client.list_users() == [{"username": "APP"}]
+    assert client.list_roles() == []
+    assert client.list_privileges() == []
+    assert client.list_schemas() == []
+    assert client.list_directories()[0]["directory_name"] == "DATA_PUMP_DIR"
+    assert client.resolve_server_path("wallet.txt")["relative_path"] == "wallet.txt"
+    assert client.password_hashes() == []
+    assert client.db_links()[0]["db_link"] == "APP_LINK"
+    with pytest.raises(OracleClientError, match="remote path must not be empty"):
+        client.resolve_server_path("")
+    with pytest.raises(OracleClientError, match="invalid schema/table name"):
+        client.dump_table("bad-schema", "ACCOUNTS", limit=1)
+
+
 def test_scheduler_file_helpers_resolve_visible_directory_paths() -> None:
     client = OracleAuditClient(_SmartConnection())
     commands: list[str] = []
@@ -252,6 +489,29 @@ def test_scheduler_file_helpers_resolve_visible_directory_paths() -> None:
     assert result["ok"] is True
     assert result["source_path"] == "/opt/oracle/admin/FREE/dpdump/redposture_large_file.txt"
     assert "/opt/oracle/admin/FREE/dpdump/redposture_large_file.txt" in commands[0]
+
+
+def test_oracle_filesystem_error_and_scheduler_fallback_paths() -> None:
+    client = OracleAuditClient(_SmartConnection())
+    client.list_directories = lambda: []  # type: ignore[method-assign]
+
+    assert client.os_read("/missing", fs_mode="directory")["ok"] is False
+    assert client.os_write("/missing", "data", fs_mode="directory")["ok"] is False
+    assert client.os_delete("/missing", fs_mode="directory")["ok"] is False
+    assert client.scheduler_read_file("/missing")["ok"] is False
+    assert client.scheduler_write_file("/missing", "data")["ok"] is False
+
+    def raise_resolve_server_path(_path: str) -> dict[str, Any]:
+        raise RuntimeError("no directory")
+
+    client.resolve_server_path = raise_resolve_server_path  # type: ignore[assignment]
+    client.scheduler_exec = lambda command, **_kwargs: {"ok": True, "command": command, "error": None}  # type: ignore[method-assign]
+    deleted = client.os_delete("/tmp/file", fs_mode="scheduler")
+    assert deleted["method"] == "scheduler_delete"
+    assert "rm -f" in deleted["command"]
+
+    client.execute = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("java denied"))  # type: ignore[method-assign]
+    assert client.java_exec("id")["ok"] is False
 
 
 def test_wallet_artifacts_try_directory_and_name_fallback() -> None:
@@ -318,3 +578,90 @@ def test_connect_oracle_with_fake_driver_and_error_classes() -> None:
             pass
         else:  # pragma: no cover - assertion guard
             raise AssertionError(f"expected {expected.__name__}")
+
+
+def test_scheduler_exec_capture_output_and_error_branch() -> None:
+    client = OracleAuditClient(_SmartConnection())
+    executed: list[tuple[str, dict[str, object] | None]] = []
+
+    def fake_execute(sql, params=None):
+        executed.append((sql, params))
+        return {"ok": True, "rowcount": 1}
+
+    client.execute = fake_execute  # type: ignore[method-assign]
+    client.os_read = lambda *_args, **_kwargs: {"ok": True, "data": "uid=54321(oracle)", "error": None}  # type: ignore[method-assign]
+    client.os_delete = lambda *_args, **_kwargs: {"ok": True, "error": None}  # type: ignore[method-assign]
+
+    result = client.scheduler_exec("id", capture_output=True)
+
+    assert result["ok"] is True
+    assert result["output_available"] is True
+    assert result["output"] == "uid=54321(oracle)"
+    assert any("dbms_scheduler.create_job" in sql.lower() for sql, _params in executed)
+
+    client.execute = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("scheduler denied"))  # type: ignore[method-assign]
+
+    try:
+        client.scheduler_exec("id")
+    except RuntimeError as exc:
+        assert "scheduler denied" in str(exc)
+    else:  # pragma: no cover - assertion guard
+        raise AssertionError("expected scheduler_exec to surface execute errors")
+
+
+def test_external_table_exec_success_and_cleanup_branches() -> None:
+    client = OracleAuditClient(_SmartConnection())
+    executed: list[str] = []
+    deleted: list[str] = []
+
+    client.os_write = lambda *_args, **_kwargs: {"ok": True, "error": None}  # type: ignore[method-assign]
+    client.scheduler_exec = lambda *_args, **_kwargs: {"ok": True, "error": None}  # type: ignore[method-assign]
+
+    def fake_execute(sql, params=None):
+        executed.append(sql)
+        return {"ok": True, "rowcount": 1}
+
+    client.execute = fake_execute  # type: ignore[method-assign]
+    client.query = lambda *_args, **_kwargs: [{"line": "external-output"}]  # type: ignore[method-assign]
+    client.os_delete = lambda path, **_kwargs: deleted.append(path) or {"ok": True, "error": None}  # type: ignore[method-assign]
+
+    result = client.external_table_exec("id")
+
+    assert result["ok"] is True
+    assert result["output"] == "external-output"
+    assert any("organization external" in sql.lower() for sql in executed)
+    assert any("drop table" in sql.lower() for sql in executed)
+    assert len(deleted) >= 2
+
+
+def test_external_table_exec_write_failure_and_dbms_cloud_branches() -> None:
+    client = OracleAuditClient(_SmartConnection())
+    client.os_write = lambda *_args, **_kwargs: {"ok": False, "error": "write denied"}  # type: ignore[method-assign]
+
+    failed = client.external_table_exec("id")
+
+    assert failed["ok"] is False
+    assert failed["error"] == "write denied"
+
+    client.query = lambda *_args, **_kwargs: []  # type: ignore[method-assign]
+    missing = client.dbms_cloud_exec("id")
+    assert missing["capability_present"] is False
+    assert missing["ok"] is False
+
+    client.query = lambda *_args, **_kwargs: [{"owner": "C##CLOUD", "object_name": "DBMS_CLOUD"}]  # type: ignore[method-assign]
+    present = client.dbms_cloud_exec("id")
+    assert present["capability_present"] is True
+    assert present["ok"] is False
+
+    client.query = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("catalog denied"))  # type: ignore[method-assign]
+    errored = client.dbms_cloud_exec("id")
+    assert errored["capability_present"] is None
+    assert "catalog denied" in str(errored["error"])
+
+
+def test_close_quietly_suppresses_close_errors() -> None:
+    class BadClose:
+        def close(self) -> None:
+            raise RuntimeError("ignore")
+
+    close_quietly(BadClose())

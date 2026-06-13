@@ -182,12 +182,20 @@ def _open_grpc_socket(host: str, port: int, timeout: float, *, use_tls: bool) ->
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
     context.set_alpn_protocols(["h2"])
-    wrapped = context.wrap_socket(base_sock, server_hostname=host)
-    wrapped.settimeout(timeout)
-    negotiated = wrapped.selected_alpn_protocol()
-    if negotiated and negotiated.lower() != "h2":
-        raise OSError(f"tls alpn negotiation failed (expected h2, got {negotiated})")
-    return wrapped
+    try:
+        wrapped = context.wrap_socket(base_sock, server_hostname=host)
+    except BaseException:
+        base_sock.close()
+        raise
+    try:
+        wrapped.settimeout(timeout)
+        negotiated = wrapped.selected_alpn_protocol()
+        if negotiated and negotiated.lower() != "h2":
+            raise OSError(f"tls alpn negotiation failed (expected h2, got {negotiated})")
+        return wrapped
+    except BaseException:
+        wrapped.close()
+        raise
 
 
 def _grpc_call(
@@ -340,8 +348,16 @@ def _open_http_socket(host: str, port: int, timeout: float, *, use_tls: bool) ->
     context = ssl.create_default_context()
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
-    wrapped = context.wrap_socket(base_sock, server_hostname=host)
-    wrapped.settimeout(timeout)
+    try:
+        wrapped = context.wrap_socket(base_sock, server_hostname=host)
+    except BaseException:
+        base_sock.close()
+        raise
+    try:
+        wrapped.settimeout(timeout)
+    except BaseException:
+        wrapped.close()
+        raise
     return wrapped
 
 

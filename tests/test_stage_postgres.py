@@ -330,6 +330,82 @@ def test_collect_postgres_privileges_and_query_helpers(monkeypatch: pytest.Monke
     assert postgres._pg_query_accessible_databases(object()) == (["postgres", "appdb"], None)
 
 
+def test_postgres_scalar_scram_and_privesc_small_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
+    query_rows = iter(
+        [
+            ([], "permission denied"),
+            ([], None),
+            ([["maybe"]], None),
+            ([["yes"]], None),
+            ([], "count denied"),
+            ([], None),
+            ([[None]], None),
+            ([["NaN"]], None),
+            ([["42"]], None),
+        ]
+    )
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: next(query_rows))
+    assert postgres._pg_query_scalar_bool(object(), "select true") == (None, "permission denied")
+    assert postgres._pg_query_scalar_bool(object(), "select true") == (None, "empty query result")
+    assert postgres._pg_query_scalar_bool(object(), "select true") == (None, "invalid boolean value: maybe")
+    assert postgres._pg_query_scalar_bool(object(), "select true") == (True, None)
+    assert postgres._pg_query_scalar_int(object(), "select 1") == (None, "count denied")
+    assert postgres._pg_query_scalar_int(object(), "select 1") == (None, "empty query result")
+    assert postgres._pg_query_scalar_int(object(), "select 1") == (None, "empty integer value")
+    assert postgres._pg_query_scalar_int(object(), "select 1") == (None, "invalid integer value: NaN")
+    assert postgres._pg_query_scalar_int(object(), "select 1") == (42, None)
+
+    assert postgres._escape_scram_username("a=b,c") == "a=3Db=2Cc"
+    assert postgres._parse_scram_fields("r=nonce,s=salt,i=4096,bad") == {"r": "nonce", "s": "salt", "i": "4096"}
+    state = postgres._ScramState(client_first_bare="n=user,r=client", client_nonce="client")
+    with pytest.raises(_PgAuditError, match="invalid SCRAM challenge"):
+        _scram_client_final(state, "secret", "r=client")
+    with pytest.raises(_PgAuditError, match="SCRAM nonce mismatch"):
+        _scram_client_final(state, "secret", "r=server,s=AAAA,i=1")
+    with pytest.raises(_PgAuditError, match="invalid SCRAM iterations"):
+        _scram_client_final(state, "secret", "r=clientserver,s=AAAA,i=bad")
+    with pytest.raises(_PgAuditError, match="invalid SCRAM salt"):
+        _scram_client_final(state, "secret", "r=clientserver,s=not-base64!,i=1")
+
+    with pytest.raises(_PgAuditError, match="SCRAM server error"):
+        postgres._scram_verify_server_final(state, "e=invalid-proof")
+    with pytest.raises(_PgAuditError, match="missing expected"):
+        postgres._scram_verify_server_final(state, "v=signature")
+    state.expected_server_signature = "expected"
+    with pytest.raises(_PgAuditError, match="signature mismatch"):
+        postgres._scram_verify_server_final(state, "v=other")
+    postgres._scram_verify_server_final(state, "v=expected")
+
+    assert postgres._pg_md5_password("alice", "secret", b"1234").startswith("md5")
+    assert postgres._pg_bool_text(None) == "unknown"
+    assert postgres._pg_privesc_role_flag(object(), "badflag") == (None, "unsupported role flag: badflag")
+    check = postgres._pg_privesc_check_record("HIGH", "id", "Name", "desc", True, "evidence")
+    assert check["severity"] == "HIGH"
+    summary = postgres._pg_privesc_summary([check, {"severity": "LOW", "vulnerable": True}, {"vulnerable": None}])
+    assert summary == {"critical": 0, "high": 1, "medium": 0, "unknown": 1, "total": 3}
+
+
+def test_postgres_privesc_collects_examples_and_unknowns(monkeypatch: pytest.MonkeyPatch) -> None:
+    role_flags = iter([(None, "rolsuper denied"), (True, None), (False, None)])
+    memberships = iter([(None, "exec denied"), (True, None), (False, None)])
+    function_exec = iter([(None, "lo_import denied"), (True, None)])
+    scalar_bool = iter([(True, None), (False, None)])
+    scalar_int = iter([(2, None)])
+
+    monkeypatch.setattr(postgres, "_pg_privesc_role_flag", lambda *_args, **_kwargs: next(role_flags))
+    monkeypatch.setattr(postgres, "_pg_privesc_role_membership", lambda *_args, **_kwargs: next(memberships))
+    monkeypatch.setattr(postgres, "_pg_privesc_function_executable", lambda *_args, **_kwargs: next(function_exec))
+    monkeypatch.setattr(postgres, "_pg_query_scalar_bool", lambda *_args, **_kwargs: next(scalar_bool))
+    monkeypatch.setattr(postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: next(scalar_int))
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: ([["public.secdef"], [None]], None))
+
+    checks, summary = _pg_collect_privesc_checks(object(), superuser=None)
+    assert len(checks) == 11
+    assert checks[0]["error"] == "rolsuper denied"
+    assert any("examples=public.secdef" in item["evidence"] for item in checks)
+    assert summary["total"] == 11
+
+
 def test_postgres_os_read_prefers_pg_read_file(monkeypatch: pytest.MonkeyPatch) -> None:
     queries: list[str] = []
 
@@ -400,6 +476,97 @@ def test_postgres_os_read_reports_both_method_failures(monkeypatch: pytest.Monke
     assert "pg_read_file failed: permission denied" in str(error)
     assert "lo_import failed: large object denied" in str(error)
     assert [item["method"] for item in attempts] == ["pg_read_file", "lo_import"]
+
+
+def test_postgres_query_sql_table_helpers_and_artifact_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    query_results = iter(
+        [
+            ([[None], ["a\nb"], []], None),
+            ([["1"], ["2"], ["3"]], None),
+            ([], "bad table"),
+            ([[None]], None),
+            ([], "count failed"),
+            ([], "column lookup failed"),
+            ([[], [""], ["id"], ["email"]], None),
+            ([["id"], ["email"]], None),
+            ([], "dump failed"),
+        ]
+    )
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: next(query_results))
+    assert postgres._pg_try_query_sql(object(), "select *", max_rows=2) == (["NULL", "a\\nb", "<truncated:1>"], None)
+    assert postgres._pg_query_table_rows(object(), "public.users", max_rows=2) == (
+        "public.users",
+        ["1", "2", "3"],
+        None,
+    )
+    assert postgres._pg_query_table_rows(object(), "bad-name") == (
+        "bad-name",
+        None,
+        "unsupported table identifier: bad-name",
+    )
+    assert postgres._pg_query_table_row_count(object(), "public.users") == ("public.users", None, "bad table")
+    assert postgres._pg_query_table_row_count(object(), "bad-name") == (
+        "bad-name",
+        None,
+        "unsupported table identifier: bad-name",
+    )
+    assert postgres._pg_query_table_columns(object(), "public.users") == (
+        "public.users",
+        None,
+        "table not found or no visible columns",
+    )
+    assert postgres._pg_query_table_columns(object(), "public.users") == (
+        "public.users",
+        None,
+        "count failed",
+    )
+    assert postgres._pg_query_table_columns(object(), "public.users") == (
+        "public.users",
+        None,
+        "column lookup failed",
+    )
+    assert postgres._pg_query_table_columns(object(), "public.users", only_columns=["missing"]) == (
+        "public.users",
+        None,
+        "no matching columns",
+    )
+    assert postgres._pg_query_table_columns(object(), "public.users", only_columns=["id"]) == (
+        "public.users",
+        ["id"],
+        None,
+    )
+    assert postgres._pg_query_table_rows(object(), "public.users") == ("public.users", None, "dump failed")
+
+    monkeypatch.setattr(postgres, "_pg_query_readable_tables", lambda _sock: (["public.users", "audit.events"], None))
+    monkeypatch.setattr(
+        postgres,
+        "_pg_query_table_columns",
+        lambda _sock, table, only_columns=None: (table, ["id", "email"], None),
+    )
+    monkeypatch.setattr(postgres, "_pg_query_table_row_count", lambda _sock, table: (table, 7, None))
+    monkeypatch.setattr(
+        postgres,
+        "_pg_query_table_rows",
+        lambda _sock, table, columns=None, max_rows=None: (table, ['{"id":1}'], None),
+    )
+    names, columns, counts, dumps, readable, query_error = postgres._pg_collect_database_artifacts(
+        object(),
+        database_name="appdb",
+        include_database_prefix=True,
+        show_tables=True,
+        show_row_counts=True,
+        show_columns=True,
+        table_targets=["public.users"],
+        table_columns=["id"],
+        dump_table_rows=True,
+        dump_row_limit=1,
+    )
+    assert names == ["appdb.public.users", "appdb.audit.events"]
+    assert columns[0]["table"] == "appdb.public.users"
+    assert counts[0]["row_count"] == 7
+    assert dumps[0]["rows"] == ['{"id":1}']
+    assert readable == 2
+    assert query_error is None
 
 
 @pytest.mark.parametrize(

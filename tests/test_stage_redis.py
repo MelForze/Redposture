@@ -435,6 +435,123 @@ def test_count_scan_and_dump_key_helpers(monkeypatch: pytest.MonkeyPatch) -> Non
     assert redis_stage._dump_redis_key_value(object(), "stream-key") == ("stream_len=7", None)
 
 
+def test_redis_helper_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(redis_stage, "_send_cmd", lambda *_args: ("integer", 1))
+    ok, err = redis_stage._auth_with_password(object(), "pw")
+    assert ok is False
+    assert "unexpected AUTH response" in str(err)
+    ok, err = redis_stage._auth_with_user_password(object(), "u", "pw")
+    assert ok is False
+    assert "unexpected AUTH response" in str(err)
+
+    monkeypatch.setattr(redis_stage, "_send_cmd", lambda *_args: ("bulk", "bad"))
+    assert redis_stage._count_redis_keys(object()) == (None, "unexpected DBSIZE response: bulk bad")
+
+    monkeypatch.setattr(redis_stage, "_send_cmd", lambda *_args: ("array", ["1", []]))
+    keys, err = redis_stage._scan_redis_keys(object(), max_rounds=1)
+    assert keys == []
+    assert "too many iterations" in str(err)
+
+    monkeypatch.setattr(redis_stage, "_send_cmd", lambda *_args: ("bulk", "bad"))
+    keys, err = redis_stage._scan_redis_keys(object())
+    assert keys is None
+    assert "unexpected SCAN response" in str(err)
+
+    monkeypatch.setattr(redis_stage, "_send_cmd", lambda *_args: ("array", ["0", "not-list"]))
+    keys, err = redis_stage._scan_redis_keys(object())
+    assert keys is None
+    assert "unexpected SCAN keys payload" in str(err)
+
+
+def test_dump_redis_key_value_error_and_unknown_type_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = {
+        ("TYPE", "type-error"): ("error", "denied"),
+        ("TYPE", "unknown-key"): ("bulk", ""),
+        ("TYPE", "none-key"): ("bulk", "none"),
+        ("TYPE", "string-error"): ("bulk", "string"),
+        ("GET", "string-error"): ("error", "denied"),
+        ("TYPE", "string-null"): ("bulk", "string"),
+        ("GET", "string-null"): ("null", None),
+        ("TYPE", "hash-empty"): ("bulk", "hash"),
+        ("HGETALL", "hash-empty"): ("array", []),
+        ("TYPE", "hash-bad"): ("bulk", "hash"),
+        ("HGETALL", "hash-bad"): ("bulk", "bad"),
+        ("TYPE", "list-error"): ("bulk", "list"),
+        ("LRANGE", "list-error", "0", "-1"): ("error", "denied"),
+        ("TYPE", "list-bad"): ("bulk", "list"),
+        ("LRANGE", "list-bad", "0", "-1"): ("bulk", "bad"),
+        ("TYPE", "set-error"): ("bulk", "set"),
+        ("SMEMBERS", "set-error"): ("error", "denied"),
+        ("TYPE", "set-bad"): ("bulk", "set"),
+        ("SMEMBERS", "set-bad"): ("bulk", "bad"),
+        ("TYPE", "zset-error"): ("bulk", "zset"),
+        ("ZRANGE", "zset-error", "0", "-1", "WITHSCORES"): ("error", "denied"),
+        ("TYPE", "zset-empty"): ("bulk", "zset"),
+        ("ZRANGE", "zset-empty", "0", "-1", "WITHSCORES"): ("array", []),
+        ("TYPE", "zset-bad"): ("bulk", "zset"),
+        ("ZRANGE", "zset-bad", "0", "-1", "WITHSCORES"): ("bulk", "bad"),
+        ("TYPE", "stream-error"): ("bulk", "stream"),
+        ("XLEN", "stream-error"): ("error", "denied"),
+        ("TYPE", "stream-bad"): ("bulk", "stream"),
+        ("XLEN", "stream-bad"): ("bulk", "bad"),
+        ("TYPE", "geo-key"): ("bulk", "geo"),
+    }
+
+    def fake_send_cmd(_sock: object, *parts: str):
+        return responses[parts]
+
+    monkeypatch.setattr(redis_stage, "_send_cmd", fake_send_cmd)
+    assert redis_stage._dump_redis_key_value(object(), "type-error") == ("<error>", "denied")
+    assert redis_stage._dump_redis_key_value(object(), "unknown-key") == ("<unknown>", None)
+    assert redis_stage._dump_redis_key_value(object(), "none-key") == ("<not found>", None)
+    assert redis_stage._dump_redis_key_value(object(), "string-error") == ("<error>", "denied")
+    assert redis_stage._dump_redis_key_value(object(), "string-null") == ("<nil>", None)
+    assert redis_stage._dump_redis_key_value(object(), "hash-empty") == ("<empty-hash>", None)
+    assert redis_stage._dump_redis_key_value(object(), "hash-bad") == ("<hash>", None)
+    assert redis_stage._dump_redis_key_value(object(), "list-error") == ("<error>", "denied")
+    assert redis_stage._dump_redis_key_value(object(), "list-bad") == ("<list>", None)
+    assert redis_stage._dump_redis_key_value(object(), "set-error") == ("<error>", "denied")
+    assert redis_stage._dump_redis_key_value(object(), "set-bad") == ("<set>", None)
+    assert redis_stage._dump_redis_key_value(object(), "zset-error") == ("<error>", "denied")
+    assert redis_stage._dump_redis_key_value(object(), "zset-empty") == ("<empty-zset>", None)
+    assert redis_stage._dump_redis_key_value(object(), "zset-bad") == ("<zset>", None)
+    assert redis_stage._dump_redis_key_value(object(), "stream-error") == ("<error>", "denied")
+    assert redis_stage._dump_redis_key_value(object(), "stream-bad") == ("<stream>", None)
+    assert redis_stage._dump_redis_key_value(object(), "geo-key") == ("<type:geo>", None)
+
+
+def test_format_keys_detail_records_json_and_entry_text_branches() -> None:
+    record = {
+        "timestamp": "2026-03-27T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 6379,
+        "show_keys": True,
+        "show_keys_limit": 1,
+        "dump_keys": True,
+        "query_key": "offlineStocks:city_4949:552400",
+        "query_key_value": "offlineStocks:city_4949:552400:v",
+        "query_key_entry": {"key": "offlineStocks:city_4949:552400", "value": "v"},
+        "keys": ["z", "a"],
+        "key_count": 2,
+        "key_value_entries": [
+            {"key": "a", "value": "1"},
+            {"key": "z", "value": None, "error": "denied\nnoacl"},
+            "ignored",
+        ],
+    }
+
+    assert redis_stage._redis_kv_entry_text({"key": "z", "error": "denied\nnoacl"}) == "z:<error:denied\\nnoacl>"
+    assert redis_stage._redis_kv_entry_text("legacy") == "legacy"
+
+    payloads = [json.loads(line) for line in redis_stage._format_keys_detail_records(record, "json")]
+    assert [item["type"] for item in payloads] == ["keys_list", "key_dump", "keys_dump"]
+    assert payloads[0]["keys"] == ["a"]
+    assert payloads[0]["keys_truncated"] is True
+    assert payloads[1]["query_key"] == "offlineStocks:city_4949:552400"
+    assert payloads[2]["key_values"] == ["a:1", "z:<error:denied\\nnoacl>"]
+    assert payloads[2]["key_value_entries"][1]["error"] == "denied\nnoacl"
+
+
 def test_audit_redis_targets_json_output_and_suppression(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     records = iter(
         [

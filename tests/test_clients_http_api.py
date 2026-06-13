@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ssl
 import urllib.error
 from typing import Any
 
@@ -9,7 +10,9 @@ from redposture_core.clients.http_api import (
     HttpApiClient,
     HttpClientConfig,
     _decode_chunked_body,
+    _flush_tls_outgoing,
     _parse_http_response_bytes,
+    _tls_over_tls_exchange,
     normalize_http_error,
 )
 
@@ -295,3 +298,243 @@ def test_https_tunnel_surfaces_malformed_chunked_as_error(monkeypatch) -> None:
     assert response.status == 0
     assert response.body == b""
     assert response.error  # malformed framing surfaced instead of silent partial JSON
+
+
+def test_http_api_client_download_to_file_success_http_error_and_io_error(monkeypatch, tmp_path) -> None:
+    class _ChunkResponse:
+        status = 206
+        headers = {}
+
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.chunks = list(chunks)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def read(self, _size: int = -1) -> bytes:
+            if not self.chunks:
+                return b""
+            return self.chunks.pop(0)
+
+        def getcode(self) -> int:
+            return self.status
+
+    response = _ChunkResponse([b"abc", b"def"])
+    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", lambda *_a, **_k: response)
+
+    out_path = tmp_path / "download.bin"
+    status, size, error = HttpApiClient(HttpClientConfig(timeout=1.0)).download_to_file(
+        "http://127.0.0.1/file",
+        str(out_path),
+        chunk_size=2,
+    )
+
+    assert (status, size, error) == (206, 6, None)
+    assert out_path.read_bytes() == b"abcdef"
+
+    http_error = urllib.error.HTTPError("http://127.0.0.1/file", 404, "missing", {}, None)
+    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", lambda *_a, **_k: http_error)
+    assert HttpApiClient().download_to_file("http://127.0.0.1/file", str(out_path)) == (404, 0, None)
+
+    monkeypatch.setattr(
+        "redposture_core.clients.http_api.urllib.request.urlopen",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk/network boom")),
+    )
+    status, size, error = HttpApiClient().download_to_file("http://127.0.0.1/file", str(out_path))
+    assert (status, size) == (0, 0)
+    assert "disk/network boom" in str(error)
+
+
+def test_http_api_client_read_fallback_paths_for_typeerror(monkeypatch) -> None:
+    class _NoSizeReadResponse:
+        status = 200
+        headers = {"X-Test": "fallback"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def read(self, *args: object) -> bytes:
+            if args:
+                raise TypeError("no size arg")
+            return b"fallback-body"
+
+        def getcode(self) -> int:
+            return self.status
+
+    monkeypatch.setattr(
+        "redposture_core.clients.http_api.urllib.request.urlopen",
+        lambda *_a, **_k: _NoSizeReadResponse(),
+    )
+    response = HttpApiClient().get("http://127.0.0.1/api")
+    assert response.body == b"fallback-body"
+    assert response.headers == {"X-Test": "fallback"}
+
+    class _NoSizeHTTPError(urllib.error.HTTPError):
+        def read(self, *args: object) -> bytes:
+            if args:
+                raise TypeError("no size arg")
+            return b"error-body"
+
+    error = _NoSizeHTTPError("http://127.0.0.1/api", 418, "teapot", {"X-Error": "fallback"}, None)
+    monkeypatch.setattr(
+        "redposture_core.clients.http_api.urllib.request.urlopen", lambda *_a, **_k: (_ for _ in ()).throw(error)
+    )
+    response = HttpApiClient().get("http://127.0.0.1/api")
+    assert response.status == 418
+    assert response.body == b"error-body"
+
+
+def test_manual_https_proxy_rejects_invalid_target_and_missing_proxy(monkeypatch) -> None:
+    client = HttpApiClient(HttpClientConfig(proxy="https://127.0.0.1:18443"))
+    response = client._send_https_target_via_https_proxy(  # noqa: SLF001
+        urllib.request.Request("https:///missing-host"),
+        body=None,
+        timeout=1.0,
+    )
+    assert response.status == 0
+    assert "invalid target host" in str(response.error)
+
+    no_proxy = HttpApiClient()
+    response = no_proxy._send_https_target_via_https_proxy(  # noqa: SLF001
+        urllib.request.Request("https://example.local/"),
+        body=None,
+        timeout=1.0,
+    )
+    assert response.status == 0
+    assert "missing https proxy config" in str(response.error)
+
+
+def test_tls_over_tls_exchange_exercises_want_read_write_and_eof_paths() -> None:
+    class _FakeSocket:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+            self.recv_chunks = [b"handshake-in", b"read-in", b""]
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        def recv(self, _size: int) -> bytes:
+            return self.recv_chunks.pop(0)
+
+    class _FakeTLS:
+        def __init__(self, outgoing: ssl.MemoryBIO) -> None:
+            self.outgoing = outgoing
+            self.handshake_calls = 0
+            self.write_calls = 0
+            self.read_calls = 0
+
+        def do_handshake(self) -> None:
+            self.handshake_calls += 1
+            self.outgoing.write(f"hs{self.handshake_calls}".encode())
+            if self.handshake_calls == 1:
+                raise ssl.SSLWantReadError()
+
+        def write(self, data: memoryview) -> int:
+            self.write_calls += 1
+            self.outgoing.write(f"wr{self.write_calls}".encode())
+            if self.write_calls == 1:
+                raise ssl.SSLWantWriteError()
+            return len(data)
+
+        def read(self, _size: int) -> bytes:
+            self.read_calls += 1
+            if self.read_calls == 1:
+                return b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+            if self.read_calls == 2:
+                raise ssl.SSLWantReadError()
+            raise ssl.SSLEOFError()
+
+    class _FakeContext:
+        def wrap_bio(self, _incoming: ssl.MemoryBIO, outgoing: ssl.MemoryBIO, **_kwargs: object) -> _FakeTLS:
+            return _FakeTLS(outgoing)
+
+    sock = _FakeSocket()
+    raw, truncated = _tls_over_tls_exchange(
+        sock,
+        _FakeContext(),
+        server_hostname="example.local",
+        request_payload=b"GET / HTTP/1.1\r\n\r\n",
+        response_cap=1,
+    )
+
+    assert raw.startswith(b"HTTP/1.1 200 OK")
+    assert truncated is False
+    assert sock.sent == [b"hs1", b"hs2", b"wr1", b"wr2"]
+
+
+def test_tls_over_tls_exchange_closed_during_handshake_and_write() -> None:
+    class _ClosedSocket:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+        def recv(self, _size: int) -> bytes:
+            return b""
+
+    class _HandshakeWantReadTLS:
+        def __init__(self, outgoing: ssl.MemoryBIO) -> None:
+            self.outgoing = outgoing
+
+        def do_handshake(self) -> None:
+            self.outgoing.write(b"hs")
+            raise ssl.SSLWantReadError()
+
+    class _WriteWantReadTLS:
+        def __init__(self, outgoing: ssl.MemoryBIO) -> None:
+            self.outgoing = outgoing
+
+        def do_handshake(self) -> None:
+            return None
+
+        def write(self, _data: memoryview) -> int:
+            self.outgoing.write(b"wr")
+            raise ssl.SSLWantReadError()
+
+    class _Context:
+        def __init__(self, tls_cls: type) -> None:
+            self.tls_cls = tls_cls
+
+        def wrap_bio(self, _incoming: ssl.MemoryBIO, outgoing: ssl.MemoryBIO, **_kwargs: object) -> object:
+            return self.tls_cls(outgoing)
+
+    with pytest.raises(OSError, match="handshake closed"):
+        _tls_over_tls_exchange(
+            _ClosedSocket(),
+            _Context(_HandshakeWantReadTLS),
+            server_hostname="example.local",
+            request_payload=b"x",
+            response_cap=10,
+        )
+
+    with pytest.raises(OSError, match="write closed"):
+        _tls_over_tls_exchange(
+            _ClosedSocket(),
+            _Context(_WriteWantReadTLS),
+            server_hostname="example.local",
+            request_payload=b"x",
+            response_cap=10,
+        )
+
+
+def test_flush_tls_outgoing_sends_until_empty() -> None:
+    class _Sock:
+        def __init__(self) -> None:
+            self.sent: list[bytes] = []
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(data)
+
+    outgoing = ssl.MemoryBIO()
+    outgoing.write(b"abc")
+    outgoing.write(b"def")
+    sock = _Sock()
+    _flush_tls_outgoing(sock, outgoing)
+    assert b"".join(sock.sent) == b"abcdef"

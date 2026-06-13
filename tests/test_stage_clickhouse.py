@@ -6,11 +6,20 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_clickhouse as clickhouse_stage
+from redposture_core.modules.clickhouse import policy as clickhouse_policy
 from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
 class _DummyClient:
     pass
+
+
+class _ValidationConsole:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def error(self, message: str) -> None:
+        self.messages.append(message)
 
 
 def _session(protocol: str = "native", username: str = "default", password: str = "", database: str = "default"):
@@ -255,6 +264,74 @@ def test_audit_clickhouse_marks_valid_credentials_when_provided_succeeds(monkeyp
     assert record["status"] == "valid_credentials"
     assert record["provided_credentials_ok"] is True
     assert record["effective_username"] == "auditor"
+
+
+def _clickhouse_validation_args(**overrides):
+    base = {
+        "targets": "127.0.0.1",
+        "hosts": None,
+        "hosts_file": None,
+        "ports": None,
+        "port": 9000,
+        "timeout": 1.0,
+        "retries": 0,
+        "workers": 1,
+        "proxy": None,
+        "output": None,
+        "output_format": "txt",
+        "debug": False,
+        "no_color": False,
+        "log": None,
+        "username": None,
+        "password": None,
+        "defcreds": False,
+        "database": "default",
+        "tables": [],
+        "table": [],
+        "columns": [],
+        "column": [],
+        "show_columns": False,
+        "execute": None,
+        "sql_cmd": None,
+        "os_shell": False,
+        "sql_shell": False,
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"show_columns": True}, "--show-columns requires --table"),
+        ({"columns": ["password"]}, "--column requires --table"),
+        ({"execute": "id", "sql_cmd": "select 1"}, "--execute cannot be combined with --sql-cmd"),
+        ({"os_shell": True, "sql_shell": True}, "--os-shell cannot be combined with --sql-shell"),
+        ({"os_shell": True, "sql_cmd": "select 1"}, "--os-shell cannot be combined with --sql-cmd"),
+        ({"os_shell": True, "execute": "id"}, "--os-shell cannot be combined with --execute"),
+        ({"sql_shell": True, "execute": "id"}, "--sql-shell cannot be combined with --execute"),
+        ({"sql_shell": True, "sql_cmd": "select 1"}, "--sql-shell cannot be combined with --sql-cmd"),
+        ({"sql_shell": True, "output": "out.txt"}, "--sql-shell cannot be used with -o/--output"),
+        ({"sql_shell": True, "output_format": "json"}, "--sql-shell requires --format txt"),
+        ({"sql_shell": True, "targets": "127.0.0.1,127.0.0.2"}, "--sql-shell requires exactly one target host"),
+        ({"sql_shell": True, "ports": "9000,9440"}, "--sql-shell requires exactly one target host"),
+    ],
+)
+def test_clickhouse_policy_validation_negative_branches(overrides, expected) -> None:
+    console = _ValidationConsole()
+    rc = clickhouse_policy.validate_args(_clickhouse_validation_args(**overrides), console)
+
+    assert rc == 2
+    assert console.messages
+    assert expected in console.messages[-1]
+
+
+def test_clickhouse_policy_validation_accepts_valid_sql_shell() -> None:
+    console = _ValidationConsole()
+    rc = clickhouse_policy.validate_args(_clickhouse_validation_args(sql_shell=True), console)
+
+    assert rc is None
+    assert console.messages == []
 
 
 def test_audit_clickhouse_fallbacks_to_http_when_auto_is_used(monkeypatch: pytest.MonkeyPatch) -> None:

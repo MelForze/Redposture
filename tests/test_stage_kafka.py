@@ -1271,3 +1271,317 @@ def test_audit_kafka_via_sasl_fallback_branch_coverage(monkeypatch: pytest.Monke
     assert allowed["status"] == "valid_credentials"
     assert allowed["topics"] == ["orders"]
     assert allowed["topic_messages"] == ["p0@1 hello"]
+
+
+class _KafkaContextSocket(_DummySocket):
+    def __init__(self) -> None:
+        self.timeout: float | None = 1.0
+        self.sent: list[bytes] = []
+        self.recv_chunks: list[bytes] = []
+        self.settimeout_calls: list[float | None] = []
+
+    def settimeout(self, timeout: float | None) -> None:
+        self.timeout = timeout
+        self.settimeout_calls.append(timeout)
+
+    def gettimeout(self) -> float | None:
+        return self.timeout
+
+    def sendall(self, data: bytes) -> None:
+        self.sent.append(data)
+
+    def recv(self, size: int) -> bytes:
+        if not self.recv_chunks:
+            return b""
+        chunk = self.recv_chunks.pop(0)
+        if len(chunk) > size:
+            self.recv_chunks.insert(0, chunk[size:])
+            return chunk[:size]
+        return chunk
+
+
+def test_kafka_format_detail_records_additional_empty_and_json_branches() -> None:
+    assert kafka._format_topics_detail_records({"host": "h", "port": 9092}, "txt") == []
+
+    detect_json = json.loads(
+        kafka._format_detect_record(
+            {"timestamp": "ts", "host": "h", "port": 9092, "is_kafka": True, "auth_required": None},
+            "json",
+        )
+    )
+    assert detect_json["detected"] is True
+    assert detect_json["auth_required"] is None
+
+    assert "(topics:-)" in kafka._with_optional_topics({"topic_count": "many"}, "KAFKA h 9092 [+] ok")
+
+    limited_record = {
+        "timestamp": "ts",
+        "host": "h",
+        "port": 9092,
+        "show_topics": True,
+        "topics": ["zeta", "alpha", "beta"],
+        "topic_count": 3,
+        "show_topics_limit": 2,
+        "query_topic": "missing",
+        "query_topic_value": None,
+        "dump": True,
+        "max_messages": 3,
+        "dump_topics": [],
+        "dump_results": {},
+        "dump_errors": {},
+        "dump_error": "metadata unavailable",
+    }
+    limited_text = "\n".join(kafka._format_topics_detail_records(limited_record, "txt"))
+    assert "Show Topics (showing:2 of 3)" in limited_text
+    assert "Topic missing" in limited_text
+    assert "[-] metadata unavailable" in limited_text
+
+    limited_json = [json.loads(line) for line in kafka._format_topics_detail_records(limited_record, "json")]
+    assert any(item["type"] == "topics_list" and item["topics"] == ["alpha", "beta"] for item in limited_json)
+    assert any(item["type"] == "topic_dump" and item["error"] == "metadata unavailable" for item in limited_json)
+
+    no_query_messages = "\n".join(
+        kafka._format_topics_detail_records(
+            {
+                "host": "h",
+                "port": 9092,
+                "query_topic": "orders",
+                "query_topic_value": "orders (partitions:1)",
+                "dump": True,
+                "max_messages": 1,
+                "dump_topics": ["orders"],
+                "dump_results": {"orders": []},
+                "dump_errors": {},
+            },
+            "txt",
+        )
+    )
+    assert "<no messages>" in no_query_messages
+
+    no_topic_messages = "\n".join(
+        kafka._format_topics_detail_records(
+            {
+                "host": "h",
+                "port": 9092,
+                "dump": True,
+                "max_messages": 1,
+                "dump_topics": ["orders"],
+                "dump_results": {"orders": []},
+                "dump_errors": {},
+            },
+            "txt",
+        )
+    )
+    assert "<no messages>" in no_topic_messages
+
+
+def test_kafka_sasl_fallback_metadata_and_exception_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kafka, "open_kafka_socket", lambda *_args, **_kwargs: _KafkaContextSocket())
+
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (True, 2, "listener requires sasl"))
+    no_creds = kafka._audit_kafka_via_sasl_fallback(
+        host="127.0.0.1",
+        port=9092,
+        timeout=1.0,
+        username=None,
+        password=None,
+        show_topics=False,
+        query_topic="orders",
+        dump=True,
+        max_messages=2,
+    )
+    assert isinstance(no_creds, dict)
+    assert no_creds["status"] == "auth_required"
+    assert no_creds["query_topic_value"] == "orders:<authentication required>"
+    assert no_creds["dump_error"] == "authentication required"
+    assert no_creds["error"] == "listener requires sasl"
+
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (True, 2, None))
+    monkeypatch.setattr(kafka, "_sasl_authenticate_plain", lambda *_args, **_kwargs: (True, 3, None))
+    monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: (None, "metadata denied"))
+    metadata_unavailable = kafka._audit_kafka_via_sasl_fallback(
+        host="127.0.0.1",
+        port=9092,
+        timeout=1.0,
+        username="alice",
+        password="",
+        show_topics=True,
+        query_topic="orders",
+        dump=True,
+        max_messages=2,
+    )
+    assert isinstance(metadata_unavailable, dict)
+    assert metadata_unavailable["status"] == "valid_credentials"
+    assert metadata_unavailable["query_topic_value"] == "orders:<not available>"
+    assert metadata_unavailable["dump_error"] == "topic metadata unavailable"
+    assert metadata_unavailable["error"] == "metadata denied"
+
+    monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: ({"topic_map": {"orders": 1}}, None))
+    not_found = kafka._audit_kafka_via_sasl_fallback(
+        host="127.0.0.1",
+        port=9092,
+        timeout=1.0,
+        username="alice",
+        password="secret",
+        show_topics=True,
+        query_topic="missing",
+        dump=True,
+        max_messages=2,
+    )
+    assert isinstance(not_found, dict)
+    assert not_found["query_topic_value"] == "missing:<not found>"
+    assert not_found["dump_error"] == "topic not found"
+
+    monkeypatch.setattr(
+        kafka,
+        "open_kafka_socket",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("connection reset")),
+    )
+    assert (
+        kafka._audit_kafka_via_sasl_fallback(
+            host="127.0.0.1",
+            port=9092,
+            timeout=1.0,
+            username="alice",
+            password="secret",
+            show_topics=False,
+            query_topic=None,
+            dump=False,
+            max_messages=1,
+        )
+        is None
+    )
+
+
+def test_kafka_audit_host_metadata_auth_and_fallback_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kafka, "open_kafka_socket", lambda *_args, **_kwargs: _KafkaContextSocket())
+    monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (False, 35, "plain EOF"))
+    monkeypatch.setattr(kafka, "_is_sasl_probe_candidate", lambda _error: True)
+    fallback_record = {
+        "timestamp": "ts",
+        "host": "127.0.0.1",
+        "port": 9092,
+        "is_kafka": True,
+        "status": "auth_required",
+        "auth_required": True,
+        "provided_credentials": False,
+        "show_topics": False,
+        "dump": False,
+        "error": "sasl required",
+    }
+    monkeypatch.setattr(kafka, "_audit_kafka_via_sasl_fallback", lambda **_kwargs: fallback_record)
+    fallback = kafka._audit_kafka_host(
+        "127.0.0.1",
+        9092,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        show_topics=False,
+        query_topic=None,
+        dump=False,
+        max_messages=1,
+    )
+    assert fallback["status"] == "auth_required"
+
+    monkeypatch.setattr(kafka, "_audit_kafka_via_sasl_fallback", lambda **_kwargs: None)
+    not_kafka = kafka._audit_kafka_host(
+        "127.0.0.1",
+        9092,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        show_topics=False,
+        query_topic=None,
+        dump=False,
+        max_messages=1,
+    )
+    assert not_kafka["status"] == "fail"
+    assert "plain EOF" in str(not_kafka["error"])
+
+    monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (True, 0, None))
+    monkeypatch.setattr(
+        kafka,
+        "_fetch_metadata",
+        lambda *_args, **_kwargs: ({"auth_required": True, "error_codes": [29, 58], "topic_map": {}}, None),
+    )
+    auth_required = kafka._audit_kafka_host(
+        "127.0.0.1",
+        9092,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        show_topics=True,
+        query_topic="private",
+        dump=True,
+        max_messages=1,
+    )
+    assert auth_required["status"] == "auth_required"
+    assert auth_required["query_topic_value"] == "private:<authentication required>"
+    assert auth_required["dump_error"] == "authentication required"
+    assert "auth errors:" in str(auth_required["error"])
+
+    monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: (None, "metadata timeout"))
+    unknown = kafka._audit_kafka_host(
+        "127.0.0.1",
+        9092,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        show_topics=False,
+        query_topic="orders",
+        dump=True,
+        max_messages=1,
+    )
+    assert unknown["status"] == "unknown_auth"
+    assert unknown["query_topic_value"] == "orders:<not available>"
+    assert unknown["dump_error"] == "topic metadata unavailable"
+
+    monkeypatch.setattr(
+        kafka,
+        "_fetch_metadata",
+        lambda *_args, **_kwargs: ({"auth_required": False, "topic_map": {"orders": 1}}, None),
+    )
+    monkeypatch.setattr(kafka, "_authenticate_and_fetch_metadata", lambda *_args, **_kwargs: (False, None, "bad sasl"))
+    invalid_but_anonymous = kafka._audit_kafka_host(
+        "127.0.0.1",
+        9092,
+        1.0,
+        0,
+        username="alice",
+        password="bad",
+        show_topics=True,
+        query_topic="missing",
+        dump=True,
+        max_messages=1,
+    )
+    assert invalid_but_anonymous["status"] == "invalid_credentials_anonymous"
+    assert invalid_but_anonymous["query_topic_value"] == "missing:<not found>"
+    assert invalid_but_anonymous["dump_error"] == "topic not found"
+
+    monkeypatch.setattr(
+        kafka,
+        "open_kafka_socket",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("unexpected EOF")),
+    )
+    monkeypatch.setattr(
+        kafka,
+        "_audit_kafka_via_sasl_fallback",
+        lambda **_kwargs: {**fallback_record, "status": "valid_credentials", "provided_credentials": True},
+    )
+    exception_fallback = kafka._audit_kafka_host(
+        "127.0.0.1",
+        9092,
+        1.0,
+        0,
+        username="alice",
+        password="secret",
+        show_topics=False,
+        query_topic=None,
+        dump=False,
+        max_messages=1,
+    )
+    assert exception_fallback["status"] == "valid_credentials"
