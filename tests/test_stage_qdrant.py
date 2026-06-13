@@ -333,6 +333,110 @@ def test_audit_qdrant_host_uses_api_key_when_anonymous_is_denied(monkeypatch: py
     assert "update probe reached endpoint" in text
 
 
+def test_audit_qdrant_auth_required_dump_and_unknown_auth_edges(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(qdrant, "_qdrant_get_root_info", lambda *_args, **_kwargs: (200, {"version": "1.15.0"}, None))
+    monkeypatch.setattr(
+        qdrant,
+        "_qdrant_get_collections",
+        lambda *_args, **_kwargs: (401, {"status": {"error": "api key required"}}, None),
+    )
+    monkeypatch.setattr(
+        qdrant,
+        "_qdrant_logger_endpoint_probe",
+        lambda *_args, **_kwargs: {"reachable": False, "blocked": True, "status": 401, "error": "api key required"},
+    )
+    record = qdrant._audit_qdrant_host(
+        "127.0.0.1",
+        6333,
+        1.0,
+        0,
+        api_key=None,
+        show_collections=True,
+        dump_requested=True,
+        collection_name=None,
+        ssrf_urls=["http://127.0.0.1:9100/metrics"],
+    )
+    assert record["status"] == "auth_required"
+    assert record["collection_dump_error"] == "authentication required for collection dump"
+    assert record["ssrf_error"] == "--collection is required for qdrant snapshot-restore SSRF probe"
+    text = "\n".join(qdrant._format_detail_records(record, "txt", debug=True))
+    assert "authentication required for collection dump" in text
+    assert "--collection is required" in text
+
+    def fake_collections(_host: str, _port: int, _timeout: float, *, headers=None):
+        if headers is None:
+            return 500, {"status": {"error": "temporary backend failure"}}, None
+        return 200, {"result": {"collections": [{"name": "secret"}]}}, None
+
+    monkeypatch.setattr(qdrant, "_qdrant_get_collections", fake_collections)
+    monkeypatch.setattr(qdrant, "_qdrant_edit_probe_empty_patch", lambda *_a, **_k: {"ok": False, "status": 403})
+    monkeypatch.setattr(
+        qdrant,
+        "_qdrant_logger_endpoint_probe",
+        lambda *_a, **_k: {"reachable": True, "blocked": False, "status": 422, "error": "invalid"},
+    )
+    unknown = qdrant._audit_qdrant_host(
+        "127.0.0.1",
+        6333,
+        1.0,
+        0,
+        api_key="secret",
+        show_collections=False,
+        dump_requested=False,
+        collection_name=None,
+        ssrf_urls=None,
+    )
+    assert unknown["status"] == "unknown_auth"
+    assert unknown["api_key_access"] is True
+    assert unknown["collections_source"] == "api_key"
+
+
+def test_audit_qdrant_dump_limit_and_collection_error_edges(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        qdrant,
+        "_qdrant_get_root_info",
+        lambda *_args, **_kwargs: (200, {"title": "Qdrant - Vector Search Engine", "version": "1.14.0"}, None),
+    )
+    monkeypatch.setattr(
+        qdrant,
+        "_qdrant_get_collections",
+        lambda *_args, **_kwargs: (
+            200,
+            {"result": {"collections": [{"name": "alpha"}, {"name": "beta"}, {"name": "gamma"}]}},
+            None,
+        ),
+    )
+    seen_names: list[str] = []
+
+    def fake_collection_info(_host: str, _port: int, _timeout: float, name: str, *, headers=None):
+        _ = headers
+        seen_names.append(name)
+        if name == "beta":
+            return 404, {"status": {"error": "not found"}}, None
+        return 200, {"result": {"name": name, "vectors_count": 1}}, None
+
+    monkeypatch.setattr(qdrant, "_qdrant_get_collection_info", fake_collection_info)
+    monkeypatch.setattr(qdrant, "_qdrant_edit_probe_empty_patch", lambda *_a, **_k: {"ok": True, "status": 200})
+    monkeypatch.setattr(qdrant, "_qdrant_logger_endpoint_probe", lambda *_a, **_k: {"reachable": True, "status": 200})
+
+    record = qdrant._audit_qdrant_host(
+        "127.0.0.1",
+        6333,
+        1.0,
+        0,
+        api_key=None,
+        show_collections=False,
+        dump_requested=True,
+        collection_name=None,
+        ssrf_urls=None,
+        dump_limit=2,
+    )
+    assert record["status"] == "open_no_auth"
+    assert seen_names == ["alpha", "beta"]
+    assert record["collection_dump_items"][0]["ok"] is True
+    assert record["collection_dump_items"][1]["error"] == "not found"
+
+
 def test_audit_qdrant_host_marks_non_qdrant_services(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(qdrant, "_qdrant_get_root_info", lambda *_args, **_kwargs: (200, {"hello": "world"}, None))
     monkeypatch.setattr(qdrant, "_qdrant_get_collections", lambda *_args, **_kwargs: (200, {"hello": "world"}, None))
@@ -557,6 +661,52 @@ def test_qdrant_ssrf_capture_listener_records_requests(monkeypatch: pytest.Monke
     assert server.stopped is True
     assert server.closed is True
     assert listener["thread"].joined is True
+
+
+def test_qdrant_ssrf_capture_handler_handles_common_http_methods() -> None:
+    class _FakeSocket:
+        def __init__(self, request: bytes) -> None:
+            self._reader = io.BytesIO(request)
+            self.sent = bytearray()
+
+        def makefile(self, mode: str, *_args: object, **_kwargs: object) -> io.BytesIO:
+            if "r" in mode:
+                return self._reader
+            return io.BytesIO()
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.extend(data)
+
+        def close(self) -> None:
+            return None
+
+    class _FakeServer:
+        server_address = ("127.0.0.1", 19000)
+        capture_hits: list[dict[str, object]]
+        capture_lock = None
+
+        def __init__(self) -> None:
+            self.capture_hits = []
+
+    server = _FakeServer()
+    requests = [
+        b"GET /metrics?x=1 HTTP/1.1\r\nHost: qdrant\r\nUser-Agent: pytest\r\n\r\n",
+        b"POST /submit HTTP/1.1\r\nHost: qdrant\r\nContent-Length: 600\r\nContent-Type: text/plain\r\n\r\n"
+        + (b"a" * 600),
+        b"PUT /put HTTP/1.1\r\nHost: qdrant\r\n\r\n",
+        b"OPTIONS /options HTTP/1.1\r\nHost: qdrant\r\n\r\n",
+        b"HEAD /head HTTP/1.1\r\nHost: qdrant\r\n\r\n",
+    ]
+    sockets = [_FakeSocket(request) for request in requests]
+    for sock in sockets:
+        qdrant._QdrantSsrfCaptureHandler(sock, ("127.0.0.1", 12345), server)
+
+    assert [item["method"] for item in server.capture_hits] == ["GET", "POST", "PUT", "OPTIONS", "HEAD"]
+    assert server.capture_hits[0]["path"] == "/metrics?x=1"
+    assert str(server.capture_hits[1]["body_preview"]).startswith("a")
+    assert "[[truncated]]" in str(server.capture_hits[1]["raw_request"])
+    assert b"redposture-ssrf-capture-ok" in bytes(sockets[0].sent)
+    assert b"redposture-ssrf-capture-ok" not in bytes(sockets[-1].sent)
 
 
 def test_qdrant_ssrf_capture_listener_start_failure(monkeypatch: pytest.MonkeyPatch) -> None:

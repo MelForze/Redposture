@@ -15,6 +15,11 @@ from redposture_core.cli_args import (
     COMMAND_ORACLE,
     COMMAND_QDRANT,
     COMMAND_SELFCERT,
+    _non_negative_int,
+    _normalize_multi_port_port_flag,
+    _port,
+    _positive_float,
+    _positive_int,
     build_parser,
     parse_args,
 )
@@ -24,6 +29,76 @@ def test_parse_args_without_args_shows_help_and_exits_cleanly() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args([])
     assert exc.value.code == 0
+
+
+def test_cli_scalar_type_helpers_reject_invalid_values() -> None:
+    assert _port("1") == 1
+    assert _port("65535") == 65535
+    with pytest.raises(argparse.ArgumentTypeError, match="integer"):
+        _port("abc")
+    with pytest.raises(argparse.ArgumentTypeError, match="range"):
+        _port("0")
+
+    assert _positive_float("1.25") == 1.25
+    with pytest.raises(argparse.ArgumentTypeError, match="number"):
+        _positive_float("nan?")
+    with pytest.raises(argparse.ArgumentTypeError, match="> 0"):
+        _positive_float("0")
+
+    assert _positive_int("7") == 7
+    with pytest.raises(argparse.ArgumentTypeError, match="integer"):
+        _positive_int("bad")
+    with pytest.raises(argparse.ArgumentTypeError, match="> 0"):
+        _positive_int("-1")
+
+    assert _non_negative_int("0") == 0
+    with pytest.raises(argparse.ArgumentTypeError, match="integer"):
+        _non_negative_int("bad")
+    with pytest.raises(argparse.ArgumentTypeError, match=">= 0"):
+        _non_negative_int("-1")
+
+
+def test_normalize_multi_port_port_flag_variants() -> None:
+    assert _normalize_multi_port_port_flag(["redis", "--port", "6379"]) == ["redis", "--port", "6379"]
+    assert _normalize_multi_port_port_flag(["redis", "--port", "6379,6380"]) == [
+        "redis",
+        "--port",
+        "6379",
+        "--ports",
+        "6379,6380",
+    ]
+    assert _normalize_multi_port_port_flag(["redis", "--port=6379-6381"]) == [
+        "redis",
+        "--port=6379",
+        "--ports",
+        "6379-6381",
+    ]
+    assert _normalize_multi_port_port_flag(["redis", "--port", "ports.txt"]) == ["redis", "--ports", "ports.txt"]
+    assert _normalize_multi_port_port_flag(["redis", "--port=ports.txt"]) == ["redis", "--ports=ports.txt"]
+
+
+def test_parse_args_legacy_top_level_modes_and_selfcert_paths() -> None:
+    args = parse_args(["--selfcert", "--cert-out", "cert.pem", "--key-out", "key.pem", "--force"])
+    assert args.command == COMMAND_SELFCERT
+    assert args.selfcert is True
+    assert args.force is True
+
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["redis", "--selfcert"])
+    assert exc.value.code == 2
+
+    for legacy_command in ("listen", "scan", "collect", "trigger"):
+        with pytest.raises(SystemExit) as exc:
+            parse_args([legacy_command])
+        assert exc.value.code == 2
+
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["exporters", "collect", "-t", "127.0.0.1", "-oA"])
+    assert exc.value.code == 2
+
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["--debug"])
+    assert exc.value.code == 2
 
 
 def test_db_command_is_not_available() -> None:

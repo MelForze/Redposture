@@ -310,13 +310,15 @@ def _kube_exec_ws(
     try:
         raw_sock = socket.create_connection((host, port), timeout=min(max(timeout, 0.1), _KUBE_WS_HANDSHAKE_TIMEOUT))
         raw_sock.settimeout(min(max(timeout, 0.1), _KUBE_WS_HANDSHAKE_TIMEOUT))
+        # Track raw_sock immediately so the `finally` closes it even if TLS wrap
+        # (or ctx init) fails — otherwise the descriptor leaks on every failed
+        # handshake (fd exhaustion over a large scan).
+        sock = raw_sock
         if use_https:
             ctx = _ssl_context(use_https=True, insecure=insecure, ca_file=ca_file)
             if ctx is None:
                 raise ValueError("failed to initialize TLS context")
             sock = ctx.wrap_socket(raw_sock, server_hostname=host)
-        else:
-            sock = raw_sock
 
         req_lines = [f"GET {exec_path} HTTP/1.1"] + [f"{k}: {v}" for k, v in request_headers.items()] + ["", ""]
         sock.sendall("\r\n".join(req_lines).encode("utf-8"))

@@ -337,6 +337,71 @@ def test_socks5_open_tunnel_closes_socket_on_negotiation_failure(monkeypatch: py
     assert sock.closed is True
 
 
+def test_socks5_open_tunnel_auth_and_response_failure_branches(monkeypatch: pytest.MonkeyPatch) -> None:
+    auth_fail = _FakeSocket([b"\x05\x02", b"\x01\x01"])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: auth_fail)
+    proxy = np.ProxyConfig(
+        scheme="socks5",
+        host="127.0.0.1",
+        port=1080,
+        username="user",
+        password="bad",
+        raw_url="socks5://user:bad@127.0.0.1:1080",
+    )
+    with pytest.raises(OSError, match="authentication failed"):
+        np._socks5_open_tunnel(proxy, "127.0.0.1", 80, timeout=1.0, source_address=None)
+    assert auth_fail.closed is True
+
+    invalid_version = _FakeSocket([b"\x05\x00", b"\x04\x00\x00\x01"])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: invalid_version)
+    proxy_no_auth = np.ProxyConfig(
+        scheme="socks5",
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks5://127.0.0.1:1080",
+    )
+    with pytest.raises(OSError, match="invalid response"):
+        np._socks5_open_tunnel(proxy_no_auth, "127.0.0.1", 80, timeout=1.0, source_address=None)
+
+    connect_fail = _FakeSocket([b"\x05\x00", b"\x05\x05\x00\x01"])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: connect_fail)
+    with pytest.raises(OSError, match="code=5"):
+        np._socks5_open_tunnel(proxy_no_auth, "127.0.0.1", 80, timeout=1.0, source_address=None)
+
+    invalid_atyp = _FakeSocket([b"\x05\x00", b"\x05\x00\x00\x09"])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: invalid_atyp)
+    with pytest.raises(OSError, match="invalid address type"):
+        np._socks5_open_tunnel(proxy_no_auth, "127.0.0.1", 80, timeout=1.0, source_address=None)
+
+
+def test_socks5_open_tunnel_validates_credentials_and_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: _FakeSocket([b"\x05\x02"]))
+    proxy = np.ProxyConfig(
+        scheme="socks5",
+        host="127.0.0.1",
+        port=1080,
+        username="u" * 256,
+        password="p",
+        raw_url="socks5://127.0.0.1:1080",
+    )
+    with pytest.raises(OSError, match="credentials are too long"):
+        np._socks5_open_tunnel(proxy, "127.0.0.1", 80, timeout=1.0, source_address=None)
+
+    proxy_h = np.ProxyConfig(
+        scheme="socks5h",
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks5h://127.0.0.1:1080",
+    )
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: _FakeSocket([b"\x05\x00"]))
+    with pytest.raises(OSError, match="invalid target host"):
+        np._socks5_open_tunnel(proxy_h, "", timeout=1.0, target_port=80, source_address=None)
+
+
 def test_socks4_open_tunnel_ipv4_request_with_userid(monkeypatch: pytest.MonkeyPatch) -> None:
     sock = _FakeSocket([b"\x00\x5a\x00\x00\x00\x00\x00\x00"])
     monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
@@ -412,6 +477,40 @@ def test_socks4_open_tunnel_closes_socket_on_reject(monkeypatch: pytest.MonkeyPa
     assert sock.closed is True
 
 
+def test_socks4_open_tunnel_rejects_ipv6_userid_nul_and_bad_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    proxy = np.ProxyConfig(
+        scheme="socks4",
+        host="127.0.0.1",
+        port=1080,
+        username=None,
+        password=None,
+        raw_url="socks4://127.0.0.1:1080",
+    )
+    sock = _FakeSocket([])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
+    with pytest.raises(OSError, match="requires IPv4"):
+        np._socks4_open_tunnel(proxy, "::1", 9100, timeout=1.0, source_address=None)
+    assert sock.closed is True
+
+    proxy_bad_user = np.ProxyConfig(
+        scheme="socks4",
+        host="127.0.0.1",
+        port=1080,
+        username="bad\x00user",
+        password=None,
+        raw_url="socks4://127.0.0.1:1080",
+    )
+    sock2 = _FakeSocket([])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock2)
+    with pytest.raises(OSError, match="userid cannot contain NUL"):
+        np._socks4_open_tunnel(proxy_bad_user, "127.0.0.1", 9100, timeout=1.0, source_address=None)
+
+    bad_reply = _FakeSocket([b"\x05\x5a\x00\x00\x00\x00\x00\x00"])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: bad_reply)
+    with pytest.raises(OSError, match="invalid response"):
+        np._socks4_open_tunnel(proxy, "127.0.0.1", 9100, timeout=1.0, source_address=None)
+
+
 def test_http_open_tunnel_sends_connect_and_proxy_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     sock = _FakeSocket([])
     monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: sock)
@@ -469,6 +568,56 @@ def test_http_open_tunnel_closes_socket_on_non_200(monkeypatch: pytest.MonkeyPat
         np._http_open_tunnel(proxy, "example.com", 443, timeout=2.0, source_address=None)
 
     assert sock.closed is True
+
+
+def test_https_open_tunnel_wraps_socket_and_closes_both_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    raw_sock = _FakeSocket([])
+    wrapped_sock = _FakeSocket([])
+    monkeypatch.setattr(np, "_open_proxy_connection", lambda *_args, **_kwargs: raw_sock)
+
+    class _FakeContext:
+        def wrap_socket(self, sock: _FakeSocket, *, server_hostname: str) -> _FakeSocket:
+            assert sock is raw_sock
+            assert server_hostname == "proxy.local"
+            return wrapped_sock
+
+    monkeypatch.setattr(np.ssl, "create_default_context", lambda: _FakeContext())
+
+    class _FakeHTTPResponse:
+        def __init__(self, transport: _FakeSocket) -> None:
+            assert transport is wrapped_sock
+            self.status = 502
+
+        def begin(self) -> None:
+            return
+
+    monkeypatch.setattr(np.http.client, "HTTPResponse", _FakeHTTPResponse)
+    proxy = np.ProxyConfig(
+        scheme="https",
+        host="proxy.local",
+        port=8443,
+        username=None,
+        password=None,
+        raw_url="https://proxy.local:8443",
+    )
+
+    with pytest.raises(OSError, match="status=502"):
+        np._http_open_tunnel(proxy, "example.com", 443, timeout=2.0, source_address=None)
+    assert raw_sock.closed is True
+    assert wrapped_sock.closed is True
+
+
+def test_open_connection_via_proxy_rejects_unsupported_scheme() -> None:
+    proxy = np.ProxyConfig(
+        scheme="ftp",
+        host="proxy.local",
+        port=21,
+        username=None,
+        password=None,
+        raw_url="ftp://proxy.local:21",
+    )
+    with pytest.raises(OSError, match="unsupported proxy scheme"):
+        np.open_connection_via_proxy(proxy, ("example.com", 443), timeout=1.0)
 
 
 def test_http_connection_pool_uses_proxy_socket_patch(monkeypatch: pytest.MonkeyPatch) -> None:

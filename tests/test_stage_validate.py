@@ -40,6 +40,61 @@ def test_validate_directory_without_hits_returns_zero(tmp_path: Path) -> None:
     assert rc == 0
 
 
+def test_validate_rejects_missing_and_empty_inputs(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    missing = tmp_path / "missing"
+    assert run_validation(str(missing)) == 2
+    assert "input not found" in capsys.readouterr().err
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    assert run_validation(str(empty_dir)) == 2
+    assert "no files to validate" in capsys.readouterr().err
+
+
+def test_validate_directory_index_fallback_grouping_hidden_and_debug(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "collect"
+    nested = root / "10.0.0.9" / "node_exporter"
+    nested.mkdir(parents=True)
+    indexed = nested / "9100_debug_vars.txt"
+    indexed.write_text(
+        "[CRED] [REDIS] 10.0.0.9:6379 user=redis pass=RedisPass2026!\npassword=PrimaryDBPass2026!\n",
+        encoding="utf-8",
+    )
+    fallback = root / "10.0.0.10" / "redis_exporter" / "9121_metrics.txt"
+    fallback.parent.mkdir(parents=True)
+    fallback.write_text(
+        "[CRED] [POSTGRES] 10.0.0.10:5432 user=postgres pass=PostgresPass2026!\n",
+        encoding="utf-8",
+    )
+    (root / "index.jsonl").write_text(
+        "\n"
+        "not-json\n"
+        '{"response_file":"10.0.0.9/node_exporter/9100_debug_vars.txt",'
+        '"host":"indexed-host","port":"19100","exporter":"node_exporter","endpoint":"/debug/vars"}\n'
+        '{"ignored":"missing response_file"}\n',
+        encoding="utf-8",
+    )
+
+    rc = run_validation(
+        str(root),
+        show=True,
+        max_lines=2,
+        fail_on_creds=False,
+        debug=True,
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    output = f"{captured.out}\n{captured.err}"
+    assert "indexed-host" in output
+    assert "Node Exporter" in output
+    assert "redis_exporter" in output or "additional hit(s) hidden" in output
+    assert "pass=1 detect start" in output
+    assert "stage_timing_summary status=hits" in output
+
+
 def test_validate_records_detects_credential_without_files() -> None:
     records = [
         {
