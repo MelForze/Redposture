@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ...clients import transport
 from ...clients.mongodb import (
     MongoAuditClient,
     close_quietly,
@@ -29,6 +30,10 @@ from ...stage_runtime import (
 from ...utils import (
     utc_now_iso,
 )
+
+# Connection-error classification + framed reads are shared via the transport layer.
+_is_timeout_error = transport.is_connection_timeout
+_is_connection_refused_error = transport.is_connection_refused
 
 _MONGODB_TAG = "MONGODB"
 _STAGE_DETECT_PROTOCOL = "detect_protocol"
@@ -56,16 +61,6 @@ def _clip(text: str, width: int = 96) -> str:
 
 def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
-
-
-def _is_timeout_error(value: Any) -> bool:
-    text = str(value or "").lower()
-    return "timeout" in text or "timed out" in text
-
-
-def _is_connection_refused_error(value: Any) -> bool:
-    text = str(value or "").lower()
-    return "connection refused" in text
 
 
 def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:

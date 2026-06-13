@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ...clients import transport
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line
 from ...show_limits import (
@@ -20,6 +21,14 @@ from ...stage_runtime import (
 from ...utils import (
     utc_now_iso,
 )
+
+# Connection-error classification + framed reads are shared via the transport
+# layer; bound here so module-qualified references (and the stage facade) keep working.
+_is_connection_refused_error = transport.is_connection_refused
+_is_timeout_error = transport.is_connection_timeout
+_is_connection_refused_fail_record = transport.is_connection_refused_fail_record
+_is_connection_timeout_fail_record = transport.is_connection_timeout_fail_record
+_recv_exact = transport.recv_exact
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -34,28 +43,6 @@ def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
 
 
-def _is_timeout_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return False
-    return "connection timeout" in text or "timed out" in text or "timeout" in text
-
-
-def _is_connection_refused_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return False
-    return "connection refused" in text or "[errno 111]" in text or "[errno 61]" in text or "10061" in text
-
-
-def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and _is_timeout_error(record.get("error"))
-
-
-def _is_connection_refused_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and _is_connection_refused_error(record.get("error"))
-
-
 def _encode_resp_array(parts: list[str]) -> bytes:
     payload = [f"*{len(parts)}\r\n".encode("ascii")]
     for item in parts:
@@ -63,16 +50,6 @@ def _encode_resp_array(parts: list[str]) -> bytes:
         payload.append(f"${len(raw)}\r\n".encode("ascii"))
         payload.append(raw + b"\r\n")
     return b"".join(payload)
-
-
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
-    data = b""
-    while len(data) < size:
-        chunk = sock.recv(size - len(data))
-        if not chunk:
-            raise ConnectionError("unexpected EOF")
-        data += chunk
-    return data
 
 
 def _recv_line(sock: socket.socket, max_len: int = 65536) -> bytes:

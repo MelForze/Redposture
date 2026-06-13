@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...audit_config import AuditConfig
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -33,7 +34,8 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
 
 
 def run_clickhouse_stage(args: Any, logger: Any) -> int:
-    console = Console(debug=bool(getattr(args, "debug", False)))
+    cfg = AuditConfig.from_namespace(args)
+    console = Console(debug=cfg.debug)
     actions._configure_clickhouse_loggers()
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
@@ -64,15 +66,16 @@ def run_clickhouse_stage(args: Any, logger: Any) -> int:
 
 
 def _emit_debug_start(args: Any, console: Any, plan: AuditCommandPlan) -> None:
-    if not bool(getattr(args, "debug", False)):
+    cfg = AuditConfig.from_namespace(args)
+    if not cfg.debug:
         return
     mode = "detect-only"
     if getattr(args, "password", None) is not None:
         mode = "provided-creds"
     elif bool(getattr(args, "defcreds", False)):
         mode = "default-creds"
-    suffix = f" format={getattr(args, 'output_format', 'txt') or 'txt'}"
-    if getattr(args, "output", None):
+    suffix = f" format={cfg.output_format}"
+    if cfg.output:
         suffix += f" output={args.output}"
     console.info(
         "clickhouse audit started: "
@@ -89,6 +92,7 @@ def _raw_protocol(args: Any) -> str:
 
 
 def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
+    cfg = AuditConfig.from_namespace(args)
     try:
         plan = build_clickhouse_plan(args)
     except ValueError as exc:
@@ -106,8 +110,8 @@ def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
     record = actions._audit_clickhouse_host(
         host=str(host),
         port=int(port),
-        timeout=float(getattr(args, "timeout", 5.0) or 5.0),
-        retries=int(getattr(args, "retries", 0) or 0),
+        timeout=cfg.timeout,
+        retries=cfg.retries,
         username=username,
         password=password,
         defcreds=bool(getattr(args, "defcreds", False)),
@@ -148,8 +152,8 @@ def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
         output, error = actions._run_sql_query_once(
             host=str(host),
             port=int(port),
-            timeout=float(getattr(args, "timeout", 5.0) or 5.0),
-            retries=int(getattr(args, "retries", 0) or 0),
+            timeout=cfg.timeout,
+            retries=cfg.retries,
             protocol=shell_protocol,
             username=shell_user,
             password=shell_password,
@@ -168,7 +172,7 @@ def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
         )
         for line in render._format_sql_detail_records(shell_record, "txt"):
             print(line)
-        if bool(getattr(args, "debug", False)) and hasattr(logger, "log"):
+        if cfg.debug and hasattr(logger, "log"):
             logger.log(
                 "clickhouse",
                 (str(host), int(port)),

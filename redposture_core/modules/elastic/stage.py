@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...audit_config import AuditConfig
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -35,7 +36,8 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
 
 
 def run_elastic_stage(args: Any, logger: Any) -> int:
-    console = Console(debug=bool(getattr(args, "debug", False)))
+    cfg = AuditConfig.from_namespace(args)
+    console = Console(debug=cfg.debug)
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
@@ -61,11 +63,11 @@ def run_elastic_stage(args: Any, logger: Any) -> int:
     except ValueError as exc:
         console.error(str(exc))
         return 2
-    if bool(getattr(args, "debug", False)) and not getattr(args, "debug_emit", None):
+    if cfg.debug and not getattr(args, "debug_emit", None):
         args.debug_emit = console.info
-    if bool(getattr(args, "debug", False)):
-        suffix = f" format={getattr(args, 'output_format', 'txt') or 'txt'}"
-        if getattr(args, "output", None):
+    if cfg.debug:
+        suffix = f" format={cfg.output_format}"
+        if cfg.output:
             suffix += f" output={args.output}"
         console.info("elastic audit started:" + suffix)
     runner = AuditCommandRunner(args=args, spec=build_elastic_spec(args), logger=logger, console=console)
@@ -74,7 +76,7 @@ def run_elastic_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process elastic output: {exc}")
         return 2
-    if bool(getattr(args, "debug", False)) and result.detected_count == 0 and hasattr(console, "warn"):
+    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all elastic targets are unreachable")
     return 0
 

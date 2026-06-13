@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...audit_config import AuditConfig
 from ...stage_runtime import build_basic_audit_plan, validate_basic_module_args
 from .actions import _normalize_column_names, _normalize_table_targets
 
 
 def validate_args(args: Any, console: Any) -> int | None:
+    cfg = AuditConfig.from_namespace(args)
     common_rc = validate_basic_module_args(args, console, module="clickhouse", pure_http=False)
     if common_rc is not None:
         return common_rc
@@ -50,11 +52,11 @@ def validate_args(args: Any, console: Any) -> int | None:
         console.error("--sql-shell cannot be combined with --sql-cmd")
         return 2
 
-    if bool(getattr(args, "sql_shell", False)) and getattr(args, "output", None):
+    if bool(getattr(args, "sql_shell", False)) and cfg.output:
         console.error("--sql-shell cannot be used with -o/--output")
         return 2
     if sql_shell:
-        if str(getattr(args, "output_format", "txt") or "txt") != "txt":
+        if cfg.output_format != "txt":
             console.error("--sql-shell requires --format txt")
             return 2
         try:
