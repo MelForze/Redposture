@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from typing import Any
 
+from ...audit_config import AuditConfig
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -34,7 +35,8 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
 
 
 def run_grpc_stage(args: Any, logger: Any) -> int:
-    console = Console(debug=bool(getattr(args, "debug", False)))
+    cfg = AuditConfig.from_namespace(args)
+    console = Console(debug=cfg.debug)
     if getattr(args, "token", None):
         args.username = None
         args.password = None
@@ -46,11 +48,11 @@ def run_grpc_stage(args: Any, logger: Any) -> int:
     except ValueError as exc:
         console.error(str(exc))
         return 2
-    if bool(getattr(args, "debug", False)) and not getattr(args, "debug_emit", None):
+    if cfg.debug and not getattr(args, "debug_emit", None):
         args.debug_emit = console.info
-    if bool(getattr(args, "debug", False)):
-        suffix = f" format={getattr(args, 'output_format', 'txt') or 'txt'}"
-        if getattr(args, "output", None):
+    if cfg.debug:
+        suffix = f" format={cfg.output_format}"
+        if cfg.output:
             suffix += f" output={args.output}"
         console.info("grpc audit started:" + suffix)
     runner = AuditCommandRunner(args=args, spec=build_grpc_spec(args), logger=logger, console=console)
@@ -81,7 +83,7 @@ def run_grpc_stage(args: Any, logger: Any) -> int:
             except OSError as exc:
                 console.error(f"failed to write grpc OpenAPI artifact: {exc}")
                 return 2
-    if bool(getattr(args, "debug", False)) and result.detected_count == 0 and hasattr(console, "warn"):
+    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all grpc targets are unreachable")
     return 0
 

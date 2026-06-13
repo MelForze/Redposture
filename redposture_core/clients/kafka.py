@@ -6,6 +6,8 @@ import socket
 import struct
 from typing import Any
 
+from . import transport
+
 KAFKA_CLIENT_ID = "redposture"
 KAFKA_API_VERSIONS = 18
 KAFKA_METADATA = 3
@@ -16,13 +18,17 @@ KAFKA_SASL_AUTHENTICATE = 36
 KAFKA_AUTH_ERROR_CODES = {29, 31, 58}
 KAFKA_MAX_FRAME = 16 * 1024 * 1024
 KAFKA_FETCH_MAX_BYTES = 1024 * 1024
-_CONNECTION_REFUSED_PREFIX = "connection refused"
-_CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _KAFKA_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("admin", "admin"),
     ("kafka", "kafka"),
     ("kafka", "password"),
 )
+
+# Connection-error classification + framed reads are shared via the transport layer.
+_is_connection_refused_error = transport.is_connection_refused
+_is_connection_timeout_error = transport.is_connection_timeout
+_is_connection_refused_fail_record = transport.is_connection_refused_fail_record
+_recv_exact = transport.recv_exact
 
 
 def open_kafka_socket(host: str, port: int, timeout: float) -> socket.socket:
@@ -76,20 +82,6 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     return friendly_error_from_exception(exc)
 
 
-def _is_connection_refused_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and text.startswith(_CONNECTION_REFUSED_PREFIX)
-
-
-def _is_connection_refused_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and _is_connection_refused_error(record.get("error"))
-
-
-def _is_connection_timeout_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and text.startswith(_CONNECTION_TIMEOUT_PREFIX)
-
-
 def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
     return str(record.get("status") or "") == "fail"
 
@@ -134,16 +126,6 @@ def _is_sasl_probe_candidate(message: str | None) -> bool:
         "end of file",
     )
     return any(needle in text for needle in needles)
-
-
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
-    data = b""
-    while len(data) < size:
-        chunk = sock.recv(size - len(data))
-        if not chunk:
-            raise ConnectionError("unexpected EOF")
-        data += chunk
-    return data
 
 
 def _recv_kafka_frame(sock: socket.socket) -> bytes:

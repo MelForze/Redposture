@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...audit_config import AuditConfig
 from ...console import Console
 from ...show_limits import dump_flag_enabled, dump_flag_limit
 from ...stage_runtime import (
@@ -36,7 +37,8 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
 
 
 def run_postgres_stage(args: Any, logger: Any) -> int:
-    console = Console(debug=bool(getattr(args, "debug", False)))
+    cfg = AuditConfig.from_namespace(args)
+    console = Console(debug=cfg.debug)
     if getattr(args, "password", None) is not None and getattr(args, "username", None) is None:
         args.username = "postgres"
     validation_rc = policy.validate_args(args, console)
@@ -61,11 +63,11 @@ def run_postgres_stage(args: Any, logger: Any) -> int:
     except ValueError as exc:
         console.error(str(exc))
         return 2
-    if bool(getattr(args, "debug", False)) and not getattr(args, "debug_emit", None):
+    if cfg.debug and not getattr(args, "debug_emit", None):
         args.debug_emit = console.info
-    if bool(getattr(args, "debug", False)):
-        suffix = f" format={getattr(args, 'output_format', 'txt') or 'txt'}"
-        if getattr(args, "output", None):
+    if cfg.debug:
+        suffix = f" format={cfg.output_format}"
+        if cfg.output:
             suffix += f" output={args.output}"
         console.info("postgres audit started:" + suffix)
     runner = AuditCommandRunner(args=args, spec=build_postgres_spec(args), logger=logger, console=console)
@@ -74,7 +76,7 @@ def run_postgres_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process postgres output: {exc}")
         return 2
-    if bool(getattr(args, "debug", False)) and result.detected_count == 0 and hasattr(console, "warn"):
+    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all postgres targets are unreachable")
     return 0
 
@@ -102,6 +104,7 @@ def _normalize_postgres_action_args(args: Any) -> None:
 
 
 def _run_postgres_shell(args: Any, console: Any) -> int:
+    cfg = AuditConfig.from_namespace(args)
     try:
         plan = build_postgres_plan(args)
     except ValueError as exc:
@@ -115,8 +118,8 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
     record = actions._audit_postgres_host(
         host=str(host),
         port=int(port),
-        timeout=float(getattr(args, "timeout", 5.0) or 5.0),
-        retries=int(getattr(args, "retries", 0) or 0),
+        timeout=cfg.timeout,
+        retries=cfg.retries,
         username=getattr(args, "username", None),
         password=getattr(args, "password", None),
         defcreds=bool(getattr(args, "defcreds", False)),
@@ -148,8 +151,8 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
             actions._pg_execute_remote_command(
                 host=str(host),
                 port=int(port),
-                timeout=float(getattr(args, "timeout", 5.0) or 5.0),
-                retries=int(getattr(args, "retries", 0) or 0),
+                timeout=cfg.timeout,
+                retries=cfg.retries,
                 username=username,
                 password=password,
                 database=database,
@@ -165,8 +168,8 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
         actions._pg_execute_sql_query(
             host=str(host),
             port=int(port),
-            timeout=float(getattr(args, "timeout", 5.0) or 5.0),
-            retries=int(getattr(args, "retries", 0) or 0),
+            timeout=cfg.timeout,
+            retries=cfg.retries,
             username=username,
             password=password,
             database=database,
