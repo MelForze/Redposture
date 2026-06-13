@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...audit_config import AuditConfig
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -33,7 +34,8 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
 
 
 def run_consul_stage(args: Any, logger: Any) -> int:
-    console = Console(debug=bool(getattr(args, "debug", False)))
+    cfg = AuditConfig.from_namespace(args)
+    console = Console(debug=cfg.debug)
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
@@ -57,7 +59,7 @@ def run_consul_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process consul output: {exc}")
         return 2
-    if bool(getattr(args, "debug", False)) and result.detected_count == 0:
+    if cfg.debug and result.detected_count == 0:
         console.warn("all consul targets are unreachable")
     if listener_info is not None:
         registered = any(bool(record.get("script_revshell")) for record in result.records)

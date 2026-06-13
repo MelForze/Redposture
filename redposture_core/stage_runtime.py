@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import audit_models as _audit_models
+from .audit_config import AuditConfig
 from .audit_models import StageTrace
 from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
 from .scheduler import BoundedScheduler
@@ -383,6 +384,7 @@ def build_basic_audit_plan(
     default_port: int,
     default_ports: Iterable[int] | None = None,
 ) -> AuditCommandPlan:
+    cfg = AuditConfig.from_namespace(args)
     try:
         ports = collect_scan_ports(getattr(args, "ports", None))
     except ValueError as exc:
@@ -419,9 +421,9 @@ def build_basic_audit_plan(
             group_hosts = filter_open_tcp_hosts_for_credential_file(
                 group_hosts,
                 port,
-                timeout=float(getattr(args, "timeout", 5.0) or 5.0),
-                workers=int(getattr(args, "workers", 1) or 1),
-                enabled=not bool(getattr(args, "proxy", None)),
+                timeout=cfg.timeout,
+                workers=cfg.workers,
+                enabled=not cfg.proxy,
             )
         targets_by_port[port] = (*targets_by_port.get(port, ()), *group_hosts)
         group_specs = tuple(getattr(group, "target_specs", ()) or ())
@@ -433,9 +435,9 @@ def build_basic_audit_plan(
         targets_by_port=targets_by_port,
         target_specs_by_port=target_specs_by_port,
         credential_runs=credential_runs,
-        output_path=getattr(args, "output", None),
-        output_format=str(getattr(args, "output_format", "txt") or "txt"),
-        workers=max(1, int(getattr(args, "workers", 1) or 1)),
+        output_path=cfg.output,
+        output_format=cfg.output_format,
+        workers=cfg.workers,
     )
 
 
@@ -443,9 +445,10 @@ def build_basic_credential_runs(args: Any) -> tuple[AuditCredentialRun, ...]:
     custom_runs = getattr(args, "_audit_credential_runs", None)
     if custom_runs is not None:
         return tuple(custom_runs)
-    username = getattr(args, "username", None)
-    password = getattr(args, "password", None)
-    token = getattr(args, "token", None) or getattr(args, "api_token", None)
+    cfg = AuditConfig.from_namespace(args)
+    username = cfg.username
+    password = cfg.password
+    token = cfg.token
     try:
         credential_file_entries = parse_username_password_credential_file(username, password)
     except ValueError as exc:
@@ -752,6 +755,7 @@ def _can_call_detail_renderer(func: Callable[..., Any]) -> bool:
 
 def _argument_value_for_hook(name: str, ctx: AuditHookContext) -> Any:
     args = ctx.args
+    cfg = AuditConfig.from_namespace(args)
     credential = ctx.credential
     target_scheme = str(ctx.target.scheme).lower() if ctx.target is not None and ctx.target.scheme else None
     if name == "host":
@@ -769,23 +773,23 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext) -> Any:
     if name == "preferred_scheme" and target_scheme in {"http", "https"}:
         return target_scheme
     if name == "timeout":
-        return float(getattr(args, "timeout", 5.0) or 5.0)
+        return cfg.timeout
     if name == "retries":
-        return int(getattr(args, "retries", 0) or 0)
+        return cfg.retries
     if name == "workers":
-        return int(getattr(args, "workers", 1) or 1)
+        return cfg.workers
     if name == "username":
-        return credential.username if credential.username is not None else getattr(args, "username", None)
+        return credential.username if credential.username is not None else cfg.username
     if name == "password":
-        return credential.password if credential.username is not None else getattr(args, "password", None)
+        return credential.password if credential.username is not None else cfg.password
     if name in {"token", "api_token"}:
         return credential.token or getattr(args, name, None) or getattr(args, "token", None)
     if name == "defcreds":
-        return bool(getattr(args, "defcreds", False)) and credential.source != "file"
+        return cfg.defcreds and credential.source != "file"
     if name == "run_deep_checks":
         return bool(ctx.run_deep_checks)
     if name == "debug":
-        return bool(getattr(args, "debug", False))
+        return cfg.debug
     if name == "debug_emit":
         return ctx.debug_emit
     if name == "proxy":
@@ -1287,6 +1291,7 @@ def run_basic_host_audit(
     -identical ones delegate here to avoid duplicating the skeleton. The module
     creates and passes `console` so it stays patchable in module-level tests."""
     name = label.lower()
+    cfg = AuditConfig.from_namespace(args)
     validation_rc = validate(args, console)
     if validation_rc is not None:
         return int(validation_rc)
@@ -1295,12 +1300,12 @@ def run_basic_host_audit(
     except ValueError as exc:
         console.error(str(exc))
         return 2
-    if bool(getattr(args, "debug", False)) and not getattr(args, "debug_emit", None):
+    if cfg.debug and not getattr(args, "debug_emit", None):
         args.debug_emit = console.info
-    if bool(getattr(args, "debug", False)):
-        suffix = f" format={getattr(args, 'output_format', 'txt') or 'txt'}"
-        if getattr(args, "output", None):
-            suffix += f" output={args.output}"
+    if cfg.debug:
+        suffix = f" format={cfg.output_format}"
+        if cfg.output:
+            suffix += f" output={cfg.output}"
         console.info(f"{name} audit started:" + suffix)
     runner = AuditCommandRunner(args=args, spec=build_spec(args), logger=logger, console=console)
     try:
@@ -1308,7 +1313,7 @@ def run_basic_host_audit(
     except OSError as exc:
         console.error(f"failed to process {name} output: {exc}")
         return 2
-    if bool(getattr(args, "debug", False)) and result.detected_count == 0 and hasattr(console, "warn"):
+    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn(f"all {name} targets are unreachable")
     return 0
 

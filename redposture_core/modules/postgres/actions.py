@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ...clients import transport
 from ...console import Console
 from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line
 from ...show_limits import (
@@ -28,6 +29,13 @@ from ...stage_runtime import (
 from ...utils import (
     utc_now_iso,
 )
+
+# Connection-error classification + framed reads are shared via the transport layer.
+_is_timeout_error = transport.is_connection_timeout
+_is_connection_timeout_fail_record = transport.is_connection_timeout_fail_record
+_is_connection_refused_error = transport.is_connection_refused
+_is_connection_refused_fail_record = transport.is_connection_refused_fail_record
+_recv_exact = transport.recv_exact
 
 _PG_PROTOCOL_VERSION = 196608
 _PG_MAX_MESSAGE_SIZE = 16 * 1024 * 1024
@@ -112,36 +120,6 @@ def _add_readline_history(readline_module: Any | None, line: str) -> None:
         readline_module.add_history(value)
     except Exception:
         return
-
-
-def _is_timeout_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return False
-    return "connection timeout" in text or "timed out" in text or "timeout" in text
-
-
-def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and _is_timeout_error(record.get("error"))
-
-
-def _is_connection_refused_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and "connection refused" in text
-
-
-def _is_connection_refused_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and _is_connection_refused_error(record.get("error"))
-
-
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
-    data = b""
-    while len(data) < size:
-        chunk = sock.recv(size - len(data))
-        if not chunk:
-            raise ConnectionError("unexpected EOF")
-        data += chunk
-    return data
 
 
 def _pg_send_message(sock: socket.socket, message_type: bytes, payload: bytes) -> None:

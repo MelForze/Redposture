@@ -12,6 +12,7 @@ from typing import Any
 
 from google.protobuf import descriptor_pb2
 
+from ...clients import transport
 from ...clients.grpc import (
     _build_auth_header,
     _build_basic_auth_header,
@@ -64,6 +65,11 @@ from ...utils import (
     as_list,
     utc_now_iso,
 )
+
+# Connection-error classification + framed reads are shared via the transport layer.
+_is_connection_refused_error = transport.is_connection_refused
+_is_connection_refused_fail_record = transport.is_connection_refused_fail_record
+_is_connection_timeout_error = transport.is_connection_timeout
 
 __all__ = [
     "descriptor_pb2",
@@ -174,20 +180,6 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     from ...utils import friendly_error_from_exception
 
     return friendly_error_from_exception(exc)
-
-
-def _is_connection_refused_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and text.startswith(_CONNECTION_REFUSED_PREFIX)
-
-
-def _is_connection_refused_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and _is_connection_refused_error(record.get("error"))
-
-
-def _is_connection_timeout_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and text.startswith(_CONNECTION_TIMEOUT_PREFIX)
 
 
 def _is_retryable_stage_error(value: Any) -> bool:

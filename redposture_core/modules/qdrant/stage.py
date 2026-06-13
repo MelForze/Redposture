@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...audit_config import AuditConfig
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -33,7 +34,8 @@ def build_qdrant_spec(args: Any) -> ModuleAuditSpec:
 
 
 def run_qdrant_stage(args: Any, logger: Any) -> int:
-    console = Console(debug=bool(getattr(args, "debug", False)))
+    cfg = AuditConfig.from_namespace(args)
+    console = Console(debug=cfg.debug)
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)

@@ -13,6 +13,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from ...clients import transport
 from ...console import Console
 from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line
 from ...show_limits import (
@@ -26,6 +27,12 @@ from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
 )
+
+# Connection-error classification + framed reads are shared via the transport layer.
+_is_timeout_error = transport.is_connection_timeout
+_is_connection_refused_error = transport.is_connection_refused
+_is_connection_timeout_fail_record = transport.is_connection_timeout_fail_record
+_is_connection_refused_fail_record = transport.is_connection_refused_fail_record
 
 _CH_DEFAULT_NATIVE_PORT = 9000
 _CH_DEFAULT_HTTP_PORT = 8123
@@ -124,24 +131,6 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     if "connection refused" in lower or "[errno 111]" in lower:
         return "connection refused (service is not listening on target port)"
     return _clip(text, 180)
-
-
-def _is_timeout_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and ("timed out" in text or "timeout" in text)
-
-
-def _is_connection_refused_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and "connection refused" in text
-
-
-def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and _is_timeout_error(record.get("error"))
-
-
-def _is_connection_refused_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and _is_connection_refused_error(record.get("error"))
 
 
 def _should_emit_status_line(record: dict[str, Any], output_format: str) -> bool:

@@ -9,6 +9,7 @@ import urllib.error
 from collections.abc import Callable
 from typing import Any
 
+from ...clients import transport
 from ...clients.http_api import HttpApiClient, HttpClientConfig
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line
@@ -21,8 +22,11 @@ from ...stage_runtime import (
 )
 from ...utils import utc_now_iso
 
-_CONNECTION_REFUSED_PREFIX = "connection refused"
-_CONNECTION_TIMEOUT_PREFIX = "connection timeout"
+# Connection-error classification + framed reads are shared via the transport layer.
+_is_connection_refused_error = transport.is_connection_refused
+_is_connection_refused_fail_record = transport.is_connection_refused_fail_record
+_is_connection_timeout_error = transport.is_connection_timeout
+
 _STAGE_DETECT_PROTOCOL = "detect_protocol"
 _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
@@ -53,20 +57,6 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     from ...utils import friendly_error_from_exception
 
     return friendly_error_from_exception(exc)
-
-
-def _is_connection_refused_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and text.startswith(_CONNECTION_REFUSED_PREFIX)
-
-
-def _is_connection_refused_fail_record(record: dict[str, Any]) -> bool:
-    return str(record.get("status") or "") == "fail" and _is_connection_refused_error(record.get("error"))
-
-
-def _is_connection_timeout_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and text.startswith(_CONNECTION_TIMEOUT_PREFIX)
 
 
 def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:

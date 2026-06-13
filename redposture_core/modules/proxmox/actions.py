@@ -15,6 +15,7 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Any
 
+from ...clients import transport
 from ...clients.http_api import HttpApiClient, HttpClientConfig
 from ...console import Console
 from ...rendering import BooleanColorRule, render_colored_marker_line
@@ -26,9 +27,11 @@ from ...utils import (
     utc_now_iso,
 )
 
+# Connection-error classification + framed reads are shared via the transport layer.
+_is_connection_refused_error = transport.is_connection_refused
+_is_connection_timeout_error = transport.is_connection_timeout
+
 _PROXMOX_API_PREFIX = "/api2/json"
-_CONNECTION_REFUSED_PREFIX = "connection refused"
-_CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _MAX_HTTP_BODY_BYTES = 262_144
 _MAX_FINDINGS_PER_TARGET = 200
 _MAX_FINDINGS_PER_ENDPOINT = 40
@@ -135,16 +138,6 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
     from ...utils import friendly_error_from_exception
 
     return friendly_error_from_exception(exc, tls_hint="try --insecure")
-
-
-def _is_connection_refused_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and text.startswith(_CONNECTION_REFUSED_PREFIX)
-
-
-def _is_connection_timeout_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and text.startswith(_CONNECTION_TIMEOUT_PREFIX)
 
 
 def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
