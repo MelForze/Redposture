@@ -418,8 +418,10 @@ def test_audit_etcd_targets_emits_detect_status_and_key_lines(monkeypatch) -> No
         show_keys: bool,
         dump_keys: bool,
         query_key: str | None,
+        dump_batch: int = 10000,
+        dump_delay: int = 20,
     ) -> dict[str, object]:
-        _ = (host, port, timeout, retries, show_keys, dump_keys, query_key)
+        _ = (host, port, timeout, retries, show_keys, dump_keys, query_key, dump_batch, dump_delay)
         return {
             "timestamp": "2026-03-27T00:00:00Z",
             "host": "127.0.0.1",
@@ -868,3 +870,141 @@ def test_run_etcd_stage_suppresses_unreachable_summary_without_debug(monkeypatch
     assert rc == 0
     warns = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
     assert not any("all etcd targets are unreachable" in msg for msg in warns)
+
+
+def test_next_key_b64_appends_null_byte() -> None:
+    # Continuation key is "<last key>\x00" so the next range starts strictly after it.
+    nxt = etcd._next_key_b64(etcd._b64_encode_text("/b"))
+    assert etcd._b64_decode_text(nxt) == "/b\x00"
+
+
+def test_stream_dump_v3_all_pages_through_ranges_with_continuation(monkeypatch) -> None:
+    b64 = etcd._b64_encode_text
+    page1 = json.dumps(
+        {"kvs": [{"key": b64("/a"), "value": b64("1")}, {"key": b64("/b"), "value": b64("2")}], "more": True}
+    )
+    page2 = json.dumps({"kvs": [{"key": b64("/c"), "value": b64("3")}], "more": False})
+    seen_keys: list[object] = []
+
+    def fake_request(host, port, method, path, timeout, *, payload=None):
+        _ = (host, port, method, timeout)
+        assert path == "/v3/kv/range"
+        assert payload is not None
+        assert payload["range_end"] == etcd._ETCD_V3_ALL_RANGE_KEY_B64
+        assert payload["limit"] == 2
+        seen_keys.append(payload["key"])
+        return (200, page1) if payload["key"] == etcd._ETCD_V3_ALL_RANGE_KEY_B64 else (200, page2)
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    sleeps: list[float] = []
+    monkeypatch.setattr(etcd.time, "sleep", lambda s: sleeps.append(s))
+
+    entries, err = etcd._stream_dump_v3_all("127.0.0.1", 2379, 1.0, batch=2, delay_ms=20)
+
+    assert err is None
+    assert [entry["key"] for entry in entries] == ["/a", "/b", "/c"]
+    assert [entry["value"] for entry in entries] == ["1", "2", "3"]
+    # Page 2 continues from the key immediately after the last one returned in page 1.
+    assert seen_keys[0] == etcd._ETCD_V3_ALL_RANGE_KEY_B64
+    assert seen_keys[1] == etcd._next_key_b64(b64("/b"))
+    assert sleeps == [0.02]  # one pause between the two pages
+
+
+def test_stream_dump_v3_all_respects_total_limit(monkeypatch) -> None:
+    b64 = etcd._b64_encode_text
+    calls = {"n": 0}
+
+    def fake_request(host, port, method, path, timeout, *, payload=None):
+        _ = (host, port, method, timeout, path)
+        calls["n"] += 1
+        assert payload["limit"] == 3  # min(batch=10, remaining=3)
+        kvs = [{"key": b64(f"/k{i}"), "value": b64(str(i))} for i in range(3)]
+        return 200, json.dumps({"kvs": kvs, "more": True})
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    monkeypatch.setattr(etcd.time, "sleep", lambda _s: None)
+
+    entries, err = etcd._stream_dump_v3_all("h", 2379, 1.0, batch=10, delay_ms=0, limit=3)
+
+    assert err is None
+    assert [entry["key"] for entry in entries] == ["/k0", "/k1", "/k2"]
+    assert calls["n"] == 1  # stops once the cap is reached, no extra page
+
+
+def test_stream_dump_v3_all_zero_delay_does_not_sleep(monkeypatch) -> None:
+    b64 = etcd._b64_encode_text
+    calls = {"n": 0}
+
+    def fake_request(host, port, method, path, timeout, *, payload=None):
+        _ = (host, port, method, timeout, path, payload)
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 200, json.dumps({"kvs": [{"key": b64("/a"), "value": b64("1")}], "more": True})
+        return 200, json.dumps({"kvs": [{"key": b64("/b"), "value": b64("2")}], "more": False})
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    sleeps: list[float] = []
+    monkeypatch.setattr(etcd.time, "sleep", lambda s: sleeps.append(s))
+
+    entries, err = etcd._stream_dump_v3_all("h", 2379, 1.0, batch=1, delay_ms=0)
+
+    assert err is None
+    assert [entry["key"] for entry in entries] == ["/a", "/b"]
+    assert sleeps == []  # delay_ms=0 disables inter-page pauses
+
+
+def test_stream_dump_v3_all_reports_auth_required(monkeypatch) -> None:
+    monkeypatch.setattr(etcd, "_http_json_request", lambda *_a, **_k: (401, ""))
+    monkeypatch.setattr(etcd.time, "sleep", lambda _s: None)
+
+    entries, err = etcd._stream_dump_v3_all("h", 2379, 1.0, batch=10, delay_ms=0)
+
+    assert entries is None
+    assert err == "authentication required"
+
+
+def test_audit_etcd_host_v3_dump_streams_paged_ranges(monkeypatch) -> None:
+    b64 = etcd._b64_encode_text
+
+    def fake_request(host, port, method, path, timeout, *, payload=None):
+        _ = (host, port, method, timeout)
+        if path == "/version":
+            return 200, '{"etcdserver":"3.5.14"}'
+        if path == "/v2/keys?recursive=true":
+            return 404, ""
+        if path == "/v3/auth/status":
+            return 500, "auth status disabled by gateway"
+        if path == "/v3/kv/range":
+            assert payload is not None
+            if payload.get("count_only"):
+                return 200, '{"count":"3"}'
+            if payload["key"] == etcd._ETCD_V3_ALL_RANGE_KEY_B64:
+                return 200, json.dumps(
+                    {
+                        "kvs": [{"key": b64("/a"), "value": b64("1")}, {"key": b64("/b"), "value": b64("2")}],
+                        "more": True,
+                    }
+                )
+            return 200, json.dumps({"kvs": [{"key": b64("/c"), "value": b64("3")}], "more": False})
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_etcd._http_json_request", fake_request)
+    monkeypatch.setattr(etcd.time, "sleep", lambda _s: None)
+
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=True,
+        dump_keys=True,
+        query_key=None,
+        dump_batch=2,
+        dump_delay=0,
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert record["auth_required"] is False
+    # Streamed across two range pages; key names derived from the dumped entries.
+    assert record["key_values"] == ["/a:1", "/b:2", "/c:3"]
+    assert record["keys"] == ["/a", "/b", "/c"]

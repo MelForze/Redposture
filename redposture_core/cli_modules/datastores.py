@@ -5,7 +5,12 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
-from ..show_limits import optional_dump_count_kwargs, optional_show_count_kwargs
+from ..show_limits import (
+    non_negative_int,
+    optional_dump_count_kwargs,
+    optional_show_count_kwargs,
+    positive_int,
+)
 
 
 def configure_redis_parser(
@@ -66,6 +71,22 @@ def configure_redis_parser(
         ),
     )
     actions.add_argument(
+        "--dump-batch",
+        dest="dump_batch",
+        type=positive_int,
+        default=10000,
+        metavar="N",
+        help="Dump page size: keys are dumped gradually in pages of N (default 10000) instead of one big dump.",
+    )
+    actions.add_argument(
+        "--dump-delay",
+        dest="dump_delay",
+        type=non_negative_int,
+        default=20,
+        metavar="MS",
+        help="Pause in milliseconds between dump pages to pace server load (default 20, 0 disables).",
+    )
+    actions.add_argument(
         "-key",
         "--key",
         dest="key",
@@ -120,6 +141,22 @@ def configure_etcd_parser(
         **optional_dump_count_kwargs(
             "Dump etcd key values. Optional count limits dumped keys when no -key/--key is selected."
         ),
+    )
+    actions.add_argument(
+        "--dump-batch",
+        dest="dump_batch",
+        type=positive_int,
+        default=10000,
+        metavar="N",
+        help="Dump page size: v3 keys are dumped gradually in ranges of N (default 10000) instead of one big dump.",
+    )
+    actions.add_argument(
+        "--dump-delay",
+        dest="dump_delay",
+        type=non_negative_int,
+        default=20,
+        metavar="MS",
+        help="Pause in milliseconds between dump pages to pace server load (default 20, 0 disables).",
     )
     actions.add_argument(
         "-key",

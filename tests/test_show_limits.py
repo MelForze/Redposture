@@ -9,12 +9,22 @@ from redposture_core.show_limits import (
     dump_flag_limit,
     limit_metadata,
     limit_sequence,
+    non_negative_int,
     optional_dump_count_kwargs,
     optional_show_count_kwargs,
     positive_int,
     show_flag_enabled,
     show_flag_limit,
 )
+
+
+def test_non_negative_int_accepts_zero_rejects_negative_and_non_int() -> None:
+    assert non_negative_int("0") == 0
+    assert non_negative_int("20") == 20
+    with pytest.raises(argparse.ArgumentTypeError, match=">= 0"):
+        non_negative_int("-1")
+    with pytest.raises(argparse.ArgumentTypeError, match="integer"):
+        non_negative_int("abc")
 
 
 def test_positive_int_and_optional_argparse_kwargs() -> None:

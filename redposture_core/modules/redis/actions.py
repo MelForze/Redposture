@@ -201,6 +201,81 @@ def _scan_redis_keys(
     return keys, None
 
 
+# Upper bound on SCAN iterations for a streaming dump. Termination is normally the
+# cursor returning to "0"; this is only a guard against a server that never converges
+# (1M rounds * COUNT 500 ~= 500M keys, far above any realistic keyspace).
+_DUMP_MAX_SCAN_ROUNDS = 1_000_000
+
+
+def _stream_dump_redis_keys(
+    sock: socket.socket,
+    *,
+    batch: int,
+    delay_ms: int,
+    limit: int | None = None,
+    count: int = 500,
+) -> tuple[list[dict[str, str | None]], str | None]:
+    """Dump key values gradually, one SCAN page at a time.
+
+    Instead of scanning the whole keyspace, sorting it, then dumping every value in one
+    burst, this interleaves enumeration and value reads: SCAN until ``batch`` keys are
+    buffered, dump that page, pause ``delay_ms`` milliseconds, then continue from the same
+    cursor. This paces the load on the server (so large keyspaces are less likely to knock
+    it over) and bounds the keyspace held in memory to one page at a time. Sorting is
+    therefore per page rather than global. ``limit`` caps the total number of dumped
+    entries; ``None`` dumps everything.
+    """
+    page_size = max(1, batch)
+    delay_seconds = max(0, delay_ms) / 1000.0
+    entries: list[dict[str, str | None]] = []
+    pending: list[str] = []
+    cursor = "0"
+    rounds = 0
+
+    def _flush_page(keys_page: list[str]) -> bool:  # returns True when the total cap is reached
+        for key_name in sorted(keys_page):
+            value_text, value_error = _dump_redis_key_value(sock, key_name)
+            if value_error:
+                entries.append(_redis_kv_entry(key_name, error=_format_redis_text(value_error)))
+            else:
+                entries.append(_redis_kv_entry(key_name, value_text))
+            if limit is not None and len(entries) >= limit:
+                return True
+        return False
+
+    while True:
+        rounds += 1
+        if rounds > _DUMP_MAX_SCAN_ROUNDS:
+            return entries, "SCAN aborted: too many iterations"
+
+        resp_type, resp_value = _send_cmd(sock, "SCAN", cursor, "COUNT", str(count))
+        if resp_type != "array" or not isinstance(resp_value, list) or len(resp_value) != 2:
+            return entries, f"unexpected SCAN response: {resp_type} {resp_value}"
+
+        next_cursor = str(resp_value[0] if resp_value[0] is not None else "0")
+        scan_batch = resp_value[1]
+        if not isinstance(scan_batch, list):
+            return entries, f"unexpected SCAN keys payload: {type(scan_batch).__name__}"
+
+        pending.extend(str(item) for item in scan_batch)
+        cursor = next_cursor
+
+        while len(pending) >= page_size:
+            page = pending[:page_size]
+            del pending[:page_size]
+            if _flush_page(page):
+                return entries, None
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+
+        if cursor == "0":
+            break
+
+    if pending:
+        _flush_page(pending)
+    return entries, None
+
+
 def _format_redis_text(value: Any) -> str:
     text = str(value if value is not None else "")
     return text.replace("\n", "\\n")
@@ -310,6 +385,8 @@ def _audit_redis_host(
     query_key: str | None,
     show_keys_limit: int | None = None,
     dump_keys_limit: int | None = None,
+    dump_batch: int = 10000,
+    dump_delay: int = 20,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -387,25 +464,26 @@ def _audit_redis_host(
                     if count_error:
                         auth_error = count_error if auth_error is None else f"{auth_error}; {count_error}"
 
-                if (show_keys or dump_keys) and can_read_keys:
-                    scan_limit = show_keys_limit if show_keys and not dump_keys else None
-                    keys, key_error = _scan_redis_keys(sock, limit=scan_limit)
+                if dump_keys and can_read_keys:
+                    dumped_entries, dump_error = _stream_dump_redis_keys(
+                        sock,
+                        batch=dump_batch,
+                        delay_ms=dump_delay,
+                        limit=dump_keys_limit,
+                    )
+                    if dump_error:
+                        auth_error = dump_error if auth_error is None else f"{auth_error}; {dump_error}"
+                    key_value_entries = dumped_entries
+                    key_values = [_redis_kv_entry_text(item) for item in dumped_entries]
+                    keys = [str(entry.get("key") or "") for entry in dumped_entries]
+                    if key_count is None:
+                        key_count = len(dumped_entries)
+                elif show_keys and can_read_keys:
+                    keys, key_error = _scan_redis_keys(sock, limit=show_keys_limit)
                     if key_error:
                         auth_error = key_error if auth_error is None else f"{auth_error}; {key_error}"
                     if key_count is None and isinstance(keys, list):
                         key_count = len(keys)
-                    if dump_keys and isinstance(keys, list):
-                        dumped_entries: list[dict[str, str | None]] = []
-                        for key_name in sorted(str(item) for item in keys):
-                            value_text, value_error = _dump_redis_key_value(sock, key_name)
-                            if value_error:
-                                dumped_entries.append(_redis_kv_entry(key_name, error=_format_redis_text(value_error)))
-                            else:
-                                dumped_entries.append(_redis_kv_entry(key_name, value_text))
-                            if dump_keys_limit is not None and len(dumped_entries) >= dump_keys_limit:
-                                break
-                        key_value_entries = dumped_entries
-                        key_values = [_redis_kv_entry_text(item) for item in dumped_entries]
 
                 if query_key and can_read_keys:
                     key_name = query_key.strip()
@@ -689,6 +767,8 @@ def _call_audit_redis_host_with_stage_debug(
     query_key: str | None,
     show_keys_limit: int | None = None,
     dump_keys_limit: int | None = None,
+    dump_batch: int = 10000,
+    dump_delay: int = 20,
     *,
     run_deep_checks: bool,
     debug: bool,
@@ -708,6 +788,8 @@ def _call_audit_redis_host_with_stage_debug(
         query_key if run_deep_checks else None,
         show_keys_limit=show_keys_limit if run_deep_checks else None,
         dump_keys_limit=dump_keys_limit if run_deep_checks else None,
+        dump_batch=dump_batch,
+        dump_delay=dump_delay,
     )
 
     result: dict[str, Any] = dict(record)
