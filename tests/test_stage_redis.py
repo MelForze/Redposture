@@ -250,7 +250,17 @@ def test_audit_redis_host_open_access_reads_keys_and_query(monkeypatch: pytest.M
     )
     monkeypatch.setattr(redis_stage, "_send_cmd", lambda *_args, **_kwargs: ("simple", "PONG"))
     monkeypatch.setattr(redis_stage, "_count_redis_keys", lambda *_args, **_kwargs: (2, None))
-    monkeypatch.setattr(redis_stage, "_scan_redis_keys", lambda *_args, **_kwargs: (["b", "a"], None))
+    # Dumping now streams pages through _stream_dump_redis_keys (SCAN page -> dump -> delay)
+    # instead of scanning the whole keyspace up front; record["keys"] reflects the dumped
+    # (per-page sorted) entries rather than raw SCAN order.
+    monkeypatch.setattr(
+        redis_stage,
+        "_stream_dump_redis_keys",
+        lambda *_args, **_kwargs: (
+            [redis_stage._redis_kv_entry("a", "1"), redis_stage._redis_kv_entry("b", "2")],
+            None,
+        ),
+    )
     monkeypatch.setattr(
         redis_stage,
         "_dump_redis_key_value",
@@ -272,7 +282,7 @@ def test_audit_redis_host_open_access_reads_keys_and_query(monkeypatch: pytest.M
 
     assert record["status"] == "open_no_auth"
     assert record["key_count"] == 2
-    assert record["keys"] == ["b", "a"]
+    assert record["keys"] == ["a", "b"]
     assert record["key_values"] == ["a:1", "b:2"]
     assert record["query_key_value"] == "a:1"
 
@@ -1194,3 +1204,68 @@ def test_audit_redis_targets_emits_two_pass_debug_markers(monkeypatch: pytest.Mo
     assert any("pass=1 detect start total=1" in line for line in debug_lines)
     assert any("stage2_gate=run reason=status=open_no_auth" in line for line in debug_lines)
     assert any("pass=2 deep complete processed=1" in line for line in debug_lines)
+
+
+def test_stream_dump_redis_keys_pages_and_delays(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Two SCAN pages: cursor "0" -> "5" with three keys, then cursor "5" -> "0" with one key.
+    scan_pages = iter(
+        [
+            ("array", ["5", ["k3", "k1", "k2"]]),
+            ("array", ["0", ["k4"]]),
+        ]
+    )
+
+    def fake_send_cmd(_sock: object, *parts: str) -> tuple[str, object]:
+        assert parts[0] == "SCAN"
+        return next(scan_pages)
+
+    monkeypatch.setattr(redis_stage, "_send_cmd", fake_send_cmd)
+    monkeypatch.setattr(redis_stage, "_dump_redis_key_value", lambda _s, k: (f"v-{k}", None))
+    sleeps: list[float] = []
+    monkeypatch.setattr(redis_stage.time, "sleep", lambda s: sleeps.append(s))
+
+    entries, err = redis_stage._stream_dump_redis_keys(object(), batch=2, delay_ms=20)
+
+    assert err is None
+    # Page 1 dumps the first two buffered keys (sorted: k1,k3); the leftover k2 carries into
+    # page 2 with k4 from the next SCAN call (sorted: k2,k4). Sorting is per page, not global.
+    assert [entry["key"] for entry in entries] == ["k1", "k3", "k2", "k4"]
+    assert [entry["value"] for entry in entries] == ["v-k1", "v-k3", "v-k2", "v-k4"]
+    # One pause per flushed page (default 20ms -> 0.02s), not per key.
+    assert sleeps == [0.02, 0.02]
+
+
+def test_stream_dump_redis_keys_respects_total_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    scan_pages = iter([("array", ["0", ["a", "b", "c", "d", "e"]])])
+    monkeypatch.setattr(redis_stage, "_send_cmd", lambda _s, *_p: next(scan_pages))
+    monkeypatch.setattr(redis_stage, "_dump_redis_key_value", lambda _s, k: (f"v-{k}", None))
+    monkeypatch.setattr(redis_stage.time, "sleep", lambda _s: None)
+
+    entries, err = redis_stage._stream_dump_redis_keys(object(), batch=10, delay_ms=0, limit=3)
+
+    assert err is None
+    assert [entry["key"] for entry in entries] == ["a", "b", "c"]
+
+
+def test_stream_dump_redis_keys_zero_delay_does_not_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    scan_pages = iter([("array", ["0", ["a", "b"]])])
+    monkeypatch.setattr(redis_stage, "_send_cmd", lambda _s, *_p: next(scan_pages))
+    monkeypatch.setattr(redis_stage, "_dump_redis_key_value", lambda _s, k: (f"v-{k}", None))
+    sleeps: list[float] = []
+    monkeypatch.setattr(redis_stage.time, "sleep", lambda s: sleeps.append(s))
+
+    entries, err = redis_stage._stream_dump_redis_keys(object(), batch=1, delay_ms=0)
+
+    assert err is None
+    assert [entry["key"] for entry in entries] == ["a", "b"]
+    assert sleeps == []  # delay_ms=0 disables inter-page pauses
+
+
+def test_stream_dump_redis_keys_reports_bad_scan_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(redis_stage, "_send_cmd", lambda *_a, **_k: ("simple", "PONG"))
+    monkeypatch.setattr(redis_stage.time, "sleep", lambda _s: None)
+
+    entries, err = redis_stage._stream_dump_redis_keys(object(), batch=10, delay_ms=0)
+
+    assert entries == []
+    assert err is not None and "unexpected SCAN response" in err

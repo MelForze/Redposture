@@ -889,6 +889,14 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         if raw is None and alias:
             raw = getattr(args, alias, False)
         return show_flag_enabled(raw if raw is not None else False)
+    # Numeric dump-pacing controls (not boolean dump toggles): resolve to their int
+    # value before the boolean `dump_*` branch below would coerce them via
+    # dump_flag_enabled. Defaults mirror the CLI/audit defaults.
+    if name in {"dump_batch", "dump_delay"}:
+        raw = getattr(args, name, None)
+        if raw is not None:
+            return int(raw)
+        return 10000 if name == "dump_batch" else 20
     if name.startswith("dump_") or name in {
         "dump",
         "dump_requested",
