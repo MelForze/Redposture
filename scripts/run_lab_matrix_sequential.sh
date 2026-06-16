@@ -398,7 +398,7 @@ run_redis_cases() {
   run_case redis redis_multi_ports 0 redis -t 127.0.0.1 -u redis -p redis --ports "6379,26380,26381,26382,26383" --show-keys
   run_text_case redis redis_debug_smoke 0 redis -t 127.0.0.1 -u redis -p redis --debug
   if is_extended_matrix; then
-    run_case redis redis_extended_key_dump_count 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --key offlineStocks:city_4949:552400 --show-keys 5 --dump 3
+    run_case redis redis_extended_key_dump_count 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --key offlineStocks:city_4949:552400 --show-keys 5 --dump 3 --dump-batch 2 --dump-delay 0
     run_case redis redis_extended_defcreds 0 redis -t 127.0.0.1 --port 6379 --defcreds --show-keys 3
   fi
 }
@@ -411,7 +411,7 @@ run_etcd_cases() {
   run_case etcd etcd_multi_instance_urls 0 etcd -t "http://127.0.0.1:2379/v2/keys,http://127.0.0.1:23790/v2/keys,http://127.0.0.1:23791/v2/keys,http://127.0.0.1:23792/v2/keys,http://127.0.0.1:23793/v2/keys" --show-keys
   run_text_case etcd etcd_debug_smoke 0 etcd -t 127.0.0.1 --port 2379 --debug
   if is_extended_matrix; then
-    run_case etcd etcd_extended_key_dump_count 0 etcd -t 127.0.0.1 --port 2379 --key /offlineStocks:city_4949:552400 --show-keys 5 --dump 3
+    run_case etcd etcd_extended_key_dump_count 0 etcd -t 127.0.0.1 --port 2379 --key /offlineStocks:city_4949:552400 --show-keys 5 --dump 3 --dump-batch 2 --dump-delay 0
     run_case etcd etcd_extended_ports_flag 0 etcd -t 127.0.0.1 --ports 2379 --show-keys 3
   fi
 }

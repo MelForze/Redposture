@@ -19,6 +19,16 @@ def positive_int(value: str) -> int:
     return number
 
 
+def non_negative_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("value must be an integer") from exc
+    if number < 0:
+        raise argparse.ArgumentTypeError("value must be >= 0")
+    return number
+
+
 def optional_show_count_kwargs(help_text: str) -> dict[str, Any]:
     return {
         "nargs": "?",

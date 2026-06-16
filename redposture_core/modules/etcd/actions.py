@@ -214,6 +214,21 @@ def _b64_decode_text(value: Any) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _next_key_b64(key_b64: str) -> str:
+    """Return the base64 of the key immediately after ``key_b64``.
+
+    etcd range pagination continues from ``last_key + \\x00`` (the smallest key strictly
+    greater than the last one returned). Works on the raw key bytes so binary keys page
+    correctly.
+    """
+    padded = key_b64 + ("=" * (-len(key_b64) % 4))
+    try:
+        raw = base64.b64decode(padded, validate=False)
+    except Exception:
+        raw = b""
+    return base64.b64encode(raw + b"\x00").decode("ascii")
+
+
 def _collect_v2_pairs(node: Any, sink: list[tuple[str, str]]) -> None:
     if not isinstance(node, dict):
         return
@@ -304,6 +319,78 @@ def _dump_v3_all(
     return result, None
 
 
+def _stream_dump_v3_all(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    batch: int,
+    delay_ms: int,
+    limit: int | None = None,
+) -> tuple[list[dict[str, str | None]] | None, str | None]:
+    """Dump the whole v3 keyspace gradually, one range page at a time.
+
+    Instead of one ``/v3/kv/range`` over the entire keyspace (which forces etcd to
+    materialise the full response in a single shot -- it can exceed the server's response
+    size limit and get truncated, on top of being a load spike), this pages through the
+    range with ``limit`` + a continuation key (``last_key + \\x00``), pausing ``delay_ms``
+    milliseconds between pages. ``limit`` caps the total number of dumped entries;
+    ``None`` dumps everything.
+    """
+    page_size = max(1, batch)
+    delay_seconds = max(0, delay_ms) / 1000.0
+    entries: list[dict[str, str | None]] = []
+    start_key_b64 = _ETCD_V3_ALL_RANGE_KEY_B64
+
+    while True:
+        page_limit = page_size
+        if limit is not None:
+            remaining = limit - len(entries)
+            if remaining <= 0:
+                break
+            page_limit = min(page_size, remaining)
+
+        request_payload: dict[str, Any] = {
+            "key": start_key_b64,
+            "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
+            "limit": page_limit,
+        }
+        status, body = _http_json_request(host, port, "POST", "/v3/kv/range", timeout, payload=request_payload)
+        if status in (401, 403) or _body_indicates_auth_required(body):
+            return (entries if entries else None), "authentication required"
+        if status != 200:
+            return (entries if entries else None), f"/v3/kv/range returned status {status}"
+
+        payload = _load_json(body)
+        if payload is None:
+            return (entries if entries else None), "/v3/kv/range returned invalid JSON"
+        kvs = payload.get("kvs")
+        if not isinstance(kvs, list):
+            break
+
+        last_key_b64: str | None = None
+        for item in kvs:
+            if not isinstance(item, dict):
+                continue
+            raw_key_b64 = item.get("key")
+            if isinstance(raw_key_b64, str):
+                last_key_b64 = raw_key_b64  # advance past every returned key, even empty-decoding ones
+            key = _b64_decode_text(raw_key_b64)
+            if not key:
+                continue
+            value = _format_etcd_text(_b64_decode_text(item.get("value")))
+            entries.append(_etcd_kv_entry(key, value))
+
+        if not bool(payload.get("more")) or last_key_b64 is None:
+            break
+        start_key_b64 = _next_key_b64(last_key_b64)
+        if delay_seconds > 0:
+            time.sleep(delay_seconds)
+
+    entries.sort(key=lambda item: str(item.get("key") or ""))
+    return entries, None
+
+
 def _dump_v3_key(host: str, port: int, key: str, timeout: float) -> tuple[dict[str, str | None] | None, str | None]:
     status, body = _http_json_request(
         host,
@@ -342,6 +429,8 @@ def _audit_etcd_host(
     query_key: str | None,
     show_keys_limit: int | None = None,
     dump_keys_limit: int | None = None,
+    dump_batch: int = 10000,
+    dump_delay: int = 20,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -440,12 +529,25 @@ def _audit_etcd_host(
                         if all_key_values is None:
                             key_dump_error = "/v2/keys returned invalid JSON"
                     elif v3_supported:
-                        all_key_values, key_dump_error = _dump_v3_all(
-                            host,
-                            port,
-                            timeout,
-                            limit=show_keys_limit if show_keys and not dump_keys else None,
-                        )
+                        if dump_keys:
+                            # Stream the dump in paged ranges instead of one keyspace-wide
+                            # range; key names for --show-keys are derived from the dumped
+                            # entries below (same approach as the Redis dump).
+                            all_key_values, key_dump_error = _stream_dump_v3_all(
+                                host,
+                                port,
+                                timeout,
+                                batch=dump_batch,
+                                delay_ms=dump_delay,
+                                limit=dump_keys_limit,
+                            )
+                        else:
+                            all_key_values, key_dump_error = _dump_v3_all(
+                                host,
+                                port,
+                                timeout,
+                                limit=show_keys_limit,
+                            )
 
                     if isinstance(all_key_values, list):
                         if show_keys:
@@ -748,6 +850,8 @@ def _call_audit_etcd_host_with_stage_debug(
     query_key: str | None,
     show_keys_limit: int | None = None,
     dump_keys_limit: int | None = None,
+    dump_batch: int = 10000,
+    dump_delay: int = 20,
     *,
     run_deep_checks: bool,
     debug: bool,
@@ -767,6 +871,8 @@ def _call_audit_etcd_host_with_stage_debug(
         show_keys if run_deep_checks else False,
         dump_keys if run_deep_checks else False,
         query_key if run_deep_checks else None,
+        dump_batch=dump_batch,
+        dump_delay=dump_delay,
         **audit_limit_kwargs,
     )
 
