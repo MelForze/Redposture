@@ -41,6 +41,40 @@ if [ ! -d "${LAB_DIR}/services" ]; then
   exit 2
 fi
 
+# P3-G: pre-run port cleanup. Stops any docker container or host process occupying a lab
+# port before the matrix starts. Without this, a leftover container/process (e.g. user-side
+# `grafana` on :3000 from another project) silently makes the lab service refuse to bind,
+# and the matrix audits whatever was already on that port -- producing confusing "service
+# is not <module>" failures that look like a regression in the audit code.
+LAB_PORTS=(
+  3000 5432 6379 9000 9090 9100 9115 9121 9187 9216 9290 9308
+  15000 15432 15433 16379 17777 18123 19000 19090 19100 19102 19104 19113 19114 19115
+  19117 19121 19128 19131 19150 19182 19187 19219 19221 19290 19308 19399 19419
+  19121 22379 22380 23790 23791 23792 23793 25432 25433 25434 25435 25439 26380 26381
+  26382 26383 26380 26443 26444 26445 26446 26447 27017 27018 28006 29115 31521 31522
+  31523 31524 8123 8500 8501 8502 8503 8504 2379 5672 9092 9200 1521 6443 22181 22182
+  22183 22184 9876 9877 9878 9879
+)
+echo "== pre-run: ensuring lab ports are free =="
+freed=0
+for port in $(printf "%s\n" "${LAB_PORTS[@]}" | sort -un); do
+  # Stop any docker container publishing that port (most common cause)
+  cids=$(docker ps -q --filter "publish=${port}" 2>/dev/null || true)
+  if [ -n "${cids}" ]; then
+    for cid in ${cids}; do
+      name=$(docker inspect -f '{{.Name}}' "${cid}" 2>/dev/null | sed 's|^/||')
+      # Don't touch redposture lab containers themselves (they get started/stopped per service block)
+      case "${name}" in
+        redposture-lab-*) continue ;;
+      esac
+      echo "  port ${port}: stopping container ${name} (cid=${cid:0:12})"
+      docker rm -f "${cid}" >/dev/null 2>&1 || true
+      freed=$((freed + 1))
+    done
+  fi
+done
+echo "== pre-run: freed ${freed} occupant(s) =="
+
 is_extended_matrix() {
   [ "${MATRIX_PROFILE}" = "extended" ]
 }
@@ -311,6 +345,15 @@ run_postgres_cases() {
     run_case postgres postgres_extended_query_privs 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --database postgres --table redposture.demo_accounts --show-columns 5 --column username,password --rows --dump 5 --sql-cmd "select username, role from redposture.demo_accounts order by id limit 2" --privesc-check
     run_case postgres postgres_extended_execute 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --execute "id"
     run_case postgres postgres_extended_os_read 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --os-read /etc/hostname
+    # postgres-alt accepts neither postgres:postgres nor pgbouncer:pgbouncer -- exercises
+    # the 5.5.1 path that surfaces ALL attempted defaults in the output (previously only
+    # unit-test covered). Runtime attaches `attempted_credentials`; postgres render
+    # produces one `[-] user:pass` line per attempt.
+    run_case postgres postgres_extended_defcreds_both_fail 0 postgres -t 127.0.0.1 --port 25439 --defcreds
+    # P4-D idempotency twin of postgres_default.
+    run_case postgres postgres_idempotency 0 postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables --dump 20
+    # P4-E fuzz: empty credentials must be rejected at parse time.
+    run_case postgres fuzz_postgres_empty_credentials 2 postgres -t 127.0.0.1 -u "" -p "" --show-databases
   fi
 }
 
@@ -324,6 +367,10 @@ run_mongodb_cases() {
   if is_extended_matrix; then
     run_case mongodb mongodb_extended_document_index_cmd 0 mongodb -t 127.0.0.1 --port 27017 --auth-db admin --database redposture --collection demo_accounts --document 1 --projection '{"username":1,"role":1}' --show-indexes 5 --index username_1 --nosql-cmd '{"dbStats":1}'
     run_case mongodb mongodb_extended_invalid_document_query 2 mongodb -t 127.0.0.1 --port 27017 --database redposture --collection demo_accounts --document 1 --query '{"role":"admin"}'
+    # P4-D idempotency twin of mongodb_auth (the cleaner of the two mongo bases).
+    run_case mongodb mongodb_idempotency 0 mongodb -t 127.0.0.1 --port 27018 -u root -p root --show-databases --show-collections --dump 20
+    # P4-E fuzz: zero timeout must be rejected at parse.
+    run_case mongodb fuzz_mongodb_zero_timeout 2 mongodb -t 127.0.0.1 --timeout 0 --show-databases
   fi
 }
 
@@ -400,6 +447,18 @@ run_redis_cases() {
   if is_extended_matrix; then
     run_case redis redis_extended_key_dump_count 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --key offlineStocks:city_4949:552400 --show-keys 5 --dump 3 --dump-batch 2 --dump-delay 0
     run_case redis redis_extended_defcreds 0 redis -t 127.0.0.1 --port 6379 --defcreds --show-keys 3
+    # Force-paged dump (batch=1 -> one page per key). Exercises the SCAN-cursor streaming
+    # loop end-to-end on a seeded keyspace and verifies that all keys still surface.
+    run_case redis redis_extended_paged_dump 0 redis -t 127.0.0.1 --port 6379 -u redis -p redis --dump --dump-batch 1 --dump-delay 0
+    # P4-D idempotency twin of redis_default. Must produce identical normalized output.
+    run_case redis redis_idempotency 0 redis -t 127.0.0.1 -u redis -p redis --show-keys --dump
+    # P4-C mutate-config: same case with different --show-keys values. Each must produce
+    # exactly its N entries (or fewer when keyspace is smaller).
+    run_case redis redis_mutate_show_keys_3 0 redis -t 127.0.0.1 -u redis -p redis --show-keys 3
+    run_case redis redis_mutate_show_keys_100 0 redis -t 127.0.0.1 -u redis -p redis --show-keys 100
+    # P4-E fuzz cases. CLI must reject these with exit=2 without crashing.
+    run_case redis fuzz_redis_invalid_port_negative 2 redis -t 127.0.0.1 --port -1 --show-keys
+    run_case redis fuzz_redis_invalid_port_huge 2 redis -t 127.0.0.1 --port 99999 --show-keys
   fi
 }
 
@@ -413,6 +472,13 @@ run_etcd_cases() {
   if is_extended_matrix; then
     run_case etcd etcd_extended_key_dump_count 0 etcd -t 127.0.0.1 --port 2379 --key /offlineStocks:city_4949:552400 --show-keys 5 --dump 3 --dump-batch 2 --dump-delay 0
     run_case etcd etcd_extended_ports_flag 0 etcd -t 127.0.0.1 --ports 2379 --show-keys 3
+    # Force multi-page continuation (batch=2 -> ~6 pages for 11 seeded keys). Exercises
+    # the `last_key + \0` continuation cursor and guarantees the full keyspace is dumped.
+    run_case etcd etcd_extended_paged_dump 0 etcd -t 127.0.0.1 --port 2379 --dump --dump-batch 2 --dump-delay 0
+    # P4-D idempotency twin of etcd_open.
+    run_case etcd etcd_idempotency 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump
+    # P4-E fuzz: garbage target URL must be rejected at parse.
+    run_case etcd fuzz_etcd_garbage_target 2 etcd -t "not_a_real_url://[invalid]"
   fi
 }
 
@@ -472,6 +538,10 @@ run_kafka_cases() {
     run_case kafka kafka_extended_dump_max_conflict 2 kafka -t 127.0.0.1 --port 9092 --dump 3 --max-messages 4
     run_case kafka kafka_extended_defcreds 0 kafka -t 127.0.0.1 --port 9092 --defcreds --show-topics
     run_case kafka kafka_extended_empty_password 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p "" --show-topics
+    # P4-D idempotency twin of kafka_open (must match base CLI exactly).
+    run_case kafka kafka_idempotency 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
+    # P4-E fuzz: negative workers must be rejected at parse.
+    run_case kafka fuzz_kafka_negative_workers 2 kafka -t 127.0.0.1 --workers -5 --show-topics
   fi
 }
 

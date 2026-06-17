@@ -1,0 +1,50 @@
+[
+  {
+    "auth_error": null,
+    "auth_mode": "token",
+    "auth_required": true,
+    "auth_valid": true,
+    "can_exec_pod": null,
+    "can_list_namespaces": true,
+    "can_list_pods": null,
+    "can_list_secrets": null,
+    "error": null,
+    "exec_command": null,
+    "exec_pod": null,
+    "exec_result": null,
+    "host": "127.0.0.1",
+    "https": true,
+    "insecure_effective": true,
+    "is_kubeapi": true,
+    "module": "kubeapi",
+    "namespace_filters": [],
+    "namespaces": [],
+    "namespaces_error": null,
+    "pods": [],
+    "pods_error": null,
+    "port": 16443,
+    "secrets": [],
+    "secrets_error": null,
+    "service": "kubeapi",
+    "show_namespaces": false,
+    "show_pods": false,
+    "show_secrets": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "auth_valid",
+        "stage_name": "auth_inference_credentials"
+      }
+    ],
+    "status": "auth_valid",
+    "tls_auto_insecure": false,
+    "version": "v1.31.6+k3s1"
+  }
+]

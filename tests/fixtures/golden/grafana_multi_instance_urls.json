@@ -1,0 +1,262 @@
+[
+  {
+    "attempted_credentials": 0,
+    "auth_attempts": [],
+    "auth_required": null,
+    "check_results": null,
+    "check_urls": null,
+    "credentials_source": null,
+    "datasource_count": null,
+    "datasources": null,
+    "default_credentials": null,
+    "defcreds_enabled": true,
+    "effective_password": null,
+    "effective_username": null,
+    "error": "Connection reset by peer",
+    "host": "127.0.0.1",
+    "is_grafana": false,
+    "module": "grafana",
+    "port": 3000,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_username": null,
+    "server_version": null,
+    "service": "grafana",
+    "show_datasources": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "error",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "fail"
+  },
+  {
+    "attempted_credentials": 0,
+    "auth_attempts": [],
+    "auth_required": null,
+    "check_results": null,
+    "check_urls": null,
+    "credentials_source": null,
+    "datasource_count": null,
+    "datasources": null,
+    "default_credentials": null,
+    "defcreds_enabled": true,
+    "effective_password": null,
+    "effective_username": null,
+    "error": "Connection reset by peer",
+    "host": "127.0.0.1",
+    "is_grafana": false,
+    "module": "grafana",
+    "port": 13001,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_username": null,
+    "server_version": null,
+    "service": "grafana",
+    "show_datasources": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "error",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "fail"
+  },
+  {
+    "attempted_credentials": 0,
+    "auth_attempts": [],
+    "auth_required": null,
+    "check_results": null,
+    "check_urls": null,
+    "credentials_source": null,
+    "datasource_count": null,
+    "datasources": null,
+    "default_credentials": null,
+    "defcreds_enabled": true,
+    "effective_password": null,
+    "effective_username": null,
+    "error": "Connection reset by peer",
+    "host": "127.0.0.1",
+    "is_grafana": false,
+    "module": "grafana",
+    "port": 13002,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_username": null,
+    "server_version": null,
+    "service": "grafana",
+    "show_datasources": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "error",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "fail"
+  },
+  {
+    "attempted_credentials": 0,
+    "auth_attempts": [],
+    "auth_required": null,
+    "check_results": null,
+    "check_urls": null,
+    "credentials_source": null,
+    "datasource_count": null,
+    "datasources": null,
+    "default_credentials": null,
+    "defcreds_enabled": true,
+    "effective_password": null,
+    "effective_username": null,
+    "error": "Connection reset by peer",
+    "host": "127.0.0.1",
+    "is_grafana": false,
+    "module": "grafana",
+    "port": 13003,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_username": null,
+    "server_version": null,
+    "service": "grafana",
+    "show_datasources": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "error",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "fail"
+  },
+  {
+    "attempted_credentials": 0,
+    "auth_attempts": [],
+    "auth_required": null,
+    "check_results": null,
+    "check_urls": null,
+    "credentials_source": null,
+    "datasource_count": null,
+    "datasources": null,
+    "default_credentials": null,
+    "defcreds_enabled": true,
+    "effective_password": null,
+    "effective_username": null,
+    "error": "Connection reset by peer",
+    "host": "127.0.0.1",
+    "is_grafana": false,
+    "module": "grafana",
+    "port": 13004,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_username": null,
+    "server_version": null,
+    "service": "grafana",
+    "show_datasources": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "error",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "fail"
+  }
+]

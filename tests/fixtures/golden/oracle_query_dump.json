@@ -1,0 +1,197 @@
+[
+  {
+    "auth_required": true,
+    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "capabilities": {
+      "can_list_dblinks": false,
+      "can_list_tables": true,
+      "can_list_users": false,
+      "can_privesc_check": false,
+      "can_query": true,
+      "can_read_hashes": false
+    },
+    "cdb_name": "FREE",
+    "con_name": "FREEPDB1",
+    "connect_service": "FREEPDB1",
+    "connect_sid": null,
+    "credential_attempts": [
+      {
+        "error": null,
+        "ok": true,
+        "password": "OracleLab!2026",
+        "token": null,
+        "username": "redposture"
+      }
+    ],
+    "db_links": [],
+    "defcreds_enabled": false,
+    "effective_username": "redposture",
+    "error": null,
+    "exec_result": null,
+    "file_results": [],
+    "hashes": [],
+    "host": "127.0.0.1",
+    "is_oracle": true,
+    "listener_dump": null,
+    "listener_password_protected": null,
+    "listener_restricted": null,
+    "listener_services": [
+      {
+        "auth_required": true,
+        "error": "invalid credentials",
+        "exists": true,
+        "protocol": "tcp",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "available"
+      }
+    ],
+    "listener_sids": [],
+    "listener_targets": [
+      {
+        "auth_required": true,
+        "error": "invalid credentials",
+        "exists": true,
+        "protocol": "tcp",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "available"
+      },
+      {
+        "auth_required": null,
+        "error": "connection refused (listener is not available)",
+        "exists": null,
+        "protocol": "tcps",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "fail"
+      }
+    ],
+    "module": "oracle",
+    "nne_check": null,
+    "pdbs": [],
+    "port": 1521,
+    "privesc_chain": [],
+    "privesc_chain_executed": [],
+    "privesc_findings": [],
+    "privileges": [],
+    "provided_credentials": true,
+    "provided_password": "OracleLab!2026",
+    "provided_username": "redposture",
+    "query_rows": [
+      {
+        "role": "admin",
+        "username": "admin"
+      },
+      {
+        "role": "finance",
+        "username": "billing"
+      }
+    ],
+    "roles": [],
+    "rows": [
+      {
+        "row": {
+          "api_key": "ora-api-key-prod-2026",
+          "email": "admin@example.internal",
+          "id": 1,
+          "password": "OracleAdmin!2026",
+          "role": "admin",
+          "username": "admin"
+        },
+        "schema": "REDPOSTURE",
+        "table": "ACCOUNTS"
+      },
+      {
+        "row": {
+          "api_key": "ora-billing-key-2026",
+          "email": "billing@example.internal",
+          "id": 2,
+          "password": "BillingOracle!2026",
+          "role": "finance",
+          "username": "billing"
+        },
+        "schema": "REDPOSTURE",
+        "table": "ACCOUNTS"
+      },
+      {
+        "row": {
+          "api_key": "ora-read-key-2026",
+          "email": "readonly@example.internal",
+          "id": 3,
+          "password": "ReadOnlyOracle!2026",
+          "role": "viewer",
+          "username": "readonly"
+        },
+        "schema": "REDPOSTURE",
+        "table": "ACCOUNTS"
+      }
+    ],
+    "schemas": [],
+    "sensitive_findings": [],
+    "server_version": null,
+    "service": "oracle",
+    "service_candidates": [
+      "FREEPDB1"
+    ],
+    "show_pdbs_limit": null,
+    "show_schemas_limit": null,
+    "show_tables_limit": null,
+    "show_users_limit": null,
+    "sid_candidates": [],
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "valid_credentials",
+    "tables": [
+      {
+        "num_rows": null,
+        "owner": "REDPOSTURE",
+        "table_name": "ACCOUNTS"
+      },
+      {
+        "num_rows": null,
+        "owner": "REDPOSTURE",
+        "table_name": "AUDIT_EVENTS"
+      },
+      {
+        "num_rows": null,
+        "owner": "REDPOSTURE",
+        "table_name": "LAB_SEED_MARKERS"
+      },
+      {
+        "num_rows": null,
+        "owner": "REDPOSTURE",
+        "table_name": "SERVICE_TOKENS"
+      }
+    ],
+    "tls_supported": false,
+    "transport": "tcp",
+    "transport_mode": "tcp",
+    "users": [],
+    "wallet_findings": []
+  }
+]

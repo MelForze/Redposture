@@ -1,0 +1,84 @@
+[
+  {
+    "auth_required": true,
+    "dump": true,
+    "dump_error": null,
+    "dump_errors": {},
+    "dump_results": {
+      "secure.audit": [
+        "<KAFKA_OFFSET> {\"event\":\"sasl_login\",\"user\":\"metrics\",\"source\":\"prometheus\"}",
+        "<KAFKA_OFFSET> {\"event\":\"topic_acl_update\",\"actor\":\"broker\",\"topic\":\"secure.orders\"}"
+      ],
+      "secure.metrics": [
+        "<KAFKA_OFFSET> {\"metric\":\"lag\",\"group\":\"metrics_collector\",\"value\":12}",
+        "<KAFKA_OFFSET> {\"metric\":\"consumer_errors\",\"group\":\"metrics_collector\",\"value\":1}"
+      ],
+      "secure.orders": [
+        "<KAFKA_OFFSET> {\"order_id\":\"sec-2001\",\"status\":\"queued\",\"tenant\":\"internal\"}",
+        "<KAFKA_OFFSET> {\"order_id\":\"sec-2002\",\"status\":\"processed\",\"tenant\":\"internal\"}",
+        "<KAFKA_OFFSET> {\"order_id\":\"sec-2003\",\"status\":\"failed\",\"tenant\":\"internal\",\"reason\":\"card_declined\"}"
+      ],
+      "secure.pipeline": [
+        "<KAFKA_OFFSET> {\"job\":\"nightly-etl\",\"status\":\"started\",\"secret_ref\":\"vault/data/kafka/etl\"}",
+        "<KAFKA_OFFSET> {\"job\":\"nightly-etl\",\"status\":\"completed\",\"rows\":12034}"
+      ]
+    },
+    "dump_topics": [
+      "secure.audit",
+      "secure.metrics",
+      "secure.orders",
+      "secure.pipeline"
+    ],
+    "error": null,
+    "host": "127.0.0.1",
+    "is_kafka": true,
+    "max_messages": 50,
+    "module": "kafka",
+    "port": 29092,
+    "provided_credentials": true,
+    "provided_credentials_ok": true,
+    "provided_password": "metricspass",
+    "provided_username": "metrics",
+    "query_topic": null,
+    "query_topic_value": null,
+    "service": "kafka",
+    "show_topics": true,
+    "show_topics_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "valid_credentials",
+    "topic_count": 4,
+    "topic_messages": null,
+    "topic_read_error": null,
+    "topics": [
+      "secure.audit",
+      "secure.metrics",
+      "secure.orders",
+      "secure.pipeline"
+    ]
+  }
+]

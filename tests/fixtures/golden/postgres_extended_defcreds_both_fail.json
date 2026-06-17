@@ -1,0 +1,99 @@
+[
+  {
+    "attempted_credentials": [
+      {
+        "password": "postgres",
+        "source": "default",
+        "status": "auth_required",
+        "username": "postgres"
+      },
+      {
+        "password": "pgbouncer",
+        "source": "default",
+        "status": "auth_required",
+        "username": "pgbouncer"
+      }
+    ],
+    "auth_database": "postgres",
+    "auth_method": "scram-sha-256",
+    "auth_required": true,
+    "can_execute_commands": null,
+    "can_read_tables": null,
+    "database": "postgres",
+    "database_count": null,
+    "database_names": null,
+    "defcreds_enabled": true,
+    "dump_row_limit": null,
+    "effective_username": "pgbouncer",
+    "error": "password authentication failed for user \"pgbouncer\"",
+    "execute_attempted": false,
+    "execute_command": null,
+    "execute_error": null,
+    "execute_ok": null,
+    "execute_output": null,
+    "host": "127.0.0.1",
+    "is_postgres": true,
+    "module": "postgres",
+    "os_read_attempted": false,
+    "os_read_error": null,
+    "os_read_method": null,
+    "os_read_methods": [],
+    "os_read_ok": null,
+    "os_read_output": null,
+    "os_read_path": null,
+    "port": 25439,
+    "privesc_check": false,
+    "privesc_checks": [],
+    "privesc_summary": {},
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_username": "pgbouncer",
+    "readable_tables": null,
+    "server_version": null,
+    "service": "postgres",
+    "show_columns": false,
+    "show_databases": false,
+    "show_row_counts": false,
+    "show_tables": false,
+    "sql_attempted": false,
+    "sql_command": null,
+    "sql_error": null,
+    "sql_ok": null,
+    "sql_output": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "auth_required",
+    "superuser": null,
+    "table_columns": [],
+    "table_columns_info": [],
+    "table_dump_enabled": false,
+    "table_dumps": [],
+    "table_names": null,
+    "table_row_counts": [],
+    "table_targets": []
+  }
+]

@@ -1,0 +1,137 @@
+[
+  {
+    "auth_required": true,
+    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "capabilities": {
+      "can_list_dblinks": true,
+      "can_list_tables": false,
+      "can_list_users": false,
+      "can_privesc_check": false,
+      "can_query": true,
+      "can_read_hashes": false
+    },
+    "cdb_name": "FREE",
+    "con_name": "FREEPDB1",
+    "connect_service": "FREEPDB1",
+    "connect_sid": null,
+    "credential_attempts": [
+      {
+        "error": null,
+        "ok": true,
+        "password": "OracleLab!2026",
+        "token": null,
+        "username": "redposture"
+      }
+    ],
+    "db_links": [
+      {
+        "db_link": "LAB_REMOTE",
+        "host": "remote_lab",
+        "owner": "REDPOSTURE",
+        "username": "REMOTE_APP"
+      }
+    ],
+    "defcreds_enabled": false,
+    "effective_username": "redposture",
+    "error": null,
+    "exec_result": null,
+    "file_results": [],
+    "hashes": [],
+    "host": "127.0.0.1",
+    "is_oracle": true,
+    "listener_dump": null,
+    "listener_password_protected": null,
+    "listener_restricted": null,
+    "listener_services": [
+      {
+        "auth_required": true,
+        "error": "invalid credentials",
+        "exists": true,
+        "protocol": "tcp",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "available"
+      }
+    ],
+    "listener_sids": [],
+    "listener_targets": [
+      {
+        "auth_required": true,
+        "error": "invalid credentials",
+        "exists": true,
+        "protocol": "tcp",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "available"
+      },
+      {
+        "auth_required": null,
+        "error": "connection refused (listener is not available)",
+        "exists": null,
+        "protocol": "tcps",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "fail"
+      }
+    ],
+    "module": "oracle",
+    "nne_check": null,
+    "pdbs": [],
+    "port": 1521,
+    "privesc_chain": [],
+    "privesc_chain_executed": [],
+    "privesc_findings": [],
+    "privileges": [],
+    "provided_credentials": true,
+    "provided_password": "OracleLab!2026",
+    "provided_username": "redposture",
+    "query_rows": [],
+    "roles": [],
+    "rows": [],
+    "schemas": [],
+    "sensitive_findings": [],
+    "server_version": null,
+    "service": "oracle",
+    "service_candidates": [
+      "FREEPDB1"
+    ],
+    "show_pdbs_limit": null,
+    "show_schemas_limit": null,
+    "show_tables_limit": null,
+    "show_users_limit": null,
+    "sid_candidates": [],
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "valid_credentials",
+    "tables": [],
+    "tls_supported": false,
+    "transport": "tcp",
+    "transport_mode": "tcp",
+    "users": [],
+    "wallet_findings": []
+  }
+]

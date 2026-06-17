@@ -1,0 +1,281 @@
+[
+  {
+    "admin_capability": true,
+    "attempted_credentials": 1,
+    "auth_attempts": [
+      {
+        "error": "",
+        "ok": true,
+        "password": "default",
+        "source": "provided",
+        "username": "default"
+      }
+    ],
+    "auth_required": true,
+    "credentials_source": "provided",
+    "database": "secure",
+    "database_count": 7,
+    "database_names": [
+      "INFORMATION_SCHEMA",
+      "billing",
+      "default",
+      "information_schema",
+      "secure"
+    ],
+    "default_credentials": false,
+    "defcreds_enabled": false,
+    "effective_password": "default",
+    "effective_username": "default",
+    "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
+    "execute_attempted": false,
+    "execute_capability": true,
+    "execute_command": null,
+    "execute_error": null,
+    "execute_ok": null,
+    "execute_output": null,
+    "host": "127.0.0.1",
+    "is_clickhouse": true,
+    "module": "clickhouse",
+    "port": 19000,
+    "protocol": "native",
+    "provided_credentials": true,
+    "provided_credentials_ok": true,
+    "provided_password": "default",
+    "provided_username": "default",
+    "read_capability": true,
+    "service": "clickhouse",
+    "show_columns": true,
+    "show_columns_limit": 5,
+    "show_databases": true,
+    "show_databases_limit": 5,
+    "show_tables": true,
+    "show_tables_limit": 5,
+    "sql_attempted": true,
+    "sql_command": "select secret_name, owner from secure.secrets_inventory limit 2",
+    "sql_error": null,
+    "sql_ok": true,
+    "sql_output": [
+      "[\"billing/gateway/api_key\", \"svc-billing\"]",
+      "[\"etl/s3/access_key\", \"svc-etl\"]"
+    ],
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "valid_credentials",
+    "table_columns": [],
+    "table_columns_info": [
+      {
+        "columns": [
+          "invoice_id",
+          "customer",
+          "amount",
+          "currency",
+          "issued_at",
+          "due_at",
+          "paid_at",
+          "status",
+          "payment_method",
+          "external_ref"
+        ],
+        "error": null,
+        "table": "billing.invoices"
+      },
+      {
+        "columns": [
+          "attempt_id",
+          "invoice_id",
+          "provider",
+          "status",
+          "attempted_at",
+          "gateway_response",
+          "card_fingerprint"
+        ],
+        "error": null,
+        "table": "billing.payment_attempts"
+      },
+      {
+        "columns": [
+          "ts",
+          "actor",
+          "source_ip",
+          "action",
+          "target_object",
+          "result",
+          "reason",
+          "secret_hint"
+        ],
+        "error": null,
+        "table": "secure.audit_log"
+      },
+      {
+        "columns": [
+          "secret_name",
+          "owner",
+          "env",
+          "backend",
+          "value_hint",
+          "last_rotated",
+          "expires_at"
+        ],
+        "error": null,
+        "table": "secure.secrets_inventory"
+      },
+      {
+        "columns": [
+          "job_id",
+          "src_cluster",
+          "dst_cluster",
+          "table_name",
+          "rows_copied",
+          "duration_ms",
+          "status",
+          "started_at",
+          "finished_at",
+          "run_by"
+        ],
+        "error": null,
+        "table": "warehouse.replication_jobs"
+      }
+    ],
+    "table_dump_enabled": true,
+    "table_dump_limit": 5,
+    "table_dumps": [
+      {
+        "columns": [
+          "invoice_id",
+          "customer",
+          "amount",
+          "currency",
+          "issued_at",
+          "due_at",
+          "paid_at",
+          "status",
+          "payment_method",
+          "external_ref"
+        ],
+        "error": null,
+        "rows": [
+          "[1001, \"Acme Corp\", \"912.35\", \"EUR\", \"<ISO>\", \"<ISO>\", \"<ISO>\", \"paid\", \"wire\", \"inv_acme_2026_001\"]",
+          "[1002, \"Globex\", \"122.1\", \"EUR\", \"<ISO>\", \"<ISO>\", null, \"pending\", \"card\", \"inv_globex_2026_002\"]",
+          "[1003, \"Initech\", \"4400\", \"USD\", \"<ISO>\", \"<ISO>\", \"<ISO>\", \"paid\", \"ach\", \"inv_initech_2026_003\"]",
+          "[1004, \"Umbrella\", \"89.99\", \"USD\", \"<ISO>\", \"<ISO>\", null, \"overdue\", null, \"inv_umbrella_2026_004\"]"
+        ],
+        "table": "billing.invoices"
+      },
+      {
+        "columns": [
+          "attempt_id",
+          "invoice_id",
+          "provider",
+          "status",
+          "attempted_at",
+          "gateway_response",
+          "card_fingerprint"
+        ],
+        "error": null,
+        "rows": [
+          "[\"pay_1002_01\", 1002, \"stripe\", \"declined\", \"<ISO>\", \"insufficient_funds\", \"fp_7d2ae11\"]",
+          "[\"pay_1002_02\", 1002, \"stripe\", \"pending\", \"<ISO>\", \"processing\", \"fp_7d2ae11\"]",
+          "[\"pay_1004_01\", 1004, \"adyen\", \"error\", \"<ISO>\", \"3ds_required\", null]"
+        ],
+        "table": "billing.payment_attempts"
+      },
+      {
+        "columns": [
+          "ts",
+          "actor",
+          "source_ip",
+          "action",
+          "target_object",
+          "result",
+          "reason",
+          "secret_hint"
+        ],
+        "error": null,
+        "rows": [
+          "[\"<ISO>\", \"dba-oncall\", \"10.2.3.8\", \"grant_access\", \"user:etl_readonly\", \"ok\", null, \"role=readonly\"]",
+          "[\"<ISO>\", \"secops-bot\", \"10.2.8.77\", \"scan_config\", \"/etc/clickhouse-server/users.xml\", \"ok\", null, \"default_user=default\"]",
+          "[\"<ISO>\", \"svc-billing\", \"10.2.5.22\", \"sync_payments\", \"billing.gateway\", \"warn\", \"retry scheduled\", \"billing-api-key-2026\"]",
+          "[\"<ISO>\", \"svc-reporting\", \"10.2.1.15\", \"rotate_credentials\", \"kv/prod/reporting/clickhouse\", \"ok\", null, \"vault://prod/clickhouse/reporting\"]"
+        ],
+        "table": "secure.audit_log"
+      },
+      {
+        "columns": [
+          "secret_name",
+          "owner",
+          "env",
+          "backend",
+          "value_hint",
+          "last_rotated",
+          "expires_at"
+        ],
+        "error": null,
+        "rows": [
+          "[\"billing/gateway/api_key\", \"svc-billing\", \"prod\", \"vault\", \"billing-api-key-2026\", \"<ISO>\", \"<ISO>\"]",
+          "[\"etl/s3/access_key\", \"svc-etl\", \"stage\", \"aws-secrets-manager\", \"AKIA...REDACTED\", \"<ISO>\", \"<ISO>\"]",
+          "[\"clickhouse/reporting/password\", \"svc-reporting\", \"prod\", \"vault\", \"vault://prod/clickhouse/reporting#password\", \"<ISO>\", \"<ISO>\"]"
+        ],
+        "table": "secure.secrets_inventory"
+      },
+      {
+        "columns": [
+          "job_id",
+          "src_cluster",
+          "dst_cluster",
+          "table_name",
+          "rows_copied",
+          "duration_ms",
+          "status",
+          "started_at",
+          "finished_at",
+          "run_by"
+        ],
+        "error": null,
+        "rows": [
+          "[\"repl_orders_20260311_01\", \"eu-1-ch\", \"dr-eu-1-ch\", \"analytics.orders\", 12034, 14820, \"ok\", \"<ISO>\", \"<ISO>\", \"svc-etl\"]",
+          "[\"repl_sessions_20260311_02\", \"eu-1-ch\", \"dr-eu-1-ch\", \"analytics.sessions\", 984221, 90755, \"ok\", \"<ISO>\", \"<ISO>\", \"svc-etl\"]",
+          "[\"repl_audit_20260311_03\", \"secure-ch\", \"dr-secure-ch\", \"secure.audit_log\", 8831, 23110, \"warn\", \"<ISO>\", \"<ISO>\", \"svc-secops\"]"
+        ],
+        "table": "warehouse.replication_jobs"
+      }
+    ],
+    "table_names": [
+      "billing.invoices",
+      "billing.payment_attempts",
+      "secure.audit_log",
+      "secure.secrets_inventory",
+      "warehouse.replication_jobs"
+    ],
+    "table_targets": [
+      "billing.invoices",
+      "billing.payment_attempts",
+      "secure.audit_log",
+      "secure.secrets_inventory",
+      "warehouse.replication_jobs"
+    ]
+  }
+]

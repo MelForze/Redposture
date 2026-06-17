@@ -1,0 +1,97 @@
+[
+  {
+    "admin_capability": true,
+    "attempted_credentials": 1,
+    "auth_attempts": [
+      {
+        "error": "",
+        "ok": true,
+        "password": "default",
+        "source": "provided",
+        "username": "default"
+      }
+    ],
+    "auth_required": true,
+    "credentials_source": "provided",
+    "database": "default",
+    "database_count": 7,
+    "database_names": [
+      "INFORMATION_SCHEMA",
+      "billing",
+      "default",
+      "information_schema",
+      "secure",
+      "system",
+      "warehouse"
+    ],
+    "default_credentials": false,
+    "defcreds_enabled": false,
+    "effective_password": "default",
+    "effective_username": "default",
+    "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
+    "execute_attempted": true,
+    "execute_capability": true,
+    "execute_command": "id",
+    "execute_error": null,
+    "execute_ok": true,
+    "execute_output": [
+      "[\"uid=101(clickhouse) gid=101(clickhouse) groups=101(clickhouse),0(root)\"]"
+    ],
+    "host": "127.0.0.1",
+    "is_clickhouse": true,
+    "module": "clickhouse",
+    "port": 19000,
+    "protocol": "native",
+    "provided_credentials": true,
+    "provided_credentials_ok": true,
+    "provided_password": "default",
+    "provided_username": "default",
+    "read_capability": true,
+    "service": "clickhouse",
+    "show_columns": false,
+    "show_columns_limit": null,
+    "show_databases": false,
+    "show_databases_limit": null,
+    "show_tables": false,
+    "show_tables_limit": null,
+    "sql_attempted": false,
+    "sql_command": null,
+    "sql_error": null,
+    "sql_ok": null,
+    "sql_output": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "valid_credentials",
+    "table_columns": [],
+    "table_columns_info": [],
+    "table_dump_enabled": false,
+    "table_dump_limit": null,
+    "table_dumps": [],
+    "table_names": null,
+    "table_targets": []
+  }
+]

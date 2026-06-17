@@ -100,7 +100,7 @@ def _write_trigger_json_records(output_path: str | None, records: list[dict[str,
     if output_path:
         with open(output_path, "w", encoding="utf-8") as fh:
             fh.write(payload)
-        return
+    # `-o` now tees: write the file (if any) AND echo to stdout instead of suppressing it.
     if payload:
         print(payload, end="", flush=True)
 

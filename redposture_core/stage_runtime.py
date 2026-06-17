@@ -176,9 +176,11 @@ class LineOutputSink:
             for line in buffered:
                 self._handle.write(line + "\n")
             self._handle.flush()
-        else:
-            for line in buffered:
-                self.emit_line(line)
+        # Always echo to the console as well: `-o`/`--save` now tees (file + console)
+        # instead of suppressing stdout. The colorizer in `emit_line` applies to the
+        # console copy; the file copy stays plain (written directly above).
+        for line in buffered:
+            self.emit_line(line)
         self.output_written = True
 
     def close(self) -> None:
@@ -645,8 +647,39 @@ def _invoke_host_stage(
     if isinstance(payload, AuditRecord):
         return payload
     if isinstance(payload, dict):
+        # Unify the timer contract before sealing: some modules build custom stage
+        # scaffolding that bypasses `StageTelemetryBuilder.attach`, so their fail-path
+        # records ship without `elapsed_ms` and `stage_timing_total_ms`. Backfill both
+        # from whatever evidence the record carries (per-stage durations are always set).
+        _backfill_record_timers(payload)
         return AuditRecord.from_mapping(payload, module=module, service=module)
     raise TypeError(f"{module} host hook must return AuditRecord-compatible payload")
+
+
+def _backfill_record_timers(record: dict[str, Any]) -> None:
+    """Centralize the elapsed_ms/stage_timing_total_ms contract so every module's record
+    carries a positive timer when the audit code actually ran. Sources, in order:
+    existing `elapsed_ms`, `stage_timing_total_ms`, or the sum of `stages[*].duration_ms`."""
+    existing_elapsed = record.get("elapsed_ms")
+    existing_total = record.get("stage_timing_total_ms")
+    stages = record.get("stages")
+    stage_sum = 0
+    if isinstance(stages, list):
+        for stage in stages:
+            if isinstance(stage, dict):
+                value = stage.get("duration_ms")
+                if isinstance(value, int) and value > 0:
+                    stage_sum += value
+    candidates = [
+        v for v in (existing_elapsed, existing_total, stage_sum) if isinstance(v, int) and v > 0
+    ]
+    if not candidates:
+        return
+    canonical = candidates[0]
+    if not isinstance(existing_elapsed, int) or existing_elapsed <= 0:
+        record["elapsed_ms"] = canonical
+    if not isinstance(existing_total, int) or existing_total <= 0:
+        record["stage_timing_total_ms"] = canonical
 
 
 @dataclass(frozen=True)
@@ -1197,6 +1230,19 @@ class AuditCommandRunner:
         selected_credential, selected_record, gate_reason = self._select_deep_record(detect_record, auth_records)
         gate = self._deep_gate(selected_record)
         if not gate[0]:
+            # No credential gated (all attempts failed). Record every attempted credential
+            # so renderers can surface all of them instead of only the last-tried one.
+            # Generic + harmless: modules whose renderers ignore this key are unaffected.
+            if len(auth_records) > 1:
+                selected_record.extra["attempted_credentials"] = [
+                    {
+                        "username": cred.username,
+                        "password": cred.password,
+                        "source": cred.source,
+                        "status": str(rec.status),
+                    }
+                    for cred, rec in auth_records
+                ]
             if debug_emit is not None:
                 debug_emit(format_stage2_gate(host, int(port), "skip", gate[1] or gate_reason))
             return selected_record
@@ -1484,5 +1530,13 @@ class StageTelemetryBuilder:
         record["debug_events"] = self.events
         record["debug_events_streamed"] = bool(self.debug_enabled and self.debug_emit is not None)
         record["stage_timing_status"] = status
-        record["stage_timing_total_ms"] = int(max(0, total_ms))
+        total_ms_int = int(max(0, total_ms))
+        record["stage_timing_total_ms"] = total_ms_int
+        # Unify the timer contract across modules: every record that goes through telemetry
+        # gets `elapsed_ms` populated as well. Some modules (e.g. docker) historically
+        # omitted it; fail-path records lost both top-level timers entirely. Without this
+        # the JSON contract is uneven and downstream consumers must check both fields.
+        existing_elapsed = record.get("elapsed_ms")
+        if not isinstance(existing_elapsed, int) or existing_elapsed <= 0:
+            record["elapsed_ms"] = total_ms_int
         return record

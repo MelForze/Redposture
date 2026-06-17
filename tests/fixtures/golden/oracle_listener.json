@@ -1,0 +1,114 @@
+[
+  {
+    "auth_required": true,
+    "banner": null,
+    "capabilities": {},
+    "cdb_name": null,
+    "con_name": null,
+    "connect_service": "FREEPDB1",
+    "connect_sid": null,
+    "db_links": [],
+    "defcreds_enabled": false,
+    "effective_username": null,
+    "error": "authentication required",
+    "exec_result": null,
+    "file_results": [],
+    "hashes": [],
+    "host": "127.0.0.1",
+    "is_oracle": true,
+    "listener_dump": null,
+    "listener_password_protected": null,
+    "listener_restricted": null,
+    "listener_services": [
+      {
+        "auth_required": true,
+        "error": "invalid credentials",
+        "exists": true,
+        "protocol": "tcp",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "available"
+      }
+    ],
+    "listener_sids": [],
+    "listener_targets": [
+      {
+        "auth_required": true,
+        "error": "invalid credentials",
+        "exists": true,
+        "protocol": "tcp",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "available"
+      },
+      {
+        "auth_required": null,
+        "error": "connection refused (listener is not available)",
+        "exists": null,
+        "protocol": "tcps",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "fail"
+      }
+    ],
+    "module": "oracle",
+    "nne_check": null,
+    "pdbs": [],
+    "port": 1521,
+    "privesc_chain": [],
+    "privesc_chain_executed": [],
+    "privesc_findings": [],
+    "privileges": [],
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_username": null,
+    "query_rows": [],
+    "roles": [],
+    "rows": [],
+    "schemas": [],
+    "sensitive_findings": [],
+    "server_version": null,
+    "service": "oracle",
+    "service_candidates": [
+      "FREEPDB1"
+    ],
+    "show_pdbs_limit": null,
+    "show_schemas_limit": null,
+    "show_tables_limit": null,
+    "show_users_limit": null,
+    "sid_candidates": [],
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "auth_required",
+    "tables": [],
+    "tls_supported": null,
+    "transport": "tcp",
+    "transport_mode": "tcp",
+    "users": [],
+    "wallet_findings": []
+  }
+]

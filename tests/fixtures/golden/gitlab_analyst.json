@@ -1,0 +1,370 @@
+[
+  {
+    "auth_required": null,
+    "clone_dir": null,
+    "clone_requested": false,
+    "clone_results": [],
+    "clone_scope": null,
+    "error": null,
+    "host": "127.0.0.1",
+    "https": false,
+    "is_gitlab": true,
+    "login_page": true,
+    "module": "gitlab",
+    "open_endpoints": [],
+    "port": 18080,
+    "project_filters": [],
+    "public_projects": [
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
+        "id": 101,
+        "issues_enabled": true,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "redposture-lab/public-api",
+        "permissions": {
+          "group_access": {
+            "access_level": 40
+          },
+          "project_access": {
+            "access_level": 40
+          }
+        },
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
+        "wiki_enabled": true
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/ops-runbooks.git",
+        "id": 102,
+        "issues_enabled": false,
+        "merge_requests_enabled": false,
+        "path_with_namespace": "redposture-lab/ops-runbooks",
+        "permissions": {
+          "group_access": {
+            "access_level": 30
+          },
+          "project_access": {
+            "access_level": 30
+          }
+        },
+        "snippets_enabled": false,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/ops-runbooks",
+        "wiki_enabled": true
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/team-observability/public-statuspage.git",
+        "id": 301,
+        "issues_enabled": false,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "team-observability/public-statuspage",
+        "permissions": {
+          "group_access": {
+            "access_level": 20
+          },
+          "project_access": {
+            "access_level": 20
+          }
+        },
+        "snippets_enabled": false,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/team-observability/public-statuspage",
+        "wiki_enabled": false
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/team-platform/ops-scripts.git",
+        "id": 302,
+        "issues_enabled": true,
+        "merge_requests_enabled": false,
+        "path_with_namespace": "team-platform/ops-scripts",
+        "permissions": {
+          "group_access": {
+            "access_level": 30
+          },
+          "project_access": {
+            "access_level": 30
+          }
+        },
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/team-platform/ops-scripts",
+        "wiki_enabled": false
+      }
+    ],
+    "public_projects_error": null,
+    "service": "gitlab",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "token_access": [
+      {
+        "access_level": 30,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/incident-timeline.git",
+        "id": 204,
+        "issues_enabled": true,
+        "issues_error": null,
+        "issues_read": true,
+        "members_error": null,
+        "members_read": false,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "redposture-lab/incident-timeline",
+        "repo_error": null,
+        "repo_read": true,
+        "snippets_enabled": false,
+        "visibility": "internal",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/incident-timeline",
+        "wiki_enabled": true
+      },
+      {
+        "access_level": 30,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/ops-runbooks.git",
+        "id": 102,
+        "issues_enabled": false,
+        "issues_error": null,
+        "issues_read": false,
+        "members_error": null,
+        "members_read": false,
+        "merge_requests_enabled": false,
+        "path_with_namespace": "redposture-lab/ops-runbooks",
+        "repo_error": null,
+        "repo_read": true,
+        "snippets_enabled": false,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/ops-runbooks",
+        "wiki_enabled": true
+      },
+      {
+        "access_level": 40,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
+        "id": 101,
+        "issues_enabled": true,
+        "issues_error": null,
+        "issues_read": true,
+        "members_error": null,
+        "members_read": false,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "redposture-lab/public-api",
+        "repo_error": null,
+        "repo_read": true,
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
+        "wiki_enabled": true
+      },
+      {
+        "access_level": 20,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/security-reports.git",
+        "id": 203,
+        "issues_enabled": true,
+        "issues_error": null,
+        "issues_read": true,
+        "members_error": null,
+        "members_read": false,
+        "merge_requests_enabled": false,
+        "path_with_namespace": "redposture-lab/security-reports",
+        "repo_error": null,
+        "repo_read": true,
+        "snippets_enabled": true,
+        "visibility": "private",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/security-reports",
+        "wiki_enabled": false
+      },
+      {
+        "access_level": 20,
+        "http_url_to_repo": "http://127.0.0.1:18080/team-observability/public-statuspage.git",
+        "id": 301,
+        "issues_enabled": false,
+        "issues_error": null,
+        "issues_read": false,
+        "members_error": null,
+        "members_read": false,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "team-observability/public-statuspage",
+        "repo_error": null,
+        "repo_read": false,
+        "snippets_enabled": false,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/team-observability/public-statuspage",
+        "wiki_enabled": false
+      },
+      {
+        "access_level": 30,
+        "http_url_to_repo": "http://127.0.0.1:18080/team-platform/ops-scripts.git",
+        "id": 302,
+        "issues_enabled": true,
+        "issues_error": null,
+        "issues_read": false,
+        "members_error": null,
+        "members_read": false,
+        "merge_requests_enabled": false,
+        "path_with_namespace": "team-platform/ops-scripts",
+        "repo_error": null,
+        "repo_read": false,
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/team-platform/ops-scripts",
+        "wiki_enabled": false
+      }
+    ],
+    "token_projects": [
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
+        "id": 101,
+        "issues_enabled": true,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "redposture-lab/public-api",
+        "permissions": {
+          "group_access": {
+            "access_level": 40
+          },
+          "project_access": {
+            "access_level": 40
+          }
+        },
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
+        "wiki_enabled": true
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/ops-runbooks.git",
+        "id": 102,
+        "issues_enabled": false,
+        "merge_requests_enabled": false,
+        "path_with_namespace": "redposture-lab/ops-runbooks",
+        "permissions": {
+          "group_access": {
+            "access_level": 30
+          },
+          "project_access": {
+            "access_level": 30
+          }
+        },
+        "snippets_enabled": false,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/ops-runbooks",
+        "wiki_enabled": true
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/security-reports.git",
+        "id": 203,
+        "issues_enabled": true,
+        "merge_requests_enabled": false,
+        "path_with_namespace": "redposture-lab/security-reports",
+        "permissions": {
+          "group_access": {
+            "access_level": 20
+          },
+          "project_access": {
+            "access_level": 20
+          }
+        },
+        "snippets_enabled": true,
+        "visibility": "private",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/security-reports",
+        "wiki_enabled": false
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/incident-timeline.git",
+        "id": 204,
+        "issues_enabled": true,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "redposture-lab/incident-timeline",
+        "permissions": {
+          "group_access": {
+            "access_level": 30
+          },
+          "project_access": {
+            "access_level": 30
+          }
+        },
+        "snippets_enabled": false,
+        "visibility": "internal",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/incident-timeline",
+        "wiki_enabled": true
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/team-observability/public-statuspage.git",
+        "id": 301,
+        "issues_enabled": false,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "team-observability/public-statuspage",
+        "permissions": {
+          "group_access": {
+            "access_level": 20
+          },
+          "project_access": {
+            "access_level": 20
+          }
+        },
+        "snippets_enabled": false,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/team-observability/public-statuspage",
+        "wiki_enabled": false
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/team-platform/ops-scripts.git",
+        "id": 302,
+        "issues_enabled": true,
+        "merge_requests_enabled": false,
+        "path_with_namespace": "team-platform/ops-scripts",
+        "permissions": {
+          "group_access": {
+            "access_level": 30
+          },
+          "project_access": {
+            "access_level": 30
+          }
+        },
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/team-platform/ops-scripts",
+        "wiki_enabled": false
+      }
+    ],
+    "token_projects_error": null,
+    "token_provided": true,
+    "token_user": {
+      "id": 2,
+      "state": "active",
+      "username": "analyst"
+    },
+    "token_valid": true,
+    "version": "17.8.1"
+  }
+]

@@ -1,0 +1,278 @@
+[
+  {
+    "auth_database": "postgres",
+    "auth_method": "scram-sha-256",
+    "auth_required": true,
+    "can_execute_commands": true,
+    "can_read_tables": true,
+    "database": "postgres",
+    "database_count": 1,
+    "database_names": [
+      "postgres"
+    ],
+    "defcreds_enabled": false,
+    "dump_row_limit": 20,
+    "effective_username": "postgres",
+    "error": null,
+    "execute_attempted": false,
+    "execute_command": null,
+    "execute_error": null,
+    "execute_ok": null,
+    "execute_output": null,
+    "host": "127.0.0.1",
+    "is_postgres": true,
+    "module": "postgres",
+    "os_read_attempted": false,
+    "os_read_error": null,
+    "os_read_method": null,
+    "os_read_methods": [],
+    "os_read_ok": null,
+    "os_read_output": null,
+    "os_read_path": null,
+    "port": 5432,
+    "privesc_check": false,
+    "privesc_checks": [],
+    "privesc_summary": {},
+    "provided_credentials": true,
+    "provided_password": "postgres",
+    "provided_username": "postgres",
+    "readable_tables": 7,
+    "server_version": "16.14",
+    "service": "postgres",
+    "show_columns": false,
+    "show_columns_limit": null,
+    "show_databases": true,
+    "show_databases_limit": null,
+    "show_row_counts": false,
+    "show_tables": true,
+    "show_tables_limit": null,
+    "sql_attempted": false,
+    "sql_command": null,
+    "sql_error": null,
+    "sql_ok": null,
+    "sql_output": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "valid_credentials",
+    "superuser": true,
+    "table_columns": [],
+    "table_columns_info": [],
+    "table_dump_enabled": true,
+    "table_dumps": [
+      {
+        "columns": [
+          "client_id",
+          "client_secret",
+          "scopes",
+          "enabled",
+          "created_at"
+        ],
+        "database": "postgres",
+        "error": null,
+        "rows": [
+          "{\"client_id\":\"grafana-reader\",\"client_secret\":\"grafana-reader-secret-2026\",\"scopes\":\"metrics:read,dashboards:read\",\"enabled\":true,\"created_at\":\"<ISO>+00:00\"}",
+          "{\"client_id\":\"prometheus-remote-write\",\"client_secret\":\"prom-rw-secret-2026\",\"scopes\":\"metrics:write\",\"enabled\":true,\"created_at\":\"<ISO>+00:00\"}",
+          "{\"client_id\":\"billing-worker\",\"client_secret\":\"billing-worker-secret-2026\",\"scopes\":\"billing:read,billing:write\",\"enabled\":true,\"created_at\":\"<ISO>+00:00\"}"
+        ],
+        "table": "redposture.api_clients"
+      },
+      {
+        "columns": [
+          "id",
+          "event_type",
+          "source_ip",
+          "details",
+          "created_at"
+        ],
+        "database": "postgres",
+        "error": null,
+        "rows": [
+          "{\"id\":1,\"event_type\":\"login_success\",\"source_ip\":\"10.10.10.21\",\"details\":\"user=admin method=password\",\"created_at\":\"<ISO>+00:00\"}",
+          "{\"id\":2,\"event_type\":\"login_failed\",\"source_ip\":\"10.10.10.22\",\"details\":\"user=readonly reason=bad_password\",\"created_at\":\"<ISO>+00:00\"}",
+          "{\"id\":3,\"event_type\":\"export\",\"source_ip\":\"10.10.10.23\",\"details\":\"table=demo_accounts rows=6\",\"created_at\":\"<ISO>+00:00\"}",
+          "{\"id\":4,\"event_type\":\"api_token_created\",\"source_ip\":\"10.10.44.19\",\"details\":\"service=grafana token=gfa_demo_token_123\",\"created_at\":\"<ISO>+00:00\"}",
+          "{\"id\":5,\"event_type\":\"job_failed\",\"source_ip\":\"10.10.55.31\",\"details\":\"job=billing-reconcile error=timeout\",\"created_at\":\"<ISO>+00:00\"}",
+          "{\"id\":6,\"event_type\":\"settings_updated\",\"source_ip\":\"10.10.77.12\",\"details\":\"key=feature.billing.v2 old=false new=true\",\"created_at\":\"<ISO>+00:00\"}"
+        ],
+        "table": "redposture.audit_events"
+      },
+      {
+        "columns": [
+          "invoice_id",
+          "customer_id",
+          "amount_cents",
+          "currency",
+          "status",
+          "paid_at"
+        ],
+        "database": "postgres",
+        "error": null,
+        "rows": [
+          "{\"invoice_id\":\"inv-2026-0001\",\"customer_id\":\"cust-1001\",\"amount_cents\":125000,\"currency\":\"USD\",\"status\":\"paid\",\"paid_at\":\"<ISO>+00:00\"}",
+          "{\"invoice_id\":\"inv-2026-0002\",\"customer_id\":\"cust-1002\",\"amount_cents\":39200,\"currency\":\"USD\",\"status\":\"overdue\",\"paid_at\":null}",
+          "{\"invoice_id\":\"inv-2026-0003\",\"customer_id\":\"cust-1003\",\"amount_cents\":87500,\"currency\":\"EUR\",\"status\":\"paid\",\"paid_at\":\"<ISO>+00:00\"}",
+          "{\"invoice_id\":\"inv-2026-0004\",\"customer_id\":\"cust-1004\",\"amount_cents\":214500,\"currency\":\"USD\",\"status\":\"processing\",\"paid_at\":null}"
+        ],
+        "table": "redposture.billing_invoices"
+      },
+      {
+        "columns": [
+          "id",
+          "username",
+          "password",
+          "role",
+          "active"
+        ],
+        "database": "postgres",
+        "error": null,
+        "rows": [
+          "{\"id\":1,\"username\":\"admin\",\"password\":\"admin\",\"role\":\"admin\",\"active\":true}",
+          "{\"id\":2,\"username\":\"readonly\",\"password\":\"readonly\",\"role\":\"viewer\",\"active\":true}",
+          "{\"id\":3,\"username\":\"service\",\"password\":\"service123\",\"role\":\"service\",\"active\":true}",
+          "{\"id\":4,\"username\":\"reporting\",\"password\":\"reporting2026\",\"role\":\"analyst\",\"active\":true}",
+          "{\"id\":5,\"username\":\"automation\",\"password\":\"auto-runner-2026\",\"role\":\"service\",\"active\":true}",
+          "{\"id\":6,\"username\":\"disabled_user\",\"password\":\"disabled\",\"role\":\"viewer\",\"active\":false}"
+        ],
+        "table": "redposture.demo_accounts"
+      },
+      {
+        "columns": [
+          "id",
+          "integration",
+          "account_name",
+          "secret_value",
+          "endpoint",
+          "updated_at"
+        ],
+        "database": "postgres",
+        "error": null,
+        "rows": [
+          "{\"id\":1,\"integration\":\"slack\",\"account_name\":\"alerts-bot\",\"secret_value\":\"xoxb-demo-slack-token\",\"endpoint\":\"https://hooks.slack.com/services/T000/B000/REDACTED\",\"updated_at\":\"<ISO>+00:00\"}",
+          "{\"id\":2,\"integration\":\"pagerduty\",\"account_name\":\"sre-primary\",\"secret_value\":\"pd_demo_routing_key_2026\",\"endpoint\":\"https://events.pagerduty.com/v2/enqueue\",\"updated_at\":\"<ISO>+00:00\"}",
+          "{\"id\":3,\"integration\":\"github\",\"account_name\":\"ci-bot\",\"secret_value\":\"ghp_lab_demo_token_123456\",\"endpoint\":\"https://api.github.com\",\"updated_at\":\"<ISO>+00:00\"}"
+        ],
+        "table": "redposture.integration_secrets"
+      },
+      {
+        "columns": [
+          "id",
+          "service_name",
+          "token",
+          "created_at"
+        ],
+        "database": "postgres",
+        "error": null,
+        "rows": [
+          "{\"id\":1,\"service_name\":\"grafana\",\"token\":\"gfa_demo_token_123\",\"created_at\":\"<ISO>+00:00\"}",
+          "{\"id\":2,\"service_name\":\"ci\",\"token\":\"ci_demo_token_456\",\"created_at\":\"<ISO>+00:00\"}",
+          "{\"id\":3,\"service_name\":\"prometheus\",\"token\":\"prom_rw_token_789\",\"created_at\":\"<ISO>+00:00\"}",
+          "{\"id\":4,\"service_name\":\"alertmanager\",\"token\":\"am_ops_token_101\",\"created_at\":\"<ISO>+00:00\"}"
+        ],
+        "table": "redposture.service_tokens"
+      },
+      {
+        "columns": [
+          "session_id",
+          "username",
+          "source_ip",
+          "user_agent",
+          "expires_at"
+        ],
+        "database": "postgres",
+        "error": null,
+        "rows": [
+          "{\"session_id\":\"sess-7f9c2b7a\",\"username\":\"admin\",\"source_ip\":\"10.10.4.12\",\"user_agent\":\"Mozilla/5.0\",\"expires_at\":\"<ISO>+00:00\"}",
+          "{\"session_id\":\"sess-d93f2e11\",\"username\":\"readonly\",\"source_ip\":\"10.10.8.54\",\"user_agent\":\"curl/8.5.0\",\"expires_at\":\"<ISO>+00:00\"}",
+          "{\"session_id\":\"sess-2ac81b90\",\"username\":\"service\",\"source_ip\":\"10.10.30.5\",\"user_agent\":\"python-requests/2.32.5\",\"expires_at\":\"<ISO>+00:00\"}"
+        ],
+        "table": "redposture.web_sessions"
+      }
+    ],
+    "table_names": [
+      "redposture.api_clients",
+      "redposture.audit_events",
+      "redposture.billing_invoices",
+      "redposture.demo_accounts",
+      "redposture.integration_secrets",
+      "redposture.service_tokens",
+      "redposture.web_sessions"
+    ],
+    "table_row_counts": [
+      {
+        "database": "postgres",
+        "error": null,
+        "row_count": 3,
+        "table": "redposture.api_clients"
+      },
+      {
+        "database": "postgres",
+        "error": null,
+        "row_count": 6,
+        "table": "redposture.audit_events"
+      },
+      {
+        "database": "postgres",
+        "error": null,
+        "row_count": 4,
+        "table": "redposture.billing_invoices"
+      },
+      {
+        "database": "postgres",
+        "error": null,
+        "row_count": 6,
+        "table": "redposture.demo_accounts"
+      },
+      {
+        "database": "postgres",
+        "error": null,
+        "row_count": 3,
+        "table": "redposture.integration_secrets"
+      },
+      {
+        "database": "postgres",
+        "error": null,
+        "row_count": 4,
+        "table": "redposture.service_tokens"
+      },
+      {
+        "database": "postgres",
+        "error": null,
+        "row_count": 3,
+        "table": "redposture.web_sessions"
+      }
+    ],
+    "table_targets": [
+      "redposture.api_clients",
+      "redposture.audit_events",
+      "redposture.billing_invoices",
+      "redposture.demo_accounts",
+      "redposture.integration_secrets",
+      "redposture.service_tokens",
+      "redposture.web_sessions"
+    ]
+  }
+]

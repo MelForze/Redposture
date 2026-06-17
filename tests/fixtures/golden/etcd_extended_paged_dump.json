@@ -1,0 +1,118 @@
+[
+  {
+    "api_versions": "v2,v3",
+    "auth_required": false,
+    "dump_keys": true,
+    "error": null,
+    "host": "127.0.0.1",
+    "is_etcd": true,
+    "key_count": 11,
+    "key_value_entries": [
+      {
+        "error": null,
+        "key": "/inventory/services/grafana/url",
+        "value": "http://grafana:3000"
+      },
+      {
+        "error": null,
+        "key": "/inventory/services/kafka/bootstrap",
+        "value": "kafka-open:9092"
+      },
+      {
+        "error": null,
+        "key": "/inventory/services/prometheus/url",
+        "value": "http://prometheus:9090"
+      },
+      {
+        "error": null,
+        "key": "/redposture/app/api_key",
+        "value": "rp-demo-key-2026"
+      },
+      {
+        "error": null,
+        "key": "/redposture/cache/redis_uri",
+        "value": "redis://default:redis@redis:6379/0"
+      },
+      {
+        "error": null,
+        "key": "/redposture/db/password",
+        "value": "postgres"
+      },
+      {
+        "error": null,
+        "key": "/redposture/db/readonly_password",
+        "value": "readonly"
+      },
+      {
+        "error": null,
+        "key": "/redposture/env",
+        "value": "lab"
+      },
+      {
+        "error": null,
+        "key": "/redposture/feature_flags/new_ui",
+        "value": "true"
+      },
+      {
+        "error": null,
+        "key": "/redposture/integrations/pagerduty/routing_key",
+        "value": "pd_demo_routing_key_2026"
+      },
+      {
+        "error": null,
+        "key": "/redposture/integrations/slack/webhook",
+        "value": "https://hooks.slack.com/services/T000/B000/REDACTED"
+      }
+    ],
+    "key_values": [
+      "/inventory/services/grafana/url:http://grafana:3000",
+      "/inventory/services/kafka/bootstrap:kafka-open:9092",
+      "/inventory/services/prometheus/url:http://prometheus:9090",
+      "/redposture/app/api_key:rp-demo-key-2026",
+      "/redposture/cache/redis_uri:redis://default:redis@redis:6379/0",
+      "/redposture/db/password:postgres",
+      "/redposture/db/readonly_password:readonly",
+      "/redposture/env:lab",
+      "/redposture/feature_flags/new_ui:true",
+      "/redposture/integrations/pagerduty/routing_key:pd_demo_routing_key_2026",
+      "/redposture/integrations/slack/webhook:https://hooks.slack.com/services/T000/B000/REDACTED"
+    ],
+    "keys": null,
+    "module": "etcd",
+    "port": 2379,
+    "query_key": null,
+    "query_key_entry": null,
+    "query_key_value": null,
+    "server_version": "3.5.14",
+    "service": "etcd",
+    "show_keys": false,
+    "show_keys_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  }
+]

@@ -250,8 +250,9 @@ def test_line_output_sink_emits_to_callback_and_file(tmp_path) -> None:
     file_sink.emit_many(["first"])
     file_sink.emit_many(["second"])
 
+    # -o now tees: lines are written to the file AND echoed to the console callback.
     assert output_path.read_text(encoding="utf-8").splitlines() == ["first", "second"]
-    assert emitted == ["one", "two"]
+    assert emitted == ["one", "two", "first", "second"]
 
 
 def test_typed_record_models_serialize_to_dicts() -> None:
@@ -369,6 +370,61 @@ def test_audit_command_runner_suppresses_pre_detect_noise_in_non_debug_txt() -> 
     assert result.suppressed_records == 1
     assert result.records[0]["protocol_error"] == "unexpected EOF"
     assert is_pre_detect_network_noise(result.typed_records[0]) is True
+
+
+def _failing_auth_spec() -> ModuleAuditSpec:
+    def auth(ctx, _detect_record) -> AuditRecord:
+        # Every credential is rejected (status not in the deep gate's allowed set).
+        return AuditRecord.from_mapping(
+            {
+                "host": ctx.host,
+                "port": ctx.port,
+                "service": "postgres",
+                "module": "postgres",
+                "status": "auth_required",
+                "effective_username": ctx.credential.username,
+            },
+            module="postgres",
+            service="postgres",
+        )
+
+    return ModuleAuditSpec(module="postgres", label="POSTGRES", default_port=5432, auth=auth)
+
+
+def test_run_deep_lifecycle_attaches_attempted_credentials_when_all_fail() -> None:
+    runner = AuditCommandRunner(args=type("A", (), {"defcreds": True})(), spec=_failing_auth_spec())
+    detect_record = AuditRecord.from_mapping(
+        {"host": "h", "port": 5432, "service": "postgres", "module": "postgres", "status": "auth_required"},
+        module="postgres",
+        service="postgres",
+    )
+    runs = (
+        AuditCredentialRun(username="postgres", password="postgres", source="default"),
+        AuditCredentialRun(username="pgbouncer", password="pgbouncer", source="default"),
+    )
+
+    record = runner._run_deep_lifecycle("h", 5432, None, detect_record, runs, None)
+
+    attempts = record.extra.get("attempted_credentials")
+    assert isinstance(attempts, list)
+    assert [(a["username"], a["password"]) for a in attempts] == [
+        ("postgres", "postgres"),
+        ("pgbouncer", "pgbouncer"),
+    ]
+
+
+def test_run_deep_lifecycle_no_attempts_attached_when_single_credential() -> None:
+    runner = AuditCommandRunner(args=type("A", (), {"defcreds": True})(), spec=_failing_auth_spec())
+    detect_record = AuditRecord.from_mapping(
+        {"host": "h", "port": 5432, "service": "postgres", "module": "postgres", "status": "auth_required"},
+        module="postgres",
+        service="postgres",
+    )
+    runs = (AuditCredentialRun(username="postgres", password="postgres", source="default"),)
+
+    record = runner._run_deep_lifecycle("h", 5432, None, detect_record, runs, None)
+
+    assert "attempted_credentials" not in record.extra
 
 
 def test_audit_command_runner_keeps_pre_detect_noise_in_debug_txt() -> None:

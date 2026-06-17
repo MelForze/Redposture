@@ -1,0 +1,302 @@
+[
+  {
+    "api_versions": "v2,v3",
+    "auth_required": false,
+    "dump_keys": false,
+    "error": null,
+    "host": "127.0.0.1",
+    "is_etcd": true,
+    "key_count": 11,
+    "key_value_entries": null,
+    "key_values": null,
+    "keys": [
+      "/inventory/services/grafana/url",
+      "/inventory/services/kafka/bootstrap",
+      "/inventory/services/prometheus/url",
+      "/redposture/app/api_key",
+      "/redposture/cache/redis_uri",
+      "/redposture/db/password",
+      "/redposture/db/readonly_password",
+      "/redposture/env",
+      "/redposture/feature_flags/new_ui",
+      "/redposture/integrations/pagerduty/routing_key",
+      "/redposture/integrations/slack/webhook"
+    ],
+    "module": "etcd",
+    "port": 2379,
+    "query_key": null,
+    "query_key_entry": null,
+    "query_key_value": null,
+    "server_version": "3.5.14",
+    "service": "etcd",
+    "show_keys": true,
+    "show_keys_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  },
+  {
+    "api_versions": "v2,v3",
+    "auth_required": false,
+    "dump_keys": false,
+    "error": null,
+    "host": "127.0.0.1",
+    "is_etcd": true,
+    "key_count": 11,
+    "key_value_entries": null,
+    "key_values": null,
+    "keys": [
+      "/inventory/services/grafana/url",
+      "/inventory/services/kafka/bootstrap",
+      "/inventory/services/prometheus/url",
+      "/redposture/app/api_key",
+      "/redposture/cache/redis_uri",
+      "/redposture/db/password",
+      "/redposture/db/readonly_password",
+      "/redposture/env",
+      "/redposture/feature_flags/new_ui",
+      "/redposture/integrations/pagerduty/routing_key",
+      "/redposture/integrations/slack/webhook"
+    ],
+    "module": "etcd",
+    "port": 23790,
+    "query_key": null,
+    "query_key_entry": null,
+    "query_key_value": null,
+    "server_version": "3.5.14",
+    "service": "etcd",
+    "show_keys": true,
+    "show_keys_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  },
+  {
+    "api_versions": "v2,v3",
+    "auth_required": false,
+    "dump_keys": false,
+    "error": null,
+    "host": "127.0.0.1",
+    "is_etcd": true,
+    "key_count": 11,
+    "key_value_entries": null,
+    "key_values": null,
+    "keys": [
+      "/inventory/services/grafana/url",
+      "/inventory/services/kafka/bootstrap",
+      "/inventory/services/prometheus/url",
+      "/redposture/app/api_key",
+      "/redposture/cache/redis_uri",
+      "/redposture/db/password",
+      "/redposture/db/readonly_password",
+      "/redposture/env",
+      "/redposture/feature_flags/new_ui",
+      "/redposture/integrations/pagerduty/routing_key",
+      "/redposture/integrations/slack/webhook"
+    ],
+    "module": "etcd",
+    "port": 23791,
+    "query_key": null,
+    "query_key_entry": null,
+    "query_key_value": null,
+    "server_version": "3.5.14",
+    "service": "etcd",
+    "show_keys": true,
+    "show_keys_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  },
+  {
+    "api_versions": "v2,v3",
+    "auth_required": false,
+    "dump_keys": false,
+    "error": null,
+    "host": "127.0.0.1",
+    "is_etcd": true,
+    "key_count": 11,
+    "key_value_entries": null,
+    "key_values": null,
+    "keys": [
+      "/inventory/services/grafana/url",
+      "/inventory/services/kafka/bootstrap",
+      "/inventory/services/prometheus/url",
+      "/redposture/app/api_key",
+      "/redposture/cache/redis_uri",
+      "/redposture/db/password",
+      "/redposture/db/readonly_password",
+      "/redposture/env",
+      "/redposture/feature_flags/new_ui",
+      "/redposture/integrations/pagerduty/routing_key",
+      "/redposture/integrations/slack/webhook"
+    ],
+    "module": "etcd",
+    "port": 23792,
+    "query_key": null,
+    "query_key_entry": null,
+    "query_key_value": null,
+    "server_version": "3.5.14",
+    "service": "etcd",
+    "show_keys": true,
+    "show_keys_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  },
+  {
+    "api_versions": "v2,v3",
+    "auth_required": false,
+    "dump_keys": false,
+    "error": null,
+    "host": "127.0.0.1",
+    "is_etcd": true,
+    "key_count": 11,
+    "key_value_entries": null,
+    "key_values": null,
+    "keys": [
+      "/inventory/services/grafana/url",
+      "/inventory/services/kafka/bootstrap",
+      "/inventory/services/prometheus/url",
+      "/redposture/app/api_key",
+      "/redposture/cache/redis_uri",
+      "/redposture/db/password",
+      "/redposture/db/readonly_password",
+      "/redposture/env",
+      "/redposture/feature_flags/new_ui",
+      "/redposture/integrations/pagerduty/routing_key",
+      "/redposture/integrations/slack/webhook"
+    ],
+    "module": "etcd",
+    "port": 23793,
+    "query_key": null,
+    "query_key_entry": null,
+    "query_key_value": null,
+    "server_version": "3.5.14",
+    "service": "etcd",
+    "show_keys": true,
+    "show_keys_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  }
+]

@@ -1,0 +1,90 @@
+[
+  {
+    "access_level": "unknown",
+    "api_key_probe_error": null,
+    "api_key_probe_status": "not_run",
+    "api_token": "invalid-token",
+    "auth_required": true,
+    "auth_valid": false,
+    "can_manage": null,
+    "can_manage_security": null,
+    "can_read": null,
+    "can_write": null,
+    "cat_endpoints": null,
+    "cat_plugins": null,
+    "cluster_error": null,
+    "cluster_health": null,
+    "cluster_nodes": null,
+    "detect_confidence": "high",
+    "detect_probe_trace": [
+      {
+        "scheme": "http",
+        "status": 401
+      },
+      {
+        "scheme": "http",
+        "status": 401
+      },
+      {
+        "scheme": "http",
+        "status": 401
+      },
+      {
+        "scheme": "http",
+        "status": 401
+      },
+      {
+        "scheme": "http",
+        "status": 401
+      }
+    ],
+    "detect_signals": [
+      "security_exception_missing_auth"
+    ],
+    "discover": false,
+    "discover_error": null,
+    "discover_results": null,
+    "effective_username": null,
+    "endpoint_diagnostics": null,
+    "endpoints_error": null,
+    "error": null,
+    "host": "127.0.0.1",
+    "insecure_effective": false,
+    "is_elastic": true,
+    "misconfig_error": null,
+    "misconfig_findings": null,
+    "module": "elastic",
+    "plugins_error": null,
+    "port": 19201,
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_token": true,
+    "provided_username": null,
+    "rights_error": null,
+    "scheme": "http",
+    "server_version": null,
+    "service": "elastic",
+    "show_cluster": false,
+    "show_endpoints": false,
+    "show_plugins": false,
+    "show_users": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": "authentication failed",
+        "result": "auth_required",
+        "stage_name": "auth_inference_credentials"
+      }
+    ],
+    "status": "auth_required",
+    "tls_auto_plain": true,
+    "users": null,
+    "users_error": null
+  }
+]

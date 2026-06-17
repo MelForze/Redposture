@@ -1,0 +1,158 @@
+[
+  {
+    "auth_required": null,
+    "clone_dir": null,
+    "clone_requested": false,
+    "clone_results": [],
+    "clone_scope": null,
+    "error": null,
+    "host": "127.0.0.1",
+    "https": false,
+    "is_gitlab": true,
+    "login_page": true,
+    "module": "gitlab",
+    "open_endpoints": [
+      {
+        "status": 200
+      },
+      {
+        "status": 200
+      },
+      {
+        "status": 200
+      },
+      {
+        "status": 200
+      },
+      {
+        "status": 200
+      },
+      {
+        "status": 200
+      },
+      {
+        "status": 200
+      }
+    ],
+    "port": 18080,
+    "project_filters": [],
+    "public_projects": [
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
+        "id": 101,
+        "issues_enabled": true,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "redposture-lab/public-api",
+        "permissions": {
+          "group_access": {
+            "access_level": 40
+          },
+          "project_access": {
+            "access_level": 40
+          }
+        },
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
+        "wiki_enabled": true
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/ops-runbooks.git",
+        "id": 102,
+        "issues_enabled": false,
+        "merge_requests_enabled": false,
+        "path_with_namespace": "redposture-lab/ops-runbooks",
+        "permissions": {
+          "group_access": {
+            "access_level": 30
+          },
+          "project_access": {
+            "access_level": 30
+          }
+        },
+        "snippets_enabled": false,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/ops-runbooks",
+        "wiki_enabled": true
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/team-observability/public-statuspage.git",
+        "id": 301,
+        "issues_enabled": false,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "team-observability/public-statuspage",
+        "permissions": {
+          "group_access": {
+            "access_level": 20
+          },
+          "project_access": {
+            "access_level": 20
+          }
+        },
+        "snippets_enabled": false,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/team-observability/public-statuspage",
+        "wiki_enabled": false
+      },
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/team-platform/ops-scripts.git",
+        "id": 302,
+        "issues_enabled": true,
+        "merge_requests_enabled": false,
+        "path_with_namespace": "team-platform/ops-scripts",
+        "permissions": {
+          "group_access": {
+            "access_level": 30
+          },
+          "project_access": {
+            "access_level": 30
+          }
+        },
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/team-platform/ops-scripts",
+        "wiki_enabled": false
+      }
+    ],
+    "public_projects_error": null,
+    "service": "gitlab",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "detected",
+    "token_access": [],
+    "token_projects": [],
+    "token_projects_error": null,
+    "token_provided": false,
+    "token_user": null,
+    "token_valid": null,
+    "version": "17.8.1"
+  }
+]

@@ -1,0 +1,74 @@
+[
+  {
+    "auth_required": false,
+    "dump": true,
+    "dump_error": null,
+    "dump_errors": {},
+    "dump_results": {
+      "orders": [
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+      ]
+    },
+    "dump_topics": [
+      "orders"
+    ],
+    "error": null,
+    "host": "127.0.0.1",
+    "is_kafka": true,
+    "max_messages": 3,
+    "module": "kafka",
+    "port": 9092,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_password": null,
+    "provided_username": null,
+    "query_topic": "orders",
+    "query_topic_value": "orders (partitions:3)",
+    "service": "kafka",
+    "show_topics": true,
+    "show_topics_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "topic_count": 5,
+    "topic_messages": [
+      "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
+      "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
+      "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+    ],
+    "topic_read_error": null,
+    "topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ]
+  }
+]
