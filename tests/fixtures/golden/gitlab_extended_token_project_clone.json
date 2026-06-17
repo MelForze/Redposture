@@ -1,0 +1,55 @@
+[
+  {
+    "auth_required": null,
+    "clone_dir": null,
+    "clone_requested": false,
+    "clone_results": [],
+    "clone_scope": null,
+    "error": "[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1082)",
+    "host": "127.0.0.1",
+    "https": true,
+    "is_gitlab": false,
+    "login_page": null,
+    "module": "gitlab",
+    "open_endpoints": [],
+    "port": 18080,
+    "project_filters": [],
+    "public_projects": [],
+    "public_projects_error": null,
+    "service": "gitlab",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1082)",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": "[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1082)",
+        "result": "error",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "fail",
+    "token_access": [],
+    "token_projects": [],
+    "token_projects_error": null,
+    "token_provided": true,
+    "token_user": null,
+    "token_valid": null,
+    "version": null
+  }
+]

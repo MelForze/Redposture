@@ -1,0 +1,452 @@
+[
+  {
+    "auth_db": "admin",
+    "auth_required": false,
+    "capabilities": {
+      "can_list_collections": null,
+      "can_list_databases": true,
+      "can_list_indexes": null,
+      "can_read_documents": null,
+      "can_run_command": null
+    },
+    "collection_targets": [],
+    "collections": [],
+    "database": null,
+    "database_count": 5,
+    "database_names": [
+      "admin",
+      "billing",
+      "config",
+      "local",
+      "redposture"
+    ],
+    "defcreds_enabled": false,
+    "document_selector": null,
+    "documents": [],
+    "dump_documents": false,
+    "dump_limit": null,
+    "dump_safety_limit": null,
+    "effective_username": null,
+    "error": null,
+    "hello": {
+      "isWritablePrimary": true,
+      "maxBsonObjectSize": 16777216,
+      "maxMessageSizeBytes": 48000000,
+      "maxWriteBatchSize": 100000,
+      "ok": 1.0,
+      "readOnly": false
+    },
+    "host": "127.0.0.1",
+    "index_filter": null,
+    "indexes": [],
+    "is_mongodb": true,
+    "module": "mongodb",
+    "nosql_command": null,
+    "nosql_command_database": null,
+    "nosql_command_error": null,
+    "nosql_command_result": null,
+    "port": 27017,
+    "projection": null,
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_username": null,
+    "query_documents": [],
+    "query_error": null,
+    "query_filter": null,
+    "server_version": "7.0.34",
+    "service": "mongodb",
+    "show_collections": false,
+    "show_collections_limit": null,
+    "show_databases": true,
+    "show_databases_limit": null,
+    "show_indexes": false,
+    "show_indexes_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  },
+  {
+    "auth_db": "admin",
+    "auth_required": false,
+    "capabilities": {
+      "can_list_collections": null,
+      "can_list_databases": true,
+      "can_list_indexes": null,
+      "can_read_documents": null,
+      "can_run_command": null
+    },
+    "collection_targets": [],
+    "collections": [],
+    "database": null,
+    "database_count": 5,
+    "database_names": [
+      "admin",
+      "billing",
+      "config",
+      "local",
+      "redposture"
+    ],
+    "defcreds_enabled": false,
+    "document_selector": null,
+    "documents": [],
+    "dump_documents": false,
+    "dump_limit": null,
+    "dump_safety_limit": null,
+    "effective_username": null,
+    "error": null,
+    "hello": {
+      "isWritablePrimary": true,
+      "maxBsonObjectSize": 16777216,
+      "maxMessageSizeBytes": 48000000,
+      "maxWriteBatchSize": 100000,
+      "ok": 1.0,
+      "readOnly": false
+    },
+    "host": "127.0.0.1",
+    "index_filter": null,
+    "indexes": [],
+    "is_mongodb": true,
+    "module": "mongodb",
+    "nosql_command": null,
+    "nosql_command_database": null,
+    "nosql_command_error": null,
+    "nosql_command_result": null,
+    "port": 37017,
+    "projection": null,
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_username": null,
+    "query_documents": [],
+    "query_error": null,
+    "query_filter": null,
+    "server_version": "7.0.34",
+    "service": "mongodb",
+    "show_collections": false,
+    "show_collections_limit": null,
+    "show_databases": true,
+    "show_databases_limit": null,
+    "show_indexes": false,
+    "show_indexes_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  },
+  {
+    "auth_db": "admin",
+    "auth_required": false,
+    "capabilities": {
+      "can_list_collections": null,
+      "can_list_databases": true,
+      "can_list_indexes": null,
+      "can_read_documents": null,
+      "can_run_command": null
+    },
+    "collection_targets": [],
+    "collections": [],
+    "database": null,
+    "database_count": 5,
+    "database_names": [
+      "admin",
+      "billing",
+      "config",
+      "local",
+      "redposture"
+    ],
+    "defcreds_enabled": false,
+    "document_selector": null,
+    "documents": [],
+    "dump_documents": false,
+    "dump_limit": null,
+    "dump_safety_limit": null,
+    "effective_username": null,
+    "error": null,
+    "hello": {
+      "isWritablePrimary": true,
+      "maxBsonObjectSize": 16777216,
+      "maxMessageSizeBytes": 48000000,
+      "maxWriteBatchSize": 100000,
+      "ok": 1.0,
+      "readOnly": false
+    },
+    "host": "127.0.0.1",
+    "index_filter": null,
+    "indexes": [],
+    "is_mongodb": true,
+    "module": "mongodb",
+    "nosql_command": null,
+    "nosql_command_database": null,
+    "nosql_command_error": null,
+    "nosql_command_result": null,
+    "port": 37018,
+    "projection": null,
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_username": null,
+    "query_documents": [],
+    "query_error": null,
+    "query_filter": null,
+    "server_version": "7.0.34",
+    "service": "mongodb",
+    "show_collections": false,
+    "show_collections_limit": null,
+    "show_databases": true,
+    "show_databases_limit": null,
+    "show_indexes": false,
+    "show_indexes_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  },
+  {
+    "auth_db": "admin",
+    "auth_required": false,
+    "capabilities": {
+      "can_list_collections": null,
+      "can_list_databases": true,
+      "can_list_indexes": null,
+      "can_read_documents": null,
+      "can_run_command": null
+    },
+    "collection_targets": [],
+    "collections": [],
+    "database": null,
+    "database_count": 5,
+    "database_names": [
+      "admin",
+      "billing",
+      "config",
+      "local",
+      "redposture"
+    ],
+    "defcreds_enabled": false,
+    "document_selector": null,
+    "documents": [],
+    "dump_documents": false,
+    "dump_limit": null,
+    "dump_safety_limit": null,
+    "effective_username": null,
+    "error": null,
+    "hello": {
+      "isWritablePrimary": true,
+      "maxBsonObjectSize": 16777216,
+      "maxMessageSizeBytes": 48000000,
+      "maxWriteBatchSize": 100000,
+      "ok": 1.0,
+      "readOnly": false
+    },
+    "host": "127.0.0.1",
+    "index_filter": null,
+    "indexes": [],
+    "is_mongodb": true,
+    "module": "mongodb",
+    "nosql_command": null,
+    "nosql_command_database": null,
+    "nosql_command_error": null,
+    "nosql_command_result": null,
+    "port": 37019,
+    "projection": null,
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_username": null,
+    "query_documents": [],
+    "query_error": null,
+    "query_filter": null,
+    "server_version": "7.0.34",
+    "service": "mongodb",
+    "show_collections": false,
+    "show_collections_limit": null,
+    "show_databases": true,
+    "show_databases_limit": null,
+    "show_indexes": false,
+    "show_indexes_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  },
+  {
+    "auth_db": "admin",
+    "auth_required": false,
+    "capabilities": {
+      "can_list_collections": null,
+      "can_list_databases": true,
+      "can_list_indexes": null,
+      "can_read_documents": null,
+      "can_run_command": null
+    },
+    "collection_targets": [],
+    "collections": [],
+    "database": null,
+    "database_count": 5,
+    "database_names": [
+      "admin",
+      "billing",
+      "config",
+      "local",
+      "redposture"
+    ],
+    "defcreds_enabled": false,
+    "document_selector": null,
+    "documents": [],
+    "dump_documents": false,
+    "dump_limit": null,
+    "dump_safety_limit": null,
+    "effective_username": null,
+    "error": null,
+    "hello": {
+      "isWritablePrimary": true,
+      "maxBsonObjectSize": 16777216,
+      "maxMessageSizeBytes": 48000000,
+      "maxWriteBatchSize": 100000,
+      "ok": 1.0,
+      "readOnly": false
+    },
+    "host": "127.0.0.1",
+    "index_filter": null,
+    "indexes": [],
+    "is_mongodb": true,
+    "module": "mongodb",
+    "nosql_command": null,
+    "nosql_command_database": null,
+    "nosql_command_error": null,
+    "nosql_command_result": null,
+    "port": 37020,
+    "projection": null,
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_username": null,
+    "query_documents": [],
+    "query_error": null,
+    "query_filter": null,
+    "server_version": "7.0.34",
+    "service": "mongodb",
+    "show_collections": false,
+    "show_collections_limit": null,
+    "show_databases": true,
+    "show_databases_limit": null,
+    "show_indexes": false,
+    "show_indexes_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  }
+]

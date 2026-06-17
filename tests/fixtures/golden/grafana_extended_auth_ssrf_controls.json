@@ -1,0 +1,62 @@
+[
+  {
+    "attempted_credentials": 1,
+    "auth_attempts": [
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "prom-operator",
+        "source": "provided",
+        "username": "admin"
+      }
+    ],
+    "auth_required": true,
+    "check_results": null,
+    "check_urls": null,
+    "credentials_source": null,
+    "datasource_count": null,
+    "datasources": null,
+    "default_credentials": false,
+    "defcreds_enabled": false,
+    "effective_password": null,
+    "effective_username": null,
+    "error": "invalid credentials; authentication required",
+    "host": "127.0.0.1",
+    "is_grafana": true,
+    "module": "grafana",
+    "port": 3000,
+    "provided_credentials": true,
+    "provided_credentials_ok": false,
+    "provided_username": "admin",
+    "server_version": "13.0.1+security-01",
+    "service": "grafana",
+    "show_datasources": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "auth_required"
+  }
+]

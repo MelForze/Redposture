@@ -1,0 +1,82 @@
+[
+  {
+    "assets": false,
+    "auth_required": null,
+    "debug": false,
+    "docker": false,
+    "download": false,
+    "download_result": null,
+    "error": "Connection reset by peer",
+    "gitlab": false,
+    "gitlab_error": null,
+    "gitlab_info": null,
+    "gitlab_repositories": null,
+    "gitlab_repository_details": null,
+    "harbor": false,
+    "harbor_artifacts": null,
+    "harbor_error": null,
+    "harbor_info": null,
+    "harbor_projects": null,
+    "harbor_repositories": null,
+    "host": "127.0.0.1",
+    "image": null,
+    "image_count": null,
+    "images": null,
+    "images_error": null,
+    "inspect": false,
+    "inspection_error": null,
+    "inspections": null,
+    "is_gitlab": null,
+    "is_harbor": null,
+    "is_nexus": null,
+    "is_registry": false,
+    "metadata": false,
+    "metadata_result": null,
+    "module": "registry",
+    "nexus": false,
+    "nexus_assets": null,
+    "nexus_error": null,
+    "nexus_info": null,
+    "nexus_repositories": null,
+    "nexus_repository_details": null,
+    "port": 15004,
+    "probe_status": null,
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_username": null,
+    "repository": null,
+    "selected_repository_tags": null,
+    "service": "registry",
+    "show_images": false,
+    "show_tags": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "Connection reset by peer",
+        "result": "fail",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 2,
+        "error": "Connection reset by peer",
+        "result": "fail",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 3,
+        "error": "Connection reset by peer",
+        "result": "fail",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 4,
+        "error": "Connection reset by peer",
+        "result": "fail",
+        "stage_name": "detect_protocol"
+      }
+    ],
+    "status": "fail",
+    "tag": null,
+    "token_provided": false
+  }
+]

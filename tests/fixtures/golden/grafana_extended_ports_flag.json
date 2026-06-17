@@ -1,0 +1,118 @@
+[
+  {
+    "attempted_credentials": 1,
+    "auth_attempts": [
+      {
+        "error": "",
+        "ok": true,
+        "password": "admin",
+        "source": "default",
+        "username": "admin"
+      }
+    ],
+    "auth_required": true,
+    "check_results": null,
+    "check_urls": [],
+    "credentials_source": "default",
+    "datasource_count": 11,
+    "datasources": [
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://blackbox-exporter:9115"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://exporter-lab:9116"
+      },
+      {
+        "access": "proxy",
+        "type": "elasticsearch",
+        "url": "https://elasticsearch.internal:9200"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://kafka-exporter:9308"
+      },
+      {
+        "access": "proxy",
+        "type": "loki",
+        "url": "http://loki.internal:3100"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://node-exporter:9100"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://postgres-exporter:9187"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "https://prometheus-prod.internal"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://proxmox-exporter:9221"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://redis-exporter:9121"
+      },
+      {
+        "access": "proxy",
+        "type": "tempo",
+        "url": "http://tempo.internal:3200"
+      }
+    ],
+    "default_credentials": true,
+    "defcreds_enabled": true,
+    "effective_password": "admin",
+    "effective_username": "admin",
+    "error": null,
+    "host": "127.0.0.1",
+    "is_grafana": true,
+    "module": "grafana",
+    "port": 3000,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_username": null,
+    "server_version": "13.0.1+security-01",
+    "service": "grafana",
+    "show_datasources": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "valid_credentials"
+  }
+]

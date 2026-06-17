@@ -88,6 +88,45 @@ def test_postgres_defcreds_include_pgbouncer_pair() -> None:
     ]
 
 
+def test_postgres_auth_required_shows_all_attempted_defaults() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 5432,
+        "status": "auth_required",
+        "auth_required": True,
+        "provided_credentials": False,
+        "defcreds_enabled": True,
+        "effective_username": "pgbouncer",
+        "attempted_credentials": [
+            {"username": "postgres", "password": "postgres", "source": "default", "status": "auth_required"},
+            {"username": "pgbouncer", "password": "pgbouncer", "source": "default", "status": "auth_required"},
+        ],
+    }
+    # Summary line is deferred (empty) so the per-attempt renderer owns the credential lines.
+    assert _format_record(record, "txt") == ""
+    lines = postgres._format_credential_attempts_records(record, "txt")
+    assert any(line.endswith("[-] postgres:postgres") for line in lines)
+    assert any(line.endswith("[-] pgbouncer:pgbouncer") for line in lines)
+    # JSON keeps the structured list on the record; no extra text lines.
+    assert postgres._format_credential_attempts_records(record, "json") == []
+
+
+def test_postgres_auth_required_single_attempt_keeps_one_line() -> None:
+    # Backward compat: without attempted_credentials, the summary still emits one line
+    # and the per-attempt renderer is a no-op.
+    record = {
+        "host": "127.0.0.1",
+        "port": 5432,
+        "status": "auth_required",
+        "auth_required": True,
+        "provided_credentials": False,
+        "defcreds_enabled": True,
+        "effective_username": "postgres",
+    }
+    assert _format_record(record, "txt").endswith("[-] postgres:postgres")
+    assert postgres._format_credential_attempts_records(record, "txt") == []
+
+
 def test_postgres_weak_default_format_uses_effective_default_pair() -> None:
     line = _format_record(
         {

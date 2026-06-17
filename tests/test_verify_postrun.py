@@ -14,11 +14,20 @@ from scripts.verify_postrun import (
     _infer_target_count_from_jsonl,
     _parse_status_file,
     _progress_counts_from_log,
+    _validate_capability_sanity,
+    _validate_cross_case_invariants,
+    _validate_dump_not_empty,
+    _validate_elapsed_sanity,
     _validate_expected_exits,
     _validate_expected_labels,
+    _validate_multi_record_consistency,
     _validate_openapi_artifacts,
     _validate_output_sanity,
     _validate_rich_lab_outputs,
+    _validate_schema_mandatory_fields,
+    _validate_stage_coherence,
+    _validate_status_coherence,
+    _validate_tee_when_output_set,
 )
 
 
@@ -569,3 +578,466 @@ def test_sequential_matrix_uses_deep_dump_for_multi_target_seeded_labs() -> None
     assert "kafka_multi_ports 0 kafka" in matrix and "--show-topics --dump --max-messages 10" in matrix
     assert "zookeeper_multi_ports 0 zookeeper" in matrix and "--show-znodes --dump" in matrix
     assert "registry_gitlab 0 registry" in matrix and "--token glrt-lab-token --gitlab --images" in matrix
+
+
+def _mk_row(
+    *,
+    module: str,
+    label: str,
+    exit_code: str,
+    json_path: str,
+    log_path: str,
+    expected_exit: str = "0",
+) -> dict[str, str]:
+    return {
+        "module": module,
+        "label": label,
+        "expected_exit": expected_exit,
+        "exit_code": exit_code,
+        "json_path": json_path,
+        "log_path": log_path,
+    }
+
+
+def test_validate_tee_when_output_set_passes_when_log_contains_json(tmp_path: Path) -> None:
+    json_path = tmp_path / "redis_default.json"
+    log_path = tmp_path / "redis_default.log"
+    json_text = '{"host": "127.0.0.1", "port": 6379, "status": "valid_credentials"}'
+    json_path.write_text(json_text + "\n", encoding="utf-8")
+    log_path.write_text(f"banner\n{json_text}\n", encoding="utf-8")
+
+    _validate_tee_when_output_set(
+        [
+            _mk_row(
+                module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path)
+            )
+        ]
+    )
+
+
+def test_validate_tee_when_output_set_fails_when_log_lacks_json(tmp_path: Path) -> None:
+    json_path = tmp_path / "redis_default.json"
+    log_path = tmp_path / "redis_default.log"
+    json_path.write_text('{"host": "127.0.0.1", "port": 6379}\n', encoding="utf-8")
+    log_path.write_text("only banner -- no json payload echoed\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="tee regression for label 'redis_default'"):
+        _validate_tee_when_output_set(
+            [
+                _mk_row(
+                    module="redis",
+                    label="redis_default",
+                    exit_code="0",
+                    json_path=str(json_path),
+                    log_path=str(log_path),
+                )
+            ]
+        )
+
+
+def test_validate_tee_when_output_set_skips_run_text_case(tmp_path: Path) -> None:
+    # run_text_case writes json_path="-" -- no JSON file to compare against, no tee check.
+    log_path = tmp_path / "smoke.log"
+    log_path.write_text("only debug text output\n", encoding="utf-8")
+    _validate_tee_when_output_set(
+        [_mk_row(module="redis", label="redis_debug_smoke", exit_code="0", json_path="-", log_path=str(log_path))]
+    )
+
+
+def test_validate_dump_not_empty_fires_on_empty_key_values(tmp_path: Path) -> None:
+    json_path = tmp_path / "redis_default.json"
+    log_path = tmp_path / "redis_default.log"
+    json_path.write_text('{"status": "valid_credentials", "key_values": []}\n', encoding="utf-8")
+    log_path.write_text("anything\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="empty-dump marker"):
+        _validate_dump_not_empty(
+            [
+                _mk_row(
+                    module="redis",
+                    label="redis_default",
+                    exit_code="0",
+                    json_path=str(json_path),
+                    log_path=str(log_path),
+                )
+            ]
+        )
+
+
+def test_validate_dump_not_empty_skips_auth_required(tmp_path: Path) -> None:
+    # When auth was required (no creds passed), an empty dump is expected -- the
+    # status-coherence rule covers the credential-flow regression separately.
+    json_path = tmp_path / "clickhouse_native_open.json"
+    log_path = tmp_path / "clickhouse_native_open.log"
+    json_path.write_text(
+        '{"status": "auth_required", "table_dumps": []}\n',
+        encoding="utf-8",
+    )
+    log_path.write_text("auth probe\n", encoding="utf-8")
+    _validate_dump_not_empty(
+        [
+            _mk_row(
+                module="clickhouse",
+                label="clickhouse_native_open",
+                exit_code="0",
+                json_path=str(json_path),
+                log_path=str(log_path),
+            )
+        ]
+    )
+
+
+def test_validate_dump_not_empty_passes_when_dump_has_content(tmp_path: Path) -> None:
+    json_path = tmp_path / "redis_default.json"
+    log_path = tmp_path / "redis_default.log"
+    json_path.write_text(
+        '{"status": "valid_credentials", "key_values": ["app:env:prod", "user:1001:name=alice"]}\n',
+        encoding="utf-8",
+    )
+    log_path.write_text("ok\n", encoding="utf-8")
+    _validate_dump_not_empty(
+        [
+            _mk_row(
+                module="redis",
+                label="redis_default",
+                exit_code="0",
+                json_path=str(json_path),
+                log_path=str(log_path),
+            )
+        ]
+    )
+
+
+def test_validate_status_coherence_fires_on_auth_required_with_credentials(tmp_path: Path) -> None:
+    json_path = tmp_path / "postgres_default.json"
+    log_path = tmp_path / "postgres_default.log"
+    # Provided credentials AND auth_required -> 5.5.1 credential-flow regression signature.
+    json_path.write_text(
+        '{"provided_credentials": true, "status": "auth_required"}\n',
+        encoding="utf-8",
+    )
+    log_path.write_text("ok\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="credential-flow regression"):
+        _validate_status_coherence(
+            [
+                _mk_row(
+                    module="postgres",
+                    label="postgres_default",
+                    exit_code="0",
+                    json_path=str(json_path),
+                    log_path=str(log_path),
+                )
+            ]
+        )
+
+
+def test_validate_status_coherence_ignores_defcreds_and_probe_cases(tmp_path: Path) -> None:
+    # Defcreds/probe cases do NOT set provided_credentials=true, so an auth_required outcome
+    # is intentional and the rule must stay silent.
+    json_path = tmp_path / "oracle_listener.json"
+    log_path = tmp_path / "oracle_listener.log"
+    json_path.write_text(
+        '{"provided_credentials": false, "status": "auth_required"}\n',
+        encoding="utf-8",
+    )
+    log_path.write_text("ok\n", encoding="utf-8")
+    _validate_status_coherence(
+        [
+            _mk_row(
+                module="oracle",
+                label="oracle_listener",
+                exit_code="0",
+                json_path=str(json_path),
+                log_path=str(log_path),
+            )
+        ]
+    )
+
+
+def test_validate_multi_record_consistency_fires_on_status_split(tmp_path: Path) -> None:
+    json_path = tmp_path / "consul_multi_instance_urls.json"
+    # 5 records, one with a different status -> partial-failure regression.
+    records = [
+        '{"host": "127.0.0.1", "port": 8500, "status": "open_no_auth"}',
+        '{"host": "127.0.0.1", "port": 8501, "status": "open_no_auth"}',
+        '{"host": "127.0.0.1", "port": 8502, "status": "fail"}',
+        '{"host": "127.0.0.1", "port": 8503, "status": "open_no_auth"}',
+        '{"host": "127.0.0.1", "port": 8504, "status": "open_no_auth"}',
+    ]
+    json_path.write_text("\n".join(records) + "\n", encoding="utf-8")
+    rows = [
+        _mk_row(
+            module="consul",
+            label="consul_multi_instance_urls",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(tmp_path / "consul.log"),
+        )
+    ]
+    (tmp_path / "consul.log").write_text("ok\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="inconsistent status across host records"):
+        _validate_multi_record_consistency(rows)
+
+
+def test_validate_multi_record_consistency_fires_on_short_count(tmp_path: Path) -> None:
+    json_path = tmp_path / "consul_multi_instance_urls.json"
+    records = [f'{{"host": "127.0.0.1", "port": {8500 + i}, "status": "open_no_auth"}}' for i in range(3)]
+    json_path.write_text("\n".join(records) + "\n", encoding="utf-8")
+    (tmp_path / "consul.log").write_text("ok\n", encoding="utf-8")
+    rows = [
+        _mk_row(
+            module="consul",
+            label="consul_multi_instance_urls",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(tmp_path / "consul.log"),
+        )
+    ]
+    with pytest.raises(SystemExit, match="expected 5 host records, got 3"):
+        _validate_multi_record_consistency(rows)
+
+
+def test_validate_multi_record_consistency_passes_uniform_status(tmp_path: Path) -> None:
+    json_path = tmp_path / "redis_multi_ports.json"
+    records = [f'{{"host": "127.0.0.1", "port": {6379 + i}, "status": "valid_credentials"}}' for i in range(5)]
+    json_path.write_text("\n".join(records) + "\n", encoding="utf-8")
+    (tmp_path / "redis.log").write_text("ok\n", encoding="utf-8")
+    rows = [
+        _mk_row(
+            module="redis",
+            label="redis_multi_ports",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(tmp_path / "redis.log"),
+        )
+    ]
+    _validate_multi_record_consistency(rows)
+
+
+def test_validate_multi_record_consistency_skips_known_mixed_cases(tmp_path: Path) -> None:
+    # docker_multi_ports is explicitly mixed-by-design (4 open + 1 auth_required).
+    json_path = tmp_path / "docker_multi_ports.json"
+    records = ['{"host": "127.0.0.1", "port": 2375, "status": "open_no_auth"}'] * 4 + [
+        '{"host": "127.0.0.1", "port": 2376, "status": "auth_required"}'
+    ]
+    json_path.write_text("\n".join(records) + "\n", encoding="utf-8")
+    (tmp_path / "docker.log").write_text("ok\n", encoding="utf-8")
+    rows = [
+        _mk_row(
+            module="docker",
+            label="docker_multi_ports",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(tmp_path / "docker.log"),
+        )
+    ]
+    _validate_multi_record_consistency(rows)
+
+
+def test_validate_json_artifacts_handles_nel_byte_in_payload(tmp_path: Path) -> None:
+    # Real flaky-test source: exporter response bodies can contain bytes that str.splitlines()
+    # treats as line separators (\r, \x85/NEL, U+2028, ...). A single such byte inside a
+    # JSON string value would shred an otherwise-valid JSONL record into invalid fragments.
+    # The reader must split only on '\n'.
+    from scripts.verify_postrun import _validate_json_artifacts
+
+    log_path = tmp_path / "exporters_collect.log"
+    json_path = tmp_path / "exporters_collect.json"
+    log_path.write_text("ok\n", encoding="utf-8")
+    # One JSONL record on one physical line, with NEL (U+0085) embedded inside the body.
+    json_path.write_text(
+        '{"exporter": "node_exporter", "body": "headtail"}\n',
+        encoding="utf-8",
+    )
+    rows = [
+        _mk_row(
+            module="exporters",
+            label="exporters_collect",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+    # No exception expected: the record is valid JSONL even though it contains \x85.
+    successful = _validate_json_artifacts(rows)
+    assert successful["exporters"] == 1
+
+
+def _audit_json(tmp_path: Path, label: str, body: str) -> tuple[Path, Path]:
+    json_path = tmp_path / f"{label}.json"
+    log_path = tmp_path / f"{label}.log"
+    json_path.write_text(body + ("\n" if not body.endswith("\n") else ""), encoding="utf-8")
+    log_path.write_text("ok\n", encoding="utf-8")
+    return json_path, log_path
+
+
+# --- P3-A schema -----------------------------------------------------------------
+
+
+def test_validate_schema_mandatory_fields_fires_on_missing_host(tmp_path: Path) -> None:
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "redis_default",
+        '{"port": 6379, "status": "valid_credentials", "timestamp": "2026-01-01T00:00:00Z", "stages": [], "module": "redis"}',
+    )
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
+    ]
+    with pytest.raises(SystemExit, match="missing/empty 'host'"):
+        _validate_schema_mandatory_fields(rows)
+
+
+def test_validate_schema_mandatory_fields_passes_complete_record(tmp_path: Path) -> None:
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "redis_default",
+        '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t","stages":[],"module":"redis"}',
+    )
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
+    ]
+    _validate_schema_mandatory_fields(rows)
+
+
+def test_validate_schema_mandatory_fields_skips_exporter_records(tmp_path: Path) -> None:
+    # Exporter-shape records (carry "exporter" field) are validated separately.
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "exporters_collect",
+        '{"host":"h","port":9100,"exporter":"node_exporter","status":"trigger_success","timestamp":"t"}',
+    )
+    rows = [
+        _mk_row(
+            module="exporters",
+            label="exporters_collect",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+    _validate_schema_mandatory_fields(rows)
+
+
+# --- P3-F elapsed sanity ---------------------------------------------------------
+
+
+def test_validate_elapsed_sanity_fires_on_zero_timer_for_success_status(tmp_path: Path) -> None:
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "redis_default",
+        '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t","stages":[],"elapsed_ms":0,"module":"redis"}',
+    )
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
+    ]
+    with pytest.raises(SystemExit, match="no positive timer"):
+        _validate_elapsed_sanity(rows)
+
+
+def test_validate_elapsed_sanity_accepts_stage_sum(tmp_path: Path) -> None:
+    # Failed audits omit top-level timers, but per-stage durations remain; total > 0 is OK.
+    body = (
+        '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t",'
+        '"stages":[{"duration_ms":5},{"duration_ms":10}],"module":"redis","elapsed_ms":null}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "redis_default", body)
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
+    ]
+    _validate_elapsed_sanity(rows)
+
+
+def test_validate_elapsed_sanity_skips_fail_status(tmp_path: Path) -> None:
+    body = '{"host":"h","port":3000,"status":"fail","timestamp":"t","stages":[],"elapsed_ms":null,"module":"grafana"}'
+    json_path, log_path = _audit_json(tmp_path, "grafana_default", body)
+    rows = [
+        _mk_row(
+            module="grafana", label="grafana_default", exit_code="0", json_path=str(json_path), log_path=str(log_path)
+        )
+    ]
+    _validate_elapsed_sanity(rows)
+
+
+# --- P3-E capability sanity ------------------------------------------------------
+
+
+def test_validate_capability_sanity_fires_when_all_fields_empty(tmp_path: Path) -> None:
+    body = (
+        '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t","stages":[],'
+        '"module":"redis","is_redis":false,"key_count":0,"keys":null,"key_values":null}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "redis_default", body)
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
+    ]
+    with pytest.raises(SystemExit, match="capability regression"):
+        _validate_capability_sanity(rows)
+
+
+def test_validate_capability_sanity_passes_when_one_field_populated(tmp_path: Path) -> None:
+    body = (
+        '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t","stages":[],'
+        '"module":"redis","is_redis":true}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "redis_default", body)
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
+    ]
+    _validate_capability_sanity(rows)
+
+
+# --- P3-B stage coherence --------------------------------------------------------
+
+
+def test_validate_stage_coherence_fires_on_success_with_failed_stage(tmp_path: Path) -> None:
+    body = (
+        '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t","module":"redis",'
+        '"stages":[{"stage_name":"detect","result":"ok","error":null},'
+        '{"stage_name":"data","result":"fail","error":"timeout"}]}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "redis_default", body)
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
+    ]
+    with pytest.raises(SystemExit, match="stage-coherence"):
+        _validate_stage_coherence(rows)
+
+
+def test_validate_stage_coherence_fires_on_fail_stage_with_null_error(tmp_path: Path) -> None:
+    body = (
+        '{"host":"h","port":6379,"status":"fail","timestamp":"t","module":"redis",'
+        '"stages":[{"stage_name":"detect","result":"fail","error":null}]}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "redis_default", body)
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
+    ]
+    with pytest.raises(SystemExit, match="silent failure"):
+        _validate_stage_coherence(rows)
+
+
+# --- P3-D cross-case invariants --------------------------------------------------
+
+
+def test_validate_cross_case_invariants_fires_on_disagreement(tmp_path: Path) -> None:
+    # redis_default and redis_extended_paged_dump must agree on key_count.
+    body_a = '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t","module":"redis","stages":[],"key_count":16}'
+    body_b = '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t","module":"redis","stages":[],"key_count":12}'
+    ja, la = _audit_json(tmp_path, "redis_default", body_a)
+    jb, lb = _audit_json(tmp_path, "redis_extended_paged_dump", body_b)
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(ja), log_path=str(la)),
+        _mk_row(module="redis", label="redis_extended_paged_dump", exit_code="0", json_path=str(jb), log_path=str(lb)),
+    ]
+    with pytest.raises(SystemExit, match="cross-case invariant violated"):
+        _validate_cross_case_invariants(rows)
+
+
+def test_validate_cross_case_invariants_passes_on_agreement(tmp_path: Path) -> None:
+    body = '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t","module":"redis","stages":[],"key_count":16}'
+    ja, la = _audit_json(tmp_path, "redis_default", body)
+    jb, lb = _audit_json(tmp_path, "redis_extended_paged_dump", body)
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(ja), log_path=str(la)),
+        _mk_row(module="redis", label="redis_extended_paged_dump", exit_code="0", json_path=str(jb), log_path=str(lb)),
+    ]
+    _validate_cross_case_invariants(rows)

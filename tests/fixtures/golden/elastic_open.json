@@ -1,0 +1,214 @@
+[
+  {
+    "access_level": "unknown",
+    "api_key_probe_error": null,
+    "api_key_probe_status": "not_run",
+    "api_token": null,
+    "auth_required": false,
+    "auth_valid": null,
+    "can_manage": null,
+    "can_manage_security": null,
+    "can_read": null,
+    "can_write": null,
+    "cat_endpoints": null,
+    "cat_plugins": null,
+    "cluster_error": null,
+    "cluster_health": null,
+    "cluster_nodes": null,
+    "detect_confidence": "high",
+    "detect_probe_trace": [
+      {
+        "scheme": "http",
+        "status": 200
+      },
+      {
+        "scheme": "http",
+        "status": 200
+      },
+      {
+        "scheme": "http",
+        "status": 200
+      },
+      {
+        "scheme": "http",
+        "status": 200
+      },
+      {
+        "scheme": "http",
+        "status": 405
+      }
+    ],
+    "detect_signals": [
+      "header_x_elastic_product",
+      "root_tagline",
+      "root_version_shape",
+      "nodes_version_shape"
+    ],
+    "discover": true,
+    "discover_error": null,
+    "discover_results": [
+      {
+        "error": null,
+        "hits": [
+          {
+            "id": "txn-1001",
+            "source": {
+              "amount": 1299.5,
+              "currency": "USD",
+              "customer_id": "cust-4421",
+              "metadata": {
+                "payment_ref": "pi_redposture_2026",
+                "provider": "stripe"
+              },
+              "status": "settled",
+              "transaction_id": "txn-1001"
+            }
+          },
+          {
+            "id": "txn-1002",
+            "source": {
+              "amount": 88.1,
+              "currency": "EUR",
+              "customer_id": "cust-8842",
+              "metadata": {
+                "provider": "adyen",
+                "risk": "review"
+              },
+              "status": "pending",
+              "transaction_id": "txn-1002"
+            }
+          }
+        ],
+        "index": "finance-transactions-2026.05",
+        "shown_hits": 2,
+        "total_hits": 2,
+        "truncated": false
+      },
+      {
+        "error": null,
+        "hits": [
+          {
+            "id": "log-1",
+            "source": {
+              "@timestamp": "<ISO>",
+              "attrs": {
+                "method": "GET",
+                "route": "/api/v1/orders"
+              },
+              "client_ip": "10.20.30.40",
+              "env": "prod",
+              "latency_ms": 42,
+              "level": "info",
+              "message": "request completed",
+              "service": "api-gateway",
+              "trace_id": "9fd4f6b27f4e4b9a"
+            }
+          },
+          {
+            "id": "log-2",
+            "source": {
+              "@timestamp": "<ISO>",
+              "attrs": {
+                "sasl_password": "metricspass",
+                "sasl_username": "metrics",
+                "topic": "orders.events"
+              },
+              "client_ip": "10.20.30.41",
+              "env": "prod",
+              "latency_ms": 980,
+              "level": "warn",
+              "message": "retrying kafka publish",
+              "service": "worker",
+              "trace_id": "a7f1d30a5a884f22"
+            }
+          }
+        ],
+        "index": "redposture-logs-2026.05",
+        "shown_hits": 2,
+        "total_hits": 2,
+        "truncated": false
+      },
+      {
+        "error": null,
+        "hits": [
+          {
+            "id": "secret-1",
+            "source": {
+              "kind": "api_key",
+              "owner": "observability",
+              "source": "kibana_saved_object",
+              "value": "elastic-prod-api-key-2026"
+            }
+          },
+          {
+            "id": "secret-2",
+            "source": {
+              "kind": "dsn",
+              "owner": "payments",
+              "source": "service_config",
+              "value": "postgresql://payments:PayDb!2026@postgres.internal:5432/payments?sslmode=require"
+            }
+          }
+        ],
+        "index": "redposture-secrets-2026.05",
+        "shown_hits": 2,
+        "total_hits": 2,
+        "truncated": false
+      }
+    ],
+    "effective_username": null,
+    "endpoint_diagnostics": null,
+    "endpoints_error": null,
+    "error": null,
+    "host": "127.0.0.1",
+    "insecure_effective": false,
+    "is_elastic": true,
+    "misconfig_error": null,
+    "misconfig_findings": null,
+    "module": "elastic",
+    "plugins_error": null,
+    "port": 19200,
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_token": false,
+    "provided_username": null,
+    "rights_error": null,
+    "scheme": "http",
+    "server_version": "8.13.4",
+    "service": "elastic",
+    "show_cluster": false,
+    "show_endpoints": false,
+    "show_plugins": false,
+    "show_users": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "open_no_auth",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "no auth provided",
+        "result": "skipped",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "tls_auto_plain": true,
+    "users": null,
+    "users_error": null
+  }
+]

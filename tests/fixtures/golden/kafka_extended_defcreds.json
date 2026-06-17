@@ -1,0 +1,82 @@
+[
+  {
+    "attempted_credentials": [
+      {
+        "password": "admin",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "admin"
+      },
+      {
+        "password": "kafka",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "kafka"
+      },
+      {
+        "password": "password",
+        "source": "default",
+        "status": "invalid_credentials_anonymous",
+        "username": "kafka"
+      }
+    ],
+    "auth_required": false,
+    "dump": false,
+    "dump_error": null,
+    "dump_errors": null,
+    "dump_results": null,
+    "dump_topics": null,
+    "error": "SASL handshake failed: ERR_34",
+    "host": "127.0.0.1",
+    "is_kafka": true,
+    "max_messages": null,
+    "module": "kafka",
+    "port": 9092,
+    "provided_credentials": true,
+    "provided_credentials_ok": false,
+    "provided_password": "password",
+    "provided_username": "kafka",
+    "query_topic": null,
+    "query_topic_value": null,
+    "service": "kafka",
+    "show_topics": false,
+    "show_topics_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": "deep checks disabled",
+        "result": "skip",
+        "stage_name": "data"
+      }
+    ],
+    "status": "invalid_credentials_anonymous",
+    "topic_count": 5,
+    "topic_messages": null,
+    "topic_read_error": null,
+    "topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ]
+  }
+]
