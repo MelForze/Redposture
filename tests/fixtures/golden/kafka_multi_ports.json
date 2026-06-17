@@ -1,0 +1,462 @@
+[
+  {
+    "auth_required": false,
+    "dump": true,
+    "dump_error": null,
+    "dump_errors": {},
+    "dump_results": {
+      "audit.logs": [
+        "<KAFKA_OFFSET> {\"event\":\"login\",\"user\":\"admin\",\"source_ip\":\"10.0.1.11\"}",
+        "<KAFKA_OFFSET> {\"event\":\"token_created\",\"service\":\"grafana\",\"token_hint\":\"gfa_demo_token_123\"}",
+        "<KAFKA_OFFSET> {\"event\":\"config_changed\",\"user\":\"automation\",\"path\":\"/etc/redposture/app.yml\"}"
+      ],
+      "inventory.events": [
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-001\",\"service\":\"postgres\",\"port\":5432,\"owner\":\"platform\"}",
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-002\",\"service\":\"kafka\",\"port\":9092,\"owner\":\"data\"}",
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-003\",\"service\":\"zookeeper\",\"port\":2181,\"owner\":\"data\"}"
+      ],
+      "orders": [
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+      ],
+      "payments.events": [
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3001\",\"provider\":\"stripe\",\"status\":\"authorized\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3002\",\"provider\":\"adyen\",\"status\":\"captured\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3003\",\"provider\":\"stripe\",\"status\":\"failed\",\"reason\":\"insufficient_funds\"}"
+      ],
+      "security.alerts": [
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9001\",\"severity\":\"high\",\"rule\":\"public_admin_panel\",\"target\":\"grafana-open\"}",
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9002\",\"severity\":\"medium\",\"rule\":\"weak_password\",\"target\":\"redis-open\"}",
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9003\",\"severity\":\"low\",\"rule\":\"debug_endpoint\",\"target\":\"exporter-lab\"}"
+      ]
+    },
+    "dump_topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ],
+    "error": null,
+    "host": "127.0.0.1",
+    "is_kafka": true,
+    "max_messages": 10,
+    "module": "kafka",
+    "port": 9092,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_password": null,
+    "provided_username": null,
+    "query_topic": null,
+    "query_topic_value": null,
+    "service": "kafka",
+    "show_topics": true,
+    "show_topics_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "topic_count": 5,
+    "topic_messages": null,
+    "topic_read_error": null,
+    "topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ]
+  },
+  {
+    "auth_required": false,
+    "dump": true,
+    "dump_error": null,
+    "dump_errors": {},
+    "dump_results": {
+      "audit.logs": [
+        "<KAFKA_OFFSET> {\"event\":\"login\",\"user\":\"admin\",\"source_ip\":\"10.0.1.11\"}",
+        "<KAFKA_OFFSET> {\"event\":\"token_created\",\"service\":\"grafana\",\"token_hint\":\"gfa_demo_token_123\"}",
+        "<KAFKA_OFFSET> {\"event\":\"config_changed\",\"user\":\"automation\",\"path\":\"/etc/redposture/app.yml\"}"
+      ],
+      "inventory.events": [
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-001\",\"service\":\"postgres\",\"port\":5432,\"owner\":\"platform\"}",
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-002\",\"service\":\"kafka\",\"port\":9092,\"owner\":\"data\"}",
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-003\",\"service\":\"zookeeper\",\"port\":2181,\"owner\":\"data\"}"
+      ],
+      "orders": [
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+      ],
+      "payments.events": [
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3001\",\"provider\":\"stripe\",\"status\":\"authorized\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3002\",\"provider\":\"adyen\",\"status\":\"captured\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3003\",\"provider\":\"stripe\",\"status\":\"failed\",\"reason\":\"insufficient_funds\"}"
+      ],
+      "security.alerts": [
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9001\",\"severity\":\"high\",\"rule\":\"public_admin_panel\",\"target\":\"grafana-open\"}",
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9002\",\"severity\":\"medium\",\"rule\":\"weak_password\",\"target\":\"redis-open\"}",
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9003\",\"severity\":\"low\",\"rule\":\"debug_endpoint\",\"target\":\"exporter-lab\"}"
+      ]
+    },
+    "dump_topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ],
+    "error": null,
+    "host": "127.0.0.1",
+    "is_kafka": true,
+    "max_messages": 10,
+    "module": "kafka",
+    "port": 39092,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_password": null,
+    "provided_username": null,
+    "query_topic": null,
+    "query_topic_value": null,
+    "service": "kafka",
+    "show_topics": true,
+    "show_topics_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "topic_count": 5,
+    "topic_messages": null,
+    "topic_read_error": null,
+    "topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ]
+  },
+  {
+    "auth_required": false,
+    "dump": true,
+    "dump_error": null,
+    "dump_errors": {},
+    "dump_results": {
+      "audit.logs": [
+        "<KAFKA_OFFSET> {\"event\":\"login\",\"user\":\"admin\",\"source_ip\":\"10.0.1.11\"}",
+        "<KAFKA_OFFSET> {\"event\":\"token_created\",\"service\":\"grafana\",\"token_hint\":\"gfa_demo_token_123\"}",
+        "<KAFKA_OFFSET> {\"event\":\"config_changed\",\"user\":\"automation\",\"path\":\"/etc/redposture/app.yml\"}"
+      ],
+      "inventory.events": [
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-001\",\"service\":\"postgres\",\"port\":5432,\"owner\":\"platform\"}",
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-002\",\"service\":\"kafka\",\"port\":9092,\"owner\":\"data\"}",
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-003\",\"service\":\"zookeeper\",\"port\":2181,\"owner\":\"data\"}"
+      ],
+      "orders": [
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+      ],
+      "payments.events": [
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3001\",\"provider\":\"stripe\",\"status\":\"authorized\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3002\",\"provider\":\"adyen\",\"status\":\"captured\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3003\",\"provider\":\"stripe\",\"status\":\"failed\",\"reason\":\"insufficient_funds\"}"
+      ],
+      "security.alerts": [
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9001\",\"severity\":\"high\",\"rule\":\"public_admin_panel\",\"target\":\"grafana-open\"}",
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9002\",\"severity\":\"medium\",\"rule\":\"weak_password\",\"target\":\"redis-open\"}",
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9003\",\"severity\":\"low\",\"rule\":\"debug_endpoint\",\"target\":\"exporter-lab\"}"
+      ]
+    },
+    "dump_topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ],
+    "error": null,
+    "host": "127.0.0.1",
+    "is_kafka": true,
+    "max_messages": 10,
+    "module": "kafka",
+    "port": 39093,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_password": null,
+    "provided_username": null,
+    "query_topic": null,
+    "query_topic_value": null,
+    "service": "kafka",
+    "show_topics": true,
+    "show_topics_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "topic_count": 5,
+    "topic_messages": null,
+    "topic_read_error": null,
+    "topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ]
+  },
+  {
+    "auth_required": false,
+    "dump": true,
+    "dump_error": null,
+    "dump_errors": {},
+    "dump_results": {
+      "audit.logs": [
+        "<KAFKA_OFFSET> {\"event\":\"login\",\"user\":\"admin\",\"source_ip\":\"10.0.1.11\"}",
+        "<KAFKA_OFFSET> {\"event\":\"token_created\",\"service\":\"grafana\",\"token_hint\":\"gfa_demo_token_123\"}",
+        "<KAFKA_OFFSET> {\"event\":\"config_changed\",\"user\":\"automation\",\"path\":\"/etc/redposture/app.yml\"}"
+      ],
+      "inventory.events": [
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-001\",\"service\":\"postgres\",\"port\":5432,\"owner\":\"platform\"}",
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-002\",\"service\":\"kafka\",\"port\":9092,\"owner\":\"data\"}",
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-003\",\"service\":\"zookeeper\",\"port\":2181,\"owner\":\"data\"}"
+      ],
+      "orders": [
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+      ],
+      "payments.events": [
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3001\",\"provider\":\"stripe\",\"status\":\"authorized\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3002\",\"provider\":\"adyen\",\"status\":\"captured\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3003\",\"provider\":\"stripe\",\"status\":\"failed\",\"reason\":\"insufficient_funds\"}"
+      ],
+      "security.alerts": [
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9001\",\"severity\":\"high\",\"rule\":\"public_admin_panel\",\"target\":\"grafana-open\"}",
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9002\",\"severity\":\"medium\",\"rule\":\"weak_password\",\"target\":\"redis-open\"}",
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9003\",\"severity\":\"low\",\"rule\":\"debug_endpoint\",\"target\":\"exporter-lab\"}"
+      ]
+    },
+    "dump_topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ],
+    "error": null,
+    "host": "127.0.0.1",
+    "is_kafka": true,
+    "max_messages": 10,
+    "module": "kafka",
+    "port": 39094,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_password": null,
+    "provided_username": null,
+    "query_topic": null,
+    "query_topic_value": null,
+    "service": "kafka",
+    "show_topics": true,
+    "show_topics_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "topic_count": 5,
+    "topic_messages": null,
+    "topic_read_error": null,
+    "topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ]
+  },
+  {
+    "auth_required": false,
+    "dump": true,
+    "dump_error": null,
+    "dump_errors": {},
+    "dump_results": {
+      "audit.logs": [
+        "<KAFKA_OFFSET> {\"event\":\"login\",\"user\":\"admin\",\"source_ip\":\"10.0.1.11\"}",
+        "<KAFKA_OFFSET> {\"event\":\"token_created\",\"service\":\"grafana\",\"token_hint\":\"gfa_demo_token_123\"}",
+        "<KAFKA_OFFSET> {\"event\":\"config_changed\",\"user\":\"automation\",\"path\":\"/etc/redposture/app.yml\"}"
+      ],
+      "inventory.events": [
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-001\",\"service\":\"postgres\",\"port\":5432,\"owner\":\"platform\"}",
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-002\",\"service\":\"kafka\",\"port\":9092,\"owner\":\"data\"}",
+        "<KAFKA_OFFSET> {\"asset_id\":\"srv-003\",\"service\":\"zookeeper\",\"port\":2181,\"owner\":\"data\"}"
+      ],
+      "orders": [
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1001\",\"status\":\"created\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
+      ],
+      "payments.events": [
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3001\",\"provider\":\"stripe\",\"status\":\"authorized\",\"amount\":149.00}",
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3002\",\"provider\":\"adyen\",\"status\":\"captured\",\"amount\":99.50}",
+        "<KAFKA_OFFSET> {\"payment_id\":\"pay-3003\",\"provider\":\"stripe\",\"status\":\"failed\",\"reason\":\"insufficient_funds\"}"
+      ],
+      "security.alerts": [
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9001\",\"severity\":\"high\",\"rule\":\"public_admin_panel\",\"target\":\"grafana-open\"}",
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9002\",\"severity\":\"medium\",\"rule\":\"weak_password\",\"target\":\"redis-open\"}",
+        "<KAFKA_OFFSET> {\"alert_id\":\"sec-9003\",\"severity\":\"low\",\"rule\":\"debug_endpoint\",\"target\":\"exporter-lab\"}"
+      ]
+    },
+    "dump_topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ],
+    "error": null,
+    "host": "127.0.0.1",
+    "is_kafka": true,
+    "max_messages": 10,
+    "module": "kafka",
+    "port": 39095,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_password": null,
+    "provided_username": null,
+    "query_topic": null,
+    "query_topic_value": null,
+    "service": "kafka",
+    "show_topics": true,
+    "show_topics_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "topic_count": 5,
+    "topic_messages": null,
+    "topic_read_error": null,
+    "topics": [
+      "audit.logs",
+      "inventory.events",
+      "orders",
+      "payments.events",
+      "security.alerts"
+    ]
+  }
+]

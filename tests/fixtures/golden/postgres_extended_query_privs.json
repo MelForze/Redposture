@@ -1,0 +1,233 @@
+[
+  {
+    "auth_database": "postgres",
+    "auth_method": "scram-sha-256",
+    "auth_required": true,
+    "can_execute_commands": true,
+    "can_read_tables": true,
+    "database": "postgres",
+    "database_count": 1,
+    "database_names": null,
+    "defcreds_enabled": false,
+    "dump_row_limit": 5,
+    "effective_username": "postgres",
+    "error": null,
+    "execute_attempted": false,
+    "execute_command": null,
+    "execute_error": null,
+    "execute_ok": null,
+    "execute_output": null,
+    "host": "127.0.0.1",
+    "is_postgres": true,
+    "module": "postgres",
+    "os_read_attempted": false,
+    "os_read_error": null,
+    "os_read_method": null,
+    "os_read_methods": [],
+    "os_read_ok": null,
+    "os_read_output": null,
+    "os_read_path": null,
+    "port": 5432,
+    "privesc_check": true,
+    "privesc_checks": [
+      {
+        "description": "full database takeover via current superuser role",
+        "error": null,
+        "evidence": "current_user rolsuper=True",
+        "id": "superuser_session",
+        "severity": "CRITICAL",
+        "vulnerable": true
+      },
+      {
+        "description": "password hashes exposed",
+        "error": null,
+        "evidence": "has SELECT on pg_catalog.pg_shadow=True",
+        "id": "pg_shadow_readable",
+        "severity": "CRITICAL",
+        "vulnerable": true
+      },
+      {
+        "description": "OS command execution",
+        "error": null,
+        "evidence": "superuser=True pg_execute_server_program=True",
+        "id": "copy_program",
+        "severity": "CRITICAL",
+        "vulnerable": true
+      },
+      {
+        "description": "arbitrary server-side file read",
+        "error": null,
+        "evidence": "superuser=True pg_read_server_files=True",
+        "id": "pg_read_file",
+        "severity": "HIGH",
+        "vulnerable": true
+      },
+      {
+        "description": "OS command execution via server program role",
+        "error": null,
+        "evidence": "pg_has_role(..., 'pg_execute_server_program', 'MEMBER')=True",
+        "id": "pg_execute_server_program_role",
+        "severity": "HIGH",
+        "vulnerable": true
+      },
+      {
+        "description": "arbitrary server-side file write",
+        "error": null,
+        "evidence": "superuser=True pg_write_server_files=True",
+        "id": "pg_write_server_files_role",
+        "severity": "HIGH",
+        "vulnerable": true
+      },
+      {
+        "description": "large object file read/write",
+        "error": null,
+        "evidence": "superuser=True lo_import_execute=True lo_export_execute=True",
+        "id": "lo_import_export",
+        "severity": "HIGH",
+        "vulnerable": true
+      },
+      {
+        "description": "role escalation",
+        "error": null,
+        "evidence": "superuser=True rolcreaterole=True",
+        "id": "createrole",
+        "severity": "HIGH",
+        "vulnerable": true
+      },
+      {
+        "description": "can create databases for staging further abuse",
+        "error": null,
+        "evidence": "superuser=True rolcreatedb=True",
+        "id": "createdb",
+        "severity": "MEDIUM",
+        "vulnerable": true
+      },
+      {
+        "description": "callable privileged functions may expose escalation paths",
+        "error": null,
+        "evidence": "accessible SECURITY DEFINER functions=0",
+        "id": "security_definer_accessible",
+        "severity": "MEDIUM",
+        "vulnerable": false
+      },
+      {
+        "description": "extension loading",
+        "error": null,
+        "evidence": "has CREATE on current_database()=True",
+        "id": "database_create_privilege",
+        "severity": "MEDIUM",
+        "vulnerable": true
+      }
+    ],
+    "privesc_summary": {
+      "critical": 3,
+      "high": 5,
+      "medium": 2,
+      "total": 11,
+      "unknown": 0
+    },
+    "provided_credentials": true,
+    "provided_password": "postgres",
+    "provided_username": "postgres",
+    "readable_tables": 7,
+    "server_version": "16.14",
+    "service": "postgres",
+    "show_columns": true,
+    "show_columns_limit": 5,
+    "show_databases": false,
+    "show_databases_limit": null,
+    "show_row_counts": true,
+    "show_tables": true,
+    "show_tables_limit": null,
+    "sql_attempted": true,
+    "sql_command": "select username, role from redposture.demo_accounts order by id limit 2",
+    "sql_error": null,
+    "sql_ok": true,
+    "sql_output": [
+      "admin | admin",
+      "readonly | viewer"
+    ],
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "valid_credentials",
+    "superuser": true,
+    "table_columns": [
+      "username",
+      "password"
+    ],
+    "table_columns_info": [
+      {
+        "columns": [
+          "username",
+          "password"
+        ],
+        "database": "postgres",
+        "error": null,
+        "table": "redposture.demo_accounts"
+      }
+    ],
+    "table_dump_enabled": true,
+    "table_dumps": [
+      {
+        "columns": [
+          "username",
+          "password"
+        ],
+        "database": "postgres",
+        "error": null,
+        "rows": [
+          "{\"username\":\"admin\",\"password\":\"admin\"}",
+          "{\"username\":\"readonly\",\"password\":\"readonly\"}",
+          "{\"username\":\"service\",\"password\":\"service123\"}",
+          "{\"username\":\"reporting\",\"password\":\"reporting2026\"}",
+          "{\"username\":\"automation\",\"password\":\"auto-runner-2026\"}"
+        ],
+        "table": "redposture.demo_accounts"
+      }
+    ],
+    "table_names": [
+      "redposture.api_clients",
+      "redposture.audit_events",
+      "redposture.billing_invoices",
+      "redposture.demo_accounts",
+      "redposture.integration_secrets",
+      "redposture.service_tokens",
+      "redposture.web_sessions"
+    ],
+    "table_row_counts": [
+      {
+        "database": "postgres",
+        "error": null,
+        "row_count": 6,
+        "table": "redposture.demo_accounts"
+      }
+    ],
+    "table_targets": [
+      "redposture.demo_accounts"
+    ]
+  }
+]

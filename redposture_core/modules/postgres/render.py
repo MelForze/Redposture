@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .actions import (
+    _format_credential_attempts_records,
     _format_databases_detail_records,
     _format_detect_record,
     _format_execute_detail_records,
@@ -30,6 +31,7 @@ __all__ = [
     "_format_sql_detail_records",
     "_format_os_read_detail_records",
     "_format_privesc_detail_records",
+    "_format_credential_attempts_records",
     "_format_record",
     "_render_colored_postgres_line",
 ]

@@ -1,0 +1,178 @@
+[
+  {
+    "auth_required": false,
+    "auth_used": null,
+    "defcreds_used": false,
+    "descriptor_protos_b64": [
+      "ChtncnBjX2hlYWx0aC92MS9oZWFsdGgucHJvdG8SDmdycGMuaGVhbHRoLnYxIiUKEkhlYWx0aENoZWNrUmVxdWVzdBIPCgdzZXJ2aWNlGAEgASgJIqkBChNIZWFsdGhDaGVja1Jlc3BvbnNlEkEKBnN0YXR1cxgBIAEoDjIxLmdycGMuaGVhbHRoLnYxLkhlYWx0aENoZWNrUmVzcG9uc2UuU2VydmluZ1N0YXR1cyJPCg1TZXJ2aW5nU3RhdHVzEgsKB1VOS05PV04QABILCgdTRVJWSU5HEAESDwoLTk9UX1NFUlZJTkcQAhITCg9TRVJWSUNFX1VOS05PV04QAzKuAQoGSGVhbHRoElAKBUNoZWNrEiIuZ3JwYy5oZWFsdGgudjEuSGVhbHRoQ2hlY2tSZXF1ZXN0GiMuZ3JwYy5oZWFsdGgudjEuSGVhbHRoQ2hlY2tSZXNwb25zZRJSCgVXYXRjaBIiLmdycGMuaGVhbHRoLnYxLkhlYWx0aENoZWNrUmVxdWVzdBojLmdycGMuaGVhbHRoLnYxLkhlYWx0aENoZWNrUmVzcG9uc2UwAUJhChFpby5ncnBjLmhlYWx0aC52MUILSGVhbHRoUHJvdG9QAVosZ29vZ2xlLmdvbGFuZy5vcmcvZ3JwYy9oZWFsdGgvZ3JwY19oZWFsdGhfdjGqAg5HcnBjLkhlYWx0aC5WMWIGcHJvdG8z",
+      "CihncnBjX3JlZmxlY3Rpb24vdjFhbHBoYS9yZWZsZWN0aW9uLnByb3RvEhdncnBjLnJlZmxlY3Rpb24udjFhbHBoYSKKAgoXU2VydmVyUmVmbGVjdGlvblJlcXVlc3QSDAoEaG9zdBgBIAEoCRIaChBmaWxlX2J5X2ZpbGVuYW1lGAMgASgJSAASIAoWZmlsZV9jb250YWluaW5nX3N5bWJvbBgEIAEoCUgAEk4KGWZpbGVfY29udGFpbmluZ19leHRlbnNpb24YBSABKAsyKS5ncnBjLnJlZmxlY3Rpb24udjFhbHBoYS5FeHRlbnNpb25SZXF1ZXN0SAASJwodYWxsX2V4dGVuc2lvbl9udW1iZXJzX29mX3R5cGUYBiABKAlIABIXCg1saXN0X3NlcnZpY2VzGAcgASgJSABCEQoPbWVzc2FnZV9yZXF1ZXN0IkUKEEV4dGVuc2lvblJlcXVlc3QSFwoPY29udGFpbmluZ190eXBlGAEgASgJEhgKEGV4dGVuc2lvbl9udW1iZXIYAiABKAUi0QMKGFNlcnZlclJlZmxlY3Rpb25SZXNwb25zZRISCgp2YWxpZF9ob3N0GAEgASgJEkoKEG9yaWdpbmFsX3JlcXVlc3QYAiABKAsyMC5ncnBjLnJlZmxlY3Rpb24udjFhbHBoYS5TZXJ2ZXJSZWZsZWN0aW9uUmVxdWVzdBJTChhmaWxlX2Rlc2NyaXB0b3JfcmVzcG9uc2UYBCABKAsyLy5ncnBjLnJlZmxlY3Rpb24udjFhbHBoYS5GaWxlRGVzY3JpcHRvclJlc3BvbnNlSAASWgoeYWxsX2V4dGVuc2lvbl9udW1iZXJzX3Jlc3BvbnNlGAUgASgLMjAuZ3JwYy5yZWZsZWN0aW9uLnYxYWxwaGEuRXh0ZW5zaW9uTnVtYmVyUmVzcG9uc2VIABJOChZsaXN0X3NlcnZpY2VzX3Jlc3BvbnNlGAYgASgLMiwuZ3JwYy5yZWZsZWN0aW9uLnYxYWxwaGEuTGlzdFNlcnZpY2VSZXNwb25zZUgAEkAKDmVycm9yX3Jlc3BvbnNlGAcgASgLMiYuZ3JwYy5yZWZsZWN0aW9uLnYxYWxwaGEuRXJyb3JSZXNwb25zZUgAQhIKEG1lc3NhZ2VfcmVzcG9uc2UiNwoWRmlsZURlc2NyaXB0b3JSZXNwb25zZRIdChVmaWxlX2Rlc2NyaXB0b3JfcHJvdG8YASADKAwiSwoXRXh0ZW5zaW9uTnVtYmVyUmVzcG9uc2USFgoOYmFzZV90eXBlX25hbWUYASABKAkSGAoQZXh0ZW5zaW9uX251bWJlchgCIAMoBSJQChNMaXN0U2VydmljZVJlc3BvbnNlEjkKB3NlcnZpY2UYASADKAsyKC5ncnBjLnJlZmxlY3Rpb24udjFhbHBoYS5TZXJ2aWNlUmVzcG9uc2UiHwoPU2VydmljZVJlc3BvbnNlEgwKBG5hbWUYASABKAkiOgoNRXJyb3JSZXNwb25zZRISCgplcnJvcl9jb2RlGAEgASgFEhUKDWVycm9yX21lc3NhZ2UYAiABKAkykwEKEFNlcnZlclJlZmxlY3Rpb24SfwoUU2VydmVyUmVmbGVjdGlvbkluZm8SMC5ncnBjLnJlZmxlY3Rpb24udjFhbHBoYS5TZXJ2ZXJSZWZsZWN0aW9uUmVxdWVzdBoxLmdycGMucmVmbGVjdGlvbi52MWFscGhhLlNlcnZlclJlZmxlY3Rpb25SZXNwb25zZSgBMAFiBnByb3RvMw=="
+    ],
+    "descriptors": [
+      {
+        "file": "grpc_health/v1/health.proto",
+        "package": "grpc.health.v1",
+        "services": [
+          {
+            "methods": [
+              {
+                "client_streaming": false,
+                "file": "grpc_health/v1/health.proto",
+                "full_method": "/grpc.health.v1.Health/Check",
+                "input_type": "grpc.health.v1.HealthCheckRequest",
+                "method": "Check",
+                "output_type": "grpc.health.v1.HealthCheckResponse",
+                "server_streaming": false,
+                "service": "grpc.health.v1.Health"
+              },
+              {
+                "client_streaming": false,
+                "file": "grpc_health/v1/health.proto",
+                "full_method": "/grpc.health.v1.Health/Watch",
+                "input_type": "grpc.health.v1.HealthCheckRequest",
+                "method": "Watch",
+                "output_type": "grpc.health.v1.HealthCheckResponse",
+                "server_streaming": true,
+                "service": "grpc.health.v1.Health"
+              }
+            ],
+            "service": "grpc.health.v1.Health"
+          }
+        ]
+      },
+      {
+        "file": "grpc_reflection/v1alpha/reflection.proto",
+        "package": "grpc.reflection.v1alpha",
+        "services": [
+          {
+            "methods": [
+              {
+                "client_streaming": true,
+                "file": "grpc_reflection/v1alpha/reflection.proto",
+                "full_method": "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+                "input_type": "grpc.reflection.v1alpha.ServerReflectionRequest",
+                "method": "ServerReflectionInfo",
+                "output_type": "grpc.reflection.v1alpha.ServerReflectionResponse",
+                "server_streaming": true,
+                "service": "grpc.reflection.v1alpha.ServerReflection"
+              }
+            ],
+            "service": "grpc.reflection.v1alpha.ServerReflection"
+          }
+        ]
+      }
+    ],
+    "detect_confidence": "high",
+    "detect_probe_trace": [
+      {
+        "error": null,
+        "grpc_status": 0,
+        "http_status": 200,
+        "probe": "health",
+        "scheme": "http"
+      }
+    ],
+    "error": null,
+    "grpc_web_detected": false,
+    "health_checks": [
+      {
+        "error": null,
+        "grpc_status": 0,
+        "grpc_status_name": "OK",
+        "service": "",
+        "serving_status": "SERVING"
+      },
+      {
+        "error": null,
+        "grpc_status": 0,
+        "grpc_status_name": "OK",
+        "service": "grpc.health.v1.Health",
+        "serving_status": "SERVING"
+      },
+      {
+        "error": null,
+        "grpc_status": 0,
+        "grpc_status_name": "OK",
+        "service": "grpc.reflection.v1alpha.ServerReflection",
+        "serving_status": "SERVING"
+      }
+    ],
+    "health_supported": true,
+    "host": "127.0.0.1",
+    "invoke_result": null,
+    "is_grpc": true,
+    "methods": [
+      {
+        "client_streaming": false,
+        "file": "grpc_health/v1/health.proto",
+        "full_method": "/grpc.health.v1.Health/Check",
+        "input_type": "grpc.health.v1.HealthCheckRequest",
+        "method": "Check",
+        "output_type": "grpc.health.v1.HealthCheckResponse",
+        "server_streaming": false,
+        "service": "grpc.health.v1.Health"
+      },
+      {
+        "client_streaming": false,
+        "file": "grpc_health/v1/health.proto",
+        "full_method": "/grpc.health.v1.Health/Watch",
+        "input_type": "grpc.health.v1.HealthCheckRequest",
+        "method": "Watch",
+        "output_type": "grpc.health.v1.HealthCheckResponse",
+        "server_streaming": true,
+        "service": "grpc.health.v1.Health"
+      },
+      {
+        "client_streaming": true,
+        "file": "grpc_reflection/v1alpha/reflection.proto",
+        "full_method": "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+        "input_type": "grpc.reflection.v1alpha.ServerReflectionRequest",
+        "method": "ServerReflectionInfo",
+        "output_type": "grpc.reflection.v1alpha.ServerReflectionResponse",
+        "server_streaming": true,
+        "service": "grpc.reflection.v1alpha.ServerReflection"
+      }
+    ],
+    "module": "grpc",
+    "port": 50051,
+    "protocol_flavor": "grpc",
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_password": null,
+    "provided_username": null,
+    "reflection_enabled": true,
+    "service": "grpc",
+    "services": [
+      "grpc.health.v1.Health",
+      "grpc.reflection.v1alpha.ServerReflection"
+    ],
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "transport": "plaintext",
+    "transport_mode": "plaintext"
+  }
+]

@@ -2652,6 +2652,11 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [+] {username}:{password_text} {_caps_suffix(record)}"
 
     if status == "auth_required":
+        attempts = record.get("attempted_credentials")
+        if isinstance(attempts, list) and len(attempts) > 1:
+            # All tried credentials failed: defer to _format_credential_attempts_records,
+            # which prints one [-] line per attempted default. Empty summary is filtered out.
+            return ""
         if record.get("provided_credentials"):
             username = str(record.get("effective_username") or "postgres")
             provided_password = record.get("provided_password")
@@ -2675,6 +2680,31 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     fail_line = f"{prefix} [!] connection failed"
     return f"{fail_line} err={err}" if err != "-" else fail_line
+
+
+def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+    """Render one `[-] user:pass` line per attempted credential when all of them failed.
+
+    The runtime attaches `attempted_credentials` only when several credentials were tried
+    and none gated, so every default that was tried (e.g. postgres:postgres AND
+    pgbouncer:pgbouncer) is visible instead of just the last one. JSON output keeps the
+    structured list in the record itself, so nothing extra is emitted there.
+    """
+    attempts = record.get("attempted_credentials")
+    if not isinstance(attempts, list) or len(attempts) < 2:
+        return []
+    if output_format == "json":
+        return []
+    prefix = _nxc_prefix(record)
+    lines: list[str] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        username = str(attempt.get("username") or "postgres")
+        password = attempt.get("password")
+        password_text = str(password) if password is not None else "postgres"
+        lines.append(f"{prefix} [-] {username}:{password_text}")
+    return lines
 
 
 def _postgres_extra_color_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:

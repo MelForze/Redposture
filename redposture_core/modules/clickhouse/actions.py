@@ -1769,6 +1769,14 @@ def _call_audit_clickhouse_host_with_stage_debug(
     record["show_databases_limit"] = show_databases_limit if run_deep_checks else None
     record["show_tables_limit"] = show_tables_limit if run_deep_checks else None
     record["show_columns_limit"] = show_columns_limit if run_deep_checks else None
+    # Apply `--show-X N` limits to the JSON payload as well, not only at TXT render time.
+    # Without this the JSON artifact carries the full list while the console shows N --
+    # `-o file.json` would silently disagree with the user's specified cap.
+    if run_deep_checks:
+        if isinstance(show_databases_limit, int) and isinstance(record.get("database_names"), list):
+            record["database_names"] = limit_sequence(record["database_names"], show_databases_limit)
+        if isinstance(show_tables_limit, int) and isinstance(record.get("table_names"), list):
+            record["table_names"] = limit_sequence(record["table_names"], show_tables_limit)
     result: dict[str, Any] = dict(record)
     debug_events: list[str] = []
 

@@ -1,0 +1,87 @@
+[
+  {
+    "add_user": null,
+    "add_user_error": null,
+    "add_user_privileges_error": null,
+    "add_user_privileges_granted": null,
+    "add_user_privileges_role": null,
+    "added_user": null,
+    "auth_attempts": [
+      {
+        "ok": "False",
+        "source": "defcreds",
+        "username": "root@pam"
+      },
+      {
+        "ok": "True",
+        "source": "defcreds",
+        "username": "root@pam"
+      }
+    ],
+    "auth_method": "password",
+    "auth_password": "admin",
+    "auth_required": null,
+    "auth_username": "root@pam",
+    "cap_adduser": true,
+    "cap_backup": true,
+    "cap_modify": true,
+    "cap_read": true,
+    "checked_endpoints": 2,
+    "credential_hits": 0,
+    "discover_creds": false,
+    "endpoint_results": [
+      {
+        "error": null,
+        "method": "GET",
+        "status": 200
+      },
+      {
+        "error": null,
+        "method": "GET",
+        "status": 200
+      }
+    ],
+    "error": null,
+    "findings": [],
+    "host": "127.0.0.1",
+    "is_proxmox": true,
+    "module": "proxmox",
+    "nodes": null,
+    "nodes_error": null,
+    "port": 18006,
+    "service": "proxmox",
+    "show_nodes": false,
+    "show_users": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "token_ok",
+    "successful_endpoints": 2,
+    "use_https": true,
+    "users": null,
+    "users_error": null
+  }
+]

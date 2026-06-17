@@ -1,0 +1,119 @@
+[
+  {
+    "assets": false,
+    "auth_required": false,
+    "debug": false,
+    "docker": false,
+    "download": false,
+    "download_result": null,
+    "error": null,
+    "gitlab": false,
+    "gitlab_error": null,
+    "gitlab_info": null,
+    "gitlab_repositories": null,
+    "gitlab_repository_details": null,
+    "harbor": true,
+    "harbor_artifacts": [
+      "core/control-plane:3.1.0@sha256:<DOCKER_ID>",
+      "core/control-plane:latest@sha256:<DOCKER_ID>",
+      "core/gateway:1.19.2@sha256:<DOCKER_ID>",
+      "ml/feature-store:2026.02@sha256:<DOCKER_ID>",
+      "ml/feature-store:latest@sha256:<DOCKER_ID>",
+      "ml/feature-store:stable@sha256:<DOCKER_ID>",
+      "ml/model-router:0.12.0@sha256:<DOCKER_ID>",
+      "security/scanner-adapter:2.7.4@sha256:<DOCKER_ID>",
+      "security/scanner-adapter:latest@sha256:<DOCKER_ID>"
+    ],
+    "harbor_error": null,
+    "harbor_info": {
+      "auth_mode": "db_auth",
+      "external_url": "http://harbor-mock:8080",
+      "harbor_version": "2.11.1",
+      "project_creation_restriction": "everyone",
+      "registry_url": "harbor-mock:8080",
+      "self_registration": false
+    },
+    "harbor_projects": [
+      "core",
+      "ml",
+      "security"
+    ],
+    "harbor_repositories": [
+      "core/control-plane",
+      "core/gateway",
+      "ml/feature-store",
+      "ml/model-router",
+      "security/scanner-adapter"
+    ],
+    "host": "127.0.0.1",
+    "image": null,
+    "image_count": 9,
+    "images": [
+      "core/control-plane:3.1.0",
+      "core/control-plane:latest",
+      "core/gateway:1.19.2",
+      "ml/feature-store:2026.02",
+      "ml/feature-store:latest",
+      "ml/feature-store:stable",
+      "ml/model-router:0.12.0",
+      "security/scanner-adapter:2.7.4",
+      "security/scanner-adapter:latest"
+    ],
+    "images_error": null,
+    "inspect": false,
+    "inspection_error": null,
+    "inspections": null,
+    "is_gitlab": false,
+    "is_harbor": true,
+    "is_nexus": false,
+    "is_registry": true,
+    "metadata": false,
+    "metadata_result": null,
+    "module": "registry",
+    "nexus": false,
+    "nexus_assets": null,
+    "nexus_error": null,
+    "nexus_info": null,
+    "nexus_repositories": null,
+    "nexus_repository_details": null,
+    "port": 15002,
+    "probe_status": 200,
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_username": null,
+    "repository": null,
+    "selected_repository_tags": null,
+    "service": "registry",
+    "show_images": true,
+    "show_tags": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "open_no_auth",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "tag": null,
+    "token_provided": false
+  }
+]

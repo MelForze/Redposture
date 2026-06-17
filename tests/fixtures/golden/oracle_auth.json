@@ -1,0 +1,352 @@
+[
+  {
+    "auth_required": true,
+    "banner": "Oracle AI Database 26ai Free Release 23.26.2.0.0 - Develop, Learn, and Run for Free\nVersion 23.26.2.0.0",
+    "capabilities": {
+      "can_list_dblinks": false,
+      "can_list_tables": false,
+      "can_list_users": true,
+      "can_privesc_check": false,
+      "can_query": true,
+      "can_read_hashes": false
+    },
+    "cdb_name": "FREE",
+    "con_name": "FREEPDB1",
+    "connect_service": "FREEPDB1",
+    "connect_sid": null,
+    "credential_attempts": [
+      {
+        "error": null,
+        "ok": true,
+        "password": "OracleLab!2026",
+        "token": null,
+        "username": "redposture"
+      }
+    ],
+    "db_links": [],
+    "defcreds_enabled": false,
+    "effective_username": "redposture",
+    "error": null,
+    "exec_result": null,
+    "file_results": [],
+    "hashes": [],
+    "host": "127.0.0.1",
+    "is_oracle": true,
+    "listener_dump": null,
+    "listener_password_protected": null,
+    "listener_restricted": null,
+    "listener_services": [
+      {
+        "auth_required": true,
+        "error": "invalid credentials",
+        "exists": true,
+        "protocol": "tcp",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "available"
+      }
+    ],
+    "listener_sids": [],
+    "listener_targets": [
+      {
+        "auth_required": true,
+        "error": "invalid credentials",
+        "exists": true,
+        "protocol": "tcp",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "available"
+      },
+      {
+        "auth_required": null,
+        "error": "connection refused (listener is not available)",
+        "exists": null,
+        "protocol": "tcps",
+        "service": "FREEPDB1",
+        "sid": null,
+        "status": "fail"
+      }
+    ],
+    "module": "oracle",
+    "nne_check": null,
+    "pdbs": [
+      {
+        "open_mode": "READ WRITE",
+        "restricted": "NO"
+      }
+    ],
+    "port": 1521,
+    "privesc_chain": [],
+    "privesc_chain_executed": [],
+    "privesc_findings": [],
+    "privileges": [],
+    "provided_credentials": true,
+    "provided_password": "OracleLab!2026",
+    "provided_username": "redposture",
+    "query_rows": [],
+    "roles": [],
+    "rows": [],
+    "schemas": [],
+    "sensitive_findings": [],
+    "server_version": null,
+    "service": "oracle",
+    "service_candidates": [
+      "FREEPDB1"
+    ],
+    "show_pdbs_limit": null,
+    "show_schemas_limit": null,
+    "show_tables_limit": null,
+    "show_users_limit": null,
+    "sid_candidates": [],
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "valid_credentials",
+    "tables": [],
+    "tls_supported": false,
+    "transport": "tcp",
+    "transport_mode": "tcp",
+    "users": [
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "ANONYMOUS"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "APPQOSSYS"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "AUDSYS"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "BAASSYS"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "DBSFWUSER"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "DBSNMP"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "DGPDB_INT"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "DIP"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "DVF"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "DVSYS"
+      },
+      {
+        "account_status": "EXPIRED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "EXPIRED_USER"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "GGSHAREDCAP"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "GGSYS"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "GSMADMIN_INTERNAL"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "GSMCATUSER"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "GSMUSER"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSTEM",
+        "profile": "DEFAULT",
+        "username": "LBACSYS"
+      },
+      {
+        "account_status": "OPEN",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "LIMITED"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "LOCKED_USER"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSTEM",
+        "profile": "DEFAULT",
+        "username": "OUTLN"
+      },
+      {
+        "account_status": "OPEN",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "PDBADMIN"
+      },
+      {
+        "account_status": "OPEN",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "PRIVESC"
+      },
+      {
+        "account_status": "OPEN",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "READONLY"
+      },
+      {
+        "account_status": "OPEN",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "REDPOSTURE"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "REMOTE_SCHEDULER_AGENT"
+      },
+      {
+        "account_status": "OPEN",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "SCOTT"
+      },
+      {
+        "account_status": "OPEN",
+        "default_tablespace": "SYSTEM",
+        "profile": "DEFAULT",
+        "username": "SYS"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "SYS$UMF"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "SYSBACKUP"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "SYSDG"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "SYSKM"
+      },
+      {
+        "account_status": "OPEN",
+        "default_tablespace": "USERS",
+        "profile": "DEFAULT",
+        "username": "SYSRAC"
+      },
+      {
+        "account_status": "OPEN",
+        "default_tablespace": "SYSTEM",
+        "profile": "DEFAULT",
+        "username": "SYSTEM"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "VECSYS"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSAUX",
+        "profile": "DEFAULT",
+        "username": "XDB"
+      },
+      {
+        "account_status": "LOCKED",
+        "default_tablespace": "SYSTEM",
+        "profile": "DEFAULT",
+        "username": "XS$NULL"
+      }
+    ],
+    "wallet_findings": []
+  }
+]

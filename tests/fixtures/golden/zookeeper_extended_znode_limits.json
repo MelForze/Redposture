@@ -1,0 +1,143 @@
+[
+  {
+    "auth_error": null,
+    "auth_inference_source": "root_ok",
+    "auth_probe_trace": [
+      "/:ok"
+    ],
+    "auth_required": false,
+    "can_create_znode": true,
+    "can_delete_znode": true,
+    "connect_error": null,
+    "dump": true,
+    "dump_error": null,
+    "dump_limit": 3,
+    "enum_error": null,
+    "error": null,
+    "host": "127.0.0.1",
+    "is_zookeeper": true,
+    "max_znodes": 10,
+    "module": "zookeeper",
+    "port": 2181,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_password": null,
+    "provided_username": null,
+    "query_error": null,
+    "query_znode": "/redposture/app/api_key",
+    "query_znode_dump": "rp-zk-key-2026",
+    "query_znode_dump_error": null,
+    "query_znode_value": "/redposture/app/api_key (children:0,bytes:14)",
+    "service": "zookeeper",
+    "show_znodes": true,
+    "stage2_error": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "znode_capability_error": null,
+    "znode_count": 22,
+    "znode_count_attempt_timeouts": [],
+    "znode_count_partial": false,
+    "znode_count_unknown": false,
+    "znode_details": [
+      {
+        "bytes": 18,
+        "children": 1,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 11,
+        "children": 1,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 31,
+        "children": 1,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 7,
+        "children": 4,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 33,
+        "children": 2,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 60,
+        "children": 0,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 3,
+        "children": 0,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 22,
+        "children": 4,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 46,
+        "children": 3,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 34,
+        "children": 1,
+        "error": null,
+        "state": "readable"
+      }
+    ],
+    "znode_values": null,
+    "znodes": [
+      "/brokers",
+      "/brokers/ids",
+      "/config",
+      "/config/services",
+      "/observability",
+      "/observability/remote_write_url",
+      "/observability/scrape_interval",
+      "/redposture",
+      "/redposture/app",
+      "/redposture/cache"
+    ],
+    "znodes_truncated": true
+  }
+]
