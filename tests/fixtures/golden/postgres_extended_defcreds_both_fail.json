@@ -49,7 +49,6 @@
     "provided_password": null,
     "provided_username": "pgbouncer",
     "readable_tables": null,
-    "server_version": null,
     "service": "postgres",
     "show_columns": false,
     "show_databases": false,

@@ -647,39 +647,8 @@ def _invoke_host_stage(
     if isinstance(payload, AuditRecord):
         return payload
     if isinstance(payload, dict):
-        # Unify the timer contract before sealing: some modules build custom stage
-        # scaffolding that bypasses `StageTelemetryBuilder.attach`, so their fail-path
-        # records ship without `elapsed_ms` and `stage_timing_total_ms`. Backfill both
-        # from whatever evidence the record carries (per-stage durations are always set).
-        _backfill_record_timers(payload)
         return AuditRecord.from_mapping(payload, module=module, service=module)
     raise TypeError(f"{module} host hook must return AuditRecord-compatible payload")
-
-
-def _backfill_record_timers(record: dict[str, Any]) -> None:
-    """Centralize the elapsed_ms/stage_timing_total_ms contract so every module's record
-    carries a positive timer when the audit code actually ran. Sources, in order:
-    existing `elapsed_ms`, `stage_timing_total_ms`, or the sum of `stages[*].duration_ms`."""
-    existing_elapsed = record.get("elapsed_ms")
-    existing_total = record.get("stage_timing_total_ms")
-    stages = record.get("stages")
-    stage_sum = 0
-    if isinstance(stages, list):
-        for stage in stages:
-            if isinstance(stage, dict):
-                value = stage.get("duration_ms")
-                if isinstance(value, int) and value > 0:
-                    stage_sum += value
-    candidates = [
-        v for v in (existing_elapsed, existing_total, stage_sum) if isinstance(v, int) and v > 0
-    ]
-    if not candidates:
-        return
-    canonical = candidates[0]
-    if not isinstance(existing_elapsed, int) or existing_elapsed <= 0:
-        record["elapsed_ms"] = canonical
-    if not isinstance(existing_total, int) or existing_total <= 0:
-        record["stage_timing_total_ms"] = canonical
 
 
 @dataclass(frozen=True)

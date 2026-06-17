@@ -62,7 +62,6 @@
     "provided_username": null,
     "rights_error": null,
     "scheme": "http",
-    "server_version": null,
     "service": "elastic",
     "show_cluster": false,
     "show_endpoints": false,

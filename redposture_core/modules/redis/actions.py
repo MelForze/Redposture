@@ -16,6 +16,7 @@ from ...show_limits import (
     limit_sequence,
 )
 from ...stage_runtime import (
+    StageTelemetryBuilder,
     merge_stage_records,
 )
 from ...utils import (
@@ -793,46 +794,24 @@ def _call_audit_redis_host_with_stage_debug(
     )
 
     result: dict[str, Any] = dict(record)
-    debug_events: list[str] = []
-    existing_debug = result.get("debug_events")
-    if isinstance(existing_debug, list):
-        for item in existing_debug:
-            if isinstance(item, str) and item.strip():
-                debug_events.append(item)
-
-    def _debug(message: str) -> None:
-        if not debug:
-            return
-        debug_events.append(message)
-        if debug_emit is not None:
-            debug_emit(f"{host}:{port} {message}")
-
     status = str(result.get("status") or "fail")
     is_redis = bool(result.get("is_redis"))
     attempts = max(1, retries + 1)
     elapsed_ms = int((time.monotonic() - started) * 1000)
-
-    stages: list[dict[str, Any]] = []
-
-    def _push_stage(stage_name: str, stage_result: str, stage_error: str | None = None, duration_ms: int = 0) -> None:
-        entry = {
-            "stage_name": stage_name,
-            "attempt": 1,
-            "duration_ms": int(max(0, duration_ms)),
-            "result": stage_result,
-            "error": stage_error or None,
-        }
-        stages.append(entry)
-        _debug(
-            f"stage_trace stage_name={stage_name} attempt=1 duration_ms={entry['duration_ms']} "
-            f"result={stage_result} error={entry['error'] or '-'}"
-        )
+    telemetry = StageTelemetryBuilder(host=host, port=port, attempts=attempts, debug=debug, debug_emit=debug_emit)
+    # Preserve any debug events the underlying audit had already recorded before reaching
+    # this wrapper. Without this, telemetry would start empty and lose pre-existing events.
+    existing_debug = result.get("debug_events")
+    if isinstance(existing_debug, list):
+        for item in existing_debug:
+            if isinstance(item, str) and item.strip():
+                telemetry.events.append(item)
 
     detect_result = "ok" if is_redis else ("error" if status == "fail" else "skip")
-    _push_stage(
+    telemetry.stage(
         "detect_protocol", detect_result, str(result.get("error") or "") if detect_result == "error" else None, 0
     )
-    _push_stage(
+    telemetry.stage(
         "auth_inference_credentials",
         "ok" if status in _REDIS_DEEP_STATUSES.union({"auth_required"}) else ("error" if status == "fail" else "skip"),
         None,
@@ -840,23 +819,19 @@ def _call_audit_redis_host_with_stage_debug(
     )
 
     if run_deep_checks and status in _REDIS_DEEP_STATUSES:
-        _push_stage("access_capabilities", "ok", None, 0)
+        telemetry.stage("access_capabilities", "ok", None, 0)
         data_result = "error" if (status == "fail" and result.get("error")) else "ok"
-        _push_stage("data", data_result, str(result.get("error") or "") if data_result == "error" else None, elapsed_ms)
+        telemetry.stage(
+            "data", data_result, str(result.get("error") or "") if data_result == "error" else None, elapsed_ms
+        )
     else:
-        _push_stage("access_capabilities", "skip", "deep checks disabled", 0)
-        _push_stage("data", "skip", "deep checks disabled", 0)
+        telemetry.stage("access_capabilities", "skip", "deep checks disabled", 0)
+        telemetry.stage("data", "skip", "deep checks disabled", 0)
 
-    stage_failed_at: str | None = None
-    for stage_entry in stages:
-        if str(stage_entry.get("result") or "") == "error":
-            stage_failed_at = str(stage_entry.get("stage_name") or "")
-            break
-
-    stage_durations_ms = {str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in stages}
-    stage_attempts = {str(item.get("stage_name") or ""): attempts for item in stages}
-
-    _debug(
+    stage_durations_ms = {
+        str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in telemetry.stages
+    }
+    telemetry.debug(
         f"stage_timing_summary status={status} attempts=1/{attempts} "
         f"detect_ms={stage_durations_ms.get('detect_protocol', 0)} "
         f"auth_ms={stage_durations_ms.get('auth_inference_credentials', 0)} "
@@ -864,13 +839,7 @@ def _call_audit_redis_host_with_stage_debug(
         f"data_ms={stage_durations_ms.get('data', 0)} "
         f"total_ms={elapsed_ms}"
     )
-
-    result["stages"] = stages
-    result["stage_failed_at"] = stage_failed_at
-    result["stage_durations_ms"] = stage_durations_ms
-    result["stage_attempts"] = stage_attempts
-    result["debug_events"] = debug_events
-    result["debug_events_streamed"] = bool(debug and debug_emit is not None)
+    result = telemetry.attach(result, status=status, total_ms=elapsed_ms)
     result["attempts"] = 1
     result["max_attempts"] = attempts
     return result

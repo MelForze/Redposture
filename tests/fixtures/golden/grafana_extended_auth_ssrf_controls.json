@@ -28,7 +28,6 @@
     "provided_credentials": true,
     "provided_credentials_ok": false,
     "provided_username": "admin",
-    "server_version": "13.0.1+security-01",
     "service": "grafana",
     "show_datasources": false,
     "stages": [
