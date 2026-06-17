@@ -501,7 +501,6 @@
         "table_name": "V_$EMON"
       }
     ],
-    "server_version": null,
     "service": "oracle",
     "service_candidates": [
       "FREEPDB1"

@@ -1,0 +1,14 @@
+# Pre-commit hooks for redposture. After `pip install -e .[dev]` run `pre-commit install`
+# once to wire the local git hook. Hooks run on every `git commit` and prevent the same
+# class of "ruff format" failures that broke CI Lint in 5.5.5 from reaching `git push`.
+#
+# Intentionally NOT including mypy here: mypy takes 5-10 seconds and pre-commit must be
+# instant, otherwise contributors start using `git commit -n` to bypass it. CI still runs
+# mypy on every push.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.2
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format

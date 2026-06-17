@@ -20,7 +20,6 @@
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_username": null,
-    "server_version": null,
     "service": "grafana",
     "show_datasources": false,
     "stages": [

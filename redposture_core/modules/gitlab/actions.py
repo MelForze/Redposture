@@ -18,6 +18,8 @@ from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line
 from ...scheduler import BoundedScheduler
 from ...stage_runtime import (
+    StageTelemetryBuilder,
+    format_retry_decision,
     merge_stage_records,
 )
 from ...utils import utc_now_iso
@@ -1053,85 +1055,45 @@ def _call_audit_gitlab_host_with_stage_debug(
             **call_kwargs,
         )
     result: dict[str, Any] = dict(record)
-    debug_events: list[str] = []
-
-    def _debug(message: str) -> None:
-        if not debug:
-            return
-        debug_events.append(message)
-        if debug_emit is not None:
-            debug_emit(f"{host}:{port} {message}")
-
     attempts = max(1, retries + 1)
     status = str(result.get("status") or "fail")
     is_gitlab = bool(result.get("is_gitlab"))
     elapsed_ms = int((time.monotonic() - started) * 1000)
-
+    telemetry = StageTelemetryBuilder(host=host, port=port, attempts=attempts, debug=debug, debug_emit=debug_emit)
     if attempts > 1 and status == "fail":
-        _debug(
-            f"retry_decision stage={_STAGE_DETECT_PROTOCOL} attempt=1/{attempts} "
-            f"backoff={_retry_delay(0):.2f}s reason=error"
-        )
-
-    stages: list[dict[str, Any]] = []
-
-    def _push_stage(stage_name: str, stage_result: str, stage_error: str | None = None, duration_ms: int = 0) -> None:
-        entry = {
-            "stage_name": stage_name,
-            "attempt": 1,
-            "duration_ms": int(max(0, duration_ms)),
-            "result": stage_result,
-            "error": stage_error or None,
-        }
-        stages.append(entry)
-        _debug(
-            f"stage_trace stage_name={stage_name} attempt=1 duration_ms={entry['duration_ms']} "
-            f"result={stage_result} error={entry['error'] or '-'}"
-        )
+        telemetry.debug(format_retry_decision(_STAGE_DETECT_PROTOCOL, 1, attempts, _retry_delay(0), "error"))
 
     detect_result = "ok" if is_gitlab else ("error" if status == "fail" else "skip")
     detect_error = str(result.get("error") or "") if detect_result == "error" else None
-    _push_stage(_STAGE_DETECT_PROTOCOL, detect_result, detect_error, 0)
+    telemetry.stage(_STAGE_DETECT_PROTOCOL, detect_result, detect_error, 0)
 
     auth_result = "ok" if is_gitlab else detect_result
-    _push_stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
+    telemetry.stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
 
     if run_deep_checks and status in _GITLAB_DEEP_STATUSES:
-        _push_stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
+        telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
         data_result = "error" if status == "fail" and result.get("error") else "ok"
-        _push_stage(
+        telemetry.stage(
             _STAGE_DATA,
             data_result,
             str(result.get("error") or "") if data_result == "error" else None,
             elapsed_ms,
         )
     else:
-        _push_stage(_STAGE_ACCESS_CAPABILITIES, "skip", "deep checks disabled", 0)
-        _push_stage(_STAGE_DATA, "skip", "deep checks disabled", 0)
+        telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "skip", "deep checks disabled", 0)
+        telemetry.stage(_STAGE_DATA, "skip", "deep checks disabled", 0)
 
-    stage_failed_at: str | None = None
-    for entry in stages:
-        if str(entry.get("result") or "") == "error":
-            stage_failed_at = str(entry.get("stage_name") or "")
-            break
-
-    stage_durations_ms = {str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in stages}
-    stage_attempts = {str(item.get("stage_name") or ""): attempts for item in stages}
-    _debug(
+    stage_durations_ms = {
+        str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in telemetry.stages
+    }
+    telemetry.debug(
         f"stage_timing_summary status={status} attempts=1/{attempts} "
         f"detect_ms={stage_durations_ms.get(_STAGE_DETECT_PROTOCOL, 0)} "
         f"auth_ms={stage_durations_ms.get(_STAGE_AUTH_INFERENCE, 0)} "
         f"capabilities_ms={stage_durations_ms.get(_STAGE_ACCESS_CAPABILITIES, 0)} "
         f"data_ms={stage_durations_ms.get(_STAGE_DATA, 0)} total_ms={elapsed_ms}"
     )
-
-    result["stages"] = stages
-    result["stage_failed_at"] = stage_failed_at
-    result["stage_durations_ms"] = stage_durations_ms
-    result["stage_attempts"] = stage_attempts
-    result["debug_events"] = debug_events
-    result["debug_events_streamed"] = bool(debug and debug_emit is not None)
-    return result
+    return telemetry.attach(result, status=status, total_ms=elapsed_ms)
 
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:

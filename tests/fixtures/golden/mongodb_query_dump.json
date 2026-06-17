@@ -69,7 +69,6 @@
     "query_filter": {
       "role": "admin"
     },
-    "server_version": "7.0.34",
     "service": "mongodb",
     "show_collections": false,
     "show_collections_limit": null,

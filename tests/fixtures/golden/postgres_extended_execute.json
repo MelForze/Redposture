@@ -37,7 +37,6 @@
     "provided_password": "postgres",
     "provided_username": "postgres",
     "readable_tables": 7,
-    "server_version": "16.14",
     "service": "postgres",
     "show_columns": false,
     "show_columns_limit": null,
