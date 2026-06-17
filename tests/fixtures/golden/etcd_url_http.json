@@ -95,7 +95,6 @@
     "query_key": null,
     "query_key_entry": null,
     "query_key_value": null,
-    "server_version": "3.5.14",
     "service": "etcd",
     "show_keys": true,
     "show_keys_limit": null,

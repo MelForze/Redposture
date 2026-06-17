@@ -45,6 +45,17 @@ redposture --version
 redposture --help
 ```
 
+### Developing
+
+```bash
+git clone https://github.com/MelForze/Redposture.git
+cd Redposture
+python -m venv .venv && source .venv/bin/activate
+pip install -e .[dev]
+pre-commit install   # one-time: wires ruff lint + format into `git commit`
+pytest               # run the full test suite
+```
+
 ## CLI Overview
 
 Top-level commands:

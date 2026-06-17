@@ -168,7 +168,6 @@
     "rows": [],
     "schemas": [],
     "sensitive_findings": [],
-    "server_version": null,
     "service": "oracle",
     "service_candidates": [
       "FREEPDB1"

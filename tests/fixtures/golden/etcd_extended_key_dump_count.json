@@ -45,7 +45,6 @@
       "value": "<not found>"
     },
     "query_key_value": "/offlineStocks:city_4949:552400:<not found>",
-    "server_version": "3.5.14",
     "service": "etcd",
     "show_keys": true,
     "show_keys_limit": 5,

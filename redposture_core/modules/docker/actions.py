@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import time
 from collections.abc import Callable
 from typing import Any
@@ -20,8 +19,6 @@ from ...clients.docker_engine import (
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line
 from ...stage_runtime import (
-    AuditHookContext,
-    AuditRecord,
     StageTelemetryBuilder,
 )
 from ...utils import as_dict, utc_now_iso

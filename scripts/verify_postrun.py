@@ -369,7 +369,10 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "kubeapi_open": ("v1.31.6+k3s1", '"auth_mode": "none"'),
     "kubeapi_extended_selectors_basic_auth": ('"auth_mode": "basic"', '"can_list_namespaces": true'),
     "grafana_extended_auth_ssrf_controls": (
-        '"server_version": "13.0.1',
+        # Loose match: grafana lab image is `grafana-oss:latest`, minor patches arrive
+        # between runs (saw 13.0.1 → 13.0.2 during 5.5.6 testing). Asserting on the major
+        # is enough to prove detection / attempted_credentials reached the audit.
+        '"server_version": "13.',
         '"attempted_credentials"',
     ),
     # C: URL-variant cases hit the same seeded services as their base cases. Asserting on
@@ -1224,8 +1227,13 @@ _GOLDEN_SKIP_LABELS = frozenset(
         "postgres_extended_os_read",  # `/etc/hostname` reads docker-assigned random hex
         "mongodb_open",  # internal collection ordering not deterministic across boots
         "mongodb_auth",
+        "mongodb_idempotency",  # same root cause: mongo collection-list ordering varies
         "registry_extended_tags_metadata",  # mock issues fresh tokens per lab boot
         "registry_gitlab",
+        # grafana_multi_instance_urls shows non-deterministic attempted_credentials count
+        # (0 vs 1) because the 5 target URLs all fail and the audit's detection retry path
+        # races against lab grafana availability.
+        "grafana_multi_instance_urls",
     }
 )
 # Docker assigns 12-char hex container names (e.g. `7fa9fd7f914d`). Normalize them so
@@ -1277,6 +1285,11 @@ _GOLDEN_VOLATILE_NESTED_FIELDS = frozenset(
         "added_password",
         "IPAM",  # docker network IPAM config flips between bridge/null on restart
         "Mountpoint",  # docker volume mountpoint paths embed cluster-side identifiers
+        # Lab service images use `:latest` tags and quietly upgrade between runs
+        # (saw mongodb 7.0.34->7.0.37, grafana 13.0.1+security-01->13.0.2 in 5.5.6).
+        # Pinning the tag is the proper fix at infra level; meanwhile, drop the version
+        # from goldens so they don't false-fail on every container patch.
+        "server_version",
     }
 )
 # Field names whose values vary every run -- stripped at ANY nesting depth before comparing

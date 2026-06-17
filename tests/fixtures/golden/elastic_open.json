@@ -174,7 +174,6 @@
     "provided_username": null,
     "rights_error": null,
     "scheme": "http",
-    "server_version": "8.13.4",
     "service": "elastic",
     "show_cluster": false,
     "show_endpoints": false,
