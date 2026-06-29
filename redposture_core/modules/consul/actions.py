@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import secrets
 import shlex
@@ -20,6 +21,7 @@ from ...clients.http_api import HttpApiClient, HttpClientConfig
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line
 from ...utils import (
+    DEFAULT_MAX_NETWORK_HOSTS,
     as_dict,
     as_list,
     collect_scan_ports,
@@ -587,8 +589,14 @@ def _normalize_ssrf_urls(targets_str: str | None, ports_str: str | None, path_st
         candidate_urls: list[str] = []
         if "://" not in target and "/" in target:
             try:
-                expanded_hosts = collect_scan_targets(target, max_network_hosts=256)
+                expanded_hosts = collect_scan_targets(target, max_network_hosts=DEFAULT_MAX_NETWORK_HOSTS)
             except (OSError, ValueError):
+                try:
+                    ipaddress.ip_network(target, strict=False)
+                except ValueError:
+                    pass
+                else:
+                    continue
                 expanded_hosts = []
             if expanded_hosts:
                 for host in expanded_hosts:

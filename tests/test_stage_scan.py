@@ -5,6 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from redposture_core import stage_scan
+from redposture_core.exporters.output import format_scan_record
 from redposture_core.stage_scan import run_scan_stage
 from redposture_core.utils import ScanTargetSpec
 
@@ -37,6 +39,93 @@ def test_run_scan_stage_rejects_negative_retries(capsys: pytest.CaptureFixture[s
     rc = run_scan_stage(_args(retries=-1))
     assert rc == 2
     assert "--retries must be >= 0" in capsys.readouterr().err
+
+
+def test_run_scan_stage_large_cidr_uses_chunked_output_and_single_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    output_path = tmp_path / "scan.txt"
+    calls: list[tuple[list[str], str]] = []
+
+    monkeypatch.setattr(stage_scan, "DEFAULT_MAX_NETWORK_HOSTS", 1)
+    monkeypatch.setattr(
+        stage_scan,
+        "load_profiles",
+        lambda _path: {"discovery_exporters": [{"name": "node_exporter", "port": 9100, "markers": ()}]},
+    )
+
+    def fake_scan_exporter_presence(
+        hosts,
+        timeout,
+        output_path,
+        output_format="json",
+        logger=None,
+        emit_line=None,
+        workers=10,
+        retries=3,
+        discovery_exporters=None,
+        custom_ports=None,
+        emit_summary=True,
+        show_progress=False,
+        progress_leave=True,
+        output_mode="w",
+        progress_owner=None,
+    ):
+        _ = (
+            timeout,
+            logger,
+            workers,
+            retries,
+            discovery_exporters,
+            custom_ports,
+            emit_summary,
+            show_progress,
+            progress_leave,
+            progress_owner,
+        )
+        host_list = list(hosts)
+        calls.append((host_list, output_mode))
+        lines = []
+        for host in host_list:
+            lines.append(
+                format_scan_record(
+                    {
+                        "timestamp": "2026-03-27T00:00:00Z",
+                        "host": host,
+                        "port": 9100,
+                        "exporter": "node_exporter",
+                        "detected": False,
+                        "url": f"http://{host}:9100/metrics",
+                        "method": "none",
+                        "status": 404,
+                        "error": None,
+                        "marker_hit": None,
+                    },
+                    output_format,
+                )
+            )
+        if output_path:
+            with open(output_path, output_mode, encoding="utf-8") as fh:
+                for line in lines:
+                    fh.write(line + "\n")
+        if emit_line is not None:
+            for line in lines:
+                emit_line(line)
+        return len(host_list), 0, {host: [] for host in host_list}
+
+    monkeypatch.setattr(stage_scan, "scan_exporter_presence", fake_scan_exporter_presence)
+
+    rc = run_scan_stage(_args(targets="10.0.0.0/30", output=str(output_path), workers=1))
+
+    assert rc == 0
+    assert calls == [(["10.0.0.1", "10.0.0.2"], "w")]
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    assert "not detected" in lines[0]
+    assert "not detected" in lines[1]
+    assert lines[-1].startswith("SCAN")
+    assert "checks=2" in lines[-1]
+    assert "found=0" in lines[-1]
 
 
 def test_run_scan_stage_handles_target_parse_error(

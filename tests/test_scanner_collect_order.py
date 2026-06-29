@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from redposture_core.exporters.collect import collect_exporter_debug_data as collect_exporter_debug_data_impl
 from redposture_core.scanner import collect_exporter_debug_data
 
 
@@ -90,6 +91,66 @@ def test_collect_txt_line_contains_display_name_and_full_url(monkeypatch) -> Non
     assert hit_lines
     assert "Node Exporter" in hit_lines[0]
     assert "url=http://10.0.0.1:9100/debug/vars" in hit_lines[0]
+
+
+def test_collect_output_file_keeps_failed_records_before_summary(tmp_path: Path) -> None:
+    output_path = tmp_path / "collect.txt"
+    emitted: list[str] = []
+
+    def fake_collect_task(
+        host: str,
+        exporter_name: str,
+        port: int,
+        endpoint: str,
+        _timeout: float,
+        _retries: int,
+    ) -> tuple[dict[str, object], bool]:
+        url = f"http://{host}:{port}{endpoint}"
+        return (
+            {
+                "timestamp": "2026-03-27T00:00:00Z",
+                "host": host,
+                "exporter": exporter_name,
+                "port": port,
+                "endpoint": endpoint,
+                "url": url,
+                "ok": False,
+                "status": None,
+                "elapsed_ms": 1,
+                "content_type": None,
+                "error": "connection timeout",
+                "truncated": False,
+                "body": "",
+            },
+            False,
+        )
+
+    total, success = collect_exporter_debug_data_impl(
+        logger=None,
+        hosts=["10.0.0.1"],
+        timeout=1.0,
+        output_path=str(output_path),
+        output_format="txt",
+        emit_line=emitted.append,
+        workers=1,
+        retries=0,
+        collect_exporters=[{"name": "node_exporter", "port": 9100}],
+        collect_debug_endpoints=["/debug/vars"],
+        found_by_host={"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
+        adaptive_collect=False,
+        collect_task_fn=fake_collect_task,
+    )
+
+    assert total == 1
+    assert success == 0
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("COLLECT")
+    assert "[!] Node Exporter" in lines[0]
+    assert "err=connection timeout" in lines[0]
+    assert lines[-1].startswith("COLLECT")
+    assert "success=0" in lines[-1]
+    assert emitted == lines
 
 
 @pytest.mark.parametrize(

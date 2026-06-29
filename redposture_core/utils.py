@@ -14,27 +14,37 @@ from typing import Any
 from .constants import HTTP_METHOD_PREFIXES
 from .scheduler import BoundedScheduler
 from .targeting import (
+    DEFAULT_MAX_NETWORK_HOSTS,
+    DEFAULT_STREAM_TARGET_WINDOW_SIZE,
     ScanExecutionGroup,
     ScanTargetSpec,
+    StreamingTargetPlan,
     TargetParsePolicy,
     build_scan_execution_groups,
+    chunked_hosts,
     collect_scan_ports,
     collect_scan_target_specs,
     collect_scan_targets,
     normalize_ip_literal,
     normalize_scan_host,
     parse_scan_target_specs,
+    stream_scan_target_specs,
 )
 
 __all__ = [
     "ScanExecutionGroup",
     "ScanTargetSpec",
+    "StreamingTargetPlan",
     "TargetParsePolicy",
+    "DEFAULT_MAX_NETWORK_HOSTS",
+    "DEFAULT_STREAM_TARGET_WINDOW_SIZE",
     "UsernamePasswordCredential",
     "as_dict",
     "as_list",
     "build_scan_execution_groups",
+    "chunked_hosts",
     "collect_scan_ports",
+    "format_credential_attempts_suffix",
     "collect_scan_target_specs",
     "collect_scan_targets",
     "filter_open_tcp_hosts_for_credential_file",
@@ -46,6 +56,7 @@ __all__ = [
     "normalize_ip_literal",
     "normalize_scan_host",
     "parse_scan_target_specs",
+    "stream_scan_target_specs",
     "parse_basic_auth",
     "parse_proxmox_api_token_auth",
     "parse_username_password_credential_file",
@@ -201,6 +212,50 @@ def parse_username_password_credential_file(
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def format_credential_attempts_suffix(
+    record: dict[str, Any],
+    *,
+    field: str,
+    min_attempts: int = 1,
+    default_username: str | None = None,
+    skip_username_dash: bool = False,
+    cap: int | None = None,
+) -> str:
+    """Format an `attempts=N users=A,B,...` suffix for credential-attempt summaries.
+
+    Shared by `kafka` (field="attempted_credentials", min_attempts=2, default_username="user")
+    and `proxmox` (field="auth_attempts", skip_username_dash=True, cap=4). Without this
+    helper both modules duplicated near-identical 15-line implementations.
+    """
+    attempts = record.get(field)
+    if not isinstance(attempts, list) or len(attempts) < min_attempts:
+        return ""
+    users: list[str] = []
+    seen: set[str] = set()
+    for item in attempts:
+        if not isinstance(item, dict):
+            continue
+        raw_username = str(item.get("username") or "").strip()
+        if default_username is not None and not raw_username:
+            raw_username = default_username
+        if not raw_username:
+            continue
+        if skip_username_dash and raw_username == "-":
+            continue
+        if raw_username in seen:
+            continue
+        seen.add(raw_username)
+        users.append(raw_username)
+    suffix = f"attempts={len(attempts)}"
+    if users:
+        if cap is not None and len(users) > cap:
+            shown = ",".join(users[:cap]) + ",..."
+        else:
+            shown = ",".join(users)
+        suffix += f" users={shown}"
+    return suffix
 
 
 def safe_decode(value: bytes | None) -> str | None:

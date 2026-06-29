@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import re
 import threading
@@ -23,6 +24,7 @@ from ...stage_runtime import (
     merge_stage_records,
 )
 from ...utils import (
+    DEFAULT_MAX_NETWORK_HOSTS,
     collect_scan_ports,
     collect_scan_targets,
     utc_now_iso,
@@ -548,8 +550,14 @@ def _normalize_ssrf_urls(targets_str: str | None, ports_str: str | None, path_st
         candidate_urls: list[str] = []
         if "://" not in target and "/" in target:
             try:
-                expanded_hosts = collect_scan_targets(target, max_network_hosts=256)
+                expanded_hosts = collect_scan_targets(target, max_network_hosts=DEFAULT_MAX_NETWORK_HOSTS)
             except (OSError, ValueError):
+                try:
+                    ipaddress.ip_network(target, strict=False)
+                except ValueError:
+                    pass
+                else:
+                    continue
                 expanded_hosts = []
             if expanded_hosts:
                 for host in expanded_hosts:

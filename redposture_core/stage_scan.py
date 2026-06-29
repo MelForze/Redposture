@@ -3,15 +3,142 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 
 from .console import Console
 from .exporters.discover import scan_exporter_presence
+from .exporters.output import emit_line as emit_output_line
+from .exporters.output import format_scan_record
 from .logger import AttemptLogger
 from .profiles import load_profiles
 from .stage_runtime import progress_total_from_groups, should_use_global_progress, start_command_progress
-from .utils import build_scan_execution_groups, collect_scan_ports, collect_scan_target_specs
+from .utils import (
+    DEFAULT_MAX_NETWORK_HOSTS,
+    TargetParsePolicy,
+    build_scan_execution_groups,
+    chunked_hosts,
+    collect_scan_ports,
+    collect_scan_target_specs,
+    stream_scan_target_specs,
+)
+
+
+def _emit_scan_summary(
+    *,
+    output_path: str | None,
+    output_format: str,
+    emit_line,
+    hosts: int,
+    checks: int,
+    found: int,
+    found_by_host: dict[str, list[dict[str, object]]],
+) -> None:
+    if not output_path:
+        return
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    summary = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "type": "summary",
+        "hosts": hosts,
+        "checks": checks,
+        "found": found,
+        "output_path": output_path,
+        "found_exporters_by_host": {
+            host: [str(item["exporter"]) for item in hits] for host, hits in found_by_host.items()
+        },
+    }
+    with open(output_path, "a", encoding="utf-8") as out_fh:
+        emit_output_line(out_fh, emit_line, format_scan_record(summary, output_format))
+
+
+def _run_large_scan_stage(
+    args: argparse.Namespace,
+    logger: AttemptLogger | None,
+    console: Console,
+    *,
+    target_plan,
+    custom_ports: list[int],
+    profiles: dict[str, object],
+    emit_line,
+    stream_to_stdout: bool,
+) -> int:
+    discovery_exporters = list(profiles["discovery_exporters"])  # type: ignore[call-overload]
+    default_ports = list(
+        dict.fromkeys(int(item.get("port")) for item in discovery_exporters if item.get("port") is not None)
+    )
+    checks = 0
+    found = 0
+    found_by_host: dict[str, list[dict[str, object]]] = {}
+    chunk_index = 0
+    try:
+        if not target_plan.has_explicit_port_targets:
+            for hosts in chunked_hosts(target_plan.iter_hosts()):
+                part_checks, part_found, part_found_by_host = scan_exporter_presence(
+                    hosts=hosts,
+                    timeout=args.timeout,
+                    output_path=args.output,
+                    output_format=args.output_format,
+                    logger=logger if args.debug else None,
+                    emit_line=emit_line,
+                    workers=args.workers,
+                    retries=args.retries,
+                    discovery_exporters=discovery_exporters,
+                    custom_ports=custom_ports or None,
+                    emit_summary=False,
+                    show_progress=False,
+                    output_mode="a" if chunk_index else "w",
+                    progress_owner=getattr(args, "_progress_owner", None),
+                )
+                chunk_index += 1
+                checks += part_checks
+                found += part_found
+                found_by_host.update({host: hits for host, hits in part_found_by_host.items() if hits})
+        else:
+            matrix_ports = tuple(custom_ports or default_ports)
+            for port in target_plan.execution_ports(matrix_ports):
+                for hosts in chunked_hosts(target_plan.iter_hosts_for_port(int(port), matrix_ports)):
+                    part_checks, part_found, part_found_by_host = scan_exporter_presence(
+                        hosts=hosts,
+                        timeout=args.timeout,
+                        output_path=args.output,
+                        output_format=args.output_format,
+                        logger=logger if args.debug else None,
+                        emit_line=emit_line,
+                        workers=args.workers,
+                        retries=args.retries,
+                        discovery_exporters=discovery_exporters,
+                        custom_ports=[int(port)],
+                        emit_summary=False,
+                        show_progress=False,
+                        output_mode="a" if chunk_index else "w",
+                        progress_owner=getattr(args, "_progress_owner", None),
+                    )
+                    chunk_index += 1
+                    checks += part_checks
+                    found += part_found
+                    found_by_host.update({host: hits for host, hits in part_found_by_host.items() if hits})
+    except OSError as exc:
+        console.error(f"failed to process scan output: {exc}")
+        return 2
+
+    _emit_scan_summary(
+        output_path=args.output,
+        output_format=args.output_format,
+        emit_line=emit_line,
+        hosts=target_plan.target_count,
+        checks=checks,
+        found=found,
+        found_by_host=found_by_host,
+    )
+    if stream_to_stdout and args.output_format == "txt":
+        console.info(f"scan complete: checks={checks} detected={found}")
+    elif not stream_to_stdout:
+        console.info(
+            f"scan complete: checks={checks} detected={found} format={args.output_format} output={args.output}"
+        )
+    return 0
 
 
 def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None) -> int:
@@ -30,12 +157,22 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         targets = f"{targets},{hosts_file}" if targets else hosts_file
 
     try:
-        target_specs = collect_scan_target_specs(targets)
+        target_plan = stream_scan_target_specs(
+            targets,
+            policy=TargetParsePolicy(url_mode="preserve", path_policy="preserve"),
+        )
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
-    if any(spec.scheme == "https" for spec in target_specs):
+    if target_plan.has_scheme("https"):
         console.error("exporters scan accepts only http:// URL targets for -t/--targets")
+        return 2
+    try:
+        target_specs = (
+            [] if target_plan.target_count > DEFAULT_MAX_NETWORK_HOSTS else collect_scan_target_specs(targets)
+        )
+    except (OSError, ValueError) as exc:
+        console.error(f"failed to parse targets: {exc}")
         return 2
     hosts = list(dict.fromkeys(spec.host for spec in target_specs))
 
@@ -51,7 +188,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
         console.error(f"failed to load profiles: {exc}")
         return 2
 
-    if not target_specs:
+    if not target_plan or (target_plan.target_count <= DEFAULT_MAX_NETWORK_HOSTS and not target_specs):
         console.error("scan requires -t/--targets")
         return 2
 
@@ -104,15 +241,27 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
     if stream_to_stdout and args.output_format == "txt":
         ports_hint = f" ports={len(custom_ports)}(custom)" if custom_ports else ""
         console.info(
-            f"scan started: hosts={len(hosts)} targets={len(target_specs)} timeout={args.timeout}s "
+            f"scan started: hosts={target_plan.target_count} targets={target_plan.target_count} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} format=txt{ports_hint}"
         )
     if not stream_to_stdout:
         ports_hint = f" ports={len(custom_ports)}(custom)" if custom_ports else ""
         console.info(
-            f"scan started: hosts={len(hosts)} targets={len(target_specs)} timeout={args.timeout}s "
+            f"scan started: hosts={target_plan.target_count} targets={target_plan.target_count} timeout={args.timeout}s "
             f"workers={args.workers} retries={args.retries} "
             f"format={args.output_format} output={args.output}{ports_hint}"
+        )
+
+    if target_plan.target_count > DEFAULT_MAX_NETWORK_HOSTS:
+        return _run_large_scan_stage(
+            args,
+            logger,
+            console,
+            target_plan=target_plan,
+            custom_ports=custom_ports,
+            profiles=profiles,
+            emit_line=emit_line,
+            stream_to_stdout=stream_to_stdout,
         )
 
     if args.debug:

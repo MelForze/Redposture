@@ -84,6 +84,9 @@ class _ConsoleCapture:
         _ = color
         self.messages.append(("plain", message))
 
+    def _paint(self, text: str, _color: str, _stream) -> str:
+        return text
+
     def render_tagged_payload_line(self, line: str, tag: str, payload_color: str | None = None) -> bool:
         _ = (line, tag, payload_color)
         return False
@@ -257,8 +260,26 @@ def test_kafka_error_helpers_and_format_record_statuses() -> None:
         {**base, "status": "invalid_credentials_anonymous", "provided_username": "alice", "provided_password": "bad"},
         "txt",
     )
+    assert "[-] alice:<empty>" in kafka._format_record(
+        {**base, "status": "invalid_credentials_anonymous", "provided_username": "alice", "provided_password": ""},
+        "txt",
+    )
     assert "[+] alice:<empty>" in kafka._format_record(
         {**base, "status": "valid_credentials", "provided_username": "alice", "provided_password": ""},
+        "txt",
+    )
+    assert "[-] authentication required attempts=2 users=admin,kafka" in kafka._format_record(
+        {
+            **base,
+            "status": "auth_required",
+            "provided_credentials": True,
+            "provided_username": "kafka",
+            "provided_password": "password",
+            "attempted_credentials": [
+                {"username": "admin", "password": "admin", "source": "default", "status": "auth_required"},
+                {"username": "kafka", "password": "password", "source": "default", "status": "auth_required"},
+            ],
+        },
         "txt",
     )
     assert "[-] authentication required" in kafka._format_record({**base, "status": "auth_required"}, "txt")
@@ -281,6 +302,212 @@ def test_kafka_default_credential_runs_are_exact_and_deduplicated() -> None:
         ("kafka", "password"),
     ]
     assert kafka._build_credential_runs(None, None, False) == [(None, None)]
+
+
+def test_run_kafka_stage_defcreds_keeps_no_auth_result_as_anonymous(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
+    calls: list[tuple[str | None, str | None, bool]] = []
+
+    def fake_stage_call(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        username: str | None,
+        password: str | None,
+        show_topics: bool,
+        query_topic: str | None,
+        dump: bool,
+        max_messages: int,
+        *,
+        run_deep_checks: bool,
+        debug: bool,
+        debug_emit,
+        show_topics_limit: int | None = None,
+    ) -> dict[str, object]:
+        _ = (
+            timeout,
+            retries,
+            query_topic,
+            dump,
+            max_messages,
+            run_deep_checks,
+            debug,
+            debug_emit,
+            show_topics_limit,
+        )
+        provided = username is not None and password is not None
+        calls.append((username, password, bool(run_deep_checks)))
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": port,
+            "is_kafka": True,
+            "status": "invalid_credentials_anonymous" if provided else "open_no_auth",
+            "auth_required": False,
+            "provided_credentials": provided,
+            "provided_username": username,
+            "provided_password": password if provided else None,
+            "provided_credentials_ok": False if provided else None,
+            "show_topics": bool(show_topics),
+            "query_topic": None,
+            "dump": False,
+            "topic_count": 1,
+            "topics": ["orders"] if run_deep_checks else None,
+            "error": None,
+        }
+
+    monkeypatch.setattr(kafka_actions, "_call_audit_kafka_host_with_stage_debug", fake_stage_call)
+
+    rc = kafka.run_kafka_stage(_kafka_args(defcreds=True, show_topics=True), logger=object())
+
+    assert rc == 0
+    plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
+    assert any("[+] anonymous access" in msg for msg in plains)
+    assert not any("[-] kafka:password" in msg for msg in plains)
+    assert not any("[-] admin:admin" in msg for msg in plains)
+    assert calls == [(None, None, False), (None, None, True)]
+
+
+def test_run_kafka_stage_defcreds_auth_required_renders_failed_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ConsoleCapture.instances.clear()
+    monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
+    calls: list[tuple[str | None, str | None, bool]] = []
+
+    def fake_stage_call(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        username: str | None,
+        password: str | None,
+        show_topics: bool,
+        query_topic: str | None,
+        dump: bool,
+        max_messages: int,
+        *,
+        run_deep_checks: bool,
+        debug: bool,
+        debug_emit,
+        show_topics_limit: int | None = None,
+    ) -> dict[str, object]:
+        _ = (
+            timeout,
+            retries,
+            show_topics,
+            query_topic,
+            dump,
+            max_messages,
+            debug,
+            debug_emit,
+            show_topics_limit,
+        )
+        provided = username is not None and password is not None
+        calls.append((username, password, bool(run_deep_checks)))
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": port,
+            "is_kafka": True,
+            "status": "auth_required",
+            "auth_required": True,
+            "provided_credentials": provided,
+            "provided_username": username,
+            "provided_password": password if provided else None,
+            "provided_credentials_ok": False if provided else None,
+            "show_topics": False,
+            "query_topic": None,
+            "dump": False,
+            "topic_count": None,
+            "topics": None,
+            "error": "SASL authentication failed" if provided else None,
+        }
+
+    monkeypatch.setattr(kafka_actions, "_call_audit_kafka_host_with_stage_debug", fake_stage_call)
+
+    rc = kafka.run_kafka_stage(_kafka_args(defcreds=True), logger=object())
+
+    assert rc == 0
+    assert calls == [
+        (None, None, False),
+        ("admin", "admin", False),
+        ("kafka", "kafka", False),
+        ("kafka", "password", False),
+    ]
+    plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
+    assert any("[-] authentication required attempts=3 users=admin,kafka" in msg for msg in plains)
+    assert not any("[-] kafka:password" in msg for msg in plains)
+
+
+def test_kafka_malformed_frame_failure_does_not_abort_next_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_stage_call(
+        host: str,
+        port: int,
+        timeout: float,
+        retries: int,
+        username: str | None,
+        password: str | None,
+        show_topics: bool,
+        query_topic: str | None,
+        dump: bool,
+        max_messages: int,
+        *,
+        run_deep_checks: bool,
+        debug: bool,
+        debug_emit,
+        show_topics_limit: int | None = None,
+    ) -> dict[str, object]:
+        _ = (
+            timeout,
+            retries,
+            username,
+            password,
+            show_topics,
+            query_topic,
+            dump,
+            max_messages,
+            run_deep_checks,
+            debug,
+            debug_emit,
+            show_topics_limit,
+        )
+        if host == "bad":
+            raise ValueError("invalid Kafka frame size 1213486160")
+        return {
+            "timestamp": "2026-03-27T00:00:00Z",
+            "host": host,
+            "port": port,
+            "is_kafka": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "provided_credentials_ok": None,
+            "show_topics": False,
+            "query_topic": None,
+            "dump": False,
+            "topic_count": 1,
+            "topics": None,
+            "error": None,
+        }
+
+    emitted: list[str] = []
+    monkeypatch.setattr(kafka, "_call_audit_kafka_host_with_stage_debug", fake_stage_call)
+
+    totals = run_module_targets_for_test(
+        "kafka",
+        hosts=["bad", "ok"],
+        port=9092,
+        emit_line=emitted.append,
+        workers=2,
+        topic=None,
+    )
+
+    assert totals == (2, 1, 0, 0, 1)
+    assert any("invalid Kafka frame size 1213486160" in line for line in emitted)
+    assert any("[+] anonymous access" in line and "\tok\t" in line for line in emitted)
 
 
 def test_kafka_frame_reader_and_request_helpers_cover_edge_cases() -> None:

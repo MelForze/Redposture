@@ -38,6 +38,7 @@ def _stream_proxmox_status(
         for line in lines:
             if out_fh is not None:
                 out_fh.write(line + "\n")
+                out_fh.flush()
             else:
                 emit_line(line)
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from redposture_core.exporters.discover import (
     fetch_fingerprint_bodies_default,
     scan_exporter_presence,
@@ -139,3 +141,52 @@ def test_scan_exporter_presence_handles_task_exceptions_and_summary() -> None:
     assert any("boom node-1:9100" in line for line in emitted)
     assert emitted[-1].startswith("SCAN")
     assert "found=0" in emitted[-1]
+
+
+def test_scan_exporter_presence_output_file_keeps_failed_records_before_summary(tmp_path: Path) -> None:
+    output_path = tmp_path / "scan.txt"
+    emitted: list[str] = []
+
+    def fake_task(host: str, port: int, _exporters, _timeout: float, _retries: int):
+        if port == 9100:
+            raise RuntimeError(f"boom {host}:{port}")
+        return (
+            {
+                "timestamp": "2026-03-27T00:00:00Z",
+                "host": host,
+                "port": port,
+                "exporter": "node_exporter",
+                "detected": False,
+                "url": f"http://{host}:{port}/metrics",
+                "method": "none",
+                "status": 404,
+                "error": None,
+                "marker_hit": None,
+            },
+            None,
+        )
+
+    checks, found, by_host = scan_exporter_presence(
+        ["node-1"],
+        1.0,
+        str(output_path),
+        output_format="txt",
+        emit_line=emitted.append,
+        workers=1,
+        retries=0,
+        discovery_exporters=[{"name": "node_exporter", "port": 9100, "markers": ("node_cpu_seconds_total",)}],
+        custom_ports=[9100, 9200],
+        scan_task_fn=fake_task,
+        show_progress=False,
+    )
+
+    assert checks == 2
+    assert found == 0
+    assert by_host == {"node-1": []}
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    assert "request failed err=boom node-1:9100" in lines[0]
+    assert "not detected" in lines[1]
+    assert lines[-1].startswith("SCAN")
+    assert "found=0" in lines[-1]
+    assert emitted == lines

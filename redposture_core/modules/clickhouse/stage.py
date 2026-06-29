@@ -79,7 +79,8 @@ def _emit_debug_start(args: Any, console: Any, plan: AuditCommandPlan) -> None:
         suffix += f" output={args.output}"
     console.info(
         "clickhouse audit started: "
-        f"hosts={plan.target_count} ports={len(plan.targets_by_port)} timeout={getattr(args, 'timeout', 5.0)}s "
+        f"hosts={plan.target_count} ports={len(plan.ports) or len(plan.targets_by_port)} "
+        f"timeout={getattr(args, 'timeout', 5.0)}s "
         f"workers={getattr(args, 'workers', 1)} retries={getattr(args, 'retries', 0)} mode={mode} "
         f"protocol={_raw_protocol(args)} database={getattr(args, 'database', 'default')}{suffix}"
     )
@@ -98,8 +99,11 @@ def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
     except ValueError as exc:
         console.error(str(exc))
         return 2
-    item = plan.iter_target_specs()[0]
-    _idx, host, port, _target = item
+    try:
+        _idx, host, port, _target = plan.require_single_target_spec()
+    except ValueError as exc:
+        console.error(f"--sql-shell {exc}")
+        return 2
     protocol = "http" if _raw_protocol(args) == "http" else "native"
     table_targets = actions._normalize_table_targets(list(getattr(args, "tables", None) or []))
     table_columns, _columns_error = actions._normalize_column_names(list(getattr(args, "columns", None) or []))

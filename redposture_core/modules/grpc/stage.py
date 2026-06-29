@@ -12,6 +12,7 @@ from ...stage_runtime import (
     AuditCommandRunner,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    install_record_callback,
 )
 from . import actions, policy, render
 
@@ -55,28 +56,42 @@ def run_grpc_stage(args: Any, logger: Any) -> int:
         if cfg.output:
             suffix += f" output={args.output}"
         console.info("grpc audit started:" + suffix)
+    openapi_path = str(getattr(args, "openapi", "") or "").strip()
+    descriptor_bytes: list[bytes] = []
+    previous_record_callback = getattr(args, "_record_callback", None)
+
+    def _capture_openapi_descriptor(record: dict[str, Any]) -> None:
+        if callable(previous_record_callback):
+            previous_record_callback(record)
+        if descriptor_bytes:
+            return
+        raw_items = record.get("descriptor_protos_b64")
+        if not isinstance(raw_items, list):
+            return
+        for item in raw_items:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            try:
+                descriptor_bytes.append(base64.b64decode(item))
+            except (ValueError, OSError):
+                continue
+
     runner = AuditCommandRunner(args=args, spec=build_grpc_spec(args), logger=logger, console=console)
     try:
-        result = runner.run_plan(plan)
+        if openapi_path:
+            with install_record_callback(args, _capture_openapi_descriptor):
+                result = runner.run_plan(plan)
+        else:
+            result = runner.run_plan(plan)
     except OSError as exc:
         console.error(f"failed to process grpc output: {exc}")
         return 2
-    openapi_path = str(getattr(args, "openapi", "") or "").strip()
     if openapi_path:
-        descriptor_bytes: list[bytes] = []
-        for record in result.records:
-            raw_items = record.get("descriptor_protos_b64")
-            if not isinstance(raw_items, list):
-                continue
-            for item in raw_items:
-                if not isinstance(item, str) or not item.strip():
-                    continue
-                try:
-                    descriptor_bytes.append(base64.b64decode(item))
-                except (ValueError, OSError):
-                    continue
-            if descriptor_bytes:
-                break
+        if not descriptor_bytes:
+            for record in result.records:
+                _capture_openapi_descriptor(record)
+                if descriptor_bytes:
+                    break
         if descriptor_bytes:
             try:
                 actions._write_openapi_document(openapi_path, descriptor_bytes)
