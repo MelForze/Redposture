@@ -1329,6 +1329,12 @@ class AuditCommandRunner:
                 )
             debug_emit(format_pass_marker(2, "deep", "complete", processed=processed_deep))
 
+        if emitted_lines == 0 and record_count > 0 and plan.output_format != "json":
+            if record_count > 1:
+                sink.emit_many((f"[*] No {self.spec.label} service detected on {record_count} target(s)",))
+            else:
+                sink.emit_many((f"[*] No {self.spec.label} service detected on target",))
+
         try:
             return AuditCommandResult(
                 records=[record.to_dict() for record in retained_records],

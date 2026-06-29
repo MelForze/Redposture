@@ -134,269 +134,54 @@ def resolve_command_runner(spec: RuntimeCommandSpec) -> Callable[..., int]:
     module_name = spec.runner_module or _STAGE_RUNNER_MODULES.get(spec.name)
     if not module_name:
         raise LookupError(f"no runner module registered for command {spec.name!r}")
-    module = importlib.import_module(module_name)
+    try:
+        module = importlib.import_module(module_name)
+    except (ModuleNotFoundError, ImportError) as exc:
+        raise LookupError(
+            f"cannot import module {module_name!r} for command {spec.name!r}: {exc}; try reinstalling the package"
+        ) from exc
     runner = getattr(module, spec.runner_attr, None)
     if not callable(runner):
         raise LookupError(f"runner {module_name}:{spec.runner_attr} is not callable")
     return runner
 
 
-def _configure_registry(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_registry_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        mirror_group_actions=helpers.mirror_group_actions,
-        port_type=helpers.port_type,
-    )
+# Helper sets reused across modules. Names must match both the `ParserHelperSet`
+# fields and the keyword parameters of the underlying `configure_*_parser`.
+_HTTP_MODULE_HELPERS: tuple[str, ...] = (
+    "add_output_flags",
+    "add_log_flag",
+    "add_scan_host_flags",
+    "add_multi_ports_flag",
+    "add_save_flag",
+    "port_type",
+)
+_HTTP_MODULE_HELPERS_WITH_MIRROR: tuple[str, ...] = (*_HTTP_MODULE_HELPERS, "mirror_group_actions")
+_DATASTORE_HELPERS: tuple[str, ...] = (
+    "add_scan_host_flags",
+    "add_multi_ports_flag",
+    "add_save_flag",
+    "add_log_flag",
+    "add_output_flags",
+    "append_selected_defaults",
+    "port_type",
+)
+_DATASTORE_HELPERS_WITH_POSITIVE_INT: tuple[str, ...] = (*_DATASTORE_HELPERS, "positive_int")
 
 
-def _configure_grafana(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_grafana_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
+def _make_configurator(
+    configure_fn: Callable[..., None],
+    helper_names: tuple[str, ...],
+) -> Callable[[argparse.ArgumentParser, ParserHelperSet], None]:
+    """Build a parser configurator that forwards the named helpers as keyword
+    arguments. This replaces a wall of near-identical wrapper functions with a
+    single data-driven dispatch; `helper_names` is the per-command contract of
+    which `ParserHelperSet` fields the module's `configure_*_parser` expects."""
 
+    def _configure(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
+        configure_fn(parser, **{name: getattr(helpers, name) for name in helper_names})
 
-def _configure_proxmox(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_proxmox_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_gitlab(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_gitlab_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_consul(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_consul_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        mirror_group_actions=helpers.mirror_group_actions,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_kubeapi(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_kubeapi_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_postgres(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_postgres_parser(
-        parser,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        add_log_flag=helpers.add_log_flag,
-        add_output_flags=helpers.add_output_flags,
-        append_selected_defaults=helpers.append_selected_defaults,
-        port_type=helpers.port_type,
-        positive_int=helpers.positive_int,
-    )
-
-
-def _configure_mongodb(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_mongodb_parser(
-        parser,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        add_log_flag=helpers.add_log_flag,
-        add_output_flags=helpers.add_output_flags,
-        append_selected_defaults=helpers.append_selected_defaults,
-        port_type=helpers.port_type,
-        positive_int=helpers.positive_int,
-    )
-
-
-def _configure_docker(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_docker_parser(
-        parser,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        add_log_flag=helpers.add_log_flag,
-        add_output_flags=helpers.add_output_flags,
-        append_selected_defaults=helpers.append_selected_defaults,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_oracle(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_oracle_parser(
-        parser,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        add_log_flag=helpers.add_log_flag,
-        add_output_flags=helpers.add_output_flags,
-        append_selected_defaults=helpers.append_selected_defaults,
-        port_type=helpers.port_type,
-        positive_int=helpers.positive_int,
-    )
-
-
-def _configure_clickhouse(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_clickhouse_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_redis(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_redis_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_etcd(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_etcd_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_qdrant(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_qdrant_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_elastic(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_elastic_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_grpc(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_grpc_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_kafka(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_kafka_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-    )
-
-
-def _configure_zookeeper(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_zookeeper_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_multi_ports_flag=helpers.add_multi_ports_flag,
-        add_save_flag=helpers.add_save_flag,
-        port_type=helpers.port_type,
-        positive_int=helpers.positive_int,
-    )
-
-
-def _configure_exporters_scan(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_scan_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_save_flag=helpers.add_save_flag,
-    )
-
-
-def _configure_exporters_collect(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_collect_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_save_flag=helpers.add_save_flag,
-        positive_int=helpers.positive_int,
-    )
-
-
-def _configure_exporters_trigger(parser: argparse.ArgumentParser, helpers: ParserHelperSet) -> None:
-    configure_trigger_parser(
-        parser,
-        add_output_flags=helpers.add_output_flags,
-        add_log_flag=helpers.add_log_flag,
-        add_scan_host_flags=helpers.add_scan_host_flags,
-        add_save_flag=helpers.add_save_flag,
-        add_listener_flags=helpers.add_listener_flags,
-    )
+    return _configure
 
 
 EXPORTERS_ACTION_SPECS: tuple[ExportersActionSpec, ...] = (
@@ -404,19 +189,28 @@ EXPORTERS_ACTION_SPECS: tuple[ExportersActionSpec, ...] = (
         name=COMMAND_SCAN,
         help="Discover observability endpoints and write scan report.",
         runner_attr="run_scan_stage",
-        configure_parser=_configure_exporters_scan,
+        configure_parser=_make_configurator(
+            configure_scan_parser,
+            ("add_output_flags", "add_log_flag", "add_scan_host_flags", "add_save_flag"),
+        ),
     ),
     ExportersActionSpec(
         name=COMMAND_COLLECT,
         help="Collect debug/runtime endpoints from a target service list.",
         runner_attr="run_collect_stage",
-        configure_parser=_configure_exporters_collect,
+        configure_parser=_make_configurator(
+            configure_collect_parser,
+            ("add_output_flags", "add_log_flag", "add_scan_host_flags", "add_save_flag", "positive_int"),
+        ),
     ),
     ExportersActionSpec(
         name=COMMAND_TRIGGER,
         help="Trigger discovered endpoints/exporters to your callback target.",
         runner_attr="run_trigger_stage",
-        configure_parser=_configure_exporters_trigger,
+        configure_parser=_make_configurator(
+            configure_trigger_parser,
+            ("add_output_flags", "add_log_flag", "add_scan_host_flags", "add_save_flag", "add_listener_flags"),
+        ),
     ),
 )
 
@@ -434,19 +228,19 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "image tags and config metadata on any compatible v2 registry endpoint."
         ),
         runner_attr="run_registry_stage",
-        configure_parser=_configure_registry,
+        configure_parser=_make_configurator(configure_registry_parser, _HTTP_MODULE_HELPERS_WITH_MIRROR),
     ),
     CommandSpec(
         name=COMMAND_GRAFANA,
         help="Audit Grafana auth exposure and datasource access.",
         runner_attr="run_grafana_stage",
-        configure_parser=_configure_grafana,
+        configure_parser=_make_configurator(configure_grafana_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_PROXMOX,
         help="Audit Proxmox API with PVE API token and search leaked credentials in API responses.",
         runner_attr="run_proxmox_stage",
-        configure_parser=_configure_proxmox,
+        configure_parser=_make_configurator(configure_proxmox_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_GITLAB,
@@ -458,7 +252,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "accessible repositories."
         ),
         runner_attr="run_gitlab_stage",
-        configure_parser=_configure_gitlab,
+        configure_parser=_make_configurator(configure_gitlab_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_CONSUL,
@@ -469,7 +263,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "EnableRemoteScriptChecks), and can perform SSRF probes via temporary agent HTTP checks."
         ),
         runner_attr="run_consul_stage",
-        configure_parser=_configure_consul,
+        configure_parser=_make_configurator(configure_consul_parser, _HTTP_MODULE_HELPERS_WITH_MIRROR),
     ),
     CommandSpec(
         name=COMMAND_KUBEAPI,
@@ -480,20 +274,20 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "visible to the current access level."
         ),
         runner_attr="run_kubeapi_stage",
-        configure_parser=_configure_kubeapi,
+        configure_parser=_make_configurator(configure_kubeapi_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_POSTGRES,
         help="Audit Postgres auth exposure and risky privileges.",
         runner_attr="run_postgres_stage",
-        configure_parser=_configure_postgres,
+        configure_parser=_make_configurator(configure_postgres_parser, _DATASTORE_HELPERS_WITH_POSITIVE_INT),
         formatter_class=PostgresHelpFormatter,
     ),
     CommandSpec(
         name=COMMAND_MONGODB,
         help="Audit MongoDB auth exposure, database/collection visibility, and document dumps.",
         runner_attr="run_mongodb_stage",
-        configure_parser=_configure_mongodb,
+        configure_parser=_make_configurator(configure_mongodb_parser, _DATASTORE_HELPERS_WITH_POSITIVE_INT),
         formatter_class=MongoDBHelpFormatter,
     ),
     CommandSpec(
@@ -505,7 +299,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "Docker exec command in a selected existing container."
         ),
         runner_attr="run_docker_stage",
-        configure_parser=_configure_docker,
+        configure_parser=_make_configurator(configure_docker_parser, _DATASTORE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_ORACLE,
@@ -515,25 +309,25 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "checks credentials/defaults, and can run explicit enumeration, privesc, RCE/file/exfil actions."
         ),
         runner_attr="run_oracle_stage",
-        configure_parser=_configure_oracle,
+        configure_parser=_make_configurator(configure_oracle_parser, _DATASTORE_HELPERS_WITH_POSITIVE_INT),
     ),
     CommandSpec(
         name=COMMAND_CLICKHOUSE,
         help="Audit ClickHouse auth exposure and privileges.",
         runner_attr="run_clickhouse_stage",
-        configure_parser=_configure_clickhouse,
+        configure_parser=_make_configurator(configure_clickhouse_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_REDIS,
         help="Audit Redis auth exposure and default credentials.",
         runner_attr="run_redis_stage",
-        configure_parser=_configure_redis,
+        configure_parser=_make_configurator(configure_redis_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_ETCD,
         help="Audit etcd API exposure and auth requirements.",
         runner_attr="run_etcd_stage",
-        configure_parser=_configure_etcd,
+        configure_parser=_make_configurator(configure_etcd_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_QDRANT,
@@ -544,7 +338,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "via collection snapshot restore from a supplied URL."
         ),
         runner_attr="run_qdrant_stage",
-        configure_parser=_configure_qdrant,
+        configure_parser=_make_configurator(configure_qdrant_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_ELASTIC,
@@ -555,7 +349,7 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "query_string discovery for potential secret leaks."
         ),
         runner_attr="run_elastic_stage",
-        configure_parser=_configure_elastic,
+        configure_parser=_make_configurator(configure_elastic_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_GRPC,
@@ -565,19 +359,19 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "queries reflection services/method descriptors, and runs grpc.health.v1.Health checks."
         ),
         runner_attr="run_grpc_stage",
-        configure_parser=_configure_grpc,
+        configure_parser=_make_configurator(configure_grpc_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_KAFKA,
         help="Audit Kafka broker auth exposure and topic visibility.",
         runner_attr="run_kafka_stage",
-        configure_parser=_configure_kafka,
+        configure_parser=_make_configurator(configure_kafka_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_ZOOKEEPER,
         help="Audit ZooKeeper exposure, auth requirements, and znode visibility.",
         runner_attr="run_zookeeper_stage",
-        configure_parser=_configure_zookeeper,
+        configure_parser=_make_configurator(configure_zookeeper_parser, (*_HTTP_MODULE_HELPERS, "positive_int")),
     ),
 )
 

@@ -117,17 +117,40 @@ def test_prepare_cert_files_bundled_and_generated_modes(monkeypatch: pytest.Monk
         lambda cert, key: generated.append((cert, key)) or None,
     )
 
+    # Default mode generates an ephemeral self-signed cert (no bundled PEM written).
+    cert, key, created_dir = servers.prepare_cert_files(None, None, generate_local_selfcert=False)
+    assert created_dir == str(temp_dir)
+    assert generated == [(cert, key)]
+
+    cert2, key2, created_dir2 = servers.prepare_cert_files(None, None, generate_local_selfcert=True)
+    assert created_dir2 == str(temp_dir)
+    assert generated == [(cert, key), (cert2, key2)]
+
+    with pytest.raises(ValueError, match="both --cert-file and --key-file"):
+        servers.prepare_cert_files(str(tmp_path / "only-cert.pem"), None)
+
+
+def test_prepare_cert_files_falls_back_to_bundled_when_generation_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    temp_dir = tmp_path / "bundle-fallback"
+    temp_dir.mkdir()
+    monkeypatch.setattr(servers.tempfile, "mkdtemp", lambda prefix="": str(temp_dir))
+
+    def _fail(_cert: str, _key: str) -> None:
+        raise ValueError("openssl missing")
+
+    monkeypatch.setattr(servers, "_generate_self_signed_cert", _fail)
+
+    # Without forcing, generation failure falls back to the bundled PEM.
     cert, key, created_dir = servers.prepare_cert_files(None, None, generate_local_selfcert=False)
     assert created_dir == str(temp_dir)
     assert "BEGIN CERTIFICATE" in open(cert, encoding="utf-8").read()
     assert "BEGIN PRIVATE KEY" in open(key, encoding="utf-8").read()
 
-    cert2, key2, created_dir2 = servers.prepare_cert_files(None, None, generate_local_selfcert=True)
-    assert created_dir2 == str(temp_dir)
-    assert generated == [(cert2, key2)]
-
-    with pytest.raises(ValueError, match="both --cert-file and --key-file"):
-        servers.prepare_cert_files(str(tmp_path / "only-cert.pem"), None)
+    # When generation is forced, the failure propagates instead.
+    with pytest.raises(ValueError, match="openssl missing"):
+        servers.prepare_cert_files(None, None, generate_local_selfcert=True)
 
 
 def test_start_server_starts_daemon_thread() -> None:

@@ -646,7 +646,9 @@ def test_audit_command_runner_suppresses_pre_detect_noise_in_non_debug_txt() -> 
 
     result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
 
-    assert emitted == []
+    assert len(emitted) == 1
+    assert "No REDIS service detected" in emitted[0]
+    assert all("protocol closed" not in line and "unexpected EOF" not in line for line in emitted)
     assert result.emitted_lines == 0
     assert result.suppressed_records == 1
     assert result.records[0]["protocol_error"] == "unexpected EOF"

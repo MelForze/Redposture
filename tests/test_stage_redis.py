@@ -722,7 +722,8 @@ def test_audit_redis_targets_suppresses_pre_detect_connection_noise(
     )
 
     assert totals == (2, 0, 0, 0, 0, 2)
-    assert emitted == []
+    assert len(emitted) == 1
+    assert "No REDIS service detected" in emitted[0]
     assert all("Connection refused" not in line for line in emitted)
 
 

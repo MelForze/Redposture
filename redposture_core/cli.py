@@ -85,7 +85,11 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
         action = getattr(args, "exporters_action", None)
         action_spec = EXPORTERS_ACTION_SPECS_BY_NAME.get(str(action or ""))
         if action_spec is not None:
-            return int(resolve_command_runner(action_spec)(args, logger))
+            try:
+                return int(resolve_command_runner(action_spec)(args, logger))
+            except LookupError as exc:
+                print(f"[error] {exc}", file=sys.stderr)
+                return 2
         print(f"[error] unsupported exporters action: {action}", file=sys.stderr)
         return 2
 
@@ -93,7 +97,11 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
         str(args.command or "")
     )
     if spec is not None:
-        runner = resolve_command_runner(spec)
+        try:
+            runner = resolve_command_runner(spec)
+        except LookupError as exc:
+            print(f"[error] {exc}", file=sys.stderr)
+            return 2
         if str(args.command or "") == "selfcert":
             return int(runner(args))
         return int(runner(args, logger))
