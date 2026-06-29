@@ -777,6 +777,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
         return f"{prefix} [!] invalid credentials {username}:{password_text}; anonymous access still available {_caps_suffix(record)}"
     if status == "auth_required":
+        attempts = record.get("credential_attempts")
+        if isinstance(attempts, list) and len(attempts) > 1:
+            return ""
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "-")
             provided_password = record.get("provided_password")
@@ -785,6 +788,27 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [-] authentication required"
     err = _clip(str(record.get("error") or "connection failed"), 96)
     return f"{prefix} [!] connection failed err={err}"
+
+
+def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if str(record.get("status") or "") != "auth_required":
+        return []
+    attempts = record.get("credential_attempts")
+    if not isinstance(attempts, list) or len(attempts) < 2:
+        return []
+    if output_format == "json":
+        return []
+    prefix = _nxc_prefix(record)
+    lines: list[str] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        username = str(attempt.get("username") or "-")
+        password = attempt.get("password")
+        password_text = "<empty>" if password == "" else str(password or "")
+        marker = "[+]" if attempt.get("ok") else "[-]"
+        lines.append(f"{prefix} {marker} {username}:{password_text}")
+    return lines
 
 
 def _format_databases_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -1098,7 +1122,9 @@ def _run_mongodb_nosql_shell(
     )
     if bool(record.get("is_mongodb")):
         emit_line(_format_detect_record(record, "txt"))
-    emit_line(_format_record(record, "txt"))
+    record_line = _format_record(record, "txt")
+    if record_line:
+        emit_line(record_line)
     if str(record.get("status") or "") not in _MONGODB_DEEP_STATUSES:
         return 1
     client = _open_client_for_successful_record(record, timeout=timeout, auth_db=auth_db)
@@ -1117,6 +1143,7 @@ __all__ = [
     "_audit_mongodb_host",
     "_format_detect_record",
     "_format_record",
+    "_format_credential_attempts_records",
 ]
 
 

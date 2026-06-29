@@ -478,7 +478,9 @@ def test_audit_zookeeper_suppresses_unexpected_eof_when_suppression_enabled(monk
     )
 
     assert (total, open_no_auth, valid, auth_required, failed) == (1, 0, 0, 0, 1)
-    assert lines == []
+    assert len(lines) == 1
+    assert "No ZOOKEEPER service detected" in lines[0]
+    assert all("Connection refused" not in line for line in lines)
 
 
 def test_audit_zookeeper_emits_records_in_input_order(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -49,6 +49,7 @@ _POSTGRES_DEEP_STATUSES = {"open_no_auth", "weak_default_creds", "valid_credenti
 _POSTGRES_DEFAULT_CREDENTIALS = (
     ("postgres", "postgres"),
     ("pgbouncer", "pgbouncer"),
+    ("pgbouncer_exporter", "pgbouncer_exporter"),
 )
 
 
@@ -581,6 +582,11 @@ def _collect_postgres_privileges(
             "AND has_table_privilege(format('%I.%I', table_schema, table_name), 'SELECT')"
         ),
     )
+    if readable_tables is None and readable_tables_error:
+        fallback_ok, _ = _pg_query_scalar_int(sock, "SELECT 1 FROM pg_catalog.pg_tables LIMIT 1")
+        if fallback_ok is not None:
+            readable_tables = 0
+            readable_tables_error = None
 
     can_execute_commands: bool | None
     if superuser is None and can_program is None:

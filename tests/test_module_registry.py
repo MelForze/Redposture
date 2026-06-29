@@ -66,3 +66,15 @@ def test_module_registry_reports_bad_runner_specs() -> None:
     )
     with pytest.raises(LookupError, match="not_a_runner"):
         resolve_command_runner(missing_runner)
+
+
+def test_module_registry_wraps_import_error_as_lookup_error() -> None:
+    broken_import = CommandSpec(
+        name="broken",
+        help="broken",
+        runner_attr="run_broken",
+        configure_parser=lambda *_args: None,
+        runner_module="redposture_core.modules.nonexistent_module_xyz",
+    )
+    with pytest.raises(LookupError, match="cannot import module"):
+        resolve_command_runner(broken_import)

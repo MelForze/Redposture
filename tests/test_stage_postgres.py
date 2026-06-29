@@ -80,11 +80,13 @@ def test_postgres_defcreds_include_pgbouncer_pair() -> None:
     assert postgres._postgres_credential_runs(None, None, defcreds=True) == [
         ("postgres", "postgres", True),
         ("pgbouncer", "pgbouncer", True),
+        ("pgbouncer_exporter", "pgbouncer_exporter", True),
     ]
     assert postgres._postgres_credential_runs("app", "secret", defcreds=True) == [
         ("app", "secret", False),
         ("postgres", "postgres", True),
         ("pgbouncer", "pgbouncer", True),
+        ("pgbouncer_exporter", "pgbouncer_exporter", True),
     ]
 
 
@@ -367,6 +369,15 @@ def test_collect_postgres_privileges_and_query_helpers(monkeypatch: pytest.Monke
     monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: ([["postgres"], [None], ["appdb"]], None))
     assert postgres._pg_query_databases(object()) == (["postgres", "appdb"], None)
     assert postgres._pg_query_accessible_databases(object()) == (["postgres", "appdb"], None)
+
+
+def test_collect_postgres_privileges_read_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    bool_results = iter([(True, None), (False, None)])
+    monkeypatch.setattr(postgres, "_pg_query_scalar_bool", lambda *_args, **_kwargs: next(bool_results))
+    int_results = iter([(None, "has_table_privilege denied"), (1, None)])
+    monkeypatch.setattr(postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: next(int_results))
+    result = postgres._collect_postgres_privileges(object())
+    assert result == (True, True, False, 0, None)
 
 
 def test_postgres_scalar_scram_and_privesc_small_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1193,7 +1204,9 @@ def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(m
     )
 
     assert (total, open_no_auth, weak, valid, auth_required, failed) == (1, 0, 0, 0, 0, 1)
-    assert lines == []
+    assert len(lines) == 1
+    assert "No POSTGRES service detected" in lines[0]
+    assert all("Connection refused" not in line and "timed out" not in line for line in lines)
 
 
 def test_caps_suffix_reports_database_count_and_not_tables() -> None:

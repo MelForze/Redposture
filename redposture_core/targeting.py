@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlparse, urlunsplit
@@ -283,6 +283,126 @@ def _range_contains(ranges: list[tuple[int, int]], value: int) -> bool:
     return False
 
 
+def _consume_target_tokens(
+    targets: str,
+    *,
+    policy: TargetParsePolicy,
+    processed_files: set[str],
+    append_spec: Callable[[ScanTargetSpec], None],
+    handle_network: Callable[[str, str | None], None],
+) -> None:
+    """Walk comma/file/URL/CIDR target tokens, delegating the strategy-specific
+    parts to callbacks.
+
+    `append_spec` receives each resolved single-host spec (bare host or URL).
+    `handle_network` receives each ``host/prefix`` token (and its source) so the
+    caller can either materialize hosts or keep them as ranges. File inclusion,
+    URL parsing/validation, and bare-host normalization are shared here so the
+    streaming and eager parsers cannot drift apart.
+    """
+
+    def _consume_token(token: str, *, source: str | None = None) -> None:
+        item = token.strip()
+        if not item:
+            return
+
+        if os.path.isfile(item):
+            real = os.path.realpath(item)
+            if real in processed_files:
+                return
+            processed_files.add(real)
+            with open(real, encoding="utf-8") as fh:
+                for line_no, raw in enumerate(fh, start=1):
+                    clean = raw.split("#", 1)[0].strip()
+                    if not clean:
+                        continue
+                    for part in clean.split(","):
+                        _consume_token(part, source=f"{real}:{line_no}")
+            return
+
+        if "://" in item:
+            parsed = urlparse(item)
+            scheme = str(parsed.scheme or "").strip().lower()
+            if scheme not in policy.allowed_schemes:
+                raise ValueError(
+                    f"unsupported target URL scheme '{scheme or '-'}' in '{item}' "
+                    f"(supported: {', '.join(policy.allowed_schemes)})"
+                )
+            if policy.url_mode == "reject":
+                raise ValueError(f"URL targets are not supported here: '{item}'")
+            host = (parsed.hostname or "").strip()
+            if not host:
+                raise ValueError(f"invalid URL target '{item}': missing host")
+            try:
+                explicit_port = parsed.port
+            except ValueError as exc:
+                raise ValueError(f"invalid URL target '{item}': {exc}") from exc
+            if policy.url_mode == "strip":
+                append_spec(
+                    ScanTargetSpec(
+                        host=host,
+                        scheme=None,
+                        explicit_port=None,
+                        raw=item,
+                        source=source or policy.source,
+                        normalized_key=host,
+                    )
+                )
+            else:
+                path = parsed.path or ""
+                query = parsed.query or ""
+                fragment = parsed.fragment or ""
+                if policy.path_policy == "reject" and (path not in {"", "/"} or query or fragment):
+                    raise ValueError(f"URL path/query are not supported here: '{item}'")
+                if policy.path_policy == "strip":
+                    path = ""
+                    query = ""
+                    fragment = ""
+                normalized_key = _make_normalized_key(
+                    host=host,
+                    scheme=scheme,
+                    port=explicit_port,
+                    path=path,
+                    query=query,
+                    fragment=fragment,
+                )
+                append_spec(
+                    ScanTargetSpec(
+                        host=host,
+                        scheme=scheme,
+                        explicit_port=explicit_port,
+                        raw=item,
+                        path=path,
+                        query=query,
+                        fragment=fragment,
+                        source=source or policy.source,
+                        normalized_key=normalized_key,
+                    )
+                )
+            return
+
+        if "/" in item:
+            handle_network(item, source)
+            return
+
+        host = normalize_scan_host(item) or ""
+        if not host:
+            return
+        append_spec(
+            ScanTargetSpec(
+                host=host,
+                scheme=None,
+                explicit_port=None,
+                raw=item,
+                source=source or policy.source,
+                normalized_key=host,
+            )
+        )
+
+    for token in targets.split(","):
+        _consume_token(token)
+
+
 def stream_scan_target_specs(
     targets: str | None,
     *,
@@ -381,114 +501,24 @@ def stream_scan_target_specs(
                 )
             )
 
-    def _consume_token(token: str, *, source: str | None = None) -> None:
-        item = token.strip()
-        if not item:
-            return
-
-        if os.path.isfile(item):
-            real = os.path.realpath(item)
-            if real in processed_files:
-                return
-            processed_files.add(real)
-            with open(real, encoding="utf-8") as fh:
-                for line_no, raw in enumerate(fh, start=1):
-                    clean = raw.split("#", 1)[0].strip()
-                    if not clean:
-                        continue
-                    for part in clean.split(","):
-                        _consume_token(part, source=f"{real}:{line_no}")
-            return
-
-        if "://" in item:
-            parsed = urlparse(item)
-            scheme = str(parsed.scheme or "").strip().lower()
-            if scheme not in active_policy.allowed_schemes:
-                raise ValueError(
-                    f"unsupported target URL scheme '{scheme or '-'}' in '{item}' "
-                    f"(supported: {', '.join(active_policy.allowed_schemes)})"
-                )
-            if active_policy.url_mode == "reject":
-                raise ValueError(f"URL targets are not supported here: '{item}'")
-            host = (parsed.hostname or "").strip()
-            if not host:
-                raise ValueError(f"invalid URL target '{item}': missing host")
-            try:
-                explicit_port = parsed.port
-            except ValueError as exc:
-                raise ValueError(f"invalid URL target '{item}': {exc}") from exc
-            if active_policy.url_mode == "strip":
-                _append_list_spec(
-                    ScanTargetSpec(
-                        host=host,
-                        scheme=None,
-                        explicit_port=None,
-                        raw=item,
-                        source=source or active_policy.source,
-                        normalized_key=host,
-                    )
-                )
-            else:
-                path = parsed.path or ""
-                query = parsed.query or ""
-                fragment = parsed.fragment or ""
-                if active_policy.path_policy == "reject" and (path not in {"", "/"} or query or fragment):
-                    raise ValueError(f"URL path/query are not supported here: '{item}'")
-                if active_policy.path_policy == "strip":
-                    path = ""
-                    query = ""
-                    fragment = ""
-                normalized_key = _make_normalized_key(
-                    host=host,
-                    scheme=scheme,
-                    port=explicit_port,
-                    path=path,
-                    query=query,
-                    fragment=fragment,
-                )
-                _append_list_spec(
-                    ScanTargetSpec(
-                        host=host,
-                        scheme=scheme,
-                        explicit_port=explicit_port,
-                        raw=item,
-                        path=path,
-                        query=query,
-                        fragment=fragment,
-                        source=source or active_policy.source,
-                        normalized_key=normalized_key,
-                    )
-                )
-            return
-
-        if "/" in item:
-            try:
-                network = ipaddress.ip_network(item, strict=False)
-            except ValueError as exc:
-                raise ValueError(f"invalid network target '{item}': {exc}") from exc
-            if isinstance(network, ipaddress.IPv4Network):
-                _append_ipv4_network(item, network, source)
-            else:
-                _append_ipv6_network(item, network, source)
-            return
-
-        host = normalize_scan_host(item) or ""
-        if not host:
-            return
-        _append_list_spec(
-            ScanTargetSpec(
-                host=host,
-                scheme=None,
-                explicit_port=None,
-                raw=item,
-                source=source or active_policy.source,
-                normalized_key=host,
-            )
-        )
+    def _handle_network(item: str, source: str | None) -> None:
+        try:
+            network = ipaddress.ip_network(item, strict=False)
+        except ValueError as exc:
+            raise ValueError(f"invalid network target '{item}': {exc}") from exc
+        if isinstance(network, ipaddress.IPv4Network):
+            _append_ipv4_network(item, network, source)
+        else:
+            _append_ipv6_network(item, network, source)
 
     if targets:
-        for token in targets.split(","):
-            _consume_token(token)
+        _consume_target_tokens(
+            targets,
+            policy=active_policy,
+            processed_files=processed_files,
+            append_spec=_append_list_spec,
+            handle_network=_handle_network,
+        )
 
     return StreamingTargetPlan(
         _entries=tuple(entries),
@@ -529,120 +559,30 @@ def parse_scan_target_specs(
         seen_specs.add(key)
         unique.append(spec)
 
-    def _consume_token(token: str, *, source: str | None = None) -> None:
-        item = token.strip()
-        if not item:
-            return
-
-        if os.path.isfile(item):
-            real = os.path.realpath(item)
-            if real in processed_files:
-                return
-            processed_files.add(real)
-            with open(real, encoding="utf-8") as fh:
-                for line_no, raw in enumerate(fh, start=1):
-                    clean = raw.split("#", 1)[0].strip()
-                    if not clean:
-                        continue
-                    for part in clean.split(","):
-                        _consume_token(part, source=f"{real}:{line_no}")
-            return
-
-        if "://" in item:
-            parsed = urlparse(item)
-            scheme = str(parsed.scheme or "").strip().lower()
-            if scheme not in active_policy.allowed_schemes:
-                raise ValueError(
-                    f"unsupported target URL scheme '{scheme or '-'}' in '{item}' "
-                    f"(supported: {', '.join(active_policy.allowed_schemes)})"
-                )
-            if active_policy.url_mode == "reject":
-                raise ValueError(f"URL targets are not supported here: '{item}'")
-            host = (parsed.hostname or "").strip()
-            if not host:
-                raise ValueError(f"invalid URL target '{item}': missing host")
-            try:
-                explicit_port = parsed.port
-            except ValueError as exc:
-                raise ValueError(f"invalid URL target '{item}': {exc}") from exc
-            if active_policy.url_mode == "strip":
-                _append_spec(
-                    ScanTargetSpec(
-                        host=host,
-                        scheme=None,
-                        explicit_port=None,
-                        raw=item,
-                        source=source or active_policy.source,
-                        normalized_key=host,
-                    )
-                )
-            else:
-                path = parsed.path or ""
-                query = parsed.query or ""
-                fragment = parsed.fragment or ""
-                if active_policy.path_policy == "reject" and (path not in {"", "/"} or query or fragment):
-                    raise ValueError(f"URL path/query are not supported here: '{item}'")
-                if active_policy.path_policy == "strip":
-                    path = ""
-                    query = ""
-                    fragment = ""
-                normalized_key = _make_normalized_key(
+    def _handle_network(item: str, source: str | None) -> None:
+        try:
+            expanded = _expand_network_targets(item, max_hosts=active_policy.max_network_hosts)
+        except ValueError as exc:
+            raise ValueError(f"invalid network target '{item}': {exc}") from exc
+        for host in expanded:
+            _append_spec(
+                ScanTargetSpec(
                     host=host,
-                    scheme=scheme,
-                    port=explicit_port,
-                    path=path,
-                    query=query,
-                    fragment=fragment,
+                    scheme=None,
+                    explicit_port=None,
+                    raw=item,
+                    source=source or active_policy.source,
+                    normalized_key=host,
                 )
-                _append_spec(
-                    ScanTargetSpec(
-                        host=host,
-                        scheme=scheme,
-                        explicit_port=explicit_port,
-                        raw=item,
-                        path=path,
-                        query=query,
-                        fragment=fragment,
-                        source=source or active_policy.source,
-                        normalized_key=normalized_key,
-                    )
-                )
-            return
-
-        if "/" in item:
-            try:
-                expanded = _expand_network_targets(item, max_hosts=active_policy.max_network_hosts)
-            except ValueError as exc:
-                raise ValueError(f"invalid network target '{item}': {exc}") from exc
-            for host in expanded:
-                _append_spec(
-                    ScanTargetSpec(
-                        host=host,
-                        scheme=None,
-                        explicit_port=None,
-                        raw=item,
-                        source=source or active_policy.source,
-                        normalized_key=host,
-                    )
-                )
-            return
-
-        host = normalize_scan_host(item) or ""
-        if not host:
-            return
-        _append_spec(
-            ScanTargetSpec(
-                host=host,
-                scheme=None,
-                explicit_port=None,
-                raw=item,
-                source=source or active_policy.source,
-                normalized_key=host,
             )
-        )
 
-    for token in targets.split(","):
-        _consume_token(token)
+    _consume_target_tokens(
+        targets,
+        policy=active_policy,
+        processed_files=processed_files,
+        append_spec=_append_spec,
+        handle_network=_handle_network,
+    )
 
     return unique
 
