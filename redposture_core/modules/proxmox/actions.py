@@ -25,6 +25,7 @@ from ...stage_runtime import (
     merge_stage_records,
 )
 from ...utils import (
+    format_credential_attempts_suffix,
     is_signature_compat_typeerror,
     utc_now_iso,
 )
@@ -527,6 +528,17 @@ def _caps_suffix(record: dict[str, Any]) -> str:
             f"(read:{_cap_text(record.get('cap_read'))})",
         )
     )
+
+
+def _password_auth_attempts_suffix(record: dict[str, Any]) -> str:
+    suffix = format_credential_attempts_suffix(
+        record,
+        field="auth_attempts",
+        min_attempts=1,
+        skip_username_dash=True,
+        cap=4,
+    )
+    return suffix
 
 
 def _normalize_key_token(value: str) -> str:
@@ -1478,6 +1490,10 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if status == "insufficient_privileges":
         return f"{prefix} [-] token valid but insufficient privileges {_caps_suffix(record)}"
     if status == "auth_failed":
+        if str(record.get("auth_method") or "") == "password":
+            suffix = _password_auth_attempts_suffix(record)
+            suffix_text = f" {suffix}" if suffix else ""
+            return f"{prefix} [-] password authentication failed{suffix_text}"
         return f"{prefix} [-] invalid pve api token"
     err = _clip(str(record.get("error") or "connection failed"), 90)
     return f"{prefix} [!] connection failed err={err}"

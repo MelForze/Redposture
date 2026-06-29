@@ -134,6 +134,17 @@ def test_normalize_ssrf_urls_builds_expected_urls() -> None:
     ]
 
 
+def test_normalize_ssrf_urls_accepts_16_cidr_targets() -> None:
+    urls = qdrant._normalize_ssrf_urls("10.153.0.0/16", "6333", "/metrics")
+    assert len(urls) == 65534
+    assert urls[0] == "http://10.153.0.1:6333/metrics"
+    assert urls[-1] == "http://10.153.255.254:6333/metrics"
+
+
+def test_normalize_ssrf_urls_rejects_oversized_cidr_targets() -> None:
+    assert qdrant._normalize_ssrf_urls("10.152.0.0/15", "6333", "/metrics") == []
+
+
 def test_normalize_ssrf_urls_returns_empty_on_invalid_path() -> None:
     assert qdrant._normalize_ssrf_urls("127.0.0.1", "6333", "http://[::1") == []
 

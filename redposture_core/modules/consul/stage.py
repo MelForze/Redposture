@@ -11,6 +11,7 @@ from ...stage_runtime import (
     AuditCommandRunner,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    install_record_callback,
 )
 from . import actions, policy, render
 
@@ -53,17 +54,30 @@ def run_consul_stage(args: Any, logger: Any) -> int:
             console.info(f"local listener started: {listener_info.get('cmd') or '-'}")
         else:
             console.warn(f"local listener not started: {listener_info.get('error') or 'unknown error'}")
+    revshell_registered = False
+    previous_record_callback = getattr(args, "_record_callback", None)
+
+    def _capture_revshell_record(record: dict[str, Any]) -> None:
+        nonlocal revshell_registered
+        if callable(previous_record_callback):
+            previous_record_callback(record)
+        if bool(record.get("script_revshell")):
+            revshell_registered = True
+
     runner = AuditCommandRunner(args=args, spec=build_consul_spec(args), logger=logger, console=console)
     try:
-        result = runner.run_plan(plan)
+        if listener_info is not None:
+            with install_record_callback(args, _capture_revshell_record):
+                result = runner.run_plan(plan)
+        else:
+            result = runner.run_plan(plan)
     except OSError as exc:
         console.error(f"failed to process consul output: {exc}")
         return 2
     if cfg.debug and result.detected_count == 0:
         console.warn("all consul targets are unreachable")
     if listener_info is not None:
-        registered = any(bool(record.get("script_revshell")) for record in result.records)
-        if not registered:
+        if not revshell_registered:
             console.warn("local listener not started: revshell check was not registered")
     return 0
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from redposture_core.exporters.output import (
+    emit_line,
     extract_display_port,
     format_collect_record,
     format_scan_record,
@@ -45,3 +46,25 @@ def test_extract_display_port_handles_urls_and_plain_targets() -> None:
     assert extract_display_port("https://example.local/path") == "443"
     assert extract_display_port("example.local:8080") == "8080"
     assert extract_display_port("example.local") == "-"
+
+
+def test_emit_line_flushes_output_file_handle() -> None:
+    class _FakeOutput:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+            self.flushes = 0
+
+        def write(self, value: str) -> None:
+            self.lines.append(value)
+
+        def flush(self) -> None:
+            self.flushes += 1
+
+    out_fh = _FakeOutput()
+    emitted: list[str] = []
+
+    emit_line(out_fh, emitted.append, "line-a")
+
+    assert out_fh.lines == ["line-a\n"]
+    assert out_fh.flushes == 1
+    assert emitted == ["line-a"]

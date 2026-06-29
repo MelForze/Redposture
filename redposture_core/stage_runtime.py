@@ -7,7 +7,8 @@ import inspect
 import json
 import os
 import sys
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,11 +19,14 @@ from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
 from .scheduler import BoundedScheduler
 from .show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from .targeting import (
+    DEFAULT_MAX_NETWORK_HOSTS,
+    DEFAULT_STREAM_TARGET_WINDOW_SIZE,
     ScanTargetSpec,
+    StreamingTargetPlan,
     TargetParsePolicy,
     build_scan_execution_groups,
     collect_scan_target_specs,
-    parse_scan_target_specs,
+    stream_scan_target_specs,
 )
 from .utils import (
     collect_scan_ports,
@@ -35,6 +39,7 @@ AuditRecord = _audit_models.AuditRecord
 CapabilitySet = _audit_models.CapabilitySet
 CredentialAttempt = _audit_models.CredentialAttempt
 _RUNTIME_COMPAT_EXPORTS = (collect_scan_targets, collect_scan_target_specs)
+DEFAULT_RECORD_RETENTION_LIMIT = 100_000
 
 
 def _merge_debug_events(*records: dict[str, Any]) -> list[str]:
@@ -152,6 +157,40 @@ def progress_total_from_groups(group_hosts: Iterable[Iterable[Any]], credential_
         except TypeError:
             total_hosts += sum(1 for _ in hosts)
     return int(total_hosts) * max(1, int(credential_runs))
+
+
+@contextmanager
+def install_record_callback(args: Any, callback: Callable[[dict[str, Any]], None]) -> Iterator[None]:
+    """Install a per-record callback on `args._record_callback` for the duration of the
+    `with` block, then restore the previous value (or remove the attribute entirely if
+    none was set). Previously consul/grpc each reimplemented this save-and-restore plumbing
+    inline; centralizing it avoids the next module copying the same boilerplate."""
+    previous = getattr(args, "_record_callback", None)
+    args._record_callback = callback
+    try:
+        yield
+    finally:
+        if previous is None:
+            try:
+                delattr(args, "_record_callback")
+            except AttributeError:
+                pass
+        else:
+            args._record_callback = previous
+
+
+def _record_callbacks_for_args(args: Any) -> tuple[Callable[[dict[str, Any]], None], ...]:
+    callbacks: list[Callable[[dict[str, Any]], None]] = []
+    seen: set[int] = set()
+    for candidate in (getattr(args, "_record_callback", None), getattr(args, "record_callback", None)):
+        if not callable(candidate):
+            continue
+        marker = id(candidate)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        callbacks.append(candidate)
+    return tuple(callbacks)
 
 
 class LineOutputSink:
@@ -282,16 +321,21 @@ class AuditCommandPlan:
     tracked separately for modules that support credential-file mode.
     """
 
-    targets_by_port: dict[int, tuple[str, ...]]
+    targets_by_port: dict[int, tuple[str, ...]] = field(default_factory=dict)
     target_specs_by_port: dict[int, tuple[ScanTargetSpec, ...]] = field(default_factory=dict)
+    target_plan: StreamingTargetPlan | None = None
+    ports: tuple[int, ...] = ()
     credential_runs: tuple[AuditCredentialRun, ...] = (AuditCredentialRun(),)
     output_path: str | None = None
     output_format: str = "txt"
     workers: int = 1
     append: bool = False
+    target_window_size: int = DEFAULT_STREAM_TARGET_WINDOW_SIZE
 
     @property
     def target_count(self) -> int:
+        if self.target_plan is not None:
+            return self.target_plan.count_for_ports(self.ports)
         if self.target_specs_by_port:
             return sum(len(specs) for specs in self.target_specs_by_port.values())
         return sum(len(hosts) for hosts in self.targets_by_port.values())
@@ -304,10 +348,12 @@ class AuditCommandPlan:
     def total_work_units(self) -> int:
         return self.target_count * self.credential_run_count
 
-    def iter_targets(self) -> list[tuple[int, str, int]]:
-        return [(idx, host, port) for idx, host, port, _target in self.iter_target_specs()]
+    def iter_targets(self) -> Iterable[tuple[int, str, int]]:
+        return ((idx, host, port) for idx, host, port, _target in self.iter_target_specs())
 
-    def iter_target_specs(self) -> list[tuple[int, str, int, ScanTargetSpec | None]]:
+    def iter_target_specs(self) -> Iterable[tuple[int, str, int, ScanTargetSpec | None]]:
+        if self.target_plan is not None:
+            return self._iter_streaming_target_specs()
         if self.target_specs_by_port:
             items: list[tuple[int, str, int, ScanTargetSpec | None]] = []
             idx = 0
@@ -324,7 +370,53 @@ class AuditCommandPlan:
                 idx += 1
         return items
 
-    def iter_work_items(self) -> list[tuple[int, str, int, AuditCredentialRun, ScanTargetSpec | None]]:
+    def _iter_streaming_target_specs(self):
+        if self.target_plan is None:
+            return
+        idx = 0
+        matrix_ports = tuple(int(port) for port in self.ports)
+        for port in self.target_plan.execution_ports(matrix_ports):
+            for spec in self.target_plan.iter_specs_for_port(int(port), matrix_ports):
+                yield idx, str(spec.host), int(port), spec
+                idx += 1
+
+    def iter_target_windows(
+        self,
+        window_size: int | None = None,
+    ):
+        size = max(1, int(window_size or self.target_window_size or DEFAULT_STREAM_TARGET_WINDOW_SIZE))
+        current: list[tuple[int, str, int, ScanTargetSpec | None]] = []
+        for item in self.iter_target_specs():
+            current.append(item)
+            if len(current) >= size:
+                yield current
+                current = []
+        if current:
+            yield current
+
+    def first_target_spec(self) -> tuple[int, str, int, ScanTargetSpec | None] | None:
+        for item in self.iter_target_specs():
+            return item
+        return None
+
+    def single_target_spec(self) -> tuple[int, str, int, ScanTargetSpec | None] | None:
+        if self.target_count != 1:
+            return None
+        return self.first_target_spec()
+
+    def require_single_target_spec(self) -> tuple[int, str, int, ScanTargetSpec | None]:
+        """Like `single_target_spec()` but raises `ValueError` instead of returning None.
+        Centralizes the "requires exactly one target host" validation that postgres /
+        clickhouse / etc. shell modes share. Callers catch the ValueError to produce
+        their own per-mode error prefix (e.g. `--sql-shell <msg>`)."""
+        spec = self.single_target_spec()
+        if spec is None:
+            raise ValueError("requires exactly one target host")
+        return spec
+
+    def iter_work_items(self) -> Iterable[tuple[int, str, int, AuditCredentialRun, ScanTargetSpec | None]]:
+        if self.target_plan is not None:
+            return self._iter_streaming_work_items()
         items: list[tuple[int, str, int, AuditCredentialRun, ScanTargetSpec | None]] = []
         idx = 0
         credential_runs = self.credential_runs or (AuditCredentialRun(),)
@@ -334,6 +426,14 @@ class AuditCommandPlan:
                 idx += 1
         return items
 
+    def _iter_streaming_work_items(self):
+        idx = 0
+        credential_runs = self.credential_runs or (AuditCredentialRun(),)
+        for _target_idx, host, port, target in self.iter_target_specs():
+            for credential in credential_runs:
+                yield idx, str(host), int(port), credential, target
+                idx += 1
+
 
 @dataclass(frozen=True)
 class AuditCommandResult:
@@ -342,6 +442,9 @@ class AuditCommandResult:
     emitted_lines: int
     typed_records: list[AuditRecord]
     suppressed_records: int = 0
+    record_count: int = 0
+    status_counts: dict[str, int] = field(default_factory=dict)
+    record_retention_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -414,23 +517,26 @@ def build_basic_audit_plan(
     if hosts_file:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
     try:
-        target_specs = parse_scan_target_specs(
+        target_plan = stream_scan_target_specs(
             targets,
             policy=TargetParsePolicy(url_mode="preserve", path_policy="preserve"),
         )
     except (OSError, ValueError) as exc:
         raise ValueError(f"failed to parse targets: {exc}") from exc
-    if not target_specs:
+    if not target_plan:
         raise ValueError("targets are required")
 
-    groups = build_scan_execution_groups(target_specs, ports)
     credential_runs = build_basic_credential_runs(args)
-    targets_by_port: dict[int, tuple[str, ...]] = {}
-    target_specs_by_port: dict[int, tuple[ScanTargetSpec, ...]] = {}
-    for group in groups:
-        port = int(group.port)
-        group_hosts = [str(host) for host in group.hosts]
-        if any(run.source == "file" for run in credential_runs):
+    port_tuple = tuple(int(port) for port in ports)
+
+    if any(run.source == "file" for run in credential_runs) and target_plan.target_count <= DEFAULT_MAX_NETWORK_HOSTS:
+        target_specs = list(target_plan.iter_specs())
+        groups = build_scan_execution_groups(target_specs, ports)
+        targets_by_port: dict[int, tuple[str, ...]] = {}
+        target_specs_by_port: dict[int, tuple[ScanTargetSpec, ...]] = {}
+        for group in groups:
+            port = int(group.port)
+            group_hosts = [str(host) for host in group.hosts]
             group_hosts = filter_open_tcp_hosts_for_credential_file(
                 group_hosts,
                 port,
@@ -438,15 +544,26 @@ def build_basic_audit_plan(
                 workers=cfg.workers,
                 enabled=not cfg.proxy,
             )
-        targets_by_port[port] = (*targets_by_port.get(port, ()), *group_hosts)
-        group_specs = tuple(getattr(group, "target_specs", ()) or ())
-        if group_specs:
-            filtered_specs = tuple(spec for spec in group_specs if str(spec.host) in set(group_hosts))
-            target_specs_by_port[port] = (*target_specs_by_port.get(port, ()), *filtered_specs)
+            targets_by_port[port] = (*targets_by_port.get(port, ()), *group_hosts)
+            group_specs = tuple(getattr(group, "target_specs", ()) or ())
+            if group_specs:
+                group_host_set = set(group_hosts)
+                filtered_specs = tuple(spec for spec in group_specs if str(spec.host) in group_host_set)
+                target_specs_by_port[port] = (*target_specs_by_port.get(port, ()), *filtered_specs)
+
+        return AuditCommandPlan(
+            targets_by_port=targets_by_port,
+            target_specs_by_port=target_specs_by_port,
+            ports=port_tuple,
+            credential_runs=credential_runs,
+            output_path=cfg.output,
+            output_format=cfg.output_format,
+            workers=cfg.workers,
+        )
 
     return AuditCommandPlan(
-        targets_by_port=targets_by_port,
-        target_specs_by_port=target_specs_by_port,
+        target_plan=target_plan,
+        ports=port_tuple,
         credential_runs=credential_runs,
         output_path=cfg.output,
         output_format=cfg.output_format,
@@ -562,14 +679,14 @@ def validate_basic_module_args(
 
     if pure_http:
         try:
-            specs = parse_scan_target_specs(
+            target_plan = stream_scan_target_specs(
                 str(targets),
                 policy=TargetParsePolicy(url_mode="preserve", path_policy="preserve"),
             )
         except ValueError as exc:
             console.error(f"failed to parse targets: {exc}")
             return 2
-        if any(str(spec.scheme or "").lower() == "https" for spec in specs):
+        if target_plan.has_scheme("https"):
             console.error(f"{module} accepts only http:// URL targets for -t/--targets")
             return 2
 
@@ -1038,16 +1155,16 @@ class AuditCommandRunner:
         return []
 
     def run_plan(self, plan: AuditCommandPlan) -> AuditCommandResult:
-        indexed_targets = plan.iter_target_specs()
+        target_count = plan.target_count
+        retain_records = target_count <= DEFAULT_RECORD_RETENTION_LIMIT
         progress = start_command_progress(
             self.args,
             self.spec.label,
-            len(indexed_targets),
-            enabled=should_use_global_progress(plan.output_format, len(indexed_targets)),
+            target_count,
+            enabled=should_use_global_progress(plan.output_format, target_count),
             leave=False,
         )
         sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append)
-        records_by_idx: dict[int, AuditRecord] = {}
         worker_count = max(1, int(plan.workers or getattr(self.args, "workers", 1) or 1))
         scheduler: BoundedScheduler[tuple[int, str, int, ScanTargetSpec | None], AuditRecord] = BoundedScheduler(
             max_workers=worker_count
@@ -1056,92 +1173,175 @@ class AuditCommandRunner:
             BoundedScheduler(max_workers=worker_count)
         )
         emitted_lines = 0
+        suppressed_records = 0
+        retained_records: list[AuditRecord] = []
+        record_count = 0
+        detected_count = 0
+        status_counts: dict[str, int] = {}
+        record_callbacks = _record_callbacks_for_args(self.args)
+        render_plan = build_render_plan(self.spec.render_module) if self.spec.render_module is not None else None
+        debug = bool(getattr(self.args, "debug", False))
         debug_emit = getattr(self.args, "debug_emit", None) if bool(getattr(self.args, "debug", False)) else None
         if debug_emit is not None:
-            debug_emit(format_pass_marker(1, "detect", "start", total=len(indexed_targets)))
+            debug_emit(format_pass_marker(1, "detect", "start", total=target_count))
 
-        detected_targets: list[tuple[int, str, int, ScanTargetSpec | None, AuditRecord]] = []
+        def _emit_record(record: AuditRecord) -> None:
+            nonlocal emitted_lines, suppressed_records
+            if plan.output_format == "json":
+                emitted_lines += 1
+                sink.emit_many((json.dumps(record.to_dict(), ensure_ascii=False),))
+                return
+            if self.spec.render is None and self.spec.render_module is None:
+                return
+            if not debug and is_pre_detect_network_noise(record):
+                suppressed_records += 1
+                return
+            lines = self._render_record(record, render_plan, plan.output_format, debug)
+            emitted_lines += len(lines)
+            sink.emit_many(lines)
+
+        def _finalize_record(record: AuditRecord) -> None:
+            nonlocal record_count, detected_count
+            record_count += 1
+            status = str(record.status or "")
+            status_counts[status] = status_counts.get(status, 0) + 1
+            if self._is_detected(record):
+                detected_count += 1
+            if retain_records:
+                retained_records.append(record)
+            if record_callbacks:
+                payload = record.to_dict()
+                for record_callback in record_callbacks:
+                    record_callback(dict(payload))
+            _emit_record(record)
+
+        total_detected = 0
+        total_deep_candidates = 0
         processed_deep = 0
+        window_index = 0
         try:
-            for (idx, host, port, target), detect_record in scheduler.iter_completed(
-                indexed_targets,
-                lambda item: self._safe_record(
-                    item[1], item[2], lambda: self._run_detect(item[1], item[2], item[3], debug_emit)
-                ),
-            ):
-                records_by_idx[int(idx)] = detect_record
-                if self._is_detected(detect_record):
-                    detected_targets.append((idx, host, port, target, detect_record))
-                elif debug_emit is not None:
-                    debug_emit(format_stage2_gate(host, int(port), "skip", self._not_detected_reason(detect_record)))
-                progress.advance(1)
+            for window in plan.iter_target_windows():
+                window_index += 1
+                pending_emit_records: dict[int, AuditRecord] = {}
+                next_emit_idx = int(window[0][0]) if window else 0
+                detected_targets: list[tuple[int, str, int, ScanTargetSpec | None, AuditRecord]] = []
 
-            initial_deep_candidates = [
-                (idx, host, port, target, detect_record)
-                for idx, host, port, target, detect_record in detected_targets
-                if self._deep_gate(detect_record)[0]
-            ]
-            if debug_emit is not None:
+                def _queue_final_record(
+                    idx: int,
+                    record: AuditRecord,
+                    pending_emit_records=pending_emit_records,
+                ) -> None:
+                    nonlocal next_emit_idx
+                    pending_emit_records[int(idx)] = record
+                    while next_emit_idx in pending_emit_records:
+                        ready_record = pending_emit_records.pop(next_emit_idx)
+                        _finalize_record(ready_record)
+                        next_emit_idx += 1
+
+                for (idx, host, port, target), detect_record in scheduler.iter_completed(
+                    window,
+                    lambda item: self._safe_record(
+                        item[1], item[2], lambda: self._run_detect(item[1], item[2], item[3], debug_emit)
+                    ),
+                ):
+                    if self._is_detected(detect_record):
+                        detected_targets.append((idx, host, port, target, detect_record))
+                    else:
+                        if debug_emit is not None:
+                            debug_emit(
+                                format_stage2_gate(host, int(port), "skip", self._not_detected_reason(detect_record))
+                            )
+                        _queue_final_record(int(idx), detect_record)
+                    progress.advance(1)
+
+                initial_deep_candidates = [
+                    (idx, host, port, target, detect_record)
+                    for idx, host, port, target, detect_record in detected_targets
+                    if self._deep_gate(detect_record)[0]
+                ]
+                total_detected += len(detected_targets)
+                total_deep_candidates += len(initial_deep_candidates)
+                if debug_emit is not None:
+                    if target_count <= len(window):
+                        debug_emit(
+                            format_pass_marker(
+                                1,
+                                "detect",
+                                "complete",
+                                detected=len(detected_targets),
+                                deep_candidates=len(initial_deep_candidates),
+                            )
+                        )
+                        debug_emit(format_pass_marker(2, "deep", "start", total=len(initial_deep_candidates)))
+                    else:
+                        debug_emit(
+                            format_pass_marker(
+                                1,
+                                "detect",
+                                "window_complete",
+                                window=window_index,
+                                detected=len(detected_targets),
+                                deep_candidates=len(initial_deep_candidates),
+                            )
+                        )
+                        debug_emit(
+                            format_pass_marker(
+                                2,
+                                "deep",
+                                "window_start",
+                                window=window_index,
+                                total=len(initial_deep_candidates),
+                            )
+                        )
+
+                if detected_targets:
+                    progress.add_total(len(detected_targets))
+                for (idx, _host, _port, _target, _detect_record), final_record in deep_scheduler.iter_completed(
+                    detected_targets,
+                    lambda item: self._safe_record(
+                        item[1],
+                        item[2],
+                        lambda: self._run_deep_lifecycle(
+                            item[1], item[2], item[3], item[4], plan.credential_runs, debug_emit
+                        ),
+                    ),
+                ):
+                    _queue_final_record(int(idx), final_record)
+                    processed_deep += int(self._deep_gate(final_record)[0])
+                    progress.advance(1)
+
+                if pending_emit_records:
+                    for idx, _host, _port, _target in window:
+                        if idx in pending_emit_records:
+                            _finalize_record(pending_emit_records.pop(idx))
+        finally:
+            progress.close()
+        if debug_emit is not None:
+            if window_index > 1:
                 debug_emit(
                     format_pass_marker(
                         1,
                         "detect",
                         "complete",
-                        detected=len(detected_targets),
-                        deep_candidates=len(initial_deep_candidates),
+                        detected=total_detected,
+                        deep_candidates=total_deep_candidates,
                     )
                 )
-                debug_emit(format_pass_marker(2, "deep", "start", total=len(initial_deep_candidates)))
-
-            if detected_targets:
-                progress.add_total(len(detected_targets))
-            for (idx, _host, _port, _target, _detect_record), final_record in deep_scheduler.iter_completed(
-                detected_targets,
-                lambda item: self._safe_record(
-                    item[1],
-                    item[2],
-                    lambda: self._run_deep_lifecycle(
-                        item[1], item[2], item[3], item[4], plan.credential_runs, debug_emit
-                    ),
-                ),
-            ):
-                records_by_idx[int(idx)] = final_record
-                processed_deep += int(self._deep_gate(final_record)[0])
-                progress.advance(1)
-        finally:
-            progress.close()
-        if debug_emit is not None:
             debug_emit(format_pass_marker(2, "deep", "complete", processed=processed_deep))
 
-        typed_records = [records_by_idx[idx] for idx, _host, _port, _target in indexed_targets if idx in records_by_idx]
-        records = [record.to_dict() for record in typed_records]
-        suppressed_records = 0
         try:
-            if plan.output_format == "json":
-                json_lines = [json.dumps(record, ensure_ascii=False) for record in records]
-                emitted_lines += len(json_lines)
-                sink.emit_many(json_lines)
-            elif self.spec.render is not None or self.spec.render_module is not None:
-                render_plan = (
-                    build_render_plan(self.spec.render_module) if self.spec.render_module is not None else None
-                )
-                debug = bool(getattr(self.args, "debug", False))
-                for record in typed_records:
-                    if not debug and is_pre_detect_network_noise(record):
-                        suppressed_records += 1
-                        continue
-                    lines = self._render_record(record, render_plan, plan.output_format, debug)
-                    emitted_lines += len(lines)
-                    sink.emit_many(lines)
+            return AuditCommandResult(
+                records=[record.to_dict() for record in retained_records],
+                detected_count=detected_count,
+                emitted_lines=emitted_lines,
+                typed_records=retained_records,
+                suppressed_records=suppressed_records,
+                record_count=record_count,
+                status_counts=status_counts,
+                record_retention_truncated=not retain_records,
+            )
         finally:
             sink.close()
-        return AuditCommandResult(
-            records=records,
-            detected_count=sum(1 for record in typed_records if self._is_detected(record)),
-            emitted_lines=emitted_lines,
-            typed_records=typed_records,
-            suppressed_records=suppressed_records,
-        )
 
     def _ctx(
         self,
@@ -1192,11 +1392,15 @@ class AuditCommandRunner:
     ) -> AuditRecord:
         auth_records: list[tuple[AuditCredentialRun, AuditRecord]] = []
         candidates = credential_runs or (AuditCredentialRun(source="anonymous"),)
-        for credential in candidates:
-            ctx = self._ctx(host, port, target, credential, run_deep_checks=False, debug_emit=debug_emit)
-            auth_records.append((credential, self._auth(ctx, detect_record)))
-
-        selected_credential, selected_record, gate_reason = self._select_deep_record(detect_record, auth_records)
+        if self._should_keep_anonymous_detect_record(detect_record):
+            selected_credential = AuditCredentialRun(source="anonymous")
+            selected_record = detect_record
+            gate_reason = "status=open_no_auth"
+        else:
+            for credential in candidates:
+                ctx = self._ctx(host, port, target, credential, run_deep_checks=False, debug_emit=debug_emit)
+                auth_records.append((credential, self._auth(ctx, detect_record)))
+            selected_credential, selected_record, gate_reason = self._select_deep_record(detect_record, auth_records)
         gate = self._deep_gate(selected_record)
         if not gate[0]:
             # No credential gated (all attempts failed). Record every attempted credential
@@ -1222,6 +1426,13 @@ class AuditCommandRunner:
         record = self._capabilities(deep_ctx, selected_record)
         record = self._data(deep_ctx, record)
         return record
+
+    def _should_keep_anonymous_detect_record(self, detect_record: AuditRecord) -> bool:
+        return (
+            self.spec.module == "kafka"
+            and bool(getattr(self.args, "defcreds", False))
+            and str(detect_record.status or "") == "open_no_auth"
+        )
 
     def _safe_record(self, host: str, port: int, task: Callable[[], AuditRecord]) -> AuditRecord:
         """Run a per-host task, converting an operational exception into a fail record.
@@ -1291,6 +1502,8 @@ class AuditCommandRunner:
         detect_record: AuditRecord,
         auth_records: list[tuple[AuditCredentialRun, AuditRecord]],
     ) -> tuple[AuditCredentialRun, AuditRecord, str]:
+        if self._should_keep_anonymous_detect_record(detect_record):
+            return AuditCredentialRun(source="anonymous"), detect_record, "status=open_no_auth"
         for credential, record in auth_records:
             gate = self._deep_gate(record)
             if gate[0]:

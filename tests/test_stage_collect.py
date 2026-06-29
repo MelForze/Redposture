@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from redposture_core import stage_collect as collect
+from redposture_core.exporters.output import format_collect_record
 from redposture_core.logger import AttemptLogger
 from redposture_core.stage_collect import run_collect_stage
 
@@ -86,6 +87,159 @@ def test_collect_helper_functions_cover_checkpoint_and_filters(tmp_path: Path) -
     )
     assert filtered_discovery == [{"name": "redis_exporter"}]
     assert filtered_collect == [{"name": "redis_exporter"}]
+
+
+def test_run_collect_stage_large_cidr_chunks_output_and_summary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    output_path = tmp_path / "collect.txt"
+    scan_calls: list[list[str]] = []
+    collect_calls: list[tuple[list[str], str]] = []
+
+    monkeypatch.setattr(collect, "DEFAULT_MAX_NETWORK_HOSTS", 1)
+    monkeypatch.setattr(
+        collect,
+        "load_profiles",
+        lambda _path: {
+            "discovery_exporters": [{"name": "node_exporter", "port": 9100, "markers": ()}],
+            "collect_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_debug_endpoints": ["/debug/vars"],
+        },
+    )
+
+    def fake_scan_exporter_presence(
+        hosts,
+        timeout,
+        output_path,
+        output_format="json",
+        logger=None,
+        emit_line=None,
+        workers=10,
+        retries=3,
+        discovery_exporters=None,
+        custom_ports=None,
+        emit_summary=True,
+        show_progress=False,
+        progress_leave=True,
+        progress_owner=None,
+    ):
+        _ = (
+            timeout,
+            output_path,
+            output_format,
+            logger,
+            emit_line,
+            workers,
+            retries,
+            discovery_exporters,
+            custom_ports,
+            emit_summary,
+            show_progress,
+            progress_leave,
+            progress_owner,
+        )
+        host_list = list(hosts)
+        scan_calls.append(host_list)
+        found_by_host = {
+            host: [{"exporter": "node_exporter", "port": 9100, "url": f"http://{host}:9100/metrics"}]
+            for host in host_list
+        }
+        return len(host_list), len(host_list), found_by_host
+
+    def fake_collect_exporter_debug_data(
+        logger,
+        hosts,
+        timeout,
+        output_path,
+        output_format="json",
+        emit_line=None,
+        workers=10,
+        retries=3,
+        collect_exporters=None,
+        collect_debug_endpoints=None,
+        found_by_host=None,
+        save_responses_dir=None,
+        record_callback=None,
+        output_mode="w",
+        index_mode="w",
+        emit_summary=True,
+        adaptive_collect=True,
+        max_inflight_requests=None,
+        resume_completed_jobs=None,
+        checkpoint_path=None,
+        checkpoint_mode="a",
+        stats_sink=None,
+        progress_owner=None,
+    ):
+        _ = (
+            logger,
+            timeout,
+            workers,
+            retries,
+            collect_exporters,
+            collect_debug_endpoints,
+            found_by_host,
+            save_responses_dir,
+            index_mode,
+            emit_summary,
+            adaptive_collect,
+            max_inflight_requests,
+            resume_completed_jobs,
+            checkpoint_path,
+            checkpoint_mode,
+            stats_sink,
+            progress_owner,
+        )
+        host_list = list(hosts)
+        collect_calls.append((host_list, output_mode))
+        lines = []
+        for host in host_list:
+            record = {
+                "timestamp": "2026-03-27T00:00:00Z",
+                "host": host,
+                "exporter": "node_exporter",
+                "port": 9100,
+                "endpoint": "/debug/vars",
+                "url": f"http://{host}:9100/debug/vars",
+                "ok": True,
+                "status": 200,
+                "elapsed_ms": 1,
+                "content_type": "text/plain",
+                "error": None,
+                "truncated": False,
+                "body": "ok",
+            }
+            if record_callback is not None:
+                record_callback(record)
+            lines.append(format_collect_record(record, output_format))
+        if output_path:
+            with open(output_path, output_mode, encoding="utf-8") as fh:
+                for line in lines:
+                    fh.write(line + "\n")
+        if emit_line is not None:
+            for line in lines:
+                emit_line(line)
+        return len(host_list), len(host_list)
+
+    monkeypatch.setattr(collect, "scan_exporter_presence", fake_scan_exporter_presence)
+    monkeypatch.setattr(collect, "collect_exporter_debug_data", fake_collect_exporter_debug_data)
+
+    rc = run_collect_stage(
+        _base_args(targets="10.0.0.0/30", output=str(output_path), workers=1),
+        logger=AttemptLogger(),
+    )
+
+    assert rc == 0
+    assert scan_calls == [["10.0.0.1", "10.0.0.2"]]
+    assert collect_calls == [(["10.0.0.1", "10.0.0.2"], "w")]
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 4
+    assert "Node Exporter" in lines[0]
+    assert "Node Exporter" in lines[1]
+    assert lines[2].startswith("VALIDATE")
+    assert lines[-1].startswith("COLLECT")
+    assert "requests=2" in lines[-1]
+    assert "success=2" in lines[-1]
 
 
 def test_collect_load_completed_jobs_parses_valid_rows_and_warns_on_open_error(

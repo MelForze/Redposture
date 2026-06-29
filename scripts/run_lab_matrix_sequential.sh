@@ -227,6 +227,131 @@ run_text_case() {
   fi
 }
 
+run_raw_case() {
+  local module="$1"
+  local label="$2"
+  local expected_exit="$3"
+  shift 3
+
+  local log_path="${OUT_DIR}/logs/${label}.log"
+  echo "== ${label} =="
+  set +e
+  "${PYTHON_BIN}" redposture.py "$@" >"${log_path}" 2>&1
+  local rc=$?
+  set -e
+
+  printf "%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "${module}" "${label}" "${expected_exit}" "${rc}" "-" "${log_path}" >> "${STATUS_FILE}"
+  if [ "${rc}" -ne "${expected_exit}" ]; then
+    echo "[error] ${label} exit mismatch: expected=${expected_exit} actual=${rc}" >&2
+    echo "[error] log: ${log_path}" >&2
+    return 1
+  fi
+  if [ "${rc}" -ne 0 ]; then
+    echo "[warn] ${label} expected failure matched (rc=${rc})" >&2
+  fi
+}
+
+run_negative_cli_cases() {
+  run_raw_case exporters fuzz_exporters_scan_missing_targets 2 exporters scan -p 9100
+  run_raw_case exporters fuzz_exporters_scan_invalid_ports 2 exporters scan -t 127.0.0.1 -p bad
+  run_raw_case exporters fuzz_exporters_scan_zero_timeout 2 exporters scan -t 127.0.0.1 --timeout 0
+  run_raw_case exporters fuzz_exporters_collect_zero_max_inflight 2 exporters collect -t 127.0.0.1 --max-inflight 0
+  run_raw_case exporters fuzz_exporters_trigger_missing_callback 2 exporters trigger -t 127.0.0.1 --no-with-listen
+  run_raw_case exporters fuzz_exporters_trigger_bad_callback_ip 2 exporters trigger -t 127.0.0.1 --callback-ip 999.999.999.999 --no-with-listen
+  run_raw_case exporters fuzz_exporters_trigger_check_without_listen 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --no-with-listen --check-credentials
+  run_raw_case exporters fuzz_exporters_trigger_json_listen_without_output 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --with-listen --format json
+  run_raw_case exporters fuzz_exporters_trigger_negative_listen_seconds 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --with-listen --listen-seconds -1
+
+  run_raw_case registry fuzz_registry_missing_targets 2 registry --docker --images
+  run_raw_case grafana fuzz_grafana_missing_targets 2 grafana --defcreds
+  run_raw_case gitlab fuzz_gitlab_missing_targets 2 gitlab
+  run_raw_case consul fuzz_consul_missing_targets 2 consul --keys
+  run_raw_case kubeapi fuzz_kubeapi_missing_targets 2 kubeapi --namespaces
+  run_raw_case postgres fuzz_postgres_missing_targets 2 postgres --show-databases
+  run_raw_case mongodb fuzz_mongodb_missing_targets 2 mongodb --show-databases
+  run_raw_case oracle fuzz_oracle_missing_targets 2 oracle --service FREEPDB1
+  run_raw_case docker fuzz_docker_missing_targets 2 docker --containers
+  run_raw_case clickhouse fuzz_clickhouse_missing_targets 2 clickhouse --show-databases
+  run_raw_case redis fuzz_redis_missing_targets 2 redis --show-keys
+  run_raw_case etcd fuzz_etcd_missing_targets 2 etcd --show-keys
+  run_raw_case qdrant fuzz_qdrant_missing_targets 2 qdrant --collections
+  run_raw_case elastic fuzz_elastic_missing_targets 2 elastic --endpoints
+  run_raw_case grpc fuzz_grpc_missing_targets 2 grpc
+  run_raw_case kafka fuzz_kafka_missing_targets 2 kafka --show-topics
+  run_raw_case zookeeper fuzz_zookeeper_missing_targets 2 zookeeper --show-znodes
+  run_raw_case proxmox fuzz_proxmox_missing_targets 2 proxmox --pveapitoken "monitor@pve!audit=token"
+
+  run_raw_case registry fuzz_registry_username_without_password 2 registry -t 127.0.0.1 -u admin --docker --images
+  run_raw_case registry fuzz_registry_token_basic_conflict 2 registry -t 127.0.0.1 --token token -u admin -p admin --docker --images
+  run_raw_case registry fuzz_registry_show_tags_without_repository 2 registry -t 127.0.0.1 --docker --show-tags
+  run_raw_case registry fuzz_registry_metadata_without_tag 2 registry -t 127.0.0.1 --docker --repository redposture/demo-api --metadata
+  run_raw_case registry fuzz_registry_assets_without_nexus 2 registry -t 127.0.0.1 --assets
+  run_raw_case registry fuzz_registry_download_without_image 2 registry -t 127.0.0.1 --docker --download
+
+  run_raw_case grafana fuzz_grafana_username_without_password 2 grafana -t 127.0.0.1 -u admin --show-datasource
+  run_raw_case kubeapi fuzz_kubeapi_username_without_password 2 kubeapi -t 127.0.0.1 -u audit --namespaces
+  run_raw_case elastic fuzz_elastic_username_without_password 2 elastic -t 127.0.0.1 -u elastic --endpoints
+  run_raw_case grpc fuzz_grpc_username_without_password 2 grpc -t 127.0.0.1 -u grpcuser
+  run_raw_case kafka fuzz_kafka_username_without_password 2 kafka -t 127.0.0.1 -u metrics --show-topics
+  run_raw_case zookeeper fuzz_zookeeper_username_without_password 2 zookeeper -t 127.0.0.1 -u zkuser --show-znodes
+  run_raw_case proxmox fuzz_proxmox_username_without_password 2 proxmox -t 127.0.0.1 -u root@pam --nodes
+  run_raw_case redis fuzz_redis_username_without_password 2 redis -t 127.0.0.1 -u redis --show-keys
+
+  run_raw_case consul fuzz_consul_username_without_password 2 consul -t 127.0.0.1 -u matrix --keys
+  run_raw_case consul fuzz_consul_key_without_dump 2 consul -t 127.0.0.1 --key redposture/kafka/sasl_password
+  run_raw_case consul fuzz_consul_service_without_dump 2 consul -t 127.0.0.1 --service svc-redposture-api
+  run_raw_case consul fuzz_consul_agent_without_dump 2 consul -t 127.0.0.1 --agent redposture-lab-consul
+  run_raw_case consul fuzz_consul_node_without_dump 2 consul -t 127.0.0.1 --node redposture-lab-consul
+  run_raw_case consul fuzz_consul_ssrf_port_without_target 2 consul -t 127.0.0.1 --ssrf-port 19100
+  run_raw_case consul fuzz_consul_delete_without_revshell 2 consul -t 127.0.0.1 --delete
+  run_raw_case consul fuzz_consul_listen_without_revshell 2 consul -t 127.0.0.1 --listen
+  run_raw_case consul fuzz_consul_revshell_missing_lhost 2 consul -t 127.0.0.1 --revshell
+  run_raw_case consul fuzz_consul_revshell_bad_lhost 2 consul -t 127.0.0.1 --revshell --lhost "http://bad" --lport 4444
+  run_raw_case consul fuzz_consul_revshell_listen_missing_lport 2 consul -t 127.0.0.1 --revshell --listen --lhost 127.0.0.1
+
+  run_raw_case qdrant fuzz_qdrant_listen_without_ssrf_target 2 qdrant -t 127.0.0.1 --collection demo_vectors --listen
+  run_raw_case qdrant fuzz_qdrant_ssrf_without_collection 2 qdrant -t 127.0.0.1 --ssrf-target http://127.0.0.1:19115/probe
+  run_raw_case qdrant fuzz_qdrant_bad_ssrf_port 2 qdrant -t 127.0.0.1 --collection demo_vectors --ssrf-target 127.0.0.1 --ssrf-port bad
+
+  run_raw_case postgres fuzz_postgres_username_without_password 2 postgres -t 127.0.0.1 -u postgres --show-databases
+  run_raw_case postgres fuzz_postgres_show_columns_without_table 2 postgres -t 127.0.0.1 --show-columns
+  run_raw_case postgres fuzz_postgres_column_without_table 2 postgres -t 127.0.0.1 --column username
+  run_raw_case postgres fuzz_postgres_execute_sql_conflict 2 postgres -t 127.0.0.1 --execute id --sql-cmd "select 1"
+  run_raw_case postgres fuzz_postgres_execute_os_read_conflict 2 postgres -t 127.0.0.1 --execute id --os-read /etc/hostname
+  run_raw_case postgres fuzz_postgres_os_shell_sql_shell_conflict 2 postgres -t 127.0.0.1 --os-shell --sql-shell
+
+  run_raw_case mongodb fuzz_mongodb_username_without_password 2 mongodb -t 127.0.0.1 -u root --show-databases
+  run_raw_case mongodb fuzz_mongodb_invalid_query_json 2 mongodb -t 127.0.0.1 --collection demo_accounts --query "{bad"
+  run_raw_case mongodb fuzz_mongodb_query_without_collection 2 mongodb -t 127.0.0.1 --query '{"role":"admin"}'
+  run_raw_case mongodb fuzz_mongodb_document_without_collection 2 mongodb -t 127.0.0.1 --document 1
+  run_raw_case mongodb fuzz_mongodb_document_query_conflict 2 mongodb -t 127.0.0.1 --collection demo_accounts --document 1 --query '{"role":"admin"}'
+  run_raw_case mongodb fuzz_mongodb_invalid_projection_json 2 mongodb -t 127.0.0.1 --collection demo_accounts --projection "{bad"
+  run_raw_case mongodb fuzz_mongodb_invalid_nosql_cmd_json 2 mongodb -t 127.0.0.1 --nosql-cmd "{bad"
+  run_raw_case mongodb fuzz_mongodb_nosql_cmd_shell_conflict 2 mongodb -t 127.0.0.1 --nosql-cmd '{"dbStats":1}' --nosql-shell
+
+  run_raw_case oracle fuzz_oracle_username_without_password 2 oracle -t 127.0.0.1 --service FREEPDB1 -u redposture
+  run_raw_case oracle fuzz_oracle_service_sid_conflict 2 oracle -t 127.0.0.1 --service FREEPDB1 --sid FREE
+  run_raw_case oracle fuzz_oracle_non_select_query 2 oracle -t 127.0.0.1 --service FREEPDB1 --query "delete from accounts"
+  run_raw_case oracle fuzz_oracle_os_write_bad_syntax 2 oracle -t 127.0.0.1 --service FREEPDB1 --os-write /tmp/file
+  run_raw_case oracle fuzz_oracle_download_bad_syntax 2 oracle -t 127.0.0.1 --service FREEPDB1 --download redposture_wallet_hint.txt
+
+  run_raw_case docker fuzz_docker_container_without_exec 2 docker -t 127.0.0.1 --container redposture-web
+  run_raw_case docker fuzz_docker_exec_without_container 2 docker -t 127.0.0.1 --exec-cmd id
+  run_raw_case docker fuzz_docker_tls_cert_without_key 2 docker -t 127.0.0.1 --tls-cert cert.pem
+  run_raw_case docker fuzz_docker_tls_key_without_cert 2 docker -t 127.0.0.1 --tls-key key.pem
+
+  run_raw_case clickhouse fuzz_clickhouse_username_without_password 2 clickhouse -t 127.0.0.1 -u default --show-databases
+  run_raw_case clickhouse fuzz_clickhouse_show_columns_without_table 2 clickhouse -t 127.0.0.1 --show-columns
+  run_raw_case clickhouse fuzz_clickhouse_column_without_table 2 clickhouse -t 127.0.0.1 --column owner
+  run_raw_case clickhouse fuzz_clickhouse_execute_sql_conflict 2 clickhouse -t 127.0.0.1 --execute id --sql-cmd "select 1"
+  run_raw_case clickhouse fuzz_clickhouse_os_shell_sql_shell_conflict 2 clickhouse -t 127.0.0.1 --os-shell --sql-shell
+  run_raw_case clickhouse fuzz_clickhouse_os_shell_execute_conflict 2 clickhouse -t 127.0.0.1 --os-shell --execute id
+
+  run_raw_case zookeeper fuzz_zookeeper_zero_max_znodes 2 zookeeper -t 127.0.0.1 --max-znodes 0
+  run_raw_case zookeeper fuzz_zookeeper_zero_enum_workers 2 zookeeper -t 127.0.0.1 --enum-workers 0
+}
+
 run_exporters_cases() {
   run_case exporters exporters_scan 0 exporters scan -t 127.0.0.1 -p "${EXPORTER_PORTS}"
   run_case exporters exporters_collect 0 exporters collect -t 127.0.0.1 -p "${EXPORTER_PORTS}" --deep --save-responses-dir "${OUT_DIR}/collect_raw"
@@ -263,6 +388,8 @@ run_registry_cases() {
   if is_extended_matrix; then
     run_case registry registry_extended_tags_metadata 0 registry -t 127.0.0.1 --port 15000 --docker --repository redposture/demo-api --show-tags --tag latest --metadata --inspect --image redposture/demo-api:latest --download --download-dir "${OUT_DIR}/registry_downloads"
     run_case registry registry_extended_ports_flag 0 registry -t 127.0.0.1 --ports 15000 --docker --images
+    run_case registry fuzz_registry_malformed_target 2 registry -t "http://[invalid:url" --docker --images
+    run_case registry fuzz_registry_invalid_port 2 registry -t 127.0.0.1 --port -1 --docker --images
   fi
 }
 
@@ -276,6 +403,8 @@ run_grafana_cases() {
   if is_extended_matrix; then
     run_case grafana grafana_extended_auth_ssrf_controls 0 grafana -t 127.0.0.1 --port 3000 -u admin -p prom-operator --show-datasource --ssrf-target 127.0.0.1 --ssrf-port 19115 --ssrf-path /probe?module=http_2xx
     run_case grafana grafana_extended_ports_flag 0 grafana -t 127.0.0.1 --ports 3000 --defcreds
+    run_case grafana fuzz_grafana_invalid_target 2 grafana -t "not://valid" --show-datasource
+    run_case grafana fuzz_grafana_huge_port 2 grafana -t 127.0.0.1 --port 99999 --defcreds
   fi
 }
 
@@ -288,6 +417,8 @@ run_gitlab_cases() {
   if is_extended_matrix; then
     run_case gitlab gitlab_extended_token_project_clone 0 gitlab -t 127.0.0.1 --port 18080 --https --token glpat-redposture-lab-analyst-2026 --project redposture-lab/public-api --clone --clone-dir "${OUT_DIR}/gitlab_clones"
     run_case gitlab gitlab_extended_ports_flag 0 gitlab -t 127.0.0.1 --ports 18080
+    run_case gitlab fuzz_gitlab_invalid_port 2 gitlab -t 127.0.0.1 --port 99999
+    run_case gitlab fuzz_gitlab_zero_timeout 2 gitlab -t 127.0.0.1 --timeout 0
   fi
 }
 
@@ -311,6 +442,8 @@ run_consul_cases() {
     run_case consul consul_extended_ports_basic_auth 0 consul -t 127.0.0.1 --ports 8500 -u matrix -p "" --keys
     run_case consul consul_extended_inventory_filters 0 consul -t 127.0.0.1 --port 8500 --keys --services --agents --checks --nodes --key redposture/kafka/sasl_password --service svc-redposture-api --agent redposture-lab-consul --node redposture-lab-consul --dump 3
     run_case consul consul_extended_ssrf_probe 0 consul -t 127.0.0.1 --port 8500 --ssrf-target 127.0.0.1 --ssrf-port 19100 --ssrf-path /metrics --checks
+    run_case consul fuzz_consul_zero_workers 2 consul -t 127.0.0.1 --workers 0 --keys
+    run_case consul fuzz_consul_negative_dump 2 consul -t 127.0.0.1 --port 8500 --keys --dump -1
   fi
 }
 
@@ -333,6 +466,8 @@ run_kubeapi_cases() {
   if is_extended_matrix; then
     run_case kubeapi kubeapi_extended_ports_flag 0 kubeapi -t 127.0.0.1 --ports 26443 --namespaces
     run_case kubeapi kubeapi_extended_selectors_basic_auth 0 kubeapi -t 127.0.0.1 --port 26443 --namespace default --namespaces --pods --pod redposture-api --username audit --password ""
+    run_case kubeapi fuzz_kubeapi_zero_timeout 2 kubeapi -t 127.0.0.1 --timeout 0
+    run_case kubeapi fuzz_kubeapi_huge_port 2 kubeapi -t 127.0.0.1 --port 99999 --namespaces
   fi
 }
 
@@ -371,6 +506,8 @@ run_mongodb_cases() {
     run_case mongodb mongodb_idempotency 0 mongodb -t 127.0.0.1 --port 27018 -u root -p root --show-databases --show-collections --dump 20
     # P4-E fuzz: zero timeout must be rejected at parse.
     run_case mongodb fuzz_mongodb_zero_timeout 2 mongodb -t 127.0.0.1 --timeout 0 --show-databases
+    run_case mongodb fuzz_mongodb_invalid_workers 2 mongodb -t 127.0.0.1 --workers abc --show-databases
+    run_case mongodb fuzz_mongodb_negative_retries 2 mongodb -t 127.0.0.1 --retries -2 --show-databases
   fi
 }
 
@@ -410,6 +547,8 @@ run_oracle_cases() {
   run_case oracle oracle_json_smoke 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --service FREEPDB1 -u redposture -p "OracleLab!2026" --show-pdbs
   if is_extended_matrix; then
     run_case oracle oracle_extended_schema_sensitive_protocol 0 oracle --timeout 5 -t 127.0.0.1 --port 1521 --protocol tcp --insecure --service FREEPDB1 -u redposture -p "OracleLab!2026" --schema REDPOSTURE --table ACCOUNTS --show-roles --show-privs --show-schemas --show-tables --dump 2 --sensitive-scan
+    run_case oracle fuzz_oracle_invalid_port 2 oracle -t 127.0.0.1 --port -1 --service FREEPDB1
+    run_case oracle fuzz_oracle_zero_timeout 2 oracle -t 127.0.0.1 --timeout 0 --service FREEPDB1
   fi
 }
 
@@ -423,6 +562,8 @@ run_docker_cases() {
   if is_extended_matrix; then
     run_case docker docker_extended_tls_files_pairing_error 2 docker -t 127.0.0.1 --port 2376 --tls-cert "${LAB_DIR}/services/proxy-isolated/certs/proxy-cert.pem"
     run_case docker docker_extended_exec_worker 0 docker -t 127.0.0.1 --port 2375 --container redposture-worker --exec-cmd "hostname && whoami"
+    run_case docker fuzz_docker_invalid_port 2 docker -t 127.0.0.1 --port abc --containers
+    run_case docker fuzz_docker_zero_timeout 2 docker -t 127.0.0.1 --timeout 0 --containers
   fi
 }
 
@@ -437,6 +578,8 @@ run_clickhouse_cases() {
     run_case clickhouse clickhouse_extended_defcreds 0 clickhouse -t 127.0.0.1 --port 9000 --defcreds --show-databases
     run_case clickhouse clickhouse_extended_query_columns 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --database secure --show-databases 5 --show-tables 5 --table secure.secrets_inventory --show-columns 5 --column owner,value_hint --dump 5 --sql-cmd "select secret_name, owner from secure.secrets_inventory limit 2"
     run_case clickhouse clickhouse_extended_execute 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --execute "id"
+    run_case clickhouse fuzz_clickhouse_negative_timeout 2 clickhouse -t 127.0.0.1 --timeout -1 --show-databases
+    run_case clickhouse fuzz_clickhouse_invalid_port 2 clickhouse -t 127.0.0.1 --port -1 --show-databases
   fi
 }
 
@@ -459,6 +602,10 @@ run_redis_cases() {
     # P4-E fuzz cases. CLI must reject these with exit=2 without crashing.
     run_case redis fuzz_redis_invalid_port_negative 2 redis -t 127.0.0.1 --port -1 --show-keys
     run_case redis fuzz_redis_invalid_port_huge 2 redis -t 127.0.0.1 --port 99999 --show-keys
+    run_case redis fuzz_redis_zero_dump 2 redis -t 127.0.0.1 --dump 0
+    run_case redis fuzz_redis_negative_show_keys 2 redis -t 127.0.0.1 --show-keys -1
+    run_case redis fuzz_redis_invalid_dump_batch 2 redis -t 127.0.0.1 -u redis -p redis --dump --dump-batch -3
+    run_case redis fuzz_redis_negative_dump_delay 2 redis -t 127.0.0.1 -u redis -p redis --dump --dump-delay -1
   fi
 }
 
@@ -479,6 +626,8 @@ run_etcd_cases() {
     run_case etcd etcd_idempotency 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump
     # P4-E fuzz: garbage target URL must be rejected at parse.
     run_case etcd fuzz_etcd_garbage_target 2 etcd -t "not_a_real_url://[invalid]"
+    run_case etcd fuzz_etcd_invalid_dump_batch 2 etcd -t 127.0.0.1 --port 2379 --dump --dump-batch -2
+    run_case etcd fuzz_etcd_negative_show_keys 2 etcd -t 127.0.0.1 --port 2379 --show-keys -1
   fi
 }
 
@@ -492,6 +641,8 @@ run_qdrant_cases() {
     run_case qdrant qdrant_extended_collection_dump_count 0 qdrant -t 127.0.0.1 --port 6333 --api-key matrix-key --collection demo_vectors --collections --dump 3
     run_case qdrant qdrant_extended_ports_flag 0 qdrant -t 127.0.0.1 --ports 6333 --collections
     run_case qdrant qdrant_extended_ssrf_probe 0 qdrant -t 127.0.0.1 --port 6333 --collection demo_vectors --listen --ssrf-target http://127.0.0.1:19115/probe --ssrf-port 19115 --ssrf-path /probe?module=http_2xx
+    run_case qdrant fuzz_qdrant_zero_timeout 2 qdrant -t 127.0.0.1 --timeout 0 --collections
+    run_case qdrant fuzz_qdrant_invalid_port 2 qdrant -t 127.0.0.1 --port -1 --collections
   fi
 }
 
@@ -506,6 +657,8 @@ run_elastic_cases() {
     run_case elastic elastic_extended_ports_defcreds 0 elastic -t 127.0.0.1 --ports 19201 --defcreds --endpoints
     run_case elastic elastic_extended_all_actions 0 elastic -t 127.0.0.1 --port 19201 -u elastic -p changeme --endpoints --cluster --user --plugins --discover
     run_case elastic elastic_extended_apitoken_invalid 0 elastic -t 127.0.0.1 --port 19201 --apitoken invalid-token --endpoints
+    run_case elastic fuzz_elastic_negative_retries 2 elastic -t 127.0.0.1 --retries -3 --endpoints
+    run_case elastic fuzz_elastic_invalid_port 2 elastic -t 127.0.0.1 --port abc --endpoints
   fi
 }
 
@@ -525,6 +678,8 @@ run_grpc_cases() {
   if is_extended_matrix; then
     run_case grpc grpc_extended_metadata_invoke 0 grpc -t 127.0.0.1 --port 50051 --meta "x-redposture-matrix: extended" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
     run_case grpc grpc_extended_basic_empty_password 0 grpc -t 127.0.0.1 --port 50061 -u grpcuser -p "" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+    run_case grpc fuzz_grpc_invalid_port 2 grpc -t 127.0.0.1 --port -1 --invoke /grpc.health.v1.Health/Check
+    run_case grpc fuzz_grpc_zero_workers 2 grpc -t 127.0.0.1 --workers 0
   fi
 }
 
@@ -542,6 +697,8 @@ run_kafka_cases() {
     run_case kafka kafka_idempotency 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
     # P4-E fuzz: negative workers must be rejected at parse.
     run_case kafka fuzz_kafka_negative_workers 2 kafka -t 127.0.0.1 --workers -5 --show-topics
+    run_case kafka fuzz_kafka_zero_max_messages 2 kafka -t 127.0.0.1 --max-messages 0 --show-topics
+    run_case kafka fuzz_kafka_invalid_port 2 kafka -t 127.0.0.1 --port abc --show-topics
   fi
 }
 
@@ -552,6 +709,8 @@ run_zookeeper_cases() {
   if is_extended_matrix; then
     run_case zookeeper zookeeper_extended_znode_limits 0 zookeeper -t 127.0.0.1 --port 2181 --znode /redposture/app/api_key --show-znodes 5 --dump 3 --max-znodes 10 --enum-workers 2
     run_case zookeeper zookeeper_extended_empty_password 0 zookeeper -t 127.0.0.1 --port 2181 -u zkuser -p "" --show-znodes 1
+    run_case zookeeper fuzz_zookeeper_invalid_port 2 zookeeper -t 127.0.0.1 --port abc --show-znodes
+    run_case zookeeper fuzz_zookeeper_zero_workers 2 zookeeper -t 127.0.0.1 --workers 0 --show-znodes
   fi
 }
 
@@ -566,6 +725,8 @@ run_proxmox_cases() {
     run_case proxmox proxmox_extended_defcreds 0 proxmox -t 127.0.0.1 --port 18006 --insecure --defcreds --nodes
     run_case proxmox proxmox_extended_defcreds_empty_password 0 proxmox -t 127.0.0.1 --port 18006 --insecure --no-https -u root@pam -p "" --nodes --users
     run_case proxmox proxmox_extended_add_user_mock 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --add-user rp-matrix@pve --users
+    run_case proxmox fuzz_proxmox_negative_workers 2 proxmox -t 127.0.0.1 --workers -1 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
+    run_case proxmox fuzz_proxmox_invalid_port 2 proxmox -t 127.0.0.1 --port -1 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
   fi
 }
 
@@ -592,6 +753,10 @@ run_service_block() {
 
 set -e
 printf "module\tlabel\texpected_exit\texit_code\tjson_path\tlog_path\n" > "${STATUS_FILE}"
+
+if is_extended_matrix; then
+  run_negative_cli_cases
+fi
 
 run_service_block exporters run_exporters_cases
 run_service_block registry run_registry_cases

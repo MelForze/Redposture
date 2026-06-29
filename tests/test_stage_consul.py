@@ -163,6 +163,17 @@ def test_normalize_ssrf_helpers() -> None:
     ]
 
 
+def test_normalize_ssrf_urls_accepts_16_cidr_targets() -> None:
+    urls = consul._normalize_ssrf_urls("10.153.0.0/16", "8500", "/v1/status/leader")
+    assert len(urls) == 65534
+    assert urls[0] == "http://10.153.0.1:8500/v1/status/leader"
+    assert urls[-1] == "http://10.153.255.254:8500/v1/status/leader"
+
+
+def test_normalize_ssrf_urls_rejects_oversized_cidr_targets() -> None:
+    assert consul._normalize_ssrf_urls("10.152.0.0/15", "8500", "/v1/status/leader") == []
+
+
 def test_detect_line_for_fail_not_consul_and_detected() -> None:
     fail = consul._detect_line(
         {"host": "127.0.0.1", "port": 8500, "is_consul": False, "status": "fail", "error": "timeout"}, "txt"

@@ -5,9 +5,11 @@ from pathlib import Path
 import pytest
 
 from scripts.verify_postrun import (
+    _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS,
     _EXPECTED_LABELS,
     _EXPECTED_MODULES,
     _EXTENDED_EXPECTED_LABELS,
+    _FUZZ_LABELS,
     _PROGRESS_EXPECTED_TARGETS,
     _combined_run_output,
     _expected_labels_for_profile,
@@ -19,6 +21,7 @@ from scripts.verify_postrun import (
     _validate_dump_not_empty,
     _validate_elapsed_sanity,
     _validate_expected_exits,
+    _validate_expected_failure_outputs,
     _validate_expected_labels,
     _validate_multi_record_consistency,
     _validate_openapi_artifacts,
@@ -1041,3 +1044,118 @@ def test_validate_cross_case_invariants_passes_on_agreement(tmp_path: Path) -> N
         _mk_row(module="redis", label="redis_extended_paged_dump", exit_code="0", json_path=str(jb), log_path=str(lb)),
     ]
     _validate_cross_case_invariants(rows)
+
+
+def test_validate_expected_failure_outputs_passes_for_expected_error(tmp_path: Path) -> None:
+    log_path = tmp_path / "fuzz_redis_invalid_port_negative.log"
+    log_path.write_text(
+        "usage: redposture redis\nerror: argument --port: port must be in range 1..65535\n", encoding="utf-8"
+    )
+
+    _validate_expected_failure_outputs(
+        [
+            _mk_row(
+                module="redis",
+                label="fuzz_redis_invalid_port_negative",
+                expected_exit="2",
+                exit_code="2",
+                json_path="-",
+                log_path=str(log_path),
+            )
+        ]
+    )
+
+
+def test_validate_expected_failure_outputs_fails_on_wrong_error(tmp_path: Path) -> None:
+    log_path = tmp_path / "fuzz_redis_invalid_port_negative.log"
+    log_path.write_text("some unrelated failure\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="failed for the wrong reason"):
+        _validate_expected_failure_outputs(
+            [
+                _mk_row(
+                    module="redis",
+                    label="fuzz_redis_invalid_port_negative",
+                    expected_exit="2",
+                    exit_code="2",
+                    json_path="-",
+                    log_path=str(log_path),
+                )
+            ]
+        )
+
+
+def test_validate_expected_failure_outputs_rejects_traceback(tmp_path: Path) -> None:
+    log_path = tmp_path / "fuzz_redis_invalid_port_negative.log"
+    log_path.write_text(
+        "error: argument --port: port must be in range 1..65535\nTraceback (most recent call last)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="Python traceback"):
+        _validate_expected_failure_outputs(
+            [
+                _mk_row(
+                    module="redis",
+                    label="fuzz_redis_invalid_port_negative",
+                    expected_exit="2",
+                    exit_code="2",
+                    json_path="-",
+                    log_path=str(log_path),
+                )
+            ]
+        )
+
+
+def test_validate_expected_failure_outputs_rejects_nonempty_json_artifact(tmp_path: Path) -> None:
+    log_path = tmp_path / "fuzz_redis_invalid_port_negative.log"
+    json_path = tmp_path / "fuzz_redis_invalid_port_negative.json"
+    log_path.write_text("error: argument --port: port must be in range 1..65535\n", encoding="utf-8")
+    json_path.write_text('{"status":"valid_credentials"}\n', encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="non-empty JSON artifact"):
+        _validate_expected_failure_outputs(
+            [
+                _mk_row(
+                    module="redis",
+                    label="fuzz_redis_invalid_port_negative",
+                    expected_exit="2",
+                    exit_code="2",
+                    json_path=str(json_path),
+                    log_path=str(log_path),
+                )
+            ]
+        )
+
+
+def test_validate_expected_failure_outputs_rejects_progress_marker(tmp_path: Path) -> None:
+    log_path = tmp_path / "fuzz_redis_invalid_port_negative.log"
+    log_path.write_text(
+        "error: argument --port: port must be in range 1..65535\nRunning redposture against 1 target\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="unexpectedly reached target execution"):
+        _validate_expected_failure_outputs(
+            [
+                _mk_row(
+                    module="redis",
+                    label="fuzz_redis_invalid_port_negative",
+                    expected_exit="2",
+                    exit_code="2",
+                    json_path="-",
+                    log_path=str(log_path),
+                )
+            ]
+        )
+
+
+def test_expected_failure_output_expectations_cover_matrix_failures() -> None:
+    from scripts.matrix_flag_coverage import parse_matrix_cases
+
+    cases = parse_matrix_cases(Path("scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8"))
+    failure_labels = {case.label for case in cases if case.expected_exit != "0"}
+
+    assert failure_labels <= set(_EXPECTED_FAILURE_OUTPUT_SUBSTRINGS)
+    assert _FUZZ_LABELS == frozenset(label for label in _EXTENDED_EXPECTED_LABELS if label.startswith("fuzz_"))
+    assert _FUZZ_LABELS <= set(_EXPECTED_FAILURE_OUTPUT_SUBSTRINGS)
