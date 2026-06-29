@@ -110,11 +110,12 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
     except ValueError as exc:
         console.error(str(exc))
         return 2
-    if plan.target_count != 1:
-        mode = "--os-shell" if bool(getattr(args, "os_shell", False)) else "--sql-shell"
-        console.error(f"{mode} requires exactly one target host")
+    mode = "--os-shell" if bool(getattr(args, "os_shell", False)) else "--sql-shell"
+    try:
+        _idx, host, port, _target = plan.require_single_target_spec()
+    except ValueError as exc:
+        console.error(f"{mode} {exc}")
         return 2
-    _idx, host, port, _target = plan.iter_target_specs()[0]
     record = actions._audit_postgres_host(
         host=str(host),
         port=int(port),

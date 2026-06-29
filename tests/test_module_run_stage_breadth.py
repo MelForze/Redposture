@@ -35,6 +35,63 @@ def test_run_cases_cover_every_registered_audit_module() -> None:
     assert set(RUN_CASES) == set(AUDIT_MODULE_NAMES)
 
 
+@pytest.mark.parametrize(
+    ("module_name", "argv", "expected_error"),
+    [
+        (
+            "registry",
+            ["registry", "-t", "127.0.0.1", "--token", "token", "-u", "admin", "-p", "admin", "--docker"],
+            "use either --token or --username/--password",
+        ),
+        ("consul", ["consul", "-t", "127.0.0.1", "--key", "redposture/kafka/sasl_password"], "--key requires --dump"),
+        (
+            "qdrant",
+            ["qdrant", "-t", "127.0.0.1", "--ssrf-target", "http://127.0.0.1:19115/probe"],
+            "--ssrf-target requires --collection",
+        ),
+        ("postgres", ["postgres", "-t", "127.0.0.1", "--show-columns"], "--show-columns requires --table"),
+        (
+            "mongodb",
+            ["mongodb", "-t", "127.0.0.1", "--collection", "demo", "--document", "1", "--query", '{"role":"admin"}'],
+            "--document cannot be combined with --query",
+        ),
+        (
+            "oracle",
+            ["oracle", "-t", "127.0.0.1", "--service", "FREEPDB1", "--sid", "FREE"],
+            "--service cannot be combined with --sid",
+        ),
+        ("docker", ["docker", "-t", "127.0.0.1", "--container", "web"], "--container and --exec-cmd"),
+        (
+            "clickhouse",
+            ["clickhouse", "-t", "127.0.0.1", "--os-shell", "--sql-shell"],
+            "--os-shell cannot be combined with --sql-shell",
+        ),
+        ("kafka", ["kafka", "-t", "127.0.0.1", "--max-messages", "0"], "--max-messages must be > 0"),
+        ("zookeeper", ["zookeeper", "-t", "127.0.0.1", "-u", "zkuser"], "--username and --password"),
+        ("proxmox", ["proxmox", "-t", "127.0.0.1"], "--pveapitoken, -u/-p, or --defcreds is required"),
+    ],
+)
+def test_package_stage_policy_negative_cases_do_not_run_plan(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    module_name: str,
+    argv: list[str],
+    expected_error: str,
+) -> None:
+    stage = importlib.import_module(f"redposture_core.modules.{module_name}.stage")
+
+    def fail_run_plan(self, plan):
+        _ = (self, plan)
+        pytest.fail("invalid CLI/policy combination reached AuditCommandRunner.run_plan")
+
+    monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", fail_run_plan)
+    args = parse_args(argv)
+    rc = getattr(stage, f"run_{module_name}_stage")(args, SimpleNamespace(log=lambda *_a, **_k: None))
+
+    assert rc == 2
+    assert expected_error in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("module_name", sorted(RUN_CASES))
 def test_package_stage_run_functions_cover_runner_plan_path(monkeypatch, module_name: str) -> None:
     stage = importlib.import_module(f"redposture_core.modules.{module_name}.stage")

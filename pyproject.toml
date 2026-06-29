@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "5.5.6"
+version = "5.5.8"
 description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/MongoDB/Docker/Oracle/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper/Elasticsearch/gRPC auditing"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -68,6 +68,9 @@ packages = ["redposture_core"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+markers = [
+  "cli_param_fuzz: opt-in deterministic fuzz coverage for CLI parameter handling",
+]
 
 [tool.mypy]
 python_version = "3.10"

@@ -49,6 +49,7 @@ from ...stage_runtime import (
     merge_stage_records,
 )
 from ...utils import (
+    format_credential_attempts_suffix,
     utc_now_iso,
 )
 
@@ -595,6 +596,15 @@ def _with_optional_topics(record: dict[str, Any], message: str) -> str:
     return f"{message} (topics:{topic_count})"
 
 
+def _attempted_credentials_suffix(record: dict[str, Any]) -> str:
+    return format_credential_attempts_suffix(
+        record,
+        field="attempted_credentials",
+        min_attempts=2,
+        default_username="user",
+    )
+
+
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required_value = record.get("auth_required")
     auth_required_text = (
@@ -640,6 +650,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return _with_optional_topics(record, f"{prefix} [+] {username}:{password_text}")
 
     if status == "auth_required":
+        attempts_suffix = _attempted_credentials_suffix(record)
+        if attempts_suffix:
+            return f"{prefix} [-] authentication required {attempts_suffix}"
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "user").strip() or "user"
             provided_password = record.get("provided_password")

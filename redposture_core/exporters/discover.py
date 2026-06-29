@@ -325,8 +325,7 @@ def scan_exporter_presence(
 
     def _process_scan_side_effects(payload: tuple[str, dict[str, Any]]) -> None:
         line, record = payload
-        if out_fh is not None:
-            out_fh.write(line + "\n")
+        emit_output_line(out_fh, None, line)
         _log_scan_record(record)
 
     def _finalize_postprocess() -> None:
@@ -377,8 +376,7 @@ def scan_exporter_presence(
                         postprocess_worker.put((line, record))
                         postprocess_worker.raise_if_failed()
                     else:
-                        if out_fh is not None:
-                            out_fh.write(line + "\n")
+                        emit_output_line(out_fh, None, line)
                         _log_scan_record(record)
         finally:
             progress.close()

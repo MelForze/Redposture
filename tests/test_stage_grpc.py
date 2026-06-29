@@ -586,3 +586,89 @@ def test_retry_delay_is_exponential_capped() -> None:
     assert _retry_delay(0) == pytest.approx(0.2)
     assert _retry_delay(1) == pytest.approx(0.4)
     assert _retry_delay(10) <= 1.5
+
+
+# --- Wave 2 (gRPC actions coverage): pure-function unit tests ---------------------
+
+
+def test_is_retryable_stage_error_recognizes_connection_prefixes() -> None:
+    assert grpc_stage._is_retryable_stage_error("connection refused by remote") is True
+    assert grpc_stage._is_retryable_stage_error("connection timeout after 5s") is True
+    assert grpc_stage._is_retryable_stage_error("CONNECTION REFUSED on socket") is True
+    assert grpc_stage._is_retryable_stage_error("permission denied") is False
+    assert grpc_stage._is_retryable_stage_error(None) is False
+    assert grpc_stage._is_retryable_stage_error("") is False
+    assert grpc_stage._is_retryable_stage_error(0) is False
+
+
+def test_credential_label_token_basic_and_fallback() -> None:
+    assert grpc_stage._credential_label({"type": "token", "token": "abc"}) == "token"
+    assert grpc_stage._credential_label({"type": "basic", "username": "u", "password": "p"}) == "u:p"
+    # empty password rendered as <empty> sentinel
+    assert grpc_stage._credential_label({"type": "basic", "username": "u", "password": ""}) == "u:<empty>"
+    # missing username defaults to "user"
+    assert grpc_stage._credential_label({"type": "basic", "password": "p"}) == "user:p"
+    # unknown type falls back to "credentials"
+    assert grpc_stage._credential_label({"type": "weird"}) == "credentials"
+    assert grpc_stage._credential_label({}) == "credentials"
+
+
+def test_format_status_label_known_and_unknown() -> None:
+    assert grpc_stage._format_status_label("open_no_auth") == "anonymous access"
+    assert grpc_stage._format_status_label("valid_credentials") == "valid credentials"
+    assert grpc_stage._format_status_label("auth_required") == "authentication required"
+    assert grpc_stage._format_status_label("invalid_credentials_anonymous") == "invalid credentials (anonymous works)"
+    assert grpc_stage._format_status_label("not_grpc") == "not grpc"
+    assert grpc_stage._format_status_label("fail") == "fail"
+    # Unknown labels pass through unchanged
+    assert grpc_stage._format_status_label("custom_state") == "custom_state"
+
+
+def test_auth_required_text_three_states() -> None:
+    assert grpc_stage._auth_required_text(True) == "True"
+    assert grpc_stage._auth_required_text(False) == "False"
+    assert grpc_stage._auth_required_text(None) == "unknown"
+    # Non-boolean truthy values flow through "unknown" branch (not bool-True).
+    assert grpc_stage._auth_required_text(1) == "unknown"
+    assert grpc_stage._auth_required_text("True") == "unknown"
+
+
+def test_auth_attempt_entries_token_takes_priority_over_basic() -> None:
+    # When a token is provided, the basic-creds branch is skipped.
+    attempts = grpc_stage._auth_attempt_entries(token="t-token", username="u", password="p", defcreds=False)
+    assert len(attempts) == 1
+    assert attempts[0]["type"] == "token"
+    assert attempts[0]["token"] == "t-token"
+    assert attempts[0]["source"] == "provided"
+
+
+def test_auth_attempt_entries_basic_only_when_both_username_and_password() -> None:
+    attempts = grpc_stage._auth_attempt_entries(token=None, username="user", password="pass", defcreds=False)
+    assert attempts == [{"type": "basic", "username": "user", "password": "pass", "source": "provided"}]
+    # Missing password drops the basic attempt entirely.
+    assert grpc_stage._auth_attempt_entries(token=None, username="user", password=None, defcreds=False) == []
+
+
+def test_auth_attempt_entries_defcreds_appends_default_tokens_and_basics() -> None:
+    attempts = grpc_stage._auth_attempt_entries(token=None, username=None, password=None, defcreds=True)
+    # Defcreds should produce at least one bearer-token attempt and one basic attempt.
+    types = [a["type"] for a in attempts]
+    assert "token" in types
+    assert "basic" in types
+    # All defcred entries carry source=defcreds
+    assert all(a["source"] == "defcreds" for a in attempts)
+
+
+def test_auth_attempt_entries_deduplicates_identical_basic_provided_vs_defcreds() -> None:
+    # If a provided credential matches one of the defcreds, the second entry is dropped.
+    attempts = grpc_stage._auth_attempt_entries(token=None, username="user", password="user", defcreds=True)
+    keys = [(a["type"], a.get("username") or a.get("token"), a.get("password")) for a in attempts]
+    # No duplicate (basic, "user", "user") combinations even though both sources would produce one.
+    assert keys.count(("basic", "user", "user")) == 1
+
+
+def test_auth_required_from_grpc_status_classification() -> None:
+    assert grpc_stage._auth_required_from_grpc_status(16) is True  # UNAUTHENTICATED
+    assert grpc_stage._auth_required_from_grpc_status(7) is True  # PERMISSION_DENIED
+    assert grpc_stage._auth_required_from_grpc_status(0) is False  # OK -> auth not required
+    assert grpc_stage._auth_required_from_grpc_status(None) is None  # unknown

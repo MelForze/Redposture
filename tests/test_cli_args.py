@@ -58,6 +58,32 @@ def test_cli_scalar_type_helpers_reject_invalid_values() -> None:
         _non_negative_int("-1")
 
 
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["redis", "-t", "10.0.0.1", "--port", "0"],
+        ["redis", "-t", "10.0.0.1", "--port", "65536"],
+        ["redis", "-t", "10.0.0.1", "--timeout", "0"],
+        ["redis", "-t", "10.0.0.1", "--workers", "0"],
+        ["redis", "-t", "10.0.0.1", "--retries", "-1"],
+        ["redis", "-t", "10.0.0.1", "--format", "xml"],
+        ["exporters", "scan", "-t", "10.0.0.1", "--timeout", "0"],
+        ["exporters", "collect", "-t", "10.0.0.1", "--max-inflight", "0"],
+        ["exporters", "trigger", "-t", "10.0.0.1", "--postgres-port", "99999"],
+        ["oracle", "-t", "10.0.0.1", "--protocol", "udp"],
+        ["oracle", "-t", "10.0.0.1", "--exec-method", "bad"],
+        ["oracle", "-t", "10.0.0.1", "--reverse-shell-type", "bad"],
+        ["clickhouse", "-t", "10.0.0.1", "--format", "yaml"],
+        ["zookeeper", "-t", "10.0.0.1", "--enum-workers", "0"],
+        ["zookeeper", "-t", "10.0.0.1", "--max-znodes", "0"],
+    ],
+)
+def test_parse_args_rejects_invalid_cli_values(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(argv)
+    assert exc.value.code == 2
+
+
 def test_normalize_multi_port_port_flag_variants() -> None:
     assert _normalize_multi_port_port_flag(["redis", "--port", "6379"]) == ["redis", "--port", "6379"]
     assert _normalize_multi_port_port_flag(["redis", "--port", "6379,6380"]) == [

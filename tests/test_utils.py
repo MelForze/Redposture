@@ -24,6 +24,7 @@ from redposture_core.utils import (
     parse_proxmox_api_token_auth,
     parse_scan_target_specs,
     parse_username_password_credential_file,
+    stream_scan_target_specs,
 )
 
 
@@ -60,6 +61,50 @@ def test_collect_scan_targets_keeps_file_precedence_when_token_matches_existing_
 def test_collect_scan_targets_expands_cidr() -> None:
     hosts = collect_scan_targets("10.0.1.0/30")
     assert hosts == ["10.0.1.1", "10.0.1.2"]
+
+
+def test_collect_scan_targets_accepts_ipv4_16_network() -> None:
+    hosts = collect_scan_targets("10.153.0.0/16")
+    assert len(hosts) == 65534
+    assert hosts[0] == "10.153.0.1"
+    assert hosts[-1] == "10.153.255.254"
+
+
+def test_collect_scan_targets_accepts_ipv4_16_from_file_and_rejects_15(tmp_path: Path) -> None:
+    hosts_file = tmp_path / "targets.txt"
+    hosts_file.write_text("10.0.0.10\n10.153.0.0/16\n", encoding="utf-8")
+
+    hosts = collect_scan_targets(str(hosts_file))
+
+    assert len(hosts) == 65535
+    assert hosts[:3] == ["10.0.0.10", "10.153.0.1", "10.153.0.2"]
+    assert hosts[-1] == "10.153.255.254"
+    with pytest.raises(ValueError, match=r"expands to 131070 hosts \(limit: 65536\)"):
+        collect_scan_targets("10.152.0.0/15")
+
+
+def test_stream_scan_target_specs_accepts_large_ipv4_cidr_without_materializing() -> None:
+    plan = stream_scan_target_specs("10.0.0.0/8")
+
+    assert plan.target_count == 16_777_214
+    assert plan.no_port_count == 16_777_214
+    assert plan.hosts_sample(3) == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
+    assert plan.first_spec() is not None
+    assert plan.single_spec() is None
+
+
+def test_stream_scan_target_specs_accepts_ipv4_zero_cidr_count() -> None:
+    plan = stream_scan_target_specs("0.0.0.0/0")
+
+    assert plan.target_count == 4_294_967_294
+    assert plan.hosts_sample(3) == ["0.0.0.1", "0.0.0.2", "0.0.0.3"]
+
+
+def test_stream_scan_target_specs_deduplicates_overlapping_ipv4_ranges() -> None:
+    plan = stream_scan_target_specs("10.0.0.1,10.0.0.0/30,10.0.0.2,10.0.0.0/31")
+
+    assert plan.target_count == 3
+    assert list(plan.iter_hosts()) == ["10.0.0.1", "10.0.0.2", "10.0.0.0"]
 
 
 def test_collect_scan_targets_rejects_invalid_cidr() -> None:

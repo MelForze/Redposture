@@ -65,6 +65,17 @@ def test_normalize_check_urls_expands_cidr_targets() -> None:
     ]
 
 
+def test_normalize_check_urls_accepts_16_cidr_targets() -> None:
+    urls = _normalize_check_urls("10.153.0.0/16", "9115")
+    assert len(urls) == 65534
+    assert urls[0] == "http://10.153.0.1:9115/"
+    assert urls[-1] == "http://10.153.255.254:9115/"
+
+
+def test_normalize_check_urls_rejects_oversized_cidr_targets() -> None:
+    assert _normalize_check_urls("10.152.0.0/15", "9115") == []
+
+
 def test_split_check_target_url_splits_base_and_upstream_path() -> None:
     split = _split_check_target_url("http://host.docker.internal:9115/debug/vars?x=1")
     assert split == ("http://host.docker.internal:9115", "/debug/vars?x=1")

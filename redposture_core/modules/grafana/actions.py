@@ -20,6 +20,7 @@ from ...stage_runtime import (
     merge_stage_records,
 )
 from ...utils import (
+    DEFAULT_MAX_NETWORK_HOSTS,
     utc_now_iso,
 )
 
@@ -224,7 +225,7 @@ def _normalize_ssrf_path(path_str: str | None) -> tuple[str, str] | None:
     return parsed_path, parsed_query
 
 
-def _expand_ssrf_cidr_targets(token: str, max_hosts: int = 4096) -> list[str] | None:
+def _expand_ssrf_cidr_targets(token: str, max_hosts: int = DEFAULT_MAX_NETWORK_HOSTS) -> list[str] | None:
     try:
         network = ipaddress.ip_network(token, strict=False)
     except ValueError:

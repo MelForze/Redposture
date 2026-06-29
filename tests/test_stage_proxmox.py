@@ -61,6 +61,146 @@ def test_proxmox_default_credentials_are_exact() -> None:
     )
 
 
+def test_proxmox_password_auth_failed_render_mentions_attempts_not_token() -> None:
+    line = _format_record(
+        {
+            "host": "127.0.0.1",
+            "port": 8006,
+            "status": "auth_failed",
+            "auth_method": "password",
+            "auth_attempts": [
+                {"username": "root@pam", "source": "defcreds", "ok": "False"},
+                {"username": "root@pam", "source": "defcreds", "ok": "False"},
+                {"username": "audit@pve", "source": "provided", "ok": "False"},
+            ],
+        },
+        "txt",
+    )
+    assert "password authentication failed" in line
+    assert "attempts=3" in line
+    assert "users=root@pam,audit@pve" in line
+    assert "invalid pve api token" not in line
+
+
+def test_proxmox_token_auth_failed_render_still_mentions_invalid_token() -> None:
+    line = _format_record(
+        {
+            "host": "127.0.0.1",
+            "port": 8006,
+            "status": "auth_failed",
+            "auth_method": "pveapitoken",
+        },
+        "txt",
+    )
+
+    assert "invalid pve api token" in line
+    assert "password authentication failed" not in line
+
+
+def test_proxmox_insufficient_privileges_with_password_auth_is_not_password_failure() -> None:
+    line = _format_record(
+        {
+            "host": "127.0.0.1",
+            "port": 8006,
+            "status": "insufficient_privileges",
+            "auth_method": "password",
+            "auth_attempts": [{"username": "root@pam", "source": "defcreds", "ok": "True"}],
+        },
+        "txt",
+    )
+
+    assert "token valid but insufficient privileges" in line
+    assert "password authentication failed" not in line
+
+
+def test_audit_proxmox_defcreds_all_fail_keeps_auth_attempts_and_password_render(monkeypatch) -> None:
+    login_calls: list[tuple[str, str]] = []
+
+    def fake_login(
+        _host,
+        _port,
+        _timeout,
+        _retries,
+        *,
+        username,
+        password,
+        use_https,
+        insecure,
+        proxy,
+    ):
+        _ = (use_https, insecure, proxy)
+        login_calls.append((username, password))
+        return None, "authentication failure"
+
+    def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
+        if path == "/access":
+            return 401, b'{"errors":"authentication failure"}', {}, None
+        return 401, b'{"errors":"permission denied"}', {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._login_proxmox_password", fake_login)
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="",
+        username=None,
+        password=None,
+        defcreds=True,
+        use_https=True,
+        insecure=True,
+        proxy=None,
+    )
+
+    assert login_calls == list(_PROXMOX_DEFAULT_CREDENTIALS)
+    assert record["status"] == "auth_failed"
+    assert record["auth_method"] == "password"
+    assert record["auth_attempts"] == [
+        {"username": "root@pam", "source": "defcreds", "ok": "False"},
+        {"username": "root@pam", "source": "defcreds", "ok": "False"},
+        {"username": "root@pam", "source": "defcreds", "ok": "False"},
+        {"username": "root@pam", "source": "defcreds", "ok": "False"},
+    ]
+    assert json.loads(_format_record(record, "json"))["auth_attempts"] == record["auth_attempts"]
+    line = _format_record(record, "txt")
+    assert "password authentication failed attempts=4 users=root@pam" in line
+    assert "invalid pve api token" not in line
+
+
+def test_audit_proxmox_defcreds_login_transport_error_is_not_token_failure(monkeypatch) -> None:
+    def fake_login(*_args, **_kwargs):
+        return None, "connection reset by peer"
+
+    def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
+        assert path == "/access"
+        return 0, b"", {}, "connection reset by peer"
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._login_proxmox_password", fake_login)
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="",
+        username=None,
+        password=None,
+        defcreds=True,
+        use_https=True,
+        insecure=True,
+        proxy=None,
+    )
+
+    assert record["status"] == "fail"
+    assert record["auth_method"] == "password"
+    line = _format_record(record, "txt")
+    assert "connection failed err=connection reset by peer" in line
+    assert "invalid pve api token" not in line
+
+
 def test_proxmox_small_helpers_cover_auth_userid_caps_and_ssl() -> None:
     assert _auth_header_value("abc123") == "PVEAPIToken=abc123"
     assert _auth_header_value("PVEAPIToken=abc123") == "PVEAPIToken=abc123"

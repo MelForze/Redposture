@@ -123,9 +123,9 @@ def parse_matrix_cases(script_text: str) -> list[MatrixCase]:
             continue
         while parts and "=" in parts[0] and not parts[0].startswith("-"):
             parts = parts[1:]
-        if not parts or parts[0] not in {"run_case", "run_text_case"}:
+        if not parts or parts[0] not in {"run_case", "run_text_case", "run_raw_case"}:
             continue
-        if len(parts) < 6:
+        if len(parts) < 5:
             continue
         kind, module, label, expected_exit = parts[:4]
         tokens = tuple(parts[4:])
@@ -135,9 +135,11 @@ def parse_matrix_cases(script_text: str) -> list[MatrixCase]:
             command_key = f"exporters {tokens[1]}"
         else:
             command_key = tokens[0]
-        implicit = ("--output",)
+        implicit: tuple[str, ...] = ()
         if kind == "run_case":
             implicit = ("--format", "--output")
+        elif kind == "run_text_case":
+            implicit = ("--output",)
         cases.append(
             MatrixCase(
                 kind=kind,

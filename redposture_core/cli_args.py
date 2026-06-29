@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import math
 import re
 import sys
 from importlib import metadata
@@ -100,6 +101,8 @@ def _positive_float(value: str) -> float:
         number = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("value must be a number") from exc
+    if not math.isfinite(number):
+        raise argparse.ArgumentTypeError("value must be finite")
     if number <= 0:
         raise argparse.ArgumentTypeError("value must be > 0")
     return number

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
+import threading
+import time
+
 import pytest
 
 from redposture_core.stage_runtime import (
     AuditCommandPlan,
+    AuditCommandResult,
     AuditCommandRunner,
     AuditCredentialRun,
     AuditRecord,
@@ -18,12 +23,14 @@ from redposture_core.stage_runtime import (
     format_retry_decision,
     format_stage2_gate,
     format_stage_trace,
+    install_record_callback,
     is_pre_detect_network_noise,
     merge_stage_records,
     progress_total_from_groups,
     should_use_global_progress,
     validate_basic_module_args,
 )
+from redposture_core.utils import ScanTargetSpec
 
 
 class _ProgressRecorder:
@@ -253,6 +260,280 @@ def test_line_output_sink_emits_to_callback_and_file(tmp_path) -> None:
     # -o now tees: lines are written to the file AND echoed to the console callback.
     assert output_path.read_text(encoding="utf-8").splitlines() == ["first", "second"]
     assert emitted == ["one", "two", "first", "second"]
+
+
+def test_audit_command_runner_streams_ordered_prefix_to_output_file(tmp_path) -> None:
+    release_second = threading.Event()
+    output_path = tmp_path / "audit.txt"
+
+    def detect(ctx) -> AuditRecord:
+        if ctx.host == "b":
+            assert release_second.wait(timeout=5.0)
+        return AuditRecord(host=ctx.host, port=ctx.port, module="demo", service="demo", status="not_service")
+
+    spec = ModuleAuditSpec(
+        module="demo",
+        label="DEMO",
+        default_port=1234,
+        detect=detect,
+        render=lambda record: [f"{record.host}:{record.port} {record.status}"],
+    )
+    plan = AuditCommandPlan(
+        targets_by_port={1234: ("a", "b", "c")},
+        output_path=str(output_path),
+        output_format="txt",
+        workers=3,
+    )
+    result_holder: list[AuditCommandResult | BaseException] = []
+
+    def run() -> None:
+        try:
+            result_holder.append(
+                AuditCommandRunner(args=object(), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+            )
+        except BaseException as exc:  # noqa: BLE001 - test thread must report failures
+            result_holder.append(exc)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if output_path.exists() and output_path.read_text(encoding="utf-8").splitlines() == ["a:1234 not_service"]:
+            break
+        time.sleep(0.01)
+    else:
+        release_second.set()
+        thread.join(timeout=5.0)
+        pytest.fail("first target was not flushed before the command completed")
+
+    assert output_path.read_text(encoding="utf-8").splitlines() == ["a:1234 not_service"]
+    release_second.set()
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+    assert result_holder and not isinstance(result_holder[0], BaseException)
+    assert output_path.read_text(encoding="utf-8").splitlines() == [
+        "a:1234 not_service",
+        "b:1234 not_service",
+        "c:1234 not_service",
+    ]
+
+
+def test_audit_command_runner_json_fail_records_stay_ordered_and_do_not_abort(tmp_path) -> None:
+    output_path = tmp_path / "audit.jsonl"
+    calls: list[str] = []
+
+    def detect(ctx) -> AuditRecord:
+        calls.append(ctx.host)
+        if ctx.host == "bad":
+            raise RuntimeError("malformed protocol frame")
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="not_service",
+            extra={"is_demo": False},
+        )
+
+    spec = ModuleAuditSpec(module="demo", label="DEMO", default_port=1234, detect=detect)
+    plan = AuditCommandPlan(
+        targets_by_port={1234: ("bad", "next")},
+        output_path=str(output_path),
+        output_format="json",
+        workers=2,
+    )
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+
+    assert sorted(calls) == ["bad", "next"]
+    assert [record["host"] for record in result.records] == ["bad", "next"]
+    assert result.records[0]["status"] == "fail"
+    assert result.records[0]["error"] == "malformed protocol frame"
+    assert result.records[1]["status"] == "not_service"
+    payloads = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert [payload["host"] for payload in payloads] == ["bad", "next"]
+    assert [payload["status"] for payload in payloads] == ["fail", "not_service"]
+
+
+def test_audit_command_runner_invokes_public_and_installed_record_callbacks() -> None:
+    args = type("Args", (), {})()
+    seen: list[tuple[str, str]] = []
+    args.record_callback = lambda record: seen.append(("public", str(record["host"])))
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="not_service",
+            extra={"is_demo": False},
+        )
+
+    spec = ModuleAuditSpec(module="demo", label="DEMO", default_port=1234, detect=detect)
+    plan = AuditCommandPlan(targets_by_port={1234: ("a",)})
+
+    with install_record_callback(args, lambda record: seen.append(("installed", str(record["host"])))):
+        AuditCommandRunner(args=args, spec=spec, emit_line=lambda _line: None).run_plan(plan)
+
+    assert seen == [("installed", "a"), ("public", "a")]
+
+
+def test_audit_command_runner_records_multiple_failed_credentials() -> None:
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="auth_required",
+            auth_required=True,
+            extra={"is_demo": True},
+        )
+
+    def auth(ctx, _detect_record: AuditRecord) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="auth_required",
+            auth_required=True,
+            extra={
+                "is_demo": True,
+                "provided_credentials": True,
+                "provided_username": ctx.credential.username,
+                "provided_password": ctx.credential.password,
+            },
+        )
+
+    spec = ModuleAuditSpec(module="demo", label="DEMO", default_port=1234, detect=detect, auth=auth)
+    plan = AuditCommandPlan(
+        targets_by_port={1234: ("a",)},
+        credential_runs=(
+            AuditCredentialRun(username="admin", password="admin", source="default"),
+            AuditCredentialRun(username="demo", password="demo", source="default"),
+        ),
+    )
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+
+    assert len(result.records) == 1
+    record = result.records[0]
+    assert record["status"] == "auth_required"
+    assert record["provided_username"] == "demo"
+    assert record["attempted_credentials"] == [
+        {"username": "admin", "password": "admin", "source": "default", "status": "auth_required"},
+        {"username": "demo", "password": "demo", "source": "default", "status": "auth_required"},
+    ]
+
+
+def test_audit_command_runner_single_failed_credential_does_not_add_attempt_noise() -> None:
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="auth_required",
+            auth_required=True,
+            extra={"is_demo": True},
+        )
+
+    def auth(ctx, _detect_record: AuditRecord) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="auth_required",
+            auth_required=True,
+            extra={
+                "is_demo": True,
+                "provided_credentials": True,
+                "provided_username": ctx.credential.username,
+                "provided_password": ctx.credential.password,
+            },
+        )
+
+    spec = ModuleAuditSpec(module="demo", label="DEMO", default_port=1234, detect=detect, auth=auth)
+    plan = AuditCommandPlan(
+        targets_by_port={1234: ("a",)},
+        credential_runs=(AuditCredentialRun(username="admin", password="admin", source="provided"),),
+    )
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+
+    assert len(result.records) == 1
+    record = result.records[0]
+    assert record["status"] == "auth_required"
+    assert record["provided_username"] == "admin"
+    assert "attempted_credentials" not in record
+
+
+class _TinyLargeTargetPlan:
+    target_count = 100_001
+    no_port_count = 100_001
+    explicit_port_counts: dict[int, int] = {}
+    explicit_ports: tuple[int, ...] = ()
+
+    def count_for_ports(self, ports: tuple[int, ...]) -> int:
+        assert ports == (1234,)
+        return self.target_count
+
+    def execution_ports(self, ports: tuple[int, ...]) -> tuple[int, ...]:
+        return ports
+
+    def iter_specs(self):
+        for host in ("a", "b", "c"):
+            yield ScanTargetSpec(host=host, normalized_key=host)
+
+    def iter_specs_for_port(self, port: int, matrix_ports: tuple[int, ...]):
+        # Test plan has no explicit-port specs; every spec applies to any matrix port.
+        if int(port) not in {int(p) for p in matrix_ports}:
+            return
+        yield from self.iter_specs()
+
+
+def test_audit_command_runner_large_streaming_plan_uses_windows_and_truncates_retention(tmp_path) -> None:
+    output_path = tmp_path / "audit.txt"
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="not_service",
+            extra={"is_demo": False},
+        )
+
+    spec = ModuleAuditSpec(
+        module="demo",
+        label="DEMO",
+        default_port=1234,
+        detect=detect,
+        render=lambda record: [f"{record.host}:{record.port} {record.status}"],
+    )
+    plan = AuditCommandPlan(
+        target_plan=_TinyLargeTargetPlan(),
+        ports=(1234,),
+        output_path=str(output_path),
+        target_window_size=2,
+    )
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=lambda _line: None).run_plan(plan)
+
+    assert output_path.read_text(encoding="utf-8").splitlines() == [
+        "a:1234 not_service",
+        "b:1234 not_service",
+        "c:1234 not_service",
+    ]
+    assert result.record_count == 3
+    assert result.status_counts == {"not_service": 3}
+    assert result.records == []
+    assert result.typed_records == []
+    assert result.record_retention_truncated is True
 
 
 def test_typed_record_models_serialize_to_dicts() -> None:
@@ -594,7 +875,7 @@ def test_audit_command_plan_tracks_targets_credentials_and_summary() -> None:
     assert plan.target_count == 3
     assert plan.credential_run_count == 2
     assert plan.total_work_units == 6
-    assert plan.iter_targets() == [(0, "a", 6379), (1, "b", 6379), (2, "c", 6380)]
+    assert list(plan.iter_targets()) == [(0, "a", 6379), (1, "b", 6379), (2, "c", 6380)]
     assert plan.credential_runs[0].label == "admin:admin"
     assert plan.credential_runs[1].label == "token:token"
     assert plan.credential_runs[0].to_attempt(ok=True).ok is True

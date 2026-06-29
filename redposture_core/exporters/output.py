@@ -142,6 +142,7 @@ def format_collect_record(record: dict[str, Any], output_format: str) -> str:
 def emit_line(out_fh: Any, emit_line: Callable[[str], None] | None, line: str) -> None:
     if out_fh is not None:
         out_fh.write(line + "\n")
+        out_fh.flush()
     if emit_line is not None:
         emit_line(line)
 

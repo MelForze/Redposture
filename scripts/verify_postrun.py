@@ -240,12 +240,134 @@ _EXTENDED_EXPECTED_LABELS = (
     "redis_mutate_show_keys_3",
     "redis_mutate_show_keys_100",
     # P4-E fuzz: CLI must reject invalid inputs with exit=2 (no Python traceback).
+    "fuzz_exporters_scan_missing_targets",
+    "fuzz_exporters_scan_invalid_ports",
+    "fuzz_exporters_scan_zero_timeout",
+    "fuzz_exporters_collect_zero_max_inflight",
+    "fuzz_exporters_trigger_missing_callback",
+    "fuzz_exporters_trigger_bad_callback_ip",
+    "fuzz_exporters_trigger_check_without_listen",
+    "fuzz_exporters_trigger_json_listen_without_output",
+    "fuzz_exporters_trigger_negative_listen_seconds",
+    "fuzz_registry_missing_targets",
+    "fuzz_grafana_missing_targets",
+    "fuzz_gitlab_missing_targets",
+    "fuzz_consul_missing_targets",
+    "fuzz_kubeapi_missing_targets",
+    "fuzz_postgres_missing_targets",
+    "fuzz_mongodb_missing_targets",
+    "fuzz_oracle_missing_targets",
+    "fuzz_docker_missing_targets",
+    "fuzz_clickhouse_missing_targets",
+    "fuzz_redis_missing_targets",
+    "fuzz_etcd_missing_targets",
+    "fuzz_qdrant_missing_targets",
+    "fuzz_elastic_missing_targets",
+    "fuzz_grpc_missing_targets",
+    "fuzz_kafka_missing_targets",
+    "fuzz_zookeeper_missing_targets",
+    "fuzz_proxmox_missing_targets",
+    "fuzz_registry_username_without_password",
+    "fuzz_registry_token_basic_conflict",
+    "fuzz_registry_show_tags_without_repository",
+    "fuzz_registry_metadata_without_tag",
+    "fuzz_registry_assets_without_nexus",
+    "fuzz_registry_download_without_image",
+    "fuzz_grafana_username_without_password",
+    "fuzz_kubeapi_username_without_password",
+    "fuzz_elastic_username_without_password",
+    "fuzz_grpc_username_without_password",
+    "fuzz_kafka_username_without_password",
+    "fuzz_zookeeper_username_without_password",
+    "fuzz_proxmox_username_without_password",
+    "fuzz_redis_username_without_password",
+    "fuzz_consul_username_without_password",
+    "fuzz_consul_key_without_dump",
+    "fuzz_consul_service_without_dump",
+    "fuzz_consul_agent_without_dump",
+    "fuzz_consul_node_without_dump",
+    "fuzz_consul_ssrf_port_without_target",
+    "fuzz_consul_delete_without_revshell",
+    "fuzz_consul_listen_without_revshell",
+    "fuzz_consul_revshell_missing_lhost",
+    "fuzz_consul_revshell_bad_lhost",
+    "fuzz_consul_revshell_listen_missing_lport",
+    "fuzz_qdrant_listen_without_ssrf_target",
+    "fuzz_qdrant_ssrf_without_collection",
+    "fuzz_qdrant_bad_ssrf_port",
+    "fuzz_postgres_username_without_password",
+    "fuzz_postgres_show_columns_without_table",
+    "fuzz_postgres_column_without_table",
+    "fuzz_postgres_execute_sql_conflict",
+    "fuzz_postgres_execute_os_read_conflict",
+    "fuzz_postgres_os_shell_sql_shell_conflict",
+    "fuzz_mongodb_username_without_password",
+    "fuzz_mongodb_invalid_query_json",
+    "fuzz_mongodb_query_without_collection",
+    "fuzz_mongodb_document_without_collection",
+    "fuzz_mongodb_document_query_conflict",
+    "fuzz_mongodb_invalid_projection_json",
+    "fuzz_mongodb_invalid_nosql_cmd_json",
+    "fuzz_mongodb_nosql_cmd_shell_conflict",
+    "fuzz_oracle_username_without_password",
+    "fuzz_oracle_service_sid_conflict",
+    "fuzz_oracle_non_select_query",
+    "fuzz_oracle_os_write_bad_syntax",
+    "fuzz_oracle_download_bad_syntax",
+    "fuzz_docker_container_without_exec",
+    "fuzz_docker_exec_without_container",
+    "fuzz_docker_tls_cert_without_key",
+    "fuzz_docker_tls_key_without_cert",
+    "fuzz_clickhouse_username_without_password",
+    "fuzz_clickhouse_show_columns_without_table",
+    "fuzz_clickhouse_column_without_table",
+    "fuzz_clickhouse_execute_sql_conflict",
+    "fuzz_clickhouse_os_shell_sql_shell_conflict",
+    "fuzz_clickhouse_os_shell_execute_conflict",
+    "fuzz_zookeeper_zero_max_znodes",
+    "fuzz_zookeeper_zero_enum_workers",
     "fuzz_redis_invalid_port_negative",
     "fuzz_redis_invalid_port_huge",
+    "fuzz_redis_zero_dump",
+    "fuzz_redis_negative_show_keys",
+    "fuzz_redis_invalid_dump_batch",
+    "fuzz_redis_negative_dump_delay",
     "fuzz_postgres_empty_credentials",
     "fuzz_etcd_garbage_target",
+    "fuzz_etcd_invalid_dump_batch",
+    "fuzz_etcd_negative_show_keys",
     "fuzz_mongodb_zero_timeout",
+    "fuzz_mongodb_invalid_workers",
+    "fuzz_mongodb_negative_retries",
     "fuzz_kafka_negative_workers",
+    "fuzz_kafka_zero_max_messages",
+    "fuzz_kafka_invalid_port",
+    "fuzz_registry_malformed_target",
+    "fuzz_registry_invalid_port",
+    "fuzz_grafana_invalid_target",
+    "fuzz_grafana_huge_port",
+    "fuzz_gitlab_invalid_port",
+    "fuzz_gitlab_zero_timeout",
+    "fuzz_consul_zero_workers",
+    "fuzz_consul_negative_dump",
+    "fuzz_kubeapi_zero_timeout",
+    "fuzz_kubeapi_huge_port",
+    "fuzz_oracle_invalid_port",
+    "fuzz_oracle_zero_timeout",
+    "fuzz_docker_invalid_port",
+    "fuzz_docker_zero_timeout",
+    "fuzz_clickhouse_negative_timeout",
+    "fuzz_clickhouse_invalid_port",
+    "fuzz_qdrant_zero_timeout",
+    "fuzz_qdrant_invalid_port",
+    "fuzz_elastic_negative_retries",
+    "fuzz_elastic_invalid_port",
+    "fuzz_grpc_invalid_port",
+    "fuzz_grpc_zero_workers",
+    "fuzz_zookeeper_invalid_port",
+    "fuzz_zookeeper_zero_workers",
+    "fuzz_proxmox_negative_workers",
+    "fuzz_proxmox_invalid_port",
 )
 
 _PROGRESS_EXPECTED_TARGETS = {
@@ -1177,17 +1299,202 @@ def _validate_idempotency(rows: list[dict[str, str]]) -> None:
 
 # P4-E: fuzz cases that pass intentionally invalid/edge inputs. The CLI must reject them
 # gracefully (non-zero exit, structured error) -- never crash with Python traceback.
-_FUZZ_LABELS = frozenset(
-    {
-        "fuzz_redis_invalid_port_negative",
-        "fuzz_redis_invalid_port_huge",
-        "fuzz_postgres_empty_credentials",
-        "fuzz_etcd_garbage_target",
-        "fuzz_mongodb_zero_timeout",
-        "fuzz_kafka_negative_workers",
-        "fuzz_clickhouse_malformed_url",
-    }
+# Any label that starts with `fuzz_` is treated as such; the helper below makes membership
+# detection trivial without enumerating every variant.
+
+_MISSING_TARGET_MODULES = (
+    "registry",
+    "grafana",
+    "gitlab",
+    "consul",
+    "kubeapi",
+    "postgres",
+    "mongodb",
+    "oracle",
+    "docker",
+    "clickhouse",
+    "redis",
+    "etcd",
+    "qdrant",
+    "elastic",
+    "grpc",
+    "kafka",
+    "zookeeper",
+    "proxmox",
 )
+
+_EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
+    "exporters_scan_url_https_reject": ("exporters scan accepts only http://",),
+    "exporters_collect_url_https_reject": ("exporters collect accepts only http://",),
+    "exporters_trigger_url_https_reject": ("exporters trigger accepts only http://",),
+    "registry_url_https_reject": ("registry accepts only http://",),
+    "grafana_url_https_reject": ("grafana accepts only http://",),
+    "etcd_url_https_reject": ("etcd accepts only http://",),
+    "qdrant_url_https_reject": ("qdrant accepts only http://",),
+    "mongodb_extended_invalid_document_query": ("--document cannot be combined with --query",),
+    "docker_extended_tls_files_pairing_error": ("--tls-cert and --tls-key must be used together",),
+    "kafka_extended_dump_max_conflict": ("--dump count cannot conflict with --max-messages",),
+    "fuzz_exporters_scan_missing_targets": ("scan requires -t/--targets",),
+    "fuzz_exporters_scan_invalid_ports": ("failed to parse --ports",),
+    "fuzz_exporters_scan_zero_timeout": ("value must be > 0",),
+    "fuzz_exporters_collect_zero_max_inflight": ("value must be > 0",),
+    "fuzz_exporters_trigger_missing_callback": ("trigger requires --callback-ip and/or --callback-dns",),
+    "fuzz_exporters_trigger_bad_callback_ip": ("--callback-ip must be a valid IP address",),
+    "fuzz_exporters_trigger_check_without_listen": ("--check-credentials requires --with-listen",),
+    "fuzz_exporters_trigger_json_listen_without_output": ("--format json with --with-listen requires --output",),
+    "fuzz_exporters_trigger_negative_listen_seconds": ("--listen-seconds must be >= 0",),
+    **{f"fuzz_{module}_missing_targets": (f"{module} requires -t/--targets",) for module in _MISSING_TARGET_MODULES},
+    "fuzz_registry_username_without_password": ("--username and --password must be set together",),
+    "fuzz_registry_token_basic_conflict": ("use either --token or --username/--password, not both",),
+    "fuzz_registry_show_tags_without_repository": ("--show-tags requires --repository",),
+    "fuzz_registry_metadata_without_tag": ("--metadata requires --repository and --tag",),
+    "fuzz_registry_assets_without_nexus": ("--assets requires --nexus",),
+    "fuzz_registry_download_without_image": ("--download requires --image",),
+    "fuzz_grafana_username_without_password": ("--password is required when --username is set",),
+    "fuzz_kubeapi_username_without_password": ("--username and --password must be set together",),
+    "fuzz_elastic_username_without_password": ("--username and --password must be set together",),
+    "fuzz_grpc_username_without_password": ("--username and --password must be set together",),
+    "fuzz_kafka_username_without_password": ("--username and --password must be set together",),
+    "fuzz_zookeeper_username_without_password": ("--username and --password must be set together",),
+    "fuzz_proxmox_username_without_password": ("--username and --password must be set together",),
+    "fuzz_redis_username_without_password": ("--username and --password must be set together",),
+    "fuzz_consul_username_without_password": ("--username and --password must be set together",),
+    "fuzz_consul_key_without_dump": ("--key requires --dump",),
+    "fuzz_consul_service_without_dump": ("--service requires --dump",),
+    "fuzz_consul_agent_without_dump": ("--agent requires --dump",),
+    "fuzz_consul_node_without_dump": ("--node requires --dump",),
+    "fuzz_consul_ssrf_port_without_target": ("--ssrf-port/--ssrf-path require --ssrf-target",),
+    "fuzz_consul_delete_without_revshell": ("--delete requires --revshell or --check-id",),
+    "fuzz_consul_listen_without_revshell": ("--listen requires --revshell",),
+    "fuzz_consul_revshell_missing_lhost": ("--lhost is required when --revshell is set",),
+    "fuzz_consul_revshell_bad_lhost": ("--lhost must be a plain IPv4/DNS hostname",),
+    "fuzz_consul_revshell_listen_missing_lport": ("--listen requires --lport",),
+    "fuzz_qdrant_listen_without_ssrf_target": ("--listen requires --ssrf-target",),
+    "fuzz_qdrant_ssrf_without_collection": ("--ssrf-target requires --collection",),
+    "fuzz_qdrant_bad_ssrf_port": ("failed to parse SSRF targets/ports",),
+    "fuzz_postgres_username_without_password": ("--password is required when --username is set",),
+    "fuzz_postgres_show_columns_without_table": ("--show-columns requires --table",),
+    "fuzz_postgres_column_without_table": ("--column requires --table",),
+    "fuzz_postgres_execute_sql_conflict": ("--execute cannot be combined with --sql-cmd",),
+    "fuzz_postgres_execute_os_read_conflict": ("--execute cannot be combined with --os-read",),
+    "fuzz_postgres_os_shell_sql_shell_conflict": ("--os-shell cannot be combined with --sql-shell",),
+    "fuzz_mongodb_username_without_password": ("--password is required when --username is set",),
+    "fuzz_mongodb_invalid_query_json": ("--query must be valid JSON object",),
+    "fuzz_mongodb_query_without_collection": ("--query requires --collection",),
+    "fuzz_mongodb_document_without_collection": ("--document requires --collection",),
+    "fuzz_mongodb_document_query_conflict": ("--document cannot be combined with --query",),
+    "fuzz_mongodb_invalid_projection_json": ("--projection must be valid JSON object",),
+    "fuzz_mongodb_invalid_nosql_cmd_json": ("--nosql-cmd must be valid JSON object",),
+    "fuzz_mongodb_nosql_cmd_shell_conflict": ("--nosql-cmd cannot be combined with --nosql-shell",),
+    "fuzz_oracle_username_without_password": ("--password is required when --username is set",),
+    "fuzz_oracle_service_sid_conflict": ("--service cannot be combined with --sid",),
+    "fuzz_oracle_non_select_query": ("--query must be a read-only SELECT statement",),
+    "fuzz_oracle_os_write_bad_syntax": ("--os-write must use local:remote or remote:local syntax",),
+    "fuzz_oracle_download_bad_syntax": ("--download must use local:remote or remote:local syntax",),
+    "fuzz_docker_container_without_exec": ("--container and --exec-cmd must be used together",),
+    "fuzz_docker_exec_without_container": ("--container and --exec-cmd must be used together",),
+    "fuzz_docker_tls_cert_without_key": ("--tls-cert and --tls-key must be used together",),
+    "fuzz_docker_tls_key_without_cert": ("--tls-cert and --tls-key must be used together",),
+    "fuzz_clickhouse_username_without_password": ("--password is required when --username is set",),
+    "fuzz_clickhouse_show_columns_without_table": ("--show-columns requires --table",),
+    "fuzz_clickhouse_column_without_table": ("--column requires --table",),
+    "fuzz_clickhouse_execute_sql_conflict": ("--execute cannot be combined with --sql-cmd",),
+    "fuzz_clickhouse_os_shell_sql_shell_conflict": ("--os-shell cannot be combined with --sql-shell",),
+    "fuzz_clickhouse_os_shell_execute_conflict": ("--os-shell cannot be combined with --execute",),
+    "fuzz_zookeeper_zero_max_znodes": ("value must be > 0",),
+    "fuzz_zookeeper_zero_enum_workers": ("value must be > 0",),
+    "fuzz_redis_invalid_port_negative": ("port must be in range",),
+    "fuzz_redis_invalid_port_huge": ("port must be in range",),
+    "fuzz_redis_zero_dump": ("value must be > 0",),
+    "fuzz_redis_negative_show_keys": ("value must be > 0",),
+    "fuzz_redis_invalid_dump_batch": ("value must be > 0",),
+    "fuzz_redis_negative_dump_delay": ("value must be >= 0",),
+    "fuzz_postgres_empty_credentials": ("--username must not be empty",),
+    "fuzz_etcd_garbage_target": ("failed to parse targets",),
+    "fuzz_etcd_invalid_dump_batch": ("value must be > 0",),
+    "fuzz_etcd_negative_show_keys": ("value must be > 0",),
+    "fuzz_mongodb_zero_timeout": ("value must be > 0",),
+    "fuzz_mongodb_invalid_workers": ("value must be an integer",),
+    "fuzz_mongodb_negative_retries": ("value must be >= 0",),
+    "fuzz_kafka_negative_workers": ("value must be > 0",),
+    "fuzz_kafka_zero_max_messages": ("--max-messages must be > 0",),
+    "fuzz_kafka_invalid_port": ("port must be an integer",),
+    "fuzz_registry_malformed_target": ("failed to parse targets",),
+    "fuzz_registry_invalid_port": ("port must be in range",),
+    "fuzz_grafana_invalid_target": ("failed to parse targets",),
+    "fuzz_grafana_huge_port": ("port must be in range",),
+    "fuzz_gitlab_invalid_port": ("port must be in range",),
+    "fuzz_gitlab_zero_timeout": ("value must be > 0",),
+    "fuzz_consul_zero_workers": ("value must be > 0",),
+    "fuzz_consul_negative_dump": ("value must be > 0",),
+    "fuzz_kubeapi_zero_timeout": ("value must be > 0",),
+    "fuzz_kubeapi_huge_port": ("port must be in range",),
+    "fuzz_oracle_invalid_port": ("port must be in range",),
+    "fuzz_oracle_zero_timeout": ("value must be > 0",),
+    "fuzz_docker_invalid_port": ("port must be an integer",),
+    "fuzz_docker_zero_timeout": ("value must be > 0",),
+    "fuzz_clickhouse_negative_timeout": ("value must be > 0",),
+    "fuzz_clickhouse_invalid_port": ("port must be in range",),
+    "fuzz_qdrant_zero_timeout": ("value must be > 0",),
+    "fuzz_qdrant_invalid_port": ("port must be in range",),
+    "fuzz_elastic_negative_retries": ("value must be >= 0",),
+    "fuzz_elastic_invalid_port": ("port must be an integer",),
+    "fuzz_grpc_invalid_port": ("port must be in range",),
+    "fuzz_grpc_zero_workers": ("value must be > 0",),
+    "fuzz_zookeeper_invalid_port": ("port must be an integer",),
+    "fuzz_zookeeper_zero_workers": ("value must be > 0",),
+    "fuzz_proxmox_negative_workers": ("value must be > 0",),
+    "fuzz_proxmox_invalid_port": ("port must be in range",),
+}
+
+
+def _is_fuzz_label(label: str) -> bool:
+    return label.startswith("fuzz_")
+
+
+_FUZZ_LABELS = frozenset(label for label in _EXTENDED_EXPECTED_LABELS if _is_fuzz_label(label))
+
+
+def _expected_int(row: dict[str, str]) -> int:
+    return int(row.get("expected_exit") or "0")
+
+
+def _validate_expected_failure_outputs(rows: list[dict[str, str]]) -> None:
+    """Expected-failure matrix rows must fail cleanly and explain why.
+
+    This validates the actual command logs produced by the lab matrix, not a separate
+    smoke command. It catches accidental Python tracebacks, silent JSON output from an
+    early-failure path, or a command failing for the wrong reason.
+    """
+    for row in rows:
+        if _expected_int(row) == 0:
+            continue
+        label = row["label"]
+        expected_substrings = _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS.get(label)
+        if not expected_substrings:
+            raise SystemExit(f"expected-failure label '{label}' has no output expectation")
+
+        log_path = Path(row["log_path"])
+        if not log_path.exists():
+            raise SystemExit(f"missing run log file for expected-failure label '{label}': {log_path}")
+        log_text = log_path.read_text(encoding="utf-8", errors="replace")
+
+        missing = [needle for needle in expected_substrings if needle not in log_text]
+        if missing:
+            raise SystemExit(
+                f"expected-failure label '{label}' failed for the wrong reason; missing log substring(s): {missing}"
+            )
+        if "Traceback (most recent call last)" in log_text:
+            raise SystemExit(f"expected-failure label '{label}' crashed with a Python traceback")
+        if "Running redposture against" in log_text:
+            raise SystemExit(f"expected-failure label '{label}' unexpectedly reached target execution")
+
+        json_path = row.get("json_path") or "-"
+        if json_path in {"", "-"}:
+            continue
+        artifact = Path(json_path)
+        if artifact.exists() and artifact.stat().st_size > 0:
+            raise SystemExit(f"expected-failure label '{label}' produced a non-empty JSON artifact: {artifact}")
 
 
 def _validate_fuzz_no_traceback(rows: list[dict[str, str]]) -> None:
@@ -1234,6 +1541,12 @@ _GOLDEN_SKIP_LABELS = frozenset(
         # (0 vs 1) because the 5 target URLs all fail and the audit's detection retry path
         # races against lab grafana availability.
         "grafana_multi_instance_urls",
+        # kafka_extended_defcreds flakes between status=open_no_auth (anonymous worked,
+        # no defcred attempts) and status=auth_required (defcreds tried, attempted_credentials
+        # list populated). Depends on lab kafka container startup race; the kafka_extended_*
+        # tests in tests/test_stage_kafka.py + the multi-record consistency rule still cover
+        # the path semantically.
+        "kafka_extended_defcreds",
     }
 )
 # Docker assigns 12-char hex container names (e.g. `7fa9fd7f914d`). Normalize them so
@@ -1664,6 +1977,7 @@ def main() -> int:
         raise SystemExit("matrix status file is empty")
 
     _validate_expected_exits(rows)
+    _validate_expected_failure_outputs(rows)
     _validate_expected_labels(rows, profile=args.profile)
 
     successful_modules = _validate_json_artifacts(rows)

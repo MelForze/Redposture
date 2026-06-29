@@ -64,11 +64,10 @@ def validate_args(args: Any, console: Any) -> int | None:
         except ValueError as exc:
             console.error(str(exc))
             return 2
-        if plan.target_count != 1:
-            console.error("--sql-shell requires exactly one target host")
-            return 2
-        if len(plan.targets_by_port) != 1:
-            console.error("--sql-shell requires exactly one port (use --port with a single value)")
+        try:
+            plan.require_single_target_spec()
+        except ValueError as exc:
+            console.error(f"--sql-shell {exc}")
             return 2
     return None
 
