@@ -686,3 +686,48 @@ def test_run_mongodb_stage_credential_file_prefilter(monkeypatch: pytest.MonkeyP
     assert rc == 0
     assert calls == [(["127.0.0.1", "127.0.0.2"], 27017), (["127.0.0.1", "127.0.0.2"], 27018)]
     assert "root:root" in out.read_text(encoding="utf-8")
+
+
+def test_mongodb_credential_attempts_records_renders_per_attempt_lines() -> None:
+    record = {
+        "host": "10.0.0.1",
+        "port": 27017,
+        "is_mongodb": True,
+        "status": "auth_required",
+        "credential_attempts": [
+            {"username": "admin", "password": "admin", "ok": False, "default": True, "error": "auth failed"},
+            {"username": "root", "password": "root", "ok": False, "default": True, "error": "auth failed"},
+            {"username": "mongo", "password": "mongo", "ok": False, "default": True, "error": "auth failed"},
+        ],
+    }
+    lines = mongodb._format_credential_attempts_records(record, "txt")
+    assert len(lines) == 3
+    assert "[-] admin:admin" in lines[0]
+    assert "[-] root:root" in lines[1]
+    assert "[-] mongo:mongo" in lines[2]
+
+    assert mongodb._format_credential_attempts_records(record, "json") == []
+
+    single_attempt = dict(record, credential_attempts=[record["credential_attempts"][0]])
+    assert mongodb._format_credential_attempts_records(single_attempt, "txt") == []
+
+
+def test_mongodb_format_record_defers_to_credential_attempts_when_multiple() -> None:
+    record = {
+        "host": "10.0.0.1",
+        "port": 27017,
+        "is_mongodb": True,
+        "status": "auth_required",
+        "provided_credentials": True,
+        "provided_username": "admin",
+        "provided_password": "admin",
+        "credential_attempts": [
+            {"username": "admin", "password": "admin", "ok": False},
+            {"username": "root", "password": "root", "ok": False},
+        ],
+    }
+    assert mongodb._format_record(record, "txt") == ""
+
+    single = dict(record, credential_attempts=[record["credential_attempts"][0]])
+    assert mongodb._format_record(single, "txt") != ""
+    assert "admin:admin" in mongodb._format_record(single, "txt")

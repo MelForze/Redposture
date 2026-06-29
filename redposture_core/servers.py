@@ -716,9 +716,17 @@ def prepare_cert_files(
     tmp_dir = tempfile.mkdtemp(prefix="redposture-certs-")
     cert = os.path.join(tmp_dir, "cert.pem")
     key = os.path.join(tmp_dir, "key.pem")
-    if generate_local_selfcert:
+
+    # Default to a freshly generated ephemeral self-signed certificate so the
+    # listener never relies on the publicly-known bundled private key. Fall back
+    # to the bundled PEM only when local generation is unavailable (e.g. openssl
+    # is missing) and a caller has not asked to force generation.
+    try:
         _generate_self_signed_cert(cert, key)
         return cert, key, tmp_dir
+    except (ValueError, OSError):
+        if generate_local_selfcert:
+            raise
 
     with open(cert, "w", encoding="utf-8") as cert_fh:
         cert_fh.write(DEFAULT_CERT_PEM)

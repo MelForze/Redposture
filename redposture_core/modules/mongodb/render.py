@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .actions import (
     _format_collections_detail_records,
+    _format_credential_attempts_records,
     _format_databases_detail_records,
     _format_detect_record,
     _format_documents_detail_records,
@@ -19,6 +20,7 @@ __all__ = [
     "_nxc_prefix",
     "_format_detect_record",
     "_format_record",
+    "_format_credential_attempts_records",
     "_format_databases_detail_records",
     "_format_collections_detail_records",
     "_format_indexes_detail_records",

@@ -83,7 +83,13 @@ def _start_servers(
                 has_custom_cert = True
                 auto_detected = True
         if not has_custom_cert:
-            console.warn("TLS enabled without custom cert/key; using bundled self-signed certificate")
+            if shutil.which("openssl"):
+                console.warn("TLS enabled without custom cert/key; generating an ephemeral self-signed certificate")
+            else:
+                console.warn(
+                    "TLS enabled without custom cert/key and openssl not found; "
+                    "falling back to bundled self-signed certificate"
+                )
         elif auto_detected:
             console.info(f"TLS enabled; auto-detected cert/key: {selected_cert} + {selected_key}")
         cert_path, key_path, temp_cert_dir = prepare_cert_files(

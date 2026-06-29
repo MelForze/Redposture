@@ -632,7 +632,9 @@ def test_audit_clickhouse_targets_suppresses_timeout_and_refused_failures(monkey
     )
 
     assert totals == (1, 0, 0, 0, 0, 1)
-    assert emitted == []
+    assert len(emitted) == 1
+    assert "No CLICKHOUSE service detected" in emitted[0]
+    assert all("Connection refused" not in line and "timed out" not in line for line in emitted)
 
 
 def test_audit_clickhouse_targets_emits_detect_attempts_status_and_details(monkeypatch: pytest.MonkeyPatch) -> None:
