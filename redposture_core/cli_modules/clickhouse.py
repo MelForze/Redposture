@@ -29,9 +29,13 @@ def configure_clickhouse_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=9000,
+        default=None,
         metavar="port",
-        help="ClickHouse port spec: single port, list/range, or file (examples: 9000, 8123, 9000,8123, ./ports.txt).",
+        help=(
+            "ClickHouse port spec: single port, list/range, or file "
+            "(examples: 9000, 8123, 9000,8123, ./ports.txt). "
+            "If omitted, scans 9000, 19000."
+        ),
     )
     add_multi_ports_flag(common)
     common.add_argument(

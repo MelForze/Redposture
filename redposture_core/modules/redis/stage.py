@@ -15,7 +15,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 6379
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS: tuple[int, ...] | None = (6379, 16379, 26379)
 
 
 def build_redis_plan(args: Any) -> AuditCommandPlan:

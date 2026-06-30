@@ -12,7 +12,7 @@ from .exporters.discover import scan_exporter_presence
 from .exporters.output import emit_line as emit_output_line
 from .exporters.output import format_scan_record
 from .logger import AttemptLogger
-from .profiles import load_profiles
+from .profiles import default_exporter_ports, load_profiles
 from .stage_runtime import progress_total_from_groups, should_use_global_progress, start_command_progress
 from .utils import (
     DEFAULT_MAX_NETWORK_HOSTS,
@@ -65,9 +65,7 @@ def _run_large_scan_stage(
     stream_to_stdout: bool,
 ) -> int:
     discovery_exporters = list(profiles["discovery_exporters"])  # type: ignore[call-overload]
-    default_ports = list(
-        dict.fromkeys(int(item.get("port")) for item in discovery_exporters if item.get("port") is not None)
-    )
+    default_ports = default_exporter_ports(discovery_exporters)
     checks = 0
     found = 0
     found_by_host: dict[str, list[dict[str, object]]] = {}
@@ -289,11 +287,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
             console.error(f"failed to process scan output: {exc}")
             return 2
     else:
-        default_ports = list(
-            dict.fromkeys(
-                int(item.get("port")) for item in profiles["discovery_exporters"] if item.get("port") is not None
-            )
-        )
+        default_ports = default_exporter_ports(list(profiles["discovery_exporters"]))
         execution_groups = build_scan_execution_groups(
             target_specs,
             custom_ports or default_ports,

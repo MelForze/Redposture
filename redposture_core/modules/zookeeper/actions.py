@@ -567,6 +567,7 @@ def _audit_zookeeper_host(
         enum_error_detail: str | None = None
         query_error_detail: str | None = None
         dump_error_detail: str | None = None
+        root_retryable_after_auth = False
 
         _debug(f"attempt={attempt + 1}/{max_attempts} start timeout={timeout}s")
         stage1_started = time.monotonic()
@@ -631,6 +632,12 @@ def _audit_zookeeper_host(
                     elif anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_RETRYABLE_ROOT_QUERY}:
                         # Digest auth succeeded, but root listing may still be ACL-restricted.
                         provided_credentials_ok = True
+                    if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and provided_credentials_ok is True:
+                        root_retryable_after_auth = True
+                        query_error_detail = _zk_error_name(root_err)
+                        last_query_error = query_error_detail
+                        root_children = root_children or []
+                        root_err = _ZK_ERR_OK
                 else:
                     provided_credentials_ok = False
                 if not auth_applied_ok and not auth_error:
@@ -792,6 +799,55 @@ def _audit_zookeeper_host(
                     auth_probe_trace=auth_probe_trace,
                     elapsed_ms=int((time.monotonic() - started) * 1000),
                     error=auth_error,
+                    connect_ms=connect_ms,
+                    auth_ms=auth_ms,
+                    enumerate_ms=None,
+                    dump_ms=None,
+                    connect_error=connect_error_detail,
+                    auth_error=auth_error_detail,
+                    enum_error=enum_error_detail,
+                    query_error=query_error_detail,
+                    dump_error=dump_error_detail,
+                    attempts=attempt + 1,
+                    max_attempts=max_attempts,
+                )
+
+            if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and inferred_auth_required is True and not provided_credentials:
+                query_error_detail = _zk_error_name(root_err)
+                last_query_error = query_error_detail
+                _stage_trace(
+                    _STAGE_AUTH_INFERENCE,
+                    attempt=attempt + 1,
+                    started_at=stage2_started,
+                    result="auth_required",
+                    error=f"root query failed: {_zk_error_name(root_err)}",
+                )
+                _debug(
+                    f"attempt={attempt + 1}/{max_attempts} result=auth_required root_err={query_error_detail} "
+                    f"connect_ms={connect_ms if connect_ms is not None else '-'} "
+                    f"auth_ms={auth_ms if auth_ms is not None else '-'} "
+                    f"enumerate_ms=- dump_ms=- total_ms={int((time.monotonic() - started) * 1000)}"
+                )
+                return _record(
+                    is_zookeeper=True,
+                    status="auth_required",
+                    auth_required=True,
+                    provided_credentials_ok=provided_credentials_ok,
+                    znode_count=None,
+                    znodes=None,
+                    znode_details=None,
+                    znode_values=None,
+                    znodes_truncated=False,
+                    query_znode_value=None,
+                    query_znode_dump=None,
+                    query_znode_dump_error="Access Denied",
+                    can_create_znode=None,
+                    can_delete_znode=None,
+                    znode_capability_error=None,
+                    auth_inference_source=auth_inference_source,
+                    auth_probe_trace=auth_probe_trace,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                    error=None,
                     connect_ms=connect_ms,
                     auth_ms=auth_ms,
                     enumerate_ms=None,
@@ -1244,6 +1300,13 @@ def _audit_zookeeper_host(
                 dump_error=dump_error_detail,
                 attempts=attempt + 1,
                 max_attempts=max_attempts,
+                znode_count_unknown=bool(root_retryable_after_auth and total_count == 0),
+                znode_count_partial=bool(root_retryable_after_auth and total_count > 0),
+                stage2_error=(
+                    f"root query failed: {_zk_error_name(_ZK_ERR_RETRYABLE_ROOT_QUERY)}"
+                    if root_retryable_after_auth
+                    else None
+                ),
             )
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             last_error = _friendly_error_from_exception(exc)

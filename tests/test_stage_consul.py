@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 
 from redposture_core import stage_consul as consul
+from redposture_core.modules.consul import render as consul_render
+from redposture_core.stage_runtime import build_render_plan, render_with_plan
 from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
 
 
@@ -522,6 +524,38 @@ def test_detail_lines_cover_transport_kv_and_services() -> None:
     assert "args=--dump" in joined
     assert "check_id=service:web-1" in joined
     assert "output=HTTP 200 OK" in joined
+
+
+def test_consul_generic_render_plan_includes_summary_and_detail_lines() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 8500,
+        "is_consul": True,
+        "version": "1.17.3",
+        "scheme": "http",
+        "anonymous_scopes": _scope_fixture(True, True, False),
+        "auth_mode": "token",
+        "auth_valid": True,
+        "auth_scopes": _scope_fixture(True, False, False),
+        "dump_requested": True,
+        "dump_all_requested": True,
+        "kv_dump_items": [{"key": "secret/app", "value": "topsecret"}],
+        "services_list_requested": True,
+        "services_list": [{"name": "web"}],
+    }
+
+    plan = build_render_plan(consul_render)
+    lines = render_with_plan(plan, record, "txt", debug=True)
+    joined = "\n".join(lines)
+
+    assert any(func.__name__ == "_format_consul_detail_lines" for func, _takes_debug in plan.details)
+    assert "Consul Agent" in joined
+    assert "anonymous partial access" in joined
+    assert "token auth" in joined
+    assert "[*] KV Dump" in joined
+    assert "secret/app=topsecret" in joined
+    assert "[*] Services" in joined
+    assert consul_render._format_consul_detail_lines(record, "json", debug=True) == []
 
 
 def test_audit_consul_targets_json_output_is_machine_readable(monkeypatch, tmp_path) -> None:

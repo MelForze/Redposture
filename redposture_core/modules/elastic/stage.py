@@ -17,7 +17,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 9200
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS: tuple[int, ...] | None = (9200, 19200)
 
 
 def build_elastic_plan(args: Any) -> AuditCommandPlan:

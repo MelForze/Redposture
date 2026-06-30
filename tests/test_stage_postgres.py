@@ -348,12 +348,17 @@ def test_collect_postgres_privileges_and_query_helpers(monkeypatch: pytest.Monke
     bool_results = iter([(None, "superuser denied"), (None, "program denied")])
     monkeypatch.setattr(postgres, "_pg_query_scalar_bool", lambda *_args, **_kwargs: next(bool_results))
     monkeypatch.setattr(postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: (None, "read denied"))
+    monkeypatch.setattr(
+        postgres,
+        "_pg_probe_readable_table_sample",
+        lambda *_args, **_kwargs: (None, None, "sample denied"),
+    )
     assert postgres._collect_postgres_privileges(object()) == (
         None,
         None,
         None,
         None,
-        "superuser denied; program denied; read denied",
+        "superuser denied; program denied; read denied; table read probe failed: sample denied",
     )
 
     monkeypatch.setattr(
@@ -374,10 +379,65 @@ def test_collect_postgres_privileges_and_query_helpers(monkeypatch: pytest.Monke
 def test_collect_postgres_privileges_read_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     bool_results = iter([(True, None), (False, None)])
     monkeypatch.setattr(postgres, "_pg_query_scalar_bool", lambda *_args, **_kwargs: next(bool_results))
-    int_results = iter([(None, "has_table_privilege denied"), (1, None)])
-    monkeypatch.setattr(postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: next(int_results))
+    monkeypatch.setattr(
+        postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: (None, "has_table_privilege denied")
+    )
+    query_rows = iter(
+        [
+            ([["public", "users"]], None),
+            ([], None),
+        ]
+    )
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: next(query_rows))
     result = postgres._collect_postgres_privileges(object())
+    assert result == (True, True, True, 1, None)
+
+
+def test_collect_postgres_privileges_read_fallback_all_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+    bool_results = iter([(True, None), (False, None)])
+    monkeypatch.setattr(postgres, "_pg_query_scalar_bool", lambda *_args, **_kwargs: next(bool_results))
+    monkeypatch.setattr(
+        postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: (None, "has_table_privilege denied")
+    )
+    query_rows = iter(
+        [
+            ([["public", "users"], ["audit", "events"]], None),
+            ([], "permission denied"),
+            ([], "permission denied"),
+        ]
+    )
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: next(query_rows))
+
+    result = postgres._collect_postgres_privileges(object())
+
     assert result == (True, True, False, 0, None)
+
+
+def test_collect_postgres_privileges_read_fallback_non_denied_stays_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bool_results = iter([(True, None), (False, None)])
+    monkeypatch.setattr(postgres, "_pg_query_scalar_bool", lambda *_args, **_kwargs: next(bool_results))
+    monkeypatch.setattr(
+        postgres, "_pg_query_scalar_int", lambda *_args, **_kwargs: (None, "has_table_privilege denied")
+    )
+    query_rows = iter(
+        [
+            ([["public", "users"]], None),
+            ([], "connection closed"),
+        ]
+    )
+    monkeypatch.setattr(postgres, "_pg_query_rows", lambda *_args, **_kwargs: next(query_rows))
+
+    result = postgres._collect_postgres_privileges(object())
+
+    assert result == (
+        True,
+        True,
+        None,
+        None,
+        "has_table_privilege denied; table read probe failed: connection closed",
+    )
 
 
 def test_postgres_scalar_scram_and_privesc_small_helpers(monkeypatch: pytest.MonkeyPatch) -> None:

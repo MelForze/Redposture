@@ -27,9 +27,13 @@ def configure_elastic_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=9200,
+        default=None,
         metavar="port",
-        help="Elasticsearch port spec: single port, list/range, or file (examples: 9200, 9200,19200, ./ports.txt).",
+        help=(
+            "Elasticsearch port spec: single port, list/range, or file "
+            "(examples: 9200, 9200,19200, ./ports.txt). "
+            "If omitted, scans 9200, 19200."
+        ),
     )
     add_multi_ports_flag(common)
     common.add_argument(

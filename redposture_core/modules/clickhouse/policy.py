@@ -52,12 +52,13 @@ def validate_args(args: Any, console: Any) -> int | None:
         console.error("--sql-shell cannot be combined with --sql-cmd")
         return 2
 
-    if bool(getattr(args, "sql_shell", False)) and cfg.output:
-        console.error("--sql-shell cannot be used with -o/--output")
+    shell_flag = "--os-shell" if os_shell else "--sql-shell"
+    if (os_shell or sql_shell) and cfg.output:
+        console.error(f"{shell_flag} cannot be used with -o/--output")
         return 2
-    if sql_shell:
+    if os_shell or sql_shell:
         if cfg.output_format != "txt":
-            console.error("--sql-shell requires --format txt")
+            console.error(f"{shell_flag} requires --format txt")
             return 2
         try:
             plan = build_basic_audit_plan(args, default_port=9000)
@@ -67,7 +68,7 @@ def validate_args(args: Any, console: Any) -> int | None:
         try:
             plan.require_single_target_spec()
         except ValueError as exc:
-            console.error(f"--sql-shell {exc}")
+            console.error(f"{shell_flag} {exc}")
             return 2
     return None
 

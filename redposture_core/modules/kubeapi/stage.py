@@ -15,7 +15,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 6443
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS: tuple[int, ...] | None = (6443, 16443)
 
 
 def build_kubeapi_plan(args: Any) -> AuditCommandPlan:

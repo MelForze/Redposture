@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -363,6 +364,56 @@ def test_oracle_helpers_parse_credentials_and_targets(tmp_path: Path) -> None:
     runs = oracle._credential_runs(None, None, defcreds=True, combo_list=str(combo))
     assert {item["username"] for item in runs} >= {"system", "scott"}
     assert oracle._target_candidates("FREEPDB1", None, None, None)[0] == {"service": "FREEPDB1", "sid": None}
+
+
+def test_run_oracle_stage_expands_default_and_list_credentials(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    combo = tmp_path / "combo.txt"
+    combo.write_text("combo_user:combo_pass\n", encoding="utf-8")
+    users = tmp_path / "users.txt"
+    users.write_text("spray_a\nspray_b\n", encoding="utf-8")
+    passwords = tmp_path / "passwords.txt"
+    passwords.write_text("shared_secret\n", encoding="utf-8")
+    captured_runs: list[tuple[str | None, str | None, str]] = []
+
+    class FakeRunner:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = (args, kwargs)
+
+        def run_plan(self, plan):
+            captured_runs.extend((run.username, run.password, run.source) for run in plan.credential_runs)
+            return type("Result", (), {"detected_count": 1})()
+
+    monkeypatch.setattr(oracle, "AuditCommandRunner", FakeRunner)
+
+    rc = oracle.run_oracle_stage(
+        _args(
+            defcreds=True,
+            combo_list=str(combo),
+            user_list=str(users),
+            pass_list=str(passwords),
+            spray_passwords=True,
+        ),
+        logger=object(),
+    )
+
+    assert rc == 0
+    assert ("combo_user", "combo_pass", "combo") in captured_runs
+    assert ("spray_a", "shared_secret", "spray") in captured_runs
+    assert ("spray_b", "shared_secret", "spray") in captured_runs
+    assert ("system", "oracle", "default") in captured_runs
+
+
+def test_run_oracle_stage_defcreds_can_return_weak_default_creds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_open(monkeypatch, auth_required=True)
+    out = tmp_path / "oracle.jsonl"
+
+    rc = oracle.run_oracle_stage(_args(defcreds=True, output=str(out), output_format="json"), logger=object())
+
+    assert rc == 0
+    records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(record.get("status") == "weak_default_creds" for record in records)
 
 
 def test_oracle_service_list_is_used_for_auth_fallback(monkeypatch: pytest.MonkeyPatch) -> None:

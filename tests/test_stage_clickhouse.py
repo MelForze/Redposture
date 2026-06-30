@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import logging
 from types import SimpleNamespace
 
@@ -311,6 +312,10 @@ def _clickhouse_validation_args(**overrides):
         ({"os_shell": True, "execute": "id"}, "--os-shell cannot be combined with --execute"),
         ({"sql_shell": True, "execute": "id"}, "--sql-shell cannot be combined with --execute"),
         ({"sql_shell": True, "sql_cmd": "select 1"}, "--sql-shell cannot be combined with --sql-cmd"),
+        ({"os_shell": True, "output": "out.txt"}, "--os-shell cannot be used with -o/--output"),
+        ({"os_shell": True, "output_format": "json"}, "--os-shell requires --format txt"),
+        ({"os_shell": True, "targets": "127.0.0.1,127.0.0.2"}, "--os-shell requires exactly one target host"),
+        ({"os_shell": True, "ports": "9000,9440"}, "--os-shell requires exactly one target host"),
         ({"sql_shell": True, "output": "out.txt"}, "--sql-shell cannot be used with -o/--output"),
         ({"sql_shell": True, "output_format": "json"}, "--sql-shell requires --format txt"),
         ({"sql_shell": True, "targets": "127.0.0.1,127.0.0.2"}, "--sql-shell requires exactly one target host"),
@@ -329,6 +334,14 @@ def test_clickhouse_policy_validation_negative_branches(overrides, expected) -> 
 def test_clickhouse_policy_validation_accepts_valid_sql_shell() -> None:
     console = _ValidationConsole()
     rc = clickhouse_policy.validate_args(_clickhouse_validation_args(sql_shell=True), console)
+
+    assert rc is None
+    assert console.messages == []
+
+
+def test_clickhouse_policy_validation_accepts_valid_os_shell() -> None:
+    console = _ValidationConsole()
+    rc = clickhouse_policy.validate_args(_clickhouse_validation_args(os_shell=True), console)
 
     assert rc is None
     assert console.messages == []
@@ -989,6 +1002,56 @@ def test_run_clickhouse_stage_rejects_sql_shell_with_output(monkeypatch: pytest.
     )
 
     assert clickhouse_stage.run_clickhouse_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None)) == 2
+
+
+def test_run_clickhouse_stage_os_shell_executes_command(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(clickhouse_stage, "_configure_clickhouse_loggers", lambda: None)
+    monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: object())
+    monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_connect_module", lambda: object())
+    monkeypatch.setattr(clickhouse_stage, "_load_readline_module", lambda: None)
+    monkeypatch.setattr(clickhouse_stage, "_add_readline_history", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "_audit_clickhouse_host",
+        lambda **_kwargs: {
+            "host": "127.0.0.1",
+            "port": 9000,
+            "protocol": "native",
+            "is_clickhouse": True,
+            "status": "valid_credentials",
+            "auth_required": False,
+            "effective_username": "default",
+            "effective_password": "",
+            "read_capability": True,
+            "execute_capability": True,
+            "admin_capability": False,
+            "database_names": ["default"],
+        },
+    )
+    inputs = iter(["id", "exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(inputs))
+    captured: dict[str, object] = {}
+
+    def fake_execute_once(**kwargs):
+        captured.update(kwargs)
+        return ["uid=1000(redposture)"], None
+
+    monkeypatch.setattr(clickhouse_stage, "_run_execute_command_once", fake_execute_once)
+
+    rc = clickhouse_stage.run_clickhouse_stage(
+        _clickhouse_validation_args(os_shell=True),
+        logger=SimpleNamespace(log=lambda *_a, **_k: None),
+    )
+
+    assert rc == 0
+    assert captured["command"] == "id"
+    assert captured["username"] == "default"
+    assert captured["protocol"] == "native"
+    stdout = capsys.readouterr().out
+    assert "clickhouse os-shell ready" in stdout
+    assert "uid=1000(redposture)" in stdout
 
 
 def test_call_audit_clickhouse_host_with_stage_debug_adds_stage_telemetry(

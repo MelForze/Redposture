@@ -36,9 +36,13 @@ def configure_zookeeper_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=2181,
+        default=None,
         metavar="port",
-        help="ZooKeeper port spec: single port, list/range, or file (examples: 2181, 2181,22181, ./ports.txt).",
+        help=(
+            "ZooKeeper port spec: single port, list/range, or file "
+            "(examples: 2181, 2181,22181, ./ports.txt). "
+            "If omitted, scans 2181, 12181."
+        ),
     )
     add_multi_ports_flag(common)
     common.add_argument(

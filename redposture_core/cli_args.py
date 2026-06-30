@@ -458,7 +458,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    original_raw_argv = list(raw_argv)
     raw_argv = _normalize_multi_port_port_flag(raw_argv)
     parser = build_parser()
 
@@ -497,8 +496,4 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(f"module command is required: {command_names_for_error()}")
 
     parsed = parser.parse_args(raw_argv)
-    if getattr(parsed, "command", None) == COMMAND_DOCKER:
-        parsed._docker_port_explicit = any(
-            token == "--port" or str(token).startswith("--port=") for token in original_raw_argv
-        )
     return parsed

@@ -478,7 +478,6 @@ def test_docker_help_sections_and_parse_flags() -> None:
     )
     assert args.command == COMMAND_DOCKER
     assert args.port == 2376
-    assert args._docker_port_explicit is True
     assert args.insecure is True
     assert args.tls_ca == "ca.pem"
     assert args.tls_cert == "cert.pem"
@@ -490,12 +489,6 @@ def test_docker_help_sections_and_parse_flags() -> None:
     assert args.system is True
     assert args.container == "web"
     assert args.exec_cmd == "id"
-
-
-def test_docker_default_port_marker_when_port_is_omitted() -> None:
-    args = parse_args(["docker", "-t", "127.0.0.1"])
-    assert args.port == 2375
-    assert args._docker_port_explicit is False
 
 
 def test_oracle_help_sections_and_parse_flags() -> None:
@@ -1707,7 +1700,7 @@ def test_registry_port_file_in_port_flag_is_normalized(tmp_path) -> None:
     ports_file.write_text("15000\n15002\n", encoding="utf-8")
     args = parse_args(["registry", "-t", "10.0.0.9", "--port", str(ports_file)])
     assert args.command == "registry"
-    assert args.port == 5000
+    assert args.port is None
     assert args.ports == str(ports_file)
 
 

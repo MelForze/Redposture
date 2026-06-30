@@ -17,7 +17,7 @@ from .exporters.discover import scan_exporter_presence
 from .exporters.output import emit_line as emit_output_line
 from .exporters.output import format_collect_record
 from .logger import AttemptLogger
-from .profiles import load_profiles
+from .profiles import default_exporter_ports, load_profiles
 from .stage_validate import VALIDATION_PRECISION_COLLECT_STRICT, ValidationRecordAccumulator
 from .utils import (
     DEFAULT_MAX_NETWORK_HOSTS,
@@ -472,9 +472,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if target_plan.target_count > DEFAULT_MAX_NETWORK_HOSTS:
         if args.debug:
             console.debug(f"pass=1 detect start total={target_plan.target_count}")
-        default_ports = list(
-            dict.fromkeys(int(port_raw) for item in discovery_exporters if (port_raw := item.get("port")) is not None)
-        )
+        default_ports = default_exporter_ports(discovery_exporters)
         scan_checks = 0
         scan_found = 0
         requests = 0
@@ -609,9 +607,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             console.error(f"failed to process collect discovery scan: {exc}")
             return 2
     else:
-        default_ports = list(
-            dict.fromkeys(int(port_raw) for item in discovery_exporters if (port_raw := item.get("port")) is not None)
-        )
+        default_ports = default_exporter_ports(discovery_exporters)
         execution_groups = build_scan_execution_groups(
             target_specs,
             custom_ports or default_ports,

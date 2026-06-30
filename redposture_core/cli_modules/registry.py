@@ -26,9 +26,13 @@ def configure_registry_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=5000,
+        default=None,
         metavar="port",
-        help="Docker Registry port spec: single port, list/range, or file (examples: 5000, 5000,15000-15002, ./ports.txt).",
+        help=(
+            "Docker Registry port spec: single port, list/range, or file "
+            "(examples: 5000, 5000,15000-15002, ./ports.txt). "
+            "If omitted, scans 5000, 15000."
+        ),
     )
     add_multi_ports_flag(common)
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")

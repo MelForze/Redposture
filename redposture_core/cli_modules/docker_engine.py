@@ -23,9 +23,9 @@ def configure_docker_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=2375,
+        default=None,
         metavar="port",
-        help="Docker Engine API port. If omitted, docker scans 2375,2376,4243.",
+        help="Docker Engine API port. If omitted, scans 2375, 2376, 4243, 12375, 12376.",
     )
     add_multi_ports_flag(common)
     add_save_flag(

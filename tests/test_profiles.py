@@ -12,6 +12,7 @@ from redposture_core.profiles import (
     _validate_collect_exporters,
     _validate_discovery_exporters,
     _validate_trigger_exporters,
+    default_exporter_ports,
     load_profiles,
 )
 
@@ -156,3 +157,36 @@ def test_load_profiles_rejects_non_object_json(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="profiles file must be a JSON object"):
         load_profiles(str(profiles_file))
+
+
+def test_default_exporter_ports_adds_plus_10k_fallback() -> None:
+    exporters = [
+        {"name": "node_exporter", "port": 9100},
+        {"name": "postgres_exporter", "port": 9187},
+        {"name": "mongodb_exporter", "port": 27017},
+    ]
+    ports = default_exporter_ports(exporters)
+    assert 9100 in ports and 19100 in ports
+    assert 9187 in ports and 19187 in ports
+    assert 27017 in ports
+    assert 37017 not in ports
+
+
+def test_default_exporter_ports_deduplicates() -> None:
+    exporters = [
+        {"name": "primary", "port": 9100},
+        {"name": "duplicate", "port": 9100},
+        {"name": "preexisting_secondary", "port": 19100},
+    ]
+    ports = default_exporter_ports(exporters)
+    assert ports.count(9100) == 1
+    assert ports.count(19100) == 1
+
+
+def test_default_exporter_ports_ignores_missing_port() -> None:
+    exporters = [
+        {"name": "no_port"},
+        {"name": "real", "port": 9115},
+    ]
+    ports = default_exporter_ports(exporters)
+    assert ports == [9115, 19115]

@@ -331,6 +331,7 @@ class AuditCommandPlan:
     workers: int = 1
     append: bool = False
     target_window_size: int = DEFAULT_STREAM_TARGET_WINDOW_SIZE
+    requested_target_count: int | None = None
 
     @property
     def target_count(self) -> int:
@@ -339,6 +340,10 @@ class AuditCommandPlan:
         if self.target_specs_by_port:
             return sum(len(specs) for specs in self.target_specs_by_port.values())
         return sum(len(hosts) for hosts in self.targets_by_port.values())
+
+    @property
+    def fallback_target_count(self) -> int:
+        return int(self.requested_target_count or self.target_count)
 
     @property
     def credential_run_count(self) -> int:
@@ -534,9 +539,11 @@ def build_basic_audit_plan(
         groups = build_scan_execution_groups(target_specs, ports)
         targets_by_port: dict[int, tuple[str, ...]] = {}
         target_specs_by_port: dict[int, tuple[ScanTargetSpec, ...]] = {}
+        requested_target_count = 0
         for group in groups:
             port = int(group.port)
             group_hosts = [str(host) for host in group.hosts]
+            requested_target_count += len(group_hosts)
             group_hosts = filter_open_tcp_hosts_for_credential_file(
                 group_hosts,
                 port,
@@ -559,6 +566,7 @@ def build_basic_audit_plan(
             output_path=cfg.output,
             output_format=cfg.output_format,
             workers=cfg.workers,
+            requested_target_count=requested_target_count,
         )
 
     return AuditCommandPlan(
@@ -831,6 +839,8 @@ def _record_looks_detected(record: dict[str, Any]) -> bool:
     if any(bool(value) for key, value in record.items() if key.startswith("is_")):
         return True
     status = str(record.get("status") or "")
+    if status.startswith("not_"):
+        return False
     return status not in {"fail", "not_detected", "not_found", "not_service"}
 
 
@@ -971,7 +981,12 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
     if name == "credential_candidates":
         if credential.username is not None:
             return [
-                {"username": credential.username, "password": credential.password or "", "source": credential.source}
+                {
+                    "username": credential.username,
+                    "password": credential.password or "",
+                    "source": credential.source,
+                    "default": credential.source == "default",
+                }
             ]
         builder = getattr(args, "_credential_candidates", None)
         if builder is not None:
@@ -1222,21 +1237,7 @@ class AuditCommandRunner:
         try:
             for window in plan.iter_target_windows():
                 window_index += 1
-                pending_emit_records: dict[int, AuditRecord] = {}
-                next_emit_idx = int(window[0][0]) if window else 0
                 detected_targets: list[tuple[int, str, int, ScanTargetSpec | None, AuditRecord]] = []
-
-                def _queue_final_record(
-                    idx: int,
-                    record: AuditRecord,
-                    pending_emit_records=pending_emit_records,
-                ) -> None:
-                    nonlocal next_emit_idx
-                    pending_emit_records[int(idx)] = record
-                    while next_emit_idx in pending_emit_records:
-                        ready_record = pending_emit_records.pop(next_emit_idx)
-                        _finalize_record(ready_record)
-                        next_emit_idx += 1
 
                 for (idx, host, port, target), detect_record in scheduler.iter_completed(
                     window,
@@ -1251,7 +1252,7 @@ class AuditCommandRunner:
                             debug_emit(
                                 format_stage2_gate(host, int(port), "skip", self._not_detected_reason(detect_record))
                             )
-                        _queue_final_record(int(idx), detect_record)
+                        _finalize_record(detect_record)
                     progress.advance(1)
 
                 initial_deep_candidates = [
@@ -1296,7 +1297,7 @@ class AuditCommandRunner:
 
                 if detected_targets:
                     progress.add_total(len(detected_targets))
-                for (idx, _host, _port, _target, _detect_record), final_record in deep_scheduler.iter_completed(
+                for (_idx, _host, _port, _target, _detect_record), final_record in deep_scheduler.iter_completed(
                     detected_targets,
                     lambda item: self._safe_record(
                         item[1],
@@ -1306,14 +1307,9 @@ class AuditCommandRunner:
                         ),
                     ),
                 ):
-                    _queue_final_record(int(idx), final_record)
+                    _finalize_record(final_record)
                     processed_deep += int(self._deep_gate(final_record)[0])
                     progress.advance(1)
-
-                if pending_emit_records:
-                    for idx, _host, _port, _target in window:
-                        if idx in pending_emit_records:
-                            _finalize_record(pending_emit_records.pop(idx))
         finally:
             progress.close()
         if debug_emit is not None:
@@ -1329,11 +1325,14 @@ class AuditCommandRunner:
                 )
             debug_emit(format_pass_marker(2, "deep", "complete", processed=processed_deep))
 
-        if emitted_lines == 0 and record_count > 0 and plan.output_format != "json":
-            if record_count > 1:
-                sink.emit_many((f"[*] No {self.spec.label} service detected on {record_count} target(s)",))
+        fallback_target_count = record_count or plan.fallback_target_count
+        if emitted_lines == 0 and fallback_target_count > 0 and plan.output_format != "json":
+            if fallback_target_count > 1:
+                fallback_lines = (f"[*] No {self.spec.label} service detected on {fallback_target_count} target(s)",)
             else:
-                sink.emit_many((f"[*] No {self.spec.label} service detected on target",))
+                fallback_lines = (f"[*] No {self.spec.label} service detected on target",)
+            emitted_lines += len(fallback_lines)
+            sink.emit_many(fallback_lines)
 
         try:
             return AuditCommandResult(

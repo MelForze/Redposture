@@ -1491,10 +1491,11 @@ def test_audit_zookeeper_inference_maps_consistent_err_124_to_auth_required(
         max_znodes=100,
     )
 
-    assert record["status"] == "fail"
+    assert record["status"] == "auth_required"
     assert record["auth_required"] is True
     assert record["auth_inference_source"] == "probe_retryable_124"
     assert record["auth_probe_trace"] == ["/:err_-124", "/zookeeper:err_-124", "/zookeeper/config:err_-124"]
+    assert "authentication required" in _format_record(record, "txt")
 
 
 def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(monkeypatch) -> None:
@@ -1682,6 +1683,110 @@ def test_audit_zookeeper_retries_retryable_root_query_and_reports_query_auth(mon
     assert record["query_znode_value"] == "/secure:<Access Denied>"
     assert record["query_znode_dump_error"] is None
     assert any("retry_decision stage=detect_protocol" in line for line in record.get("debug_events") or [])
+
+
+def test_audit_zookeeper_repeated_retryable_root_query_reports_auth_required(monkeypatch) -> None:
+    calls = {"root": 0}
+
+    class _RetryableRootClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def get_children2(self, path: str):
+            assert path == "/"
+            calls["root"] += 1
+            return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _RetryableRootClient)
+    monkeypatch.setattr("redposture_core.stage_zookeeper._retry_delay", lambda _attempt: 0.0)
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
+        lambda *_a, **_k: (True, "probe_retryable_124", ["/:err_-124", "/zookeeper:err_-124"]),
+    )
+
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert calls["root"] == 2
+    assert record["status"] == "auth_required"
+    assert record["auth_required"] is True
+    assert record["auth_inference_source"] == "probe_retryable_124"
+    rendered = _format_record(record, "txt")
+    assert "authentication required" in rendered
+    assert "connection failed" not in rendered
+    assert "ERR_-124" not in rendered
+
+
+def test_audit_zookeeper_digest_ok_retryable_root_query_is_not_connection_failure(monkeypatch) -> None:
+    class _RetryableAfterDigestClient:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.authed = False
+
+        def connect(self) -> None:
+            return
+
+        def close(self) -> None:
+            return
+
+        def auth_digest(self, _username: str, _password: str):
+            self.authed = True
+            return True, None
+
+        def get_children2(self, path: str):
+            assert path == "/"
+            return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+
+    monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _RetryableAfterDigestClient)
+    monkeypatch.setattr("redposture_core.stage_zookeeper._retry_delay", lambda _attempt: 0.0)
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
+        lambda *_a, **_k: (True, "probe_retryable_124", ["/:err_-124", "/zookeeper:err_-124"]),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._probe_znode_create_delete",
+        lambda *_a, **_k: (None, None, None),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._enumerate_znodes",
+        lambda *_a, **_k: ([], 0, False, {}, "getChildren failed for /: ERR_-124"),
+    )
+
+    record = _audit_zookeeper_host(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.2,
+        retries=0,
+        username="admin",
+        password="admin",
+        show_znodes=True,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+    )
+
+    assert record["status"] == "valid_credentials"
+    assert record["provided_credentials_ok"] is True
+    assert record["znode_count_unknown"] is True
+    assert record["stage2_error"] == "root query failed: ERR_-124"
+    rendered = _format_record(record, "txt")
+    assert "admin:admin" in rendered
+    assert "connection failed" not in rendered
 
 
 def test_format_znodes_detail_records_cover_text_and_json_paths() -> None:
