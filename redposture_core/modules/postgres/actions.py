@@ -583,10 +583,12 @@ def _collect_postgres_privileges(
         ),
     )
     if readable_tables is None and readable_tables_error:
-        fallback_ok, _ = _pg_query_scalar_int(sock, "SELECT 1 FROM pg_catalog.pg_tables LIMIT 1")
-        if fallback_ok is not None:
-            readable_tables = 0
+        sample_can_read, sample_readable_tables, sample_error = _pg_probe_readable_table_sample(sock)
+        if sample_can_read is not None:
+            readable_tables = sample_readable_tables
             readable_tables_error = None
+        elif sample_error:
+            readable_tables_error = f"{readable_tables_error}; table read probe failed: {sample_error}"
 
     can_execute_commands: bool | None
     if superuser is None and can_program is None:
@@ -611,6 +613,61 @@ def _collect_postgres_privileges(
     ]
     query_error = "; ".join(errors) if errors else None
     return superuser, can_execute_commands, can_read_tables, readable_tables, query_error
+
+
+def _pg_probe_readable_table_sample(
+    sock: socket.socket,
+    *,
+    limit: int = 8,
+) -> tuple[bool | None, int | None, str | None]:
+    rows, error = _pg_query_rows(
+        sock,
+        (
+            "SELECT table_schema, table_name "
+            "FROM information_schema.tables "
+            "WHERE table_schema NOT IN ('pg_catalog', 'information_schema') "
+            "AND table_type IN ('BASE TABLE', 'VIEW', 'FOREIGN TABLE') "
+            "ORDER BY table_schema, table_name "
+            f"LIMIT {max(1, int(limit))}"
+        ),
+    )
+    if error:
+        return None, None, error
+
+    candidates: list[tuple[str, str]] = []
+    for row in rows:
+        if len(row) < 2:
+            continue
+        schema = str(row[0] or "").strip()
+        table = str(row[1] or "").strip()
+        if schema and table:
+            candidates.append((schema, table))
+    if not candidates:
+        return False, 0, None
+
+    last_error: str | None = None
+    denied_count = 0
+    for schema, table in candidates:
+        sql_ident = f"{_pg_quote_ident(schema)}.{_pg_quote_ident(table)}"
+        _rows, probe_error = _pg_query_rows(sock, f"SELECT 1 FROM {sql_ident} LIMIT 1")
+        if probe_error is None:
+            return True, 1, None
+        last_error = probe_error
+        if _pg_read_probe_error_is_denied(probe_error):
+            denied_count += 1
+    if denied_count == len(candidates):
+        return False, 0, last_error
+    return None, None, last_error
+
+
+def _pg_read_probe_error_is_denied(error: str) -> bool:
+    normalized = error.lower()
+    return (
+        "permission denied" in normalized
+        or "insufficient privilege" in normalized
+        or "insufficient privileges" in normalized
+        or "sqlstate 42501" in normalized
+    )
 
 
 def _pg_bool_text(value: bool | None) -> str:

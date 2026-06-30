@@ -42,7 +42,6 @@ def _args(**overrides: object) -> argparse.Namespace:
         "hosts": None,
         "port": 2375,
         "ports": None,
-        "_docker_port_explicit": True,
         "timeout": 1.0,
         "workers": 1,
         "retries": 0,
@@ -218,6 +217,20 @@ def test_auth_required_and_not_docker_branches(monkeypatch: pytest.MonkeyPatch) 
     not_docker = docker_stage._audit_docker_host("127.0.0.1", 1234, 1.0, 0)
     assert not_docker["status"] == "not_docker"
     assert "not Docker Engine API endpoint" in docker_stage._format_record(not_docker, "txt")
+
+
+def test_run_docker_stage_not_service_emits_explicit_line(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    def not_docker_probe(*_args, **_kwargs):
+        return None, None, None, "not Docker Engine API endpoint (status:404)", False
+
+    monkeypatch.setattr(docker_stage, "_probe_docker", not_docker_probe)
+
+    rc = docker_stage.run_docker_stage(_args(port=1234, workers=1), logger=object())
+
+    assert rc == 0
+    stdout = capsys.readouterr().out
+    assert "not Docker Engine API endpoint" in stdout
+    assert "Docker Engine API (auth required:unknown)" not in stdout
 
 
 def test_probe_docker_transport_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:

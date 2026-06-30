@@ -118,6 +118,30 @@ def _validate_collect_endpoints(raw: Any) -> tuple[str, ...]:
     return tuple(endpoints)
 
 
+def default_exporter_ports(exporters: list[dict[str, Any]] | tuple[dict[str, Any], ...]) -> list[int]:
+    """Return port list to scan when no `--ports` was specified.
+
+    Includes primary exporter ports plus a `+10000` fallback for each port
+    below 10000 (e.g. `node_exporter` 9100 also probes 19100). This matches
+    real-world conventions where ops run a second instance on a shifted port
+    for staging/replica deployments without changing the exporter port range.
+    """
+    primary: list[int] = []
+    seen: set[int] = set()
+    for item in exporters:
+        port_value = item.get("port")
+        if port_value is None:
+            continue
+        port = int(port_value)
+        if port in seen:
+            continue
+        seen.add(port)
+        primary.append(port)
+    secondary = [port + 10000 for port in primary if port < 10000 and (port + 10000) not in seen]
+    seen.update(secondary)
+    return primary + secondary
+
+
 def _default_profiles() -> dict[str, Any]:
     return {
         "trigger_exporters": [dict(item) for item in SCAN_EXPORTERS],

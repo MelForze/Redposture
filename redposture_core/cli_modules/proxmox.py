@@ -27,9 +27,13 @@ def configure_proxmox_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=8006,
+        default=None,
         metavar="port",
-        help="Proxmox API port spec: single port, list/range, or file (examples: 8006, 8006,18006, ./ports.txt).",
+        help=(
+            "Proxmox API port spec: single port, list/range, or file "
+            "(examples: 8006, 8006,18006, ./ports.txt). "
+            "If omitted, scans 8006, 18006."
+        ),
     )
     add_multi_ports_flag(common)
     common.add_argument(

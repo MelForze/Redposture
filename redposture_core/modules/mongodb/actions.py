@@ -777,8 +777,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
         return f"{prefix} [!] invalid credentials {username}:{password_text}; anonymous access still available {_caps_suffix(record)}"
     if status == "auth_required":
-        attempts = record.get("credential_attempts")
-        if isinstance(attempts, list) and len(attempts) > 1:
+        attempts = _credential_attempt_rows(record)
+        if len(attempts) > 1:
             return ""
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "-")
@@ -790,11 +790,41 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     return f"{prefix} [!] connection failed err={err}"
 
 
+def _credential_attempt_rows(record: dict[str, Any]) -> list[dict[str, Any]]:
+    attempted_rows = _generic_credential_attempt_rows(record.get("attempted_credentials"))
+    if len(attempted_rows) > 1:
+        return attempted_rows
+    attempts = record.get("credential_attempts")
+    if isinstance(attempts, list) and attempts:
+        return [item for item in attempts if isinstance(item, dict)]
+    return attempted_rows
+
+
+def _generic_credential_attempt_rows(attempted_credentials: Any) -> list[dict[str, Any]]:
+    if not isinstance(attempted_credentials, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in attempted_credentials:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "")
+        rows.append(
+            {
+                "username": item.get("username"),
+                "password": item.get("password"),
+                "ok": status in {"open_no_auth", "valid_credentials", "weak_default_creds"},
+                "default": item.get("source") == "default",
+                "error": status or None,
+            }
+        )
+    return rows
+
+
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
     if str(record.get("status") or "") != "auth_required":
         return []
-    attempts = record.get("credential_attempts")
-    if not isinstance(attempts, list) or len(attempts) < 2:
+    attempts = _credential_attempt_rows(record)
+    if len(attempts) < 2:
         return []
     if output_format == "json":
         return []

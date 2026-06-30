@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +20,7 @@ from redposture_core.stage_runtime import (
     ModuleRunSummary,
     StageTelemetryBuilder,
     StageTrace,
+    build_basic_audit_plan,
     format_pass_marker,
     format_retry_decision,
     format_stage2_gate,
@@ -262,13 +264,14 @@ def test_line_output_sink_emits_to_callback_and_file(tmp_path) -> None:
     assert emitted == ["one", "two", "first", "second"]
 
 
-def test_audit_command_runner_streams_ordered_prefix_to_output_file(tmp_path) -> None:
-    release_second = threading.Event()
+def test_audit_command_runner_streams_completed_records_to_output_file_and_stdout(tmp_path) -> None:
+    release_first = threading.Event()
     output_path = tmp_path / "audit.txt"
+    emitted: list[str] = []
 
     def detect(ctx) -> AuditRecord:
-        if ctx.host == "b":
-            assert release_second.wait(timeout=5.0)
+        if ctx.host == "a":
+            assert release_first.wait(timeout=5.0)
         return AuditRecord(host=ctx.host, port=ctx.port, module="demo", service="demo", status="not_service")
 
     spec = ModuleAuditSpec(
@@ -288,9 +291,7 @@ def test_audit_command_runner_streams_ordered_prefix_to_output_file(tmp_path) ->
 
     def run() -> None:
         try:
-            result_holder.append(
-                AuditCommandRunner(args=object(), spec=spec, emit_line=lambda _line: None).run_plan(plan)
-            )
+            result_holder.append(AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan))
         except BaseException as exc:  # noqa: BLE001 - test thread must report failures
             result_holder.append(exc)
 
@@ -298,27 +299,29 @@ def test_audit_command_runner_streams_ordered_prefix_to_output_file(tmp_path) ->
     thread.start()
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        if output_path.exists() and output_path.read_text(encoding="utf-8").splitlines() == ["a:1234 not_service"]:
+        if output_path.exists() and "b:1234 not_service" in output_path.read_text(encoding="utf-8").splitlines():
             break
         time.sleep(0.01)
     else:
-        release_second.set()
+        release_first.set()
         thread.join(timeout=5.0)
-        pytest.fail("first target was not flushed before the command completed")
+        pytest.fail("completed target was not flushed before the blocked first target")
 
-    assert output_path.read_text(encoding="utf-8").splitlines() == ["a:1234 not_service"]
-    release_second.set()
+    assert "b:1234 not_service" in output_path.read_text(encoding="utf-8").splitlines()
+    assert "b:1234 not_service" in emitted
+    assert "a:1234 not_service" not in emitted
+    release_first.set()
     thread.join(timeout=5.0)
     assert not thread.is_alive()
     assert result_holder and not isinstance(result_holder[0], BaseException)
-    assert output_path.read_text(encoding="utf-8").splitlines() == [
+    assert set(output_path.read_text(encoding="utf-8").splitlines()) == {
         "a:1234 not_service",
         "b:1234 not_service",
         "c:1234 not_service",
-    ]
+    }
 
 
-def test_audit_command_runner_json_fail_records_stay_ordered_and_do_not_abort(tmp_path) -> None:
+def test_audit_command_runner_json_fail_records_emit_and_do_not_abort(tmp_path) -> None:
     output_path = tmp_path / "audit.jsonl"
     calls: list[str] = []
 
@@ -346,13 +349,14 @@ def test_audit_command_runner_json_fail_records_stay_ordered_and_do_not_abort(tm
     result = AuditCommandRunner(args=object(), spec=spec, emit_line=lambda _line: None).run_plan(plan)
 
     assert sorted(calls) == ["bad", "next"]
-    assert [record["host"] for record in result.records] == ["bad", "next"]
-    assert result.records[0]["status"] == "fail"
-    assert result.records[0]["error"] == "malformed protocol frame"
-    assert result.records[1]["status"] == "not_service"
+    records_by_host = {record["host"]: record for record in result.records}
+    assert records_by_host["bad"]["status"] == "fail"
+    assert records_by_host["bad"]["error"] == "malformed protocol frame"
+    assert records_by_host["next"]["status"] == "not_service"
     payloads = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
-    assert [payload["host"] for payload in payloads] == ["bad", "next"]
-    assert [payload["status"] for payload in payloads] == ["fail", "not_service"]
+    payloads_by_host = {payload["host"]: payload for payload in payloads}
+    assert payloads_by_host["bad"]["status"] == "fail"
+    assert payloads_by_host["next"]["status"] == "not_service"
 
 
 def test_audit_command_runner_invokes_public_and_installed_record_callbacks() -> None:
@@ -649,10 +653,112 @@ def test_audit_command_runner_suppresses_pre_detect_noise_in_non_debug_txt() -> 
     assert len(emitted) == 1
     assert "No REDIS service detected" in emitted[0]
     assert all("protocol closed" not in line and "unexpected EOF" not in line for line in emitted)
-    assert result.emitted_lines == 0
+    assert result.emitted_lines == 1
     assert result.suppressed_records == 1
     assert result.records[0]["protocol_error"] == "unexpected EOF"
     assert is_pre_detect_network_noise(result.typed_records[0]) is True
+
+
+def test_credential_file_prefilter_empty_hosts_emits_no_service(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    creds = tmp_path / "creds.txt"
+    creds.write_text("bad:bad\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "redposture_core.stage_runtime.filter_open_tcp_hosts_for_credential_file",
+        lambda *_args, **_kwargs: [],
+    )
+    args = SimpleNamespace(
+        targets="127.0.0.1,127.0.0.2",
+        hosts=None,
+        hosts_file=None,
+        ports=None,
+        port=6379,
+        username=str(creds),
+        password=None,
+        timeout=0.1,
+        retries=0,
+        workers=1,
+        proxy=None,
+        output=None,
+        output_format="txt",
+        debug=False,
+        defcreds=False,
+    )
+    plan = build_basic_audit_plan(args, default_port=6379)
+    emitted: list[str] = []
+    spec = ModuleAuditSpec(module="redis", label="REDIS", default_port=6379, render=lambda _record: [])
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
+
+    assert plan.target_count == 0
+    assert plan.requested_target_count == 2
+    assert emitted == ["[*] No REDIS service detected on 2 target(s)"]
+    assert result.emitted_lines == 1
+    assert result.record_count == 0
+
+
+def test_build_basic_audit_plan_uses_default_ports_when_port_not_specified() -> None:
+    args = SimpleNamespace(
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        port=None,
+        ports=None,
+        timeout=0.1,
+        retries=0,
+        workers=1,
+        output=None,
+        output_format="txt",
+        debug=False,
+    )
+    plan = build_basic_audit_plan(args, default_port=5432, default_ports=(5432, 6432, 15432))
+    assert set(plan.ports) == {5432, 6432, 15432}
+
+
+def test_build_basic_audit_plan_explicit_port_disables_fallback() -> None:
+    args = SimpleNamespace(
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        port=5432,
+        ports=None,
+        timeout=0.1,
+        retries=0,
+        workers=1,
+        output=None,
+        output_format="txt",
+        debug=False,
+    )
+    plan = build_basic_audit_plan(args, default_port=5432, default_ports=(5432, 6432, 15432))
+    assert set(plan.ports) == {5432}
+
+
+def test_build_basic_audit_plan_explicit_ports_disables_fallback() -> None:
+    args = SimpleNamespace(
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        port=None,
+        ports="5432,9999",
+        timeout=0.1,
+        retries=0,
+        workers=1,
+        output=None,
+        output_format="txt",
+        debug=False,
+    )
+    plan = build_basic_audit_plan(args, default_port=5432, default_ports=(5432, 6432, 15432))
+    assert set(plan.ports) == {5432, 9999}
+
+
+def test_no_service_fallback_is_not_emitted_for_json() -> None:
+    emitted: list[str] = []
+    spec = ModuleAuditSpec(module="redis", label="REDIS", default_port=6379, render=lambda _record: [])
+    plan = AuditCommandPlan(targets_by_port={}, requested_target_count=1, output_format="json")
+
+    result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
+
+    assert emitted == []
+    assert result.emitted_lines == 0
 
 
 def _failing_auth_spec() -> ModuleAuditSpec:

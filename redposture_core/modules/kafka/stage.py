@@ -17,7 +17,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 9092
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS: tuple[int, ...] | None = (9092, 19092)
 
 
 def build_kafka_plan(args: Any) -> AuditCommandPlan:

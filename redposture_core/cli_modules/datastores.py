@@ -33,9 +33,13 @@ def configure_redis_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=6379,
+        default=None,
         metavar="port",
-        help="Redis port spec: single port, list/range, or file (examples: 6379, 6379,16379, ./ports.txt).",
+        help=(
+            "Redis port spec: single port, list/range, or file "
+            "(examples: 6379, 6379,16379, ./ports.txt). "
+            "If omitted, scans 6379, 16379, 26379."
+        ),
     )
     add_multi_ports_flag(common)
     auth.add_argument(
@@ -124,9 +128,13 @@ def configure_etcd_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=2379,
+        default=None,
         metavar="port",
-        help="etcd port spec: single port, list/range, or file (examples: 2379, 2379,22379, ./ports.txt).",
+        help=(
+            "etcd port spec: single port, list/range, or file "
+            "(examples: 2379, 2379,22379, ./ports.txt). "
+            "If omitted, scans 2379, 12379."
+        ),
     )
     add_multi_ports_flag(common)
     actions.add_argument(
@@ -197,9 +205,13 @@ def configure_kafka_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=9092,
+        default=None,
         metavar="port",
-        help="Kafka port spec: single port, list/range, or file (examples: 9092, 9092,29092, ./ports.txt).",
+        help=(
+            "Kafka port spec: single port, list/range, or file "
+            "(examples: 9092, 9092,29092, ./ports.txt). "
+            "If omitted, scans 9092, 19092."
+        ),
     )
     add_multi_ports_flag(common)
     auth.add_argument(

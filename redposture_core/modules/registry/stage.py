@@ -15,7 +15,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 5000
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS: tuple[int, ...] | None = (5000, 15000)
 
 
 def build_registry_plan(args: Any) -> AuditCommandPlan:

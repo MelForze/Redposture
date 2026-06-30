@@ -18,7 +18,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 5432
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS: tuple[int, ...] | None = (5432, 6432, 15432)
 
 
 def build_postgres_plan(args: Any) -> AuditCommandPlan:
@@ -103,8 +103,14 @@ def _normalize_postgres_action_args(args: Any) -> None:
     args.dump_row_limit = dump_flag_limit(getattr(args, "dump", None))
 
 
+def _force_single_default_port(args: Any) -> None:
+    if getattr(args, "port", None) is None and getattr(args, "ports", None) is None:
+        args.port = _DEFAULT_PORT
+
+
 def _run_postgres_shell(args: Any, console: Any) -> int:
     cfg = AuditConfig.from_namespace(args)
+    _force_single_default_port(args)
     try:
         plan = build_postgres_plan(args)
     except ValueError as exc:

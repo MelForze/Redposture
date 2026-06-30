@@ -15,11 +15,16 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 9000
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS: tuple[int, ...] | None = (9000, 19000)
 
 
 def build_clickhouse_plan(args: Any) -> AuditCommandPlan:
     return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+
+
+def _force_single_default_port(args: Any) -> None:
+    if getattr(args, "port", None) is None and getattr(args, "ports", None) is None:
+        args.port = _DEFAULT_PORT
 
 
 def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
@@ -48,6 +53,8 @@ def run_clickhouse_stage(args: Any, logger: Any) -> int:
     except RuntimeError as exc:
         console.error(str(exc))
         return 2
+    if bool(getattr(args, "os_shell", False)):
+        return _run_clickhouse_os_shell(args, logger, console)
     if bool(getattr(args, "sql_shell", False)):
         return _run_clickhouse_sql_shell(args, logger, console)
     try:
@@ -94,6 +101,7 @@ def _raw_protocol(args: Any) -> str:
 
 def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
     cfg = AuditConfig.from_namespace(args)
+    _force_single_default_port(args)
     try:
         plan = build_clickhouse_plan(args)
     except ValueError as exc:
@@ -184,6 +192,103 @@ def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
                 query=query,
                 sql_ok=error is None,
                 sql_error=error,
+            )
+    return 0
+
+
+def _run_clickhouse_os_shell(args: Any, logger: Any, console: Any) -> int:
+    cfg = AuditConfig.from_namespace(args)
+    _force_single_default_port(args)
+    try:
+        plan = build_clickhouse_plan(args)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
+    try:
+        _idx, host, port, _target = plan.require_single_target_spec()
+    except ValueError as exc:
+        console.error(f"--os-shell {exc}")
+        return 2
+    protocol = "http" if _raw_protocol(args) == "http" else "native"
+    table_targets = actions._normalize_table_targets(list(getattr(args, "tables", None) or []))
+    table_columns, _columns_error = actions._normalize_column_names(list(getattr(args, "columns", None) or []))
+    username = getattr(args, "username", None)
+    password = getattr(args, "password", None)
+    if password is not None and not username:
+        username = "default"
+    record = actions._audit_clickhouse_host(
+        host=str(host),
+        port=int(port),
+        timeout=cfg.timeout,
+        retries=cfg.retries,
+        username=username,
+        password=password,
+        defcreds=bool(getattr(args, "defcreds", False)),
+        database=str(getattr(args, "database", "default") or "default"),
+        protocol=protocol,
+        show_databases=bool(getattr(args, "show_databases", False)),
+        show_tables=bool(getattr(args, "show_tables", False)),
+        show_columns=bool(getattr(args, "show_columns", False)),
+        table_targets=table_targets,
+        table_columns=table_columns,
+        dump_table_rows=bool(getattr(args, "dump", False)),
+        execute_command=None,
+        sql_command=None,
+    )
+    _emit_clickhouse_record(record, "txt")
+    if not bool(record.get("is_clickhouse")):
+        return 1
+    if str(record.get("status") or "") in {"auth_required", "fail"}:
+        return 1
+
+    shell_user = str(record.get("effective_username") or username or "default")
+    shell_password = str(record.get("effective_password") or password or "")
+    shell_protocol = str(record.get("protocol") or protocol)
+    readline_module = actions._load_readline_module()
+    console.success("clickhouse os-shell ready; type 'exit' or 'quit' to stop")
+    while True:
+        try:
+            raw_command = input("ch-os> ")
+        except (EOFError, KeyboardInterrupt):
+            console.plain("")
+            break
+        command = raw_command.strip()
+        if not command:
+            continue
+        if command.lower() in {"exit", "quit"}:
+            break
+        actions._add_readline_history(readline_module, command)
+        output, error = actions._run_execute_command_once(
+            host=str(host),
+            port=int(port),
+            timeout=cfg.timeout,
+            retries=cfg.retries,
+            protocol=shell_protocol,
+            username=shell_user,
+            password=shell_password,
+            database=str(getattr(args, "database", "default") or "default"),
+            command=command,
+        )
+        shell_record = dict(record)
+        shell_record.update(
+            {
+                "execute_command": command,
+                "execute_attempted": True,
+                "execute_ok": error is None,
+                "execute_output": output,
+                "execute_error": error,
+            }
+        )
+        for line in render._format_execute_detail_records(shell_record, "txt"):
+            print(line)
+        if cfg.debug and hasattr(logger, "log"):
+            logger.log(
+                "clickhouse",
+                (str(host), int(port)),
+                phase="os_shell",
+                command=command,
+                execute_ok=error is None,
+                execute_error=error,
             )
     return 0
 

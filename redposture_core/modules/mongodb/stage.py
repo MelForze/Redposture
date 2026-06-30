@@ -9,13 +9,15 @@ from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
+    AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    has_username_password_credential_file,
 )
 from . import actions, policy, render
 
 _DEFAULT_PORT = 27017
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS: tuple[int, ...] | None = (27017, 27018, 27019)
 
 
 def build_mongodb_plan(args: Any) -> AuditCommandPlan:
@@ -40,11 +42,30 @@ def run_mongodb_stage(args: Any, logger: Any) -> int:
     if validation_rc is not None:
         return int(validation_rc)
     _normalize_mongodb_action_args(args)
+    if bool(getattr(args, "nosql_shell", False)):
+        _force_single_default_port(args)
+    if not has_username_password_credential_file(args):
+        credential_runs = actions._credential_runs(
+            getattr(args, "username", None),
+            getattr(args, "password", None),
+            defcreds=bool(getattr(args, "defcreds", False)),
+        )
+        if credential_runs:
+            args._audit_credential_runs = tuple(
+                AuditCredentialRun(
+                    username=item.get("username"),
+                    password=item.get("password"),
+                    source="default" if bool(item.get("default")) else "provided",
+                )
+                for item in credential_runs
+            )
     try:
         plan = build_mongodb_plan(args)
     except ValueError as exc:
         console.error(str(exc))
         return 2
+    if bool(getattr(args, "nosql_shell", False)):
+        return _run_mongodb_nosql_shell(args, plan, console)
     if cfg.debug and not getattr(args, "debug_emit", None):
         args.debug_emit = console.info
     if cfg.debug:
@@ -64,6 +85,47 @@ def run_mongodb_stage(args: Any, logger: Any) -> int:
 
 
 __all__ = ["build_mongodb_plan", "build_mongodb_spec", "run_mongodb_stage"]
+
+
+def _force_single_default_port(args: Any) -> None:
+    if getattr(args, "port", None) is None and getattr(args, "ports", None) is None:
+        args.port = _DEFAULT_PORT
+
+
+def _run_mongodb_nosql_shell(args: Any, plan: AuditCommandPlan, console: Any) -> int:
+    cfg = AuditConfig.from_namespace(args)
+    try:
+        _idx, host, port, _target = plan.require_single_target_spec()
+    except ValueError as exc:
+        console.error(f"--nosql-shell {exc}")
+        return 2
+    return actions._run_mongodb_nosql_shell(
+        host=str(host),
+        port=int(port),
+        timeout=cfg.timeout,
+        retries=cfg.retries,
+        credential_candidates=_mongodb_credential_candidates(plan),
+        auth_db=str(getattr(args, "auth_db", None) or "admin"),
+        database=getattr(args, "database", None),
+        emit_line=console.plain,
+        shell_emit_line=console.plain,
+    )
+
+
+def _mongodb_credential_candidates(plan: AuditCommandPlan) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for credential in plan.credential_runs:
+        if credential.username is None:
+            continue
+        candidates.append(
+            {
+                "username": credential.username,
+                "password": credential.password or "",
+                "source": credential.source,
+                "default": credential.source == "default",
+            }
+        )
+    return candidates
 
 
 def _normalize_mongodb_action_args(args: Any) -> None:
