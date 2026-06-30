@@ -33,9 +33,13 @@ def configure_mongodb_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=27017,
+        default=None,
         metavar="port",
-        help="MongoDB port spec: single port, list/range, or file (examples: 27017, 27017,37017, ./ports.txt).",
+        help=(
+            "MongoDB port spec: single port, list/range, or file "
+            "(examples: 27017, 27017,37017, ./ports.txt). "
+            "If omitted, scans 27017, 27018, 27019."
+        ),
     )
     add_multi_ports_flag(common)
     add_save_flag(

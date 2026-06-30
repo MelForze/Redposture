@@ -34,9 +34,13 @@ def configure_postgres_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=5432,
+        default=None,
         metavar="port",
-        help="Postgres port spec: single port, list/range, or file (examples: 5432, 5432,15432, ./ports.txt).",
+        help=(
+            "Postgres port spec: single port, list/range, or file "
+            "(examples: 5432, 5432,15432, ./ports.txt). "
+            "If omitted, scans 5432, 6432, 15432."
+        ),
     )
     add_multi_ports_flag(common)
     add_save_flag(

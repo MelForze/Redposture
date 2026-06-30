@@ -43,7 +43,8 @@ def test_signature_checking_proxy_rejects_unknown_kwarg() -> None:
         proxy(show_databases_limit=5)  # the exact kwarg that crashed in the field
 
 
-def test_clickhouse_sql_shell_binds_real_host_audit_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("shell_flag", ["--sql-shell", "--os-shell"])
+def test_clickhouse_shell_binds_real_host_audit_signature(monkeypatch: pytest.MonkeyPatch, shell_flag: str) -> None:
     monkeypatch.setattr(ch_actions, "_load_clickhouse_driver_client", lambda *_a, **_k: None)
     monkeypatch.setattr(ch_actions, "_load_clickhouse_connect_module", lambda *_a, **_k: None)
     monkeypatch.setattr(ch_stage, "_emit_clickhouse_record", lambda *_a, **_k: None)
@@ -53,7 +54,7 @@ def test_clickhouse_sql_shell_binds_real_host_audit_signature(monkeypatch: pytes
         _signature_checking_proxy(ch_actions._audit_clickhouse_host, {"is_clickhouse": False, "status": "fail"}),
     )
 
-    args = parse_args(["clickhouse", "-t", "127.0.0.1", "-u", "rteam", "-p", "secret", "--sql-shell"])
+    args = parse_args(["clickhouse", "-t", "127.0.0.1", "-u", "rteam", "-p", "secret", shell_flag])
     rc = ch_stage.run_clickhouse_stage(args, logger=object())
 
     assert rc == 1  # not detected -> returns before the interactive loop, no TypeError

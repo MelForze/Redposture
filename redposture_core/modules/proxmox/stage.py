@@ -15,7 +15,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 8006
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS: tuple[int, ...] | None = (8006, 18006)
 
 
 def build_proxmox_plan(args: Any) -> AuditCommandPlan:

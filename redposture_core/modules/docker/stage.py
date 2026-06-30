@@ -15,7 +15,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 2375
-_DEFAULT_PORTS = (2375, 2376, 4243)
+_DEFAULT_PORTS: tuple[int, ...] | None = (2375, 2376, 4243, 12375, 12376)
 
 
 def build_docker_plan(args: Any) -> AuditCommandPlan:

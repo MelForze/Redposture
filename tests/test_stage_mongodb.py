@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from redposture_core import stage_mongodb as mongodb
+from redposture_core.modules.mongodb import actions as mongodb_actions
 from tests.stage_runtime_helpers import run_module_targets_for_test
 
 
@@ -374,6 +375,35 @@ def test_mongodb_nosql_shell_session_command_error_and_eof() -> None:
     )
 
 
+def test_run_mongodb_stage_nosql_shell_dispatches_to_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_shell(**kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(mongodb_actions, "_run_mongodb_nosql_shell", fake_shell)
+
+    rc = mongodb.run_mongodb_stage(
+        _args(nosql_shell=True, defcreds=True, database="redposture", auth_db="admin"),
+        logger=object(),
+    )
+
+    assert rc == 0
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == 27017
+    assert captured["auth_db"] == "admin"
+    assert captured["database"] == "redposture"
+    assert captured["emit_line"] is not None
+    assert captured["shell_emit_line"] is not None
+    assert captured["credential_candidates"][0] == {
+        "username": "root",
+        "password": "root",
+        "source": "default",
+        "default": True,
+    }
+
+
 def test_audit_mongodb_invalid_credentials_anonymous_and_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     def anonymous_with_invalid_creds(host, port, *, username=None, password=None, auth_db="admin", timeout=1.0):
         if username is None:
@@ -688,6 +718,38 @@ def test_run_mongodb_stage_credential_file_prefilter(monkeypatch: pytest.MonkeyP
     assert "root:root" in out.read_text(encoding="utf-8")
 
 
+def test_run_mongodb_stage_defcreds_expands_default_pairs(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    _patch_open(monkeypatch, auth_required=True)
+
+    rc = mongodb.run_mongodb_stage(_args(defcreds=True, show_databases=True), logger=object())
+
+    assert rc == 0
+    stdout = capsys.readouterr().out
+    assert "root:root" in stdout
+    assert "Databases" in stdout
+    assert "redposture" in stdout
+
+
+def test_run_mongodb_stage_defcreds_all_fail_renders_all_attempts(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    class _RejectRaw(_FakeRaw):
+        def _check_auth(self) -> None:
+            if self.auth_required:
+                raise RuntimeError("not authorized code 13")
+
+    def fake_open(host, port, *, username=None, password=None, auth_db="admin", timeout=1.0, mongo_client_cls=None):
+        return _RejectRaw(auth_required=True, username=username, password=password)
+
+    monkeypatch.setattr(mongodb, "open_mongodb_client", fake_open)
+
+    rc = mongodb.run_mongodb_stage(_args(defcreds=True), logger=object())
+
+    assert rc == 0
+    stdout = capsys.readouterr().out
+    assert "authentication required" not in stdout
+    for credential in ("root:root", "admin:admin", "root:password", "mongo:mongo", "mongodb:mongodb"):
+        assert credential in stdout
+
+
 def test_mongodb_credential_attempts_records_renders_per_attempt_lines() -> None:
     record = {
         "host": "10.0.0.1",
@@ -710,6 +772,21 @@ def test_mongodb_credential_attempts_records_renders_per_attempt_lines() -> None
 
     single_attempt = dict(record, credential_attempts=[record["credential_attempts"][0]])
     assert mongodb._format_credential_attempts_records(single_attempt, "txt") == []
+
+    generic_record = {
+        "host": "10.0.0.1",
+        "port": 27017,
+        "is_mongodb": True,
+        "status": "auth_required",
+        "attempted_credentials": [
+            {"username": "root", "password": "root", "source": "default", "status": "auth_required"},
+            {"username": "admin", "password": "admin", "source": "default", "status": "auth_required"},
+        ],
+    }
+    generic_lines = mongodb._format_credential_attempts_records(generic_record, "txt")
+    assert len(generic_lines) == 2
+    assert "[-] root:root" in generic_lines[0]
+    assert "[-] admin:admin" in generic_lines[1]
 
 
 def test_mongodb_format_record_defers_to_credential_attempts_when_multiple() -> None:

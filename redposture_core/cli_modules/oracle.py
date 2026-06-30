@@ -23,7 +23,12 @@ def configure_oracle_parser(
     common = parser.add_argument_group("Common")
     add_scan_host_flags(common, include_profiles=False)
     common.add_argument(
-        "--port", dest="port", type=port_type, default=1521, metavar="port", help="Oracle TNS listener port."
+        "--port",
+        dest="port",
+        type=port_type,
+        default=None,
+        metavar="port",
+        help="Oracle TNS listener port (default: 1521, 11521).",
     )
     add_multi_ports_flag(common)
     add_save_flag(
