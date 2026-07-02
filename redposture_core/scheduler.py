@@ -5,14 +5,14 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 T = TypeVar("T")
 R = TypeVar("R")
 K = TypeVar("K")
 
 
-def _cancel_pending_futures(executor: ThreadPoolExecutor, pending: dict[Future, object]) -> None:
+def _cancel_pending_futures(executor: ThreadPoolExecutor, pending: dict[Future[Any], Any]) -> None:
     """Best-effort cancel + non-waiting shutdown used by Ctrl+C paths.
 
     Python's default `with ThreadPoolExecutor` calls `shutdown(wait=True)` on

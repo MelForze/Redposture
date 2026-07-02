@@ -99,7 +99,9 @@ class ThreadingHTTPReuseServer(ThreadingHTTPServer):
     # parks a handler thread — process leaks threads until server_close().
     timeout = 30
 
-    def process_request(self, request: socket.socket, client_address: Any) -> None:
+    def process_request(  # type: ignore[override]  # narrowed to socket.socket by intent
+        self, request: socket.socket, client_address: Any
+    ) -> None:
         # Apply the timeout to the accepted socket immediately so BaseHTTPRequestHandler's
         # rfile/wfile inherit it. Without this the class-level `timeout` only
         # applies to the accept() call, not to the handler socket.
