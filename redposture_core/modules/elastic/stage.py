@@ -32,6 +32,8 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_elastic_line,
+        # E3 opt-in: Elastic anon-open cluster never needs a credential probe.
+        keep_anonymous_open_no_auth=True,
     )
 
 

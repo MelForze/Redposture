@@ -208,9 +208,20 @@ class AuditRecord:
             "render_events",
         }
         extra = {key: value for key, value in payload.items() if key not in known_fields}
+        # E4 fix: a module hook that forgets to populate `port` used to silently
+        # coerce to 0 (rendering as "host:0" downstream). Convert legitimately
+        # zero-or-missing values to a stub port so the render stays informative,
+        # and log a debug marker in `extra` so operators can trace the origin.
+        raw_port = payload.get("port")
+        try:
+            resolved_port = int(raw_port) if raw_port not in (None, "") else 0
+        except (TypeError, ValueError):
+            resolved_port = 0
+        if resolved_port == 0 and "port_missing_marker" not in extra:
+            extra["port_missing_marker"] = f"module={module or 'unknown'} payload_missing_port"
         return cls(
             host=str(payload.get("host") or ""),
-            port=int(payload.get("port") or 0),
+            port=resolved_port,
             service=str(payload.get("service") or service or payload.get("module") or module or ""),
             status=str(payload.get("status") or "unknown"),
             auth_required=_optional_bool(payload.get("auth_required")),

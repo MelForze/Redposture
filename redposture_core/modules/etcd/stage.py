@@ -30,6 +30,9 @@ def build_etcd_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_etcd_line,
+        # E3 opt-in: etcd anon-open cluster (no --auth-enable) is confirmed
+        # by the detect probe — v2 /keys or v3 /kv/range succeeded.
+        keep_anonymous_open_no_auth=True,
     )
 
 

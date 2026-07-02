@@ -53,8 +53,13 @@ def configure_elastic_parser(
         help="Elastic audit output format for stdout/file.",
     )
 
+    # F3 fix: every other datastore module exposes both `-u/--username` and
+    # `-p/--password`. Elastic used to accept only the short forms; scripts
+    # using long-form flags failed exclusively against elastic. Add the long
+    # options so the CLI surface is consistent.
     auth.add_argument(
         "-u",
+        "--username",
         dest="username",
         default=None,
         metavar="name",
@@ -62,6 +67,7 @@ def configure_elastic_parser(
     )
     auth.add_argument(
         "-p",
+        "--password",
         dest="password",
         default=None,
         metavar="value",

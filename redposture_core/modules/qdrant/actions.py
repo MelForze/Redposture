@@ -14,7 +14,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig
+from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
 from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line
 from ...servers import server_listen_port
@@ -99,7 +99,8 @@ def _http_json_request(
     headers: dict[str, str] | None = None,
     payload: dict[str, Any] | None = None,
 ) -> tuple[int, Any, str | None]:
-    url = f"http://{host}:{port}{path}"
+    scheme = resolve_http_scheme(host, port, timeout, probe_path="/collections")
+    url = f"{scheme}://{host}:{port}{path}"
     body_bytes: bytes | None = None
     req_headers = {
         "User-Agent": "RedPosture/1.0",
@@ -111,7 +112,9 @@ def _http_json_request(
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req_headers["Content-Type"] = "application/json"
 
-    response = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024)).request(
+    response = HttpApiClient(
+        HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True)
+    ).request(
         method,
         url,
         headers=req_headers,

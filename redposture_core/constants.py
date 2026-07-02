@@ -235,9 +235,13 @@ DISCOVERY_EXPORTERS = (
     {
         "name": "clickhouse_exporter",
         "port": 9116,
-        "markers": ("clickhouse_",),
+        # B3 fix: `clickhouse_` alone matched any prometheus scrape mentioning
+        # a clickhouse metric (e.g. `clickhouse_keeper_up` from a completely
+        # unrelated exporter). Anchor on the concrete `_build_info` / `_up`
+        # metrics the real exporter emits.
+        "markers": ("clickhouse_exporter_build_info", "clickhouse_up"),
         "strong_markers": ("clickhouse_exporter_build_info", "clickhouse_up"),
-        "weak_markers": ("clickhouse_",),
+        "weak_markers": ("clickhouse_scrape_", "clickhouse_query_"),
         "fingerprint_vars": ("clickhouse", "scrape_uri", "clickhouse_password", "clickhouse_username"),
         "fingerprint_cmdline": ("clickhouse_exporter", "--clickhouse.url=", "--scrape.uri="),
     },
@@ -273,18 +277,23 @@ DISCOVERY_EXPORTERS = (
     {
         "name": "mongodb_exporter",
         "port": 9216,
-        "markers": ("mongodb_",),
+        # B3 fix: replace the bare `mongodb_` marker with concrete
+        # metric/label names so unrelated exporters emitting a metric like
+        # `mongodb_topology_state` no longer match.
+        "markers": ("mongodb_exporter_build_info", "mongodb_up"),
         "strong_markers": ("mongodb_exporter_build_info", "mongodb_up"),
-        "weak_markers": ("mongodb_",),
+        "weak_markers": ("mongodb_ss_", "mongodb_up"),
         "fingerprint_vars": ("mongodb", "mongodb_uri", "mongodb_password", "mongodb_username"),
         "fingerprint_cmdline": ("mongodb_exporter", "--mongodb.uri=", "--mongodb.user=", "--mongodb.password="),
     },
     {
         "name": "pgbouncer_exporter",
         "port": 9127,
-        "markers": ("pgbouncer_",),
-        "strong_markers": ("pgbouncer_up",),
-        "weak_markers": ("pgbouncer_",),
+        # B3 fix: `pgbouncer_` alone matched any exporter with a metric named
+        # `pgbouncer_something` (extremely common in postgres-adjacent tooling).
+        "markers": ("pgbouncer_exporter_build_info", "pgbouncer_up"),
+        "strong_markers": ("pgbouncer_exporter_build_info", "pgbouncer_up"),
+        "weak_markers": ("pgbouncer_pools_", "pgbouncer_databases_"),
         "fingerprint_vars": ("pgbouncer", "pgbouncer_uri", "pgbouncer_password", "pgbouncer_username"),
         "fingerprint_cmdline": ("pgbouncer_exporter", "--pgBouncer.connectionString=", "--web.config.file="),
     },

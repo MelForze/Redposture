@@ -3,7 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import math
 from collections.abc import Callable
+
+
+def _positive_seconds(value: str) -> float:
+    """F6 fix: reject 0 / negative / NaN listen-second values at parse time."""
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--listen-seconds must be a number") from exc
+    if not math.isfinite(number):
+        raise argparse.ArgumentTypeError("--listen-seconds must be finite")
+    if number <= 0:
+        raise argparse.ArgumentTypeError("--listen-seconds must be > 0")
+    return number
 
 
 def configure_listen_parser(
@@ -106,7 +120,7 @@ def configure_trigger_parser(
     actions.add_argument(
         "--listen-seconds",
         dest="listen_seconds",
-        type=float,
+        type=_positive_seconds,
         default=None,
         metavar="seconds",
         help="With --with-listen, stop listeners automatically after N seconds.",

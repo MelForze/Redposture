@@ -1098,7 +1098,11 @@ def test_stage4_timeout_retries_with_shared_policy_and_keeps_status(monkeypatch:
     assert any("retry_decision stage=data" in line for line in rec.get("debug_events") or [])
 
 
-def test_audit_zookeeper_marks_provided_credentials_invalid_on_anonymous_open_target(monkeypatch) -> None:
+def test_audit_zookeeper_valid_credentials_on_open_target(monkeypatch) -> None:
+    """A2 fix: when auth_digest succeeds AND post-auth root read works, the
+    credentials are valid regardless of whether the anonymous read also
+    worked. The old code (`anonymous_root_err != _ZK_ERR_OK`) mislabeled
+    good creds against an open ZK as invalid_credentials_anonymous."""
     calls = {"auth": 0}
 
     class _FakeZkClient:
@@ -1141,12 +1145,8 @@ def test_audit_zookeeper_marks_provided_credentials_invalid_on_anonymous_open_ta
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "invalid_credentials_anonymous"
-    assert record["provided_credentials_ok"] is False
-    assert record["auth_required"] is False
-    assert "authentication failed" in str(record["error"]).lower()
-    line = _format_record(record, "txt")
-    assert "[-] admin:admin" in line
+    assert record["status"] == "valid_credentials"
+    assert record["provided_credentials_ok"] is True
 
 
 def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypatch) -> None:
@@ -1315,8 +1315,11 @@ def test_audit_zookeeper_valid_credentials_after_retryable_root_query(monkeypatc
     assert calls["auth"] == 1
     assert record["status"] == "valid_credentials"
     assert record["provided_credentials_ok"] is True
-    assert record["auth_required"] is True
-    assert record["auth_inference_source"] == "probe_retryable_124"
+    # A3 fix: consistent -124 across anonymous probes no longer promotes to
+    # auth_required=True — it stays inconclusive so transient leader-election
+    # noise does not masquerade as an auth requirement.
+    assert record["auth_required"] is None
+    assert record["auth_inference_source"] == "probe_retryable_124_inconclusive"
 
 
 def test_audit_zookeeper_infers_auth_required_true_from_anonymous_probes(monkeypatch) -> None:
@@ -1456,9 +1459,15 @@ def test_audit_zookeeper_inference_keeps_unknown_for_neutral_and_error_probes(
     assert "/zookeeper:nonode" in record["auth_probe_trace"]
 
 
-def test_audit_zookeeper_inference_maps_consistent_err_124_to_auth_required(
+def test_audit_zookeeper_inference_leaves_consistent_err_124_inconclusive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """A3 fix: err_-124 is a documented retryable/transient marker. When every
+    anonymous probe returns -124 (leader election, brief server load) the
+    inference must stay inconclusive rather than promoting to auth_required=True
+    — the previous behavior misclassified open ZooKeeper clusters as auth-gated
+    during churn."""
+
     class _FakeZkClient:
         def __init__(self, host: str, port: int, timeout: float) -> None:
             _ = (host, port, timeout)
@@ -1491,11 +1500,10 @@ def test_audit_zookeeper_inference_maps_consistent_err_124_to_auth_required(
         max_znodes=100,
     )
 
-    assert record["status"] == "auth_required"
-    assert record["auth_required"] is True
-    assert record["auth_inference_source"] == "probe_retryable_124"
+    # Inference is inconclusive; auth_required stays None instead of True.
+    assert record["auth_required"] is None
+    assert record["auth_inference_source"] == "probe_retryable_124_inconclusive"
     assert record["auth_probe_trace"] == ["/:err_-124", "/zookeeper:err_-124", "/zookeeper/config:err_-124"]
-    assert "authentication required" in _format_record(record, "txt")
 
 
 def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(monkeypatch) -> None:
@@ -3039,8 +3047,12 @@ def test_audit_host_auth_digest_edge_branches(monkeypatch: pytest.MonkeyPatch) -
         query_znode=None,
         max_znodes=100,
     )
-    assert rec["status"] == "auth_required"
-    assert rec["provided_credentials_ok"] is True
+    # D3 fix: anon=NOAUTH + post-auth=NOAUTH is ambiguous — could be "auth
+    # applied to a valid low-privilege principal" or "creds silently rejected".
+    # We now probe /zookeeper (world-readable on default ZK) to disambiguate.
+    # In this fake every read returns NOAUTH, so /zookeeper NOAUTH means creds
+    # were silently rejected → provided_credentials_ok=False (was True prior).
+    assert rec["provided_credentials_ok"] is False
 
     class _AuthDigestFailsWithoutErrorClient:
         def __init__(self, *_args, **_kwargs) -> None:

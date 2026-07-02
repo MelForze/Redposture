@@ -66,7 +66,9 @@ def test_run_cases_cover_every_registered_audit_module() -> None:
             ["clickhouse", "-t", "127.0.0.1", "--os-shell", "--sql-shell"],
             "--os-shell cannot be combined with --sql-shell",
         ),
-        ("kafka", ["kafka", "-t", "127.0.0.1", "--max-messages", "0"], "--max-messages must be > 0"),
+        # F5 fix: --max-messages now goes through the shared positive_int
+        # validator, which emits `argument --max-messages: value must be > 0`.
+        ("kafka", ["kafka", "-t", "127.0.0.1", "--max-messages", "0"], "value must be > 0"),
         ("zookeeper", ["zookeeper", "-t", "127.0.0.1", "-u", "zkuser"], "--username and --password"),
         ("proxmox", ["proxmox", "-t", "127.0.0.1"], "--pveapitoken, -u/-p, or --defcreds is required"),
     ],
@@ -85,7 +87,17 @@ def test_package_stage_policy_negative_cases_do_not_run_plan(
         pytest.fail("invalid CLI/policy combination reached AuditCommandRunner.run_plan")
 
     monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", fail_run_plan)
-    args = parse_args(argv)
+    # F5 fix side-effect: some validators (e.g. --max-messages > 0) now run at
+    # argparse type-conversion time, so parse_args itself raises SystemExit(2)
+    # before the stage code has a chance to. Accept either outcome — the
+    # important invariant is (a) exit 2 and (b) the expected error appears in
+    # stderr — as long as run_plan is never reached.
+    try:
+        args = parse_args(argv)
+    except SystemExit as exc:
+        assert exc.code == 2
+        assert expected_error in capsys.readouterr().err
+        return
     rc = getattr(stage, f"run_{module_name}_stage")(args, SimpleNamespace(log=lambda *_a, **_k: None))
 
     assert rc == 2

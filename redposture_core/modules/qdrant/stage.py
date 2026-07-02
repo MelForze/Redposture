@@ -30,6 +30,9 @@ def build_qdrant_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_qdrant_line,
+        # E3 opt-in: Qdrant anon-open (no --api-key-set config) is confirmed
+        # by the detect probe.
+        keep_anonymous_open_no_auth=True,
     )
 
 

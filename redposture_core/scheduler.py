@@ -12,6 +12,23 @@ R = TypeVar("R")
 K = TypeVar("K")
 
 
+def _cancel_pending_futures(executor: ThreadPoolExecutor, pending: dict[Future, object]) -> None:
+    """Best-effort cancel + non-waiting shutdown used by Ctrl+C paths.
+
+    Python's default `with ThreadPoolExecutor` calls `shutdown(wait=True)` on
+    exit, which parks the CLI until every in-flight socket op times out. We
+    cancel futures that never started and detach without waiting so operator
+    Ctrl+C surfaces immediately.
+    """
+    for future in list(pending.keys()):
+        future.cancel()
+    try:
+        executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        # Python < 3.9 lacked cancel_futures — fall back to the two-arg form.
+        executor.shutdown(wait=False)
+
+
 class BoundedScheduler(Generic[T, R]):
     """Small ThreadPool wrapper with max-inflight and optional per-key limits."""
 
@@ -45,8 +62,9 @@ class BoundedScheduler(Generic[T, R]):
             with semaphore:
                 return worker(item)
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            pending: dict[Future[R], int] = {}
+        executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        pending: dict[Future[R], int] = {}
+        try:
             cursor = 0
             while cursor < len(indexed) or pending:
                 while cursor < len(indexed) and len(pending) < self.max_inflight:
@@ -57,7 +75,21 @@ class BoundedScheduler(Generic[T, R]):
                 for future in done:
                     idx = pending.pop(future)
                     results[idx] = future.result()
-
+        except (KeyboardInterrupt, SystemExit):
+            # C3 fix: default ThreadPoolExecutor.__exit__ calls shutdown(wait=True),
+            # so Ctrl+C freezes the CLI until every in-flight socket times out.
+            _cancel_pending_futures(executor, pending)
+            raise
+        except BaseException:
+            # E1 fix: any worker-side exception (TypeError, KeyError, custom
+            # exceptions from broken render helpers, etc.) previously escaped
+            # without shutting the executor down — the remaining worker threads
+            # kept running against subsequent hosts. Cancel + non-waiting
+            # shutdown here so the leak point is closed.
+            _cancel_pending_futures(executor, pending)
+            raise
+        else:
+            executor.shutdown(wait=True)
         return [results[idx] for idx, _item in indexed]
 
     def iter_completed(
@@ -85,8 +117,10 @@ class BoundedScheduler(Generic[T, R]):
             with semaphore:
                 return worker(item)
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            pending: dict[Future[R], tuple[int, T]] = {}
+        executor = ThreadPoolExecutor(max_workers=self.max_workers)
+        pending: dict[Future[R], tuple[int, T]] = {}
+        drained_normally = False
+        try:
             cursor = 0
             while cursor < len(indexed) or pending:
                 while cursor < len(indexed) and len(pending) < self.max_inflight:
@@ -97,6 +131,17 @@ class BoundedScheduler(Generic[T, R]):
                 for future in done:
                     _idx, item = pending.pop(future)
                     yield item, future.result()
+            drained_normally = True
+        finally:
+            # E1 fix: generators can be closed early (GeneratorExit when the
+            # consumer breaks out of the loop) OR raise any exception from
+            # `future.result()`. In every non-normal exit we cancel pending
+            # futures and shut the executor down without waiting so we don't
+            # leak worker threads that keep hammering sockets in the background.
+            if drained_normally:
+                executor.shutdown(wait=True)
+            else:
+                _cancel_pending_futures(executor, pending)
 
 
 __all__ = ["BoundedScheduler"]

@@ -30,6 +30,9 @@ def build_redis_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_redis_line,
+        # E3 opt-in: Redis anon-open (no AUTH required) makes the defcreds
+        # loop redundant — the audit already succeeded without credentials.
+        keep_anonymous_open_no_auth=True,
     )
 
 
