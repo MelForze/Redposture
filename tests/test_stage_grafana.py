@@ -285,7 +285,7 @@ def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypat
     )
 
     assert record["status"] == "invalid_credentials_anonymous"
-    assert int(record["attempted_credentials"]) == 1
+    assert int(record["attempted_credentials_count"]) == 1
     auth_attempts = record.get("auth_attempts")
     assert isinstance(auth_attempts, list)
     assert [f"{item.get('username')}:{item.get('password')}" for item in auth_attempts] == [
@@ -356,7 +356,7 @@ def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkey
     )
 
     assert record["status"] == "valid_credentials"
-    assert int(record["attempted_credentials"]) == 1
+    assert int(record["attempted_credentials_count"]) == 1
     assert record["credentials_source"] == "default"
     assert record["effective_username"] == "admin"
     assert verify_calls == [("admin", "admin")]
@@ -419,7 +419,7 @@ def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> 
     )
 
     assert record["status"] == "invalid_credentials_anonymous"
-    assert int(record["attempted_credentials"]) == 2
+    assert int(record["attempted_credentials_count"]) == 2
     assert verify_calls == [
         ("custom-user", "custom-pass"),
         ("admin", "admin"),
@@ -1057,3 +1057,102 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
     assert created_totals == [3]
     assert advanced_steps == [1, 1, 1]
     assert closed_count == 1
+
+
+# ---------------------------------------------------------------------------
+# E2E-batch fixes discovered while running against a live Grafana instance
+# ---------------------------------------------------------------------------
+
+
+def test_fix_e2e_grafana_apitoken_flows_through_and_verifies_via_bearer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Previously the Grafana CLI exposed only Basic auth; API keys /
+    service-account tokens (Bearer glsa-...) had no `--apitoken` argument at
+    all. E2E revealed users had no way to test Grafana instances that
+    disabled Basic auth. This test pins:
+
+      1. `_audit_grafana_host(apitoken=...)` calls `/api/user` with a Bearer
+         header (not Basic).
+      2. A successful token check populates `provided_credentials_ok=True`,
+         `credentials_source='apitoken'`, and adds an `apitoken`-source
+         entry to `attempted_credentials` (list-typed).
+    """
+    calls: list[dict] = []
+
+    def _fake_http(host, port, path, timeout, *, headers=None, method="GET", data=None):
+        calls.append({"path": path, "headers": dict(headers or {})})
+        if path == "/api/health":
+            return 200, '{"database":"ok","commit":"abc","version":"11.0.0"}', {}
+        if path == "/api/user":
+            auth = (headers or {}).get("Authorization", "")
+            if auth == "Bearer glsa-valid-token":
+                return 200, '{"login":"admin"}', {}
+            return 401, "", {}
+        if path == "/api/datasources":
+            return 200, "[]", {}
+        return 200, "", {}
+
+    monkeypatch.setattr("redposture_core.stage_grafana._http_request", _fake_http)
+
+    record = _audit_grafana_host(
+        "127.0.0.1",
+        3000,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        defcreds=False,
+        check_urls=None,
+        apitoken="glsa-valid-token",
+    )
+    assert record["status"] in {"valid_credentials", "weak_default_creds"}
+    assert record["provided_credentials_ok"] is True
+    assert record["credentials_source"] == "apitoken"
+
+    # A Bearer /api/user probe was actually issued.
+    bearer_hits = [
+        c for c in calls if c["path"] == "/api/user" and c["headers"].get("Authorization", "").startswith("Bearer")
+    ]
+    assert bearer_hits, "Bearer /api/user probe never issued"
+
+    # attempted_credentials is a list of attempt dicts (not the legacy int
+    # counter that broke downstream JSON consumers).
+    attempts = record["attempted_credentials"]
+    assert isinstance(attempts, list), f"attempted_credentials must be a list, got {type(attempts).__name__}"
+    assert any(a.get("source") == "apitoken" and a.get("ok") for a in attempts)
+    assert record["attempted_credentials_count"] == len([a for a in attempts if a.get("source") == "apitoken"])
+
+
+def test_fix_e2e_grafana_attempted_credentials_is_a_list_not_an_int(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: `attempted_credentials` used to be an `int` counter in the
+    JSON output, breaking every JSON consumer that expected the same
+    `list[dict]` shape used by mongo/kafka/postgres. Fix keeps the counter
+    under a distinct key (`attempted_credentials_count`) and repurposes
+    `attempted_credentials` as the actual attempt list.
+    """
+
+    def _fake_http(host, port, path, timeout, *, headers=None, method="GET", data=None):
+        if path == "/api/health":
+            return 200, '{"database":"ok","commit":"x","version":"11.0.0"}', {}
+        return 401, "", {}
+
+    monkeypatch.setattr("redposture_core.stage_grafana._http_request", _fake_http)
+
+    record = _audit_grafana_host(
+        "127.0.0.1",
+        3000,
+        1.0,
+        0,
+        username="admin",
+        password="wrong-password",
+        defcreds=False,
+        check_urls=None,
+    )
+    assert isinstance(record["attempted_credentials"], list)
+    assert isinstance(record["attempted_credentials_count"], int)
+    # `credential_attempts` — the canonical name every other module uses —
+    # must ALSO be present so heterogeneous JSON consumers work.
+    assert isinstance(record["credential_attempts"], list)

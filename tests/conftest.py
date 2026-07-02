@@ -56,3 +56,12 @@ def lab_full_compose_path() -> Path:
     if not compose_path.exists():
         pytest.skip(f"local lab compose not found: {compose_path}; set REDPOSTURE_LAB_DIR")
     return compose_path
+
+
+@pytest.fixture
+def lab_services_dir() -> Path:
+    lab_dir = Path(os.environ.get("REDPOSTURE_LAB_DIR", "lab"))
+    services_path = lab_dir / "services"
+    if not services_path.exists():
+        pytest.skip(f"lab services dir not found: {services_path}; set REDPOSTURE_LAB_DIR")
+    return services_path

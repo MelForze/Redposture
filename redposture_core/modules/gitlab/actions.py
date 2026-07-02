@@ -30,7 +30,7 @@ _STAGE_DETECT_PROTOCOL = "detect_protocol"
 _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
-_GITLAB_DEEP_STATUSES = {"detected"}
+_GITLAB_DEEP_STATUSES = {"detected", "valid_credentials", "invalid_credentials"}
 _PUBLIC_ENDPOINT_PATHS: tuple[str, ...] = (
     "/api/v4/version",
     "/-/health",
@@ -753,13 +753,31 @@ def _audit_gitlab_host(
                         )
                     )
 
+            # E2E-batch fix: previously the status was always `detected` when
+            # the target looked like a GitLab instance, regardless of whether
+            # the supplied token was valid. Operators couldn't distinguish
+            # "we tried the token and it worked" from "we tried the token and
+            # it was rejected" without parsing the token_valid / token_user
+            # fields by hand. Reflect the token verdict in the status:
+            #   - token_valid=True  → `valid_credentials`
+            #   - token provided but token_valid=False → `invalid_credentials`
+            #   - otherwise the instance is up but we didn't authenticate → `detected`
+            if is_gitlab:
+                if token_valid is True:
+                    computed_status = "valid_credentials"
+                elif token_provided and token_valid is False:
+                    computed_status = "invalid_credentials"
+                else:
+                    computed_status = "detected"
+            else:
+                computed_status = "not_gitlab"
             return {
                 "timestamp": utc_now_iso(),
                 "host": host,
                 "port": port,
                 "https": use_https,
                 "is_gitlab": is_gitlab,
-                "status": "detected" if is_gitlab else "not_gitlab",
+                "status": computed_status,
                 "login_page": login_page,
                 "version": version,
                 "open_endpoints": open_endpoints,
@@ -895,7 +913,10 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     if output_format == "json":
         return []
 
-    if str(record.get("status") or "fail") != "detected":
+    # E2E fix: the summary detail block now also renders for valid/invalid
+    # credentials — before, only `detected` records reached the summary lines,
+    # so token-auth outcomes were rendered without their access breakdown.
+    if str(record.get("status") or "fail") not in {"detected", "valid_credentials", "invalid_credentials"}:
         return []
 
     prefix = _nxc_prefix(record)

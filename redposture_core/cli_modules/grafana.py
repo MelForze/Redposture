@@ -53,6 +53,23 @@ def configure_grafana_parser(
         action="store_true",
         help="Try default Grafana credentials admin:admin.",
     )
+    # E2E-batch fix: Grafana supports API keys / service account tokens
+    # (`Authorization: Bearer glsa-*`) but the CLI previously exposed only
+    # basic auth. Adding `--apitoken` gives operators feature parity with the
+    # Grafana HTTP API. Both `--apitoken` and `--api-token` are accepted so
+    # scripts written against different modules don't have to special-case.
+    grafana_auth.add_argument(
+        "--apitoken",
+        "--api-token",
+        dest="apitoken",
+        default=None,
+        metavar="value",
+        help=(
+            "Grafana API key or service-account token sent as "
+            "'Authorization: Bearer <value>'. Legacy API keys start with "
+            "glc_/eyJ..., service-account tokens with glsa_..."
+        ),
+    )
     grafana_actions.add_argument(
         "--show-datasources",
         "--show-datasource",

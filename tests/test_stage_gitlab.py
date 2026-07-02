@@ -359,7 +359,9 @@ def test_audit_gitlab_host_valid_token_probes_access_and_clones(monkeypatch) -> 
         workers=4,
     )
 
-    assert record["status"] == "detected"
+    # E2E-batch fix: a valid token now yields `valid_credentials` (was
+    # unconditionally `detected` regardless of token verdict).
+    assert record["status"] == "valid_credentials"
     assert record["token_valid"] is True
     assert record["token_user"] == {"id": 7, "username": "scanner"}
     assert record["clone_scope"] == "token"
@@ -894,3 +896,42 @@ def test_audit_gitlab_targets_emits_stage_debug_markers(monkeypatch: pytest.Monk
     assert any(line.startswith("pass=1 detect start total=1") for line in debug_lines)
     assert any("stage2_gate=run reason=status=detected" in line for line in debug_lines)
     assert any("pass=2 deep complete processed=1" in line for line in debug_lines)
+
+
+def test_fix_e2e_gitlab_invalid_token_yields_invalid_credentials_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E2E revealed that GitLab returned `status='detected'` even when the
+    supplied token was rejected — operators had to parse `token_valid` to
+    tell success from failure. Pin the new tri-state (valid/invalid/detected).
+    """
+
+    def _fake_http(host, port, method, path, timeout, *, use_https=False, headers=None, body=None):
+        _ = (host, port, method, timeout, use_https, headers, body)
+        if path == "/users/sign_in":
+            return 200, b"<title>GitLab</title> users/sign_in", {}, None
+        if path == "/api/v4/version":
+            return 200, b'{"version":"16.7.0"}', {"content-type": "application/json"}, None
+        if path == "/api/v4/user":
+            return 401, b"", {}, None
+        if path.startswith("/api/v4/projects"):
+            return 401, b"", {}, None
+        return 200, b"[]", {}, None
+
+    monkeypatch.setattr("redposture_core.stage_gitlab._http_request", _fake_http)
+
+    record = gitlab._audit_gitlab_host(
+        host="127.0.0.1",
+        port=8080,
+        timeout=1.0,
+        retries=0,
+        use_https=False,
+        token="glpat-bogus",
+        project_filters=[],
+        clone=False,
+        clone_dir="/tmp/gitlab-noop",
+        workers=1,
+    )
+    assert record["token_provided"] is True
+    assert record["token_valid"] is False
+    assert record["status"] == "invalid_credentials"
