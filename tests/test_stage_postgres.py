@@ -1285,7 +1285,12 @@ def test_caps_suffix_reports_database_count_and_not_tables() -> None:
     assert "(tables:" not in suffix
 
 
-def test_defcreds_is_reported_when_anonymous_access_is_allowed(monkeypatch) -> None:
+def test_trust_auth_with_defcreds_is_reported_as_open_no_auth(monkeypatch) -> None:
+    """Trust-auth server (auth_required=False) never validates a password, so
+    --defcreds cannot have 'worked'. Reporting weak_default_creds in that case
+    was a false positive: the server accepted anon access regardless of what
+    the client sent.
+    """
     monkeypatch.setattr(
         "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
@@ -1323,7 +1328,7 @@ def test_defcreds_is_reported_when_anonymous_access_is_allowed(monkeypatch) -> N
     )
 
     assert record["auth_required"] is False
-    assert record["status"] == "weak_default_creds"
+    assert record["status"] == "open_no_auth"
 
 
 def test_show_tables_without_database_walks_all_accessible_databases(monkeypatch) -> None:

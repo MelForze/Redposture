@@ -7,7 +7,7 @@ import re
 import sys
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from concurrent.futures import Future, as_completed
 from contextlib import contextmanager
 from typing import Any, Protocol, TextIO
@@ -211,7 +211,21 @@ class ProgressBar:
             marker_segment = "╸"
             remaining_segment = "━" * (_PROGRESS_BAR_WIDTH - fill)
 
-        bar = f"{_ANSI_CYAN}{complete_segment}{marker_segment}{_ANSI_RESET}{_ANSI_DIM}{remaining_segment}{_ANSI_RESET}"
+        # F2 fix: previously the progress bar ignored `--no-color` and always
+        # emitted ANSI escapes, so redirected output and `--log` files were
+        # littered with raw `\x1b[36m` sequences. Skip the escapes when the
+        # console-level no_color flag is set.
+        from .console import is_console_no_color as _is_no_color
+
+        if _is_no_color():
+            bar = f"{complete_segment}{marker_segment}{remaining_segment}"
+            colored_description: Callable[[str], str] = lambda s: s  # noqa: E731
+        else:
+            bar = (
+                f"{_ANSI_CYAN}{complete_segment}{marker_segment}{_ANSI_RESET}"
+                f"{_ANSI_DIM}{remaining_segment}{_ANSI_RESET}"
+            )
+            colored_description = lambda s: f"{_ANSI_GREEN}{s}{_ANSI_RESET}"  # noqa: E731
 
         elapsed = max(0.0, time.monotonic() - self._started)
         rate = (self._done / elapsed) if elapsed > 0 else 0.0
@@ -223,7 +237,7 @@ class ProgressBar:
             remaining = None
         eta_text = self._format_eta(remaining)
 
-        return f"{_ANSI_GREEN}{self._description}{_ANSI_RESET} {bar} {percent:3d}% {eta_text}"
+        return f"{colored_description(self._description)} {bar} {percent:3d}% {eta_text}"
 
     @staticmethod
     def _visible_len(line: str) -> int:

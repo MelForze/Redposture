@@ -612,6 +612,8 @@ run_redis_cases() {
 run_etcd_cases() {
   run_case etcd etcd_open 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump
   run_case etcd etcd_auth 0 etcd -t 127.0.0.1 --port 22379 --show-keys --dump
+  run_case etcd etcd_auth_defcreds 0 etcd -t 127.0.0.1 --port 22379 --defcreds --show-keys
+  run_case etcd etcd_auth_user_pass 0 etcd -t 127.0.0.1 --port 22379 -u root -p root --show-keys
   run_case etcd etcd_url_http 0 etcd -t "http://127.0.0.1:2379/v2/keys?recursive=true" --show-keys --dump
   run_case etcd etcd_url_https_reject 2 etcd -t "https://127.0.0.1:2379/v2/keys?recursive=true" --show-keys
   run_case etcd etcd_multi_instance_urls 0 etcd -t "http://127.0.0.1:2379/v2/keys,http://127.0.0.1:23790/v2/keys,http://127.0.0.1:23791/v2/keys,http://127.0.0.1:23792/v2/keys,http://127.0.0.1:23793/v2/keys" --show-keys

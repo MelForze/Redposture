@@ -35,6 +35,9 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_clickhouse_line,
+        # E3 opt-in: ClickHouse anon-open (default_user w/ empty password) is
+        # already confirmed by the detect probe.
+        keep_anonymous_open_no_auth=True,
     )
 
 

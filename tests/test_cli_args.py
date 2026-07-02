@@ -2195,10 +2195,11 @@ def test_postgres_rejects_short_database_flag() -> None:
     assert exc.value.code == 2
 
 
-def test_postgres_rejects_save_alias() -> None:
-    with pytest.raises(SystemExit) as exc:
-        parse_args(["postgres", "-t", "10.0.0.7", "--save", "postgres_audit.jsonl"])
-    assert exc.value.code == 2
+def test_postgres_accepts_save_alias() -> None:
+    """F9 fix: `--save` used to be rejected exclusively by postgres/mongo/
+    docker/oracle; every other module accepted it. Now aligned."""
+    args = parse_args(["postgres", "-t", "10.0.0.7", "--save", "postgres_audit.jsonl"])
+    assert args.output == "postgres_audit.jsonl"
 
 
 def test_clickhouse_flags_are_parsed() -> None:

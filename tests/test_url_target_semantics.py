@@ -203,7 +203,14 @@ def test_proxmox_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPat
     rc = run_proxmox_stage(args, AttemptLogger())
 
     assert rc == 0
-    assert captured == [("https", 18006, "/api2/json/access/ticket"), ("https", 18006, "/api2/json/access/ticket")]
+    # F7 fix: cfg.token now resolves from `pve_api_token`, so the credential
+    # is no longer treated as anonymous in the auth stage; the runner runs
+    # host_stage during the auth phase too (detect + auth + data = 3 calls)
+    # instead of skipping it for a would-be anonymous credential (which was
+    # the previous 2-call behavior). All three calls use the same URL — the
+    # invariant this test cares about is scheme+port+path propagation.
+    assert len(captured) == 3
+    assert all(entry == ("https", 18006, "/api2/json/access/ticket") for entry in captured)
 
 
 def test_consul_passes_preferred_scheme_hint(monkeypatch: pytest.MonkeyPatch) -> None:

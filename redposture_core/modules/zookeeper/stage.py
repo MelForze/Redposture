@@ -30,6 +30,9 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_zookeeper_line,
+        # E3 opt-in: ZooKeeper anon-open (default ACLs, no digest ACL on /)
+        # is confirmed by the anon probe listing /.
+        keep_anonymous_open_no_auth=True,
     )
 
 

@@ -111,6 +111,29 @@ def is_auth_error(exc: BaseException | str | None) -> bool:
     )
 
 
+def is_transient_network_error(exc: BaseException | str | None) -> bool:
+    """True when the failure is a network-shaped transient (timeout, refused,
+    reset, DNS blip) rather than an auth verdict from the server. Callers use
+    this to avoid misclassifying network noise as 'invalid credential'."""
+    text = str(exc or "").lower()
+    return any(
+        needle in text
+        for needle in (
+            "connection refused",
+            "connection reset",
+            "connection timeout",
+            "timed out",
+            "serverselectiontimeouterror",
+            "dns lookup failed",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "network is unreachable",
+            "no route to host",
+            "topologydescription",
+        )
+    )
+
+
 def json_safe(value: Any) -> Any:
     json_util = _load_bson_json_util()
     if json_util is not None:
@@ -252,6 +275,7 @@ def non_system_databases(names: Iterable[str]) -> list[str]:
 
 __all__ = [
     "MongoAuditClient",
+    "is_transient_network_error",
     "MongoAuthError",
     "MongoClientError",
     "MongoDependencyError",

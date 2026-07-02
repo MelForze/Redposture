@@ -119,6 +119,8 @@ _EXPECTED_LABELS = (
     "redis_multi_ports",
     "etcd_open",
     "etcd_auth",
+    "etcd_auth_defcreds",
+    "etcd_auth_user_pass",
     "etcd_url_http",
     "etcd_url_https_reject",
     "etcd_multi_instance_urls",

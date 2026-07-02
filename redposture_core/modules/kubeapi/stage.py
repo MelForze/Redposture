@@ -30,6 +30,9 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_kubeapi_line,
+        # E3 opt-in: kubeapi anon-open (system:anonymous binding, common on
+        # dev/testing clusters) is confirmed by the detect probe.
+        keep_anonymous_open_no_auth=True,
     )
 
 

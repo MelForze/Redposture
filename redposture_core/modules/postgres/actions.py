@@ -6,11 +6,11 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import re
 import secrets
 import socket
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -334,7 +334,16 @@ def _scram_client_final(state: _ScramState, password: str, server_first: str) ->
             auth_method="scram-sha-256",
         ) from exc
 
-    salted_password = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8", errors="replace"), salt, iterations)
+    # PostgreSQL and libpq apply SASLprep (RFC 4013) before PBKDF2. In practice
+    # this means NFKC normalization for the common case; fall back to raw utf-8
+    # if normalization somehow fails, matching libpq's own tolerant behavior.
+    try:
+        prepared_password = unicodedata.normalize("NFKC", password)
+    except (TypeError, ValueError):
+        prepared_password = password
+    salted_password = hashlib.pbkdf2_hmac(
+        "sha256", prepared_password.encode("utf-8", errors="replace"), salt, iterations
+    )
     client_key = hmac.new(salted_password, b"Client Key", hashlib.sha256).digest()
     stored_key = hashlib.sha256(client_key).digest()
 
@@ -590,11 +599,7 @@ def _collect_postgres_privileges(
         elif sample_error:
             readable_tables_error = f"{readable_tables_error}; table read probe failed: {sample_error}"
 
-    can_execute_commands: bool | None
-    if superuser is None and can_program is None:
-        can_execute_commands = None
-    else:
-        can_execute_commands = bool(superuser) or bool(can_program)
+    can_execute_commands = _pg_tri_or(superuser, can_program)
 
     can_read_tables: bool | None
     if readable_tables is None:
@@ -672,6 +677,20 @@ def _pg_read_probe_error_is_denied(error: str) -> bool:
 
 def _pg_bool_text(value: bool | None) -> str:
     return "True" if value is True else "False" if value is False else "unknown"
+
+
+def _pg_tri_or(*values: bool | None) -> bool | None:
+    """Tri-state OR for privesc checks.
+
+    Any True dominates. Otherwise, if any input is None (query failed / unknown)
+    we return None so 'unknown superuser + role=False' does not silently become
+    False and hide a real superuser from the privesc report.
+    """
+    if any(value is True for value in values):
+        return True
+    if any(value is None for value in values):
+        return None
+    return False
 
 
 def _pg_privesc_role_membership(sock: socket.socket, role_name: str) -> tuple[bool | None, str | None]:
@@ -776,7 +795,7 @@ def _pg_collect_privesc_checks(
     )
 
     execute_role, execute_role_error = _pg_privesc_role_membership(sock, "pg_execute_server_program")
-    copy_program = None if superuser is None and execute_role is None else bool(superuser) or bool(execute_role)
+    copy_program = _pg_tri_or(superuser, execute_role)
     copy_error = execute_role_error if execute_role is None and superuser is not True else None
     checks.append(
         _pg_privesc_check_record(
@@ -791,9 +810,7 @@ def _pg_collect_privesc_checks(
     )
 
     read_server_files, read_server_error = _pg_privesc_role_membership(sock, "pg_read_server_files")
-    pg_read_file = (
-        None if superuser is None and read_server_files is None else bool(superuser) or bool(read_server_files)
-    )
+    pg_read_file = _pg_tri_or(superuser, read_server_files)
     checks.append(
         _pg_privesc_check_record(
             "HIGH",
@@ -819,9 +836,7 @@ def _pg_collect_privesc_checks(
     )
 
     write_server_files, write_server_error = _pg_privesc_role_membership(sock, "pg_write_server_files")
-    file_write = (
-        None if superuser is None and write_server_files is None else bool(superuser) or bool(write_server_files)
-    )
+    file_write = _pg_tri_or(superuser, write_server_files)
     checks.append(
         _pg_privesc_check_record(
             "HIGH",
@@ -836,11 +851,7 @@ def _pg_collect_privesc_checks(
 
     lo_import_exec, lo_import_error = _pg_privesc_function_executable(sock, "pg_catalog.lo_import(text)")
     lo_export_exec, lo_export_error = _pg_privesc_function_executable(sock, "pg_catalog.lo_export(oid,text)")
-    lo_capable = (
-        None
-        if superuser is None and lo_import_exec is None and lo_export_exec is None
-        else bool(superuser) or bool(lo_import_exec) or bool(lo_export_exec)
-    )
+    lo_capable = _pg_tri_or(superuser, lo_import_exec, lo_export_exec)
     lo_errors = "; ".join(item for item in (lo_import_error, lo_export_error) if item) or None
     checks.append(
         _pg_privesc_check_record(
@@ -858,7 +869,7 @@ def _pg_collect_privesc_checks(
     )
 
     createrole, createrole_error = _pg_privesc_role_flag(sock, "rolcreaterole")
-    createrole_effective = None if superuser is None and createrole is None else bool(superuser) or bool(createrole)
+    createrole_effective = _pg_tri_or(superuser, createrole)
     checks.append(
         _pg_privesc_check_record(
             "HIGH",
@@ -872,7 +883,7 @@ def _pg_collect_privesc_checks(
     )
 
     createdb, createdb_error = _pg_privesc_role_flag(sock, "rolcreatedb")
-    createdb_effective = None if superuser is None and createdb is None else bool(superuser) or bool(createdb)
+    createdb_effective = _pg_tri_or(superuser, createdb)
     checks.append(
         _pg_privesc_check_record(
             "MEDIUM",
@@ -1271,9 +1282,29 @@ def _pg_try_read_server_file(
     else:
         attempts.append({"method": "pg_read_file", "ok": False, "error": "empty pg_read_file result"})
 
-    directory = os.path.dirname(clean_path) or "."
-    basename = os.path.basename(clean_path)
-    _, switch_error = _pg_query_rows(sock, "SELECT pg_switch_wal()")
+    # A14 fix: `clean_path` is a path ON THE REMOTE SERVER — the audited PG
+    # process's OS, not the client's. `os.path.dirname`/`basename` follow the
+    # client's separator, so a Windows-formatted path (backslashes) audited
+    # from Linux/macOS was mis-parsed → wrong pg_ls_dir target and spurious
+    # "did not list" warnings. Split on both separators explicitly.
+    def _remote_dirname(path: str) -> str:
+        marker = max(path.rfind("/"), path.rfind("\\"))
+        if marker <= 0:
+            return "."
+        return path[:marker]
+
+    def _remote_basename(path: str) -> str:
+        marker = max(path.rfind("/"), path.rfind("\\"))
+        return path[marker + 1 :] if marker >= 0 else path
+
+    directory = _remote_dirname(clean_path)
+    basename = _remote_basename(clean_path)
+    # D1 fix: previous version issued `SELECT pg_switch_wal()` before every
+    # read attempt as a defensive maneuver. `pg_switch_wal` forces the current
+    # WAL segment to be archived on the server — a wasteful side effect for a
+    # read-only probe (and it requires superuser or `pg_write_wal` membership,
+    # so it fails harmlessly on lower-privileged runs but still burns a round
+    # trip). Skip it; the large-object read path below is self-contained.
     dir_rows, dir_error = _pg_query_rows(
         sock,
         f"SELECT pg_ls_dir({_pg_quote_literal(directory)}, FALSE, TRUE)",
@@ -1287,8 +1318,6 @@ def _pg_try_read_server_file(
     import_rows, import_error = _pg_query_rows(sock, f"SELECT lo_import({_pg_quote_literal(clean_path)})")
     if import_error:
         parts = [f"lo_import failed: {import_error}"]
-        if switch_error:
-            parts.append(f"pg_switch_wal failed: {switch_error}")
         if directory_warning:
             parts.append(directory_warning)
         error = "; ".join(parts)
@@ -1325,7 +1354,6 @@ def _pg_try_read_server_file(
     warning_parts = [
         item
         for item in (
-            f"pg_switch_wal failed: {switch_error}" if switch_error else None,
             directory_warning,
             f"lo_unlink failed: {unlink_error}" if unlink_error else None,
         )
@@ -1951,9 +1979,10 @@ def _audit_postgres_host(
                 except Exception:
                     pass
 
-                if session.auth_required is False and defcreds:
-                    status = "weak_default_creds"
-                elif session.auth_required is False:
+                # trust auth (auth_required=False) means the server never asked for a
+                # password — --defcreds cannot have "worked" against it. Always report
+                # open_no_auth in that case so we don't fabricate a weak-password finding.
+                if session.auth_required is False:
                     status = "open_no_auth"
                 elif provided_credentials:
                     status = "valid_credentials"
@@ -2765,7 +2794,16 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             continue
         username = str(attempt.get("username") or "postgres")
         password = attempt.get("password")
-        password_text = str(password) if password is not None else "postgres"
+        # A13 fix: an attempt with password=None is a bare-username probe (no
+        # password sent). The old fallback substituted the literal "postgres",
+        # so reports claimed `postgres:postgres` was tried when in fact nothing
+        # was — corrupting reproducer evidence. Emit a marker instead.
+        if password is None:
+            password_text = "<no-password>"
+        elif password == "":
+            password_text = "<empty>"
+        else:
+            password_text = str(password)
         lines.append(f"{prefix} [-] {username}:{password_text}")
     return lines
 

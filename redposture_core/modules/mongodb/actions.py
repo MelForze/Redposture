@@ -10,8 +10,11 @@ from typing import Any
 from ...clients import transport
 from ...clients.mongodb import (
     MongoAuditClient,
+    MongoDependencyError,
+    MongoNotMongoError,
     close_quietly,
     is_auth_error,
+    is_transient_network_error,
     json_safe,
     non_system_databases,
     normalize_mongodb_error,
@@ -152,10 +155,11 @@ def _group_collection_targets(
         value = str(raw or "").strip()
         if not value:
             continue
-        if selected_database:
-            grouped.setdefault(selected_database, []).append(value)
-            normalized.append(value)
-            continue
+        # A8 fix: split on `.` FIRST so `--database mydb --collection users.audit`
+        # correctly resolves to the (mydb, users.audit) → but split naturally
+        # yields (users, audit). Prior behavior treated it as literal collection
+        # "users.audit" under mydb and produced empty dumps. When --database is
+        # set, a bare (no-dot) target still routes to that DB.
         if "." in value:
             database, collection = value.split(".", 1)
             database = database.strip()
@@ -163,6 +167,9 @@ def _group_collection_targets(
             if not database or not collection:
                 return [], {}, f"invalid --collection target: {value}"
             grouped.setdefault(database, []).append(collection)
+            normalized.append(value)
+        elif selected_database:
+            grouped.setdefault(selected_database, []).append(value)
             normalized.append(value)
         else:
             grouped.setdefault(selected_database, []).append(value)
@@ -207,6 +214,16 @@ def _try_credentials(
     auth_db: str,
     credential_candidates: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Try each candidate; return the first success + the attempt log.
+
+    A7 fix: transient network failures (connection refused/reset/timeout, DNS
+    blips) are NOT recorded as credential attempts — the credential was never
+    actually validated. Instead we mark them with `transient=True` so callers
+    can distinguish "credentials rejected" (server said no) from "we never got
+    to ask the server". Previously any exception looked like a rejected
+    credential, so a brief network hiccup during the defcreds loop reported
+    5 phantom failed credential probes.
+    """
     attempts: list[dict[str, Any]] = []
     for candidate in credential_candidates:
         username = candidate.get("username")
@@ -234,6 +251,7 @@ def _try_credentials(
             attempts.append(attempt)
             return attempt, attempts
         except Exception as exc:
+            transient = is_transient_network_error(exc) and not is_auth_error(exc)
             attempts.append(
                 {
                     "username": username,
@@ -241,6 +259,7 @@ def _try_credentials(
                     "ok": False,
                     "default": bool(candidate.get("default")),
                     "error": normalize_mongodb_error(exc),
+                    "transient": transient,
                 }
             )
         finally:
@@ -501,9 +520,14 @@ def _audit_mongodb_host(
         nosql_command=nosql_command,
     )
 
+    # A12 fix: persist credential_attempts across retries so the final fail
+    # record still shows what was tried before the connection ultimately died.
+    persisted_credential_attempts: list[dict[str, Any]] = []
     for attempt in range(attempts):
         started = time.monotonic()
         client: MongoAuditClient | None = None
+        active_client_ref: MongoAuditClient | None = None
+        active_client_owned_ref = False
         try:
             client = _open_client(host, port, timeout, username=None, password=None, auth_db=auth_database)
             hello = client.hello()
@@ -515,6 +539,11 @@ def _audit_mongodb_host(
                 version = str(hello.get("version") or "").strip() or None
 
             anon_databases, anon_error = _try_list_databases(client)
+            # "authentication required" is the canonical marker _try_list_databases sets
+            # when is_auth_error matched, but some servers surface auth failures under
+            # other normalized messages ("not authorized", "authentication failed"). If we
+            # later authenticate successfully, the check at line 548 below promotes the
+            # inference to True for any non-transport anon failure.
             auth_required = anon_databases is None and anon_error == "authentication required"
             credential_attempts: list[dict[str, Any]] = []
             selected_credential: dict[str, Any] | None = None
@@ -529,6 +558,10 @@ def _audit_mongodb_host(
                     auth_db=auth_database,
                     credential_candidates=credential_candidates,
                 )
+                # A12: cache the attempt log immediately after _try_credentials
+                # returns, before any subsequent step can raise and lose it.
+                if credential_attempts:
+                    persisted_credential_attempts = list(credential_attempts)
                 if selected_credential is not None:
                     active_client = _open_client(
                         host,
@@ -541,11 +574,21 @@ def _audit_mongodb_host(
                         auth_db=auth_database,
                     )
                     active_client_owned = True
+                    # A10 fix: mirror ownership onto the outer refs so the finally
+                    # block can close the credentialed client if _collect_mongodb_data
+                    # (or anything after it) raises. Without this, active_client
+                    # leaked pymongo topology/monitor threads under exceptions.
+                    active_client_ref = active_client
+                    active_client_owned_ref = True
                     database_names, database_error = _try_list_databases(active_client)
                     status = "weak_default_creds" if selected_credential.get("default") else "valid_credentials"
                     effective_username = selected_credential.get("username")
                     effective_password = selected_credential.get("password")
-                    auth_required = True if auth_required else False
+                    # Auth succeeded; if anon could not list databases (any auth-shaped or
+                    # normalized-error response) that's evidence the server enforced auth,
+                    # regardless of the exact anon_error string. Only report auth_required
+                    # as False when the anon listing itself succeeded.
+                    auth_required = anon_databases is None
                 elif anon_databases is not None:
                     database_names = anon_databases
                     database_error = None
@@ -556,6 +599,14 @@ def _audit_mongodb_host(
                 else:
                     database_names = None
                     database_error = anon_error or "authentication required"
+                    # A7 fix: if every credential attempt was actually a network
+                    # transient (nothing reached the server verdict), do NOT
+                    # advertise "auth_required with N failed credentials". Report
+                    # the underlying transport failure so the operator can retry.
+                    non_transient_attempts = [item for item in credential_attempts if not item.get("transient")]
+                    if credential_attempts and not non_transient_attempts:
+                        first_error = credential_attempts[0].get("error") or "connection failed"
+                        raise ConnectionError(first_error)
                     status = "auth_required"
                     effective_username = credential_candidates[0].get("username")
                     effective_password = credential_candidates[0].get("password")
@@ -593,6 +644,10 @@ def _audit_mongodb_host(
             )
             if active_client_owned:
                 active_client.close()
+                # Ownership transferred to caller frame — cancel the
+                # finally-block backup close for this attempt.
+                active_client_owned_ref = False
+                active_client_ref = None
 
             record = dict(record_template)
             record.update(data)
@@ -605,7 +660,11 @@ def _audit_mongodb_host(
                     "provided_credentials": bool(credential_candidates),
                     "provided_username": effective_username if credential_candidates else None,
                     "provided_password": effective_password if credential_candidates else None,
-                    "defcreds_enabled": any(bool(item.get("default")) for item in credential_candidates),
+                    # A11 fix: reflect actual attempts, not whether the caller
+                    # *supplied* defaults. If the user's own credential succeeded
+                    # first, the defcreds probes were never exercised and the
+                    # report should not claim defcreds coverage.
+                    "defcreds_enabled": any(bool(item.get("default")) for item in credential_attempts),
                     "effective_username": effective_username,
                     "credential_attempts": credential_attempts,
                     "server_version": version,
@@ -615,6 +674,13 @@ def _audit_mongodb_host(
                 }
             )
             return record
+        except (MongoNotMongoError, MongoDependencyError) as exc:
+            # A9 fix: fail-fast on terminal classifications. A non-MongoDB
+            # endpoint (banner does not match) or a missing pymongo install
+            # will never succeed on a retry — burning the retry budget just
+            # multiplies latency across large scans.
+            last_error = normalize_mongodb_error(exc)
+            break
         except Exception as exc:
             last_error = normalize_mongodb_error(exc)
             if attempt >= attempts - 1:
@@ -623,6 +689,11 @@ def _audit_mongodb_host(
         finally:
             if client is not None:
                 client.close()
+            if active_client_owned_ref and active_client_ref is not None:
+                try:
+                    active_client_ref.close()
+                except Exception:
+                    pass
 
     record = dict(record_template)
     record.update(
@@ -631,6 +702,10 @@ def _audit_mongodb_host(
             "status": "fail",
             "is_mongodb": False,
             "error": last_error or "connection failed",
+            # A12 fix: surface any credential probes that reached the server
+            # before the terminal failure — otherwise the final record silently
+            # loses evidence of what was tried.
+            "credential_attempts": persisted_credential_attempts,
         }
     )
     return record

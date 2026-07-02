@@ -33,6 +33,10 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_postgres_line,
+        # E3 opt-in: PostgreSQL `trust auth` (no password requested) means the
+        # detect probe already logged in without any credential; the defcreds
+        # loop can't improve on that and just adds round-trips.
+        keep_anonymous_open_no_auth=True,
     )
 
 
@@ -150,12 +154,16 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
     database = str(getattr(args, "database", "postgres") or "postgres")
     if bool(getattr(args, "os_shell", False)):
         while True:
-            command = input("pg-os> ").strip()
+            try:
+                command = input("pg-os> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.plain("")
+                break
             if not command:
                 continue
             if command.lower() in {"exit", "quit"}:
                 break
-            actions._pg_execute_remote_command(
+            output, exec_error = actions._pg_execute_remote_command(
                 host=str(host),
                 port=int(port),
                 timeout=cfg.timeout,
@@ -165,14 +173,22 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
                 database=database,
                 command=command,
             )
+            for line in output or []:
+                console.plain(str(line))
+            if exec_error:
+                console.error(exec_error)
         return 0
     while True:
-        query = input("pg-sql> ").strip()
+        try:
+            query = input("pg-sql> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.plain("")
+            break
         if not query:
             continue
         if query.lower() in {"exit", "quit"}:
             break
-        actions._pg_execute_sql_query(
+        output, query_error = actions._pg_execute_sql_query(
             host=str(host),
             port=int(port),
             timeout=cfg.timeout,
@@ -182,4 +198,8 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
             database=database,
             query=query,
         )
+        for line in output or []:
+            console.plain(str(line))
+        if query_error:
+            console.error(query_error)
     return 0

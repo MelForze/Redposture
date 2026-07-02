@@ -44,6 +44,20 @@ def _env_truthy(name: str) -> bool:
     return value is not None and value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+# D4 fix: cache the result for the default (stdout) path. `should_use_color`
+# is called for every single log line emitted from listener storms, so its
+# `os.environ.get` reads + `isatty()` syscall added up under load. Only the
+# `stream is None` branch is cached — callers that pass explicit streams are
+# rare (~test fixtures) and get the fully-recomputed value. Env changes during
+# a run are exotic; the sentinel invalidates cache when they happen.
+_DEFAULT_COLOR_CACHE: bool | None = None
+_COLOR_CACHE_SENTINEL: tuple[str | None, str | None] | None = None
+
+
+def _current_env_sentinel() -> tuple[str | None, str | None]:
+    return (os.environ.get("NO_COLOR"), os.environ.get("FORCE_COLOR"))
+
+
 def should_use_color(stream: TextIO | None = None) -> bool:
     """Whether ANSI color should be written to ``stream`` (default stdout).
 
@@ -53,15 +67,35 @@ def should_use_color(stream: TextIO | None = None) -> bool:
     stays clean (matching the progress bar's gating). The ``--no-color`` flag is
     layered on by the callers (`Console._use_color` / `logger._paint`).
     """
-    if _env_present("NO_COLOR"):
-        return False
-    if _env_truthy("FORCE_COLOR"):
-        return True
-    target = sys.stdout if stream is None else stream
-    try:
-        return bool(target.isatty())
-    except Exception:
-        return False
+    global _DEFAULT_COLOR_CACHE, _COLOR_CACHE_SENTINEL
+
+    def _compute(target: TextIO) -> bool:
+        if _env_present("NO_COLOR"):
+            return False
+        if _env_truthy("FORCE_COLOR"):
+            return True
+        try:
+            return bool(target.isatty())
+        except Exception:
+            return False
+
+    if stream is None:
+        sentinel = _current_env_sentinel()
+        if sentinel != _COLOR_CACHE_SENTINEL:
+            _DEFAULT_COLOR_CACHE = None
+            _COLOR_CACHE_SENTINEL = sentinel
+        if _DEFAULT_COLOR_CACHE is None:
+            _DEFAULT_COLOR_CACHE = _compute(sys.stdout)
+        return _DEFAULT_COLOR_CACHE
+
+    return _compute(stream)
+
+
+def _reset_color_cache() -> None:
+    """Test helper: forget the memoized should_use_color result."""
+    global _DEFAULT_COLOR_CACHE, _COLOR_CACHE_SENTINEL
+    _DEFAULT_COLOR_CACHE = None
+    _COLOR_CACHE_SENTINEL = None
 
 
 class Console:

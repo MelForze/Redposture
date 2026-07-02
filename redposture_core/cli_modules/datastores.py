@@ -120,6 +120,7 @@ def configure_etcd_parser(
     port_type: Callable[[str], int],
 ) -> None:
     common = parser.add_argument_group("Common")
+    auth = parser.add_argument_group("Auth")
     actions = parser.add_argument_group("Actions")
     add_output_flags(common)
     add_log_flag(common)
@@ -137,6 +138,27 @@ def configure_etcd_parser(
         ),
     )
     add_multi_ports_flag(common)
+    auth.add_argument(
+        "-u",
+        "--username",
+        dest="username",
+        default=None,
+        metavar="name",
+        help="Optional etcd username for /v3/auth/authenticate credential check.",
+    )
+    auth.add_argument(
+        "-p",
+        "--password",
+        dest="password",
+        default=None,
+        metavar="value",
+        help="Optional etcd password for /v3/auth/authenticate credential check.",
+    )
+    auth.add_argument(
+        "--defcreds",
+        action="store_true",
+        help="Try default etcd credentials (root:root, root:etcd, etcd:etcd) when auth is required.",
+    )
     actions.add_argument(
         "--show-keys",
         **optional_show_count_kwargs(
@@ -255,7 +277,9 @@ def configure_kafka_parser(
     actions.add_argument(
         "--max-messages",
         dest="max_messages",
-        type=int,
+        # F5 fix: previously `type=int` accepted 0 or negative values silently,
+        # so `--max-messages 0` reported "success" with an empty dump.
+        type=positive_int,
         default=None,
         metavar="count",
         help="Maximum number of topic messages to read per topic with --dump.",

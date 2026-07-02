@@ -32,6 +32,10 @@ def build_mongodb_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_mongodb_line,
+        # E3 opt-in: MongoDB anon-open (no --auth flag on the server) means
+        # the detect probe already listed databases; the defcreds loop only
+        # adds redundant round-trips.
+        keep_anonymous_open_no_auth=True,
     )
 
 
@@ -41,7 +45,16 @@ def run_mongodb_stage(args: Any, logger: Any) -> int:
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
-    _normalize_mongodb_action_args(args)
+    # D2 fix: surface parse errors from _group_collection_targets /
+    # _parse_document_selector / _parse_json_object / etc. Previously these
+    # were bound to a throwaway `_error` and dropped on the floor, so
+    # `--collection foo.` or malformed --query silently produced an empty
+    # target list and the audit ran as a clean no-op.
+    normalize_errors = _normalize_mongodb_action_args(args)
+    if normalize_errors:
+        for err in normalize_errors:
+            console.error(err)
+        return 2
     if bool(getattr(args, "nosql_shell", False)):
         _force_single_default_port(args)
     if not has_username_password_credential_file(args):
@@ -128,30 +141,43 @@ def _mongodb_credential_candidates(plan: AuditCommandPlan) -> list[dict[str, Any
     return candidates
 
 
-def _normalize_mongodb_action_args(args: Any) -> None:
+def _normalize_mongodb_action_args(args: Any) -> list[str]:
+    """Normalize CLI args into audit-ready shapes; return any parse errors."""
+    errors: list[str] = []
     collections = actions._split_csv_values(
         list(getattr(args, "collections", None) or getattr(args, "collection", None) or [])
     )
-    normalized, grouped, _error = actions._group_collection_targets(collections, getattr(args, "database", None))
+    normalized, grouped, error = actions._group_collection_targets(collections, getattr(args, "database", None))
+    if error:
+        errors.append(error)
     args.collection_targets = normalized
     args.collection_targets_by_database = grouped
     query_raw = getattr(args, "query", None)
     if getattr(args, "document", None):
-        selector, _safe, _error = actions._parse_document_selector(str(args.document))
+        selector, _safe, error = actions._parse_document_selector(str(args.document))
+        if error:
+            errors.append(error)
         args.document_selector = selector
         args.query_filter = {"_id": selector}
     elif query_raw:
-        query_filter, _error = actions._parse_json_object(str(query_raw), field_name="--query")
+        query_filter, error = actions._parse_json_object(str(query_raw), field_name="--query")
+        if error:
+            errors.append(error)
         args.query_filter = query_filter
     else:
         args.query_filter = None
     projection_raw = getattr(args, "projection", None)
-    projection, _error = actions._parse_json_object(str(projection_raw or ""), field_name="--projection")
+    projection, error = actions._parse_json_object(str(projection_raw or ""), field_name="--projection")
+    if error:
+        errors.append(error)
     args.projection = projection or None
     args.index_filter = getattr(args, "index", None)
     nosql_raw = getattr(args, "nosql_cmd", None)
     if nosql_raw:
-        command, _error = actions._parse_json_object(str(nosql_raw), field_name="--nosql-cmd")
+        command, error = actions._parse_json_object(str(nosql_raw), field_name="--nosql-cmd")
+        if error:
+            errors.append(error)
         args.nosql_command = command
     else:
         args.nosql_command = None
+    return errors

@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 import sys
+import threading
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -194,38 +195,49 @@ def _record_callbacks_for_args(args: Any) -> tuple[Callable[[dict[str, Any]], No
 
 
 class LineOutputSink:
-    """Buffered line sink for stages that must choose one emitted result from many attempts."""
+    """Buffered line sink for stages that must choose one emitted result from many attempts.
+
+    C1/C2 fix: BoundedScheduler runs `_finalize_record` on N worker threads
+    concurrently, and every worker eventually reaches `emit_many`. The prior
+    implementation opened the file lazily without a lock (two threads could
+    race, one `open('w')` truncating the other's output) and wrote/flushed
+    without serialization (lines from different records could interleave).
+    A single mutex around the file+console emit path is enough because the
+    critical section is small (a handful of writes + one flush per record).
+    """
 
     def __init__(self, output_path: str | None, emit_line: Callable[[str], None], *, append: bool = False) -> None:
         self.output_path = output_path
         self.emit_line = emit_line
         self.output_written = bool(append)
         self._handle: Any = None
+        self._lock = threading.Lock()
 
     def emit_many(self, lines: Iterable[str]) -> None:
         buffered = [line for line in lines if line]
         if not buffered:
             return
-        if self.output_path:
-            if self._handle is None:
-                # Open once and keep the handle: render emits per record, so a
-                # per-call open/close would re-open the file for every finding.
-                os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
-                self._handle = open(self.output_path, "a" if self.output_written else "w", encoding="utf-8")
+        with self._lock:
+            if self.output_path:
+                if self._handle is None:
+                    os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
+                    self._handle = open(self.output_path, "a" if self.output_written else "w", encoding="utf-8")
+                for line in buffered:
+                    self._handle.write(line + "\n")
+                self._handle.flush()
+            # Emit to console inside the lock too: without it a second thread's
+            # `print()` can splice its output into the first thread's partial
+            # write on POSIX (write(2) is atomic per-syscall but Python's
+            # `print(...)` performs two writes).
             for line in buffered:
-                self._handle.write(line + "\n")
-            self._handle.flush()
-        # Always echo to the console as well: `-o`/`--save` now tees (file + console)
-        # instead of suppressing stdout. The colorizer in `emit_line` applies to the
-        # console copy; the file copy stays plain (written directly above).
-        for line in buffered:
-            self.emit_line(line)
-        self.output_written = True
+                self.emit_line(line)
+            self.output_written = True
 
     def close(self) -> None:
-        if self._handle is not None:
-            self._handle.close()
-            self._handle = None
+        with self._lock:
+            if self._handle is not None:
+                self._handle.close()
+                self._handle = None
 
 
 def _build_colored_emit(console: Any, colorize: Callable[[Any, str], bool] | None) -> Callable[[str], None]:
@@ -283,6 +295,12 @@ class ModuleAuditSpec:
     colorize: Callable[[Any, str], bool] | None = None
     is_detected: Callable[[AuditRecord], bool] | None = None
     deep_gate: Callable[[AuditRecord], tuple[bool, str]] | None = None
+    # E3 opt-in: when True + `--defcreds` + detect status==open_no_auth, the
+    # runner returns the detect record instead of re-running the host_stage
+    # against every default credential. Kafka hardcodes this behavior in
+    # `_should_keep_anonymous_detect_record`; other modules opt in via this
+    # flag as their credential loop is proven safe to skip on anon-open.
+    keep_anonymous_open_no_auth: bool = False
 
 
 @dataclass(frozen=True)
@@ -748,7 +766,42 @@ def _invoke_host_stage(
             run_deep_checks=bool(run_deep_checks),
             debug_emit=ctx.debug_emit,
         )
-    cfg = AuditConfig.from_namespace(ctx.args)
+
+    # C6 fix: cache the resolved AuditConfig on the argparse Namespace so
+    # repeated per-host stage invocations don't re-coerce every field of the
+    # same namespace. `_cached_audit_config` is a plain attribute the harness
+    # never inspects; if the object is not a Namespace (test doubles etc)
+    # we quietly fall back to the eager path.
+    #
+    # E9 fix: invalidate the cache whenever the caller mutates AuditConfig-
+    # relevant fields on args between invocations. We hash a lightweight
+    # sentinel of the fields AuditConfig reads (timeout, retries, workers,
+    # debug, defcreds, username, password, token, output, output_format) and
+    # rebuild when the sentinel changes.
+    def _cfg_sentinel(ns: Any) -> tuple[Any, ...]:
+        return (
+            getattr(ns, "timeout", None),
+            getattr(ns, "retries", None),
+            getattr(ns, "workers", None),
+            getattr(ns, "debug", None),
+            getattr(ns, "defcreds", None),
+            getattr(ns, "username", None),
+            getattr(ns, "password", None),
+            getattr(ns, "token", None),
+            getattr(ns, "output", None),
+            getattr(ns, "output_format", None),
+        )
+
+    sentinel = _cfg_sentinel(ctx.args)
+    cached_sentinel = getattr(ctx.args, "_cached_audit_config_sentinel", None)
+    cfg = getattr(ctx.args, "_cached_audit_config", None)
+    if cfg is None or cached_sentinel != sentinel:
+        cfg = AuditConfig.from_namespace(ctx.args)
+        try:
+            ctx.args._cached_audit_config = cfg
+            ctx.args._cached_audit_config_sentinel = sentinel
+        except AttributeError:
+            pass
     positional: list[Any] = []
     keyword: dict[str, Any] = {}
     for name, parameter in signature.parameters.items():
@@ -790,7 +843,13 @@ def build_render_plan(render_module: Any) -> RenderPlan:
     detect = getattr(render_module, "_format_detect_record", None) or getattr(render_module, "_detect_line", None)
     summary = getattr(render_module, "_format_record", None)
     details: list[tuple[Callable[..., Any], bool]] = []
-    for name in getattr(render_module, "__all__", ()):
+    # E7 fix: modules without `__all__` used to lose every detail renderer
+    # silently (TXT output collapsed to detect+summary only). Fall back to
+    # `dir(render_module)` filtered by the same naming convention.
+    candidate_names = getattr(render_module, "__all__", None)
+    if not candidate_names:
+        candidate_names = tuple(name for name in dir(render_module) if name.startswith("_format"))
+    for name in candidate_names:
         if name in {"_format_detect_record", "_format_record", "_detect_line"}:
             continue
         if not (name.startswith("_format") and (name.endswith("_records") or name.endswith("_lines"))):
@@ -816,13 +875,23 @@ def render_with_plan(
         except TypeError:
             pass
     if plan.summary is not None:
-        lines.append(str(plan.summary(record_payload, output_format)))
+        try:
+            lines.append(str(plan.summary(record_payload, output_format)))
+        except Exception as exc:  # noqa: BLE001 — render must never abort the scan
+            # E5 fix: a broken _format_record used to propagate any exception
+            # other than TypeError out through _finalize_record → the whole
+            # scan loop was killed. Emit a marker line so operators see the
+            # per-record failure but the scan finishes.
+            lines.append(f"[!] render summary failed for record: {exc.__class__.__name__}: {exc}")
     for func, takes_debug in plan.details:
         try:
             rendered = (
                 func(record_payload, output_format, debug=debug) if takes_debug else func(record_payload, output_format)
             )
         except TypeError:
+            continue
+        except Exception as exc:  # noqa: BLE001 — see E5 fix above
+            lines.append(f"[!] render detail {func.__name__} failed: {exc.__class__.__name__}: {exc}")
             continue
         if rendered:
             lines.extend(str(line) for line in rendered if line)
@@ -952,7 +1021,16 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
     if name == "username":
         return credential.username if credential.username is not None else cfg.username
     if name == "password":
-        return credential.password if credential.username is not None else cfg.password
+        # E2 fix: password-only credentials (e.g. Redis AUTH-with-token, kafka
+        # SASL/PLAIN with anonymous username) provide `password` but no
+        # `username`. The previous check gated password propagation on the
+        # username field, so file-driven password lists were silently replaced
+        # by cfg.password (which is the CLI's raw arg — often the file path).
+        if credential.password is not None:
+            return credential.password
+        if credential.username is not None:
+            return credential.password  # explicit-None on a user-only credential
+        return cfg.password
     if name in {"token", "api_token"}:
         return credential.token or getattr(args, name, None) or getattr(args, "token", None)
     if name == "defcreds":
@@ -1172,6 +1250,18 @@ class AuditCommandRunner:
     def run_plan(self, plan: AuditCommandPlan) -> AuditCommandResult:
         target_count = plan.target_count
         retain_records = target_count <= DEFAULT_RECORD_RETENTION_LIMIT
+        # E6 fix: when target_count exceeds the retention limit, downstream
+        # consumers (exporters, summary renderers) that iterate
+        # `AuditCommandResult.records` used to get an empty list without any
+        # indication. Emit a one-shot debug marker so operators can trace
+        # "0-length result but N hosts probed" in the run log.
+        if not retain_records:
+            debug_emit_early = getattr(self.args, "debug_emit", None)
+            if callable(debug_emit_early):
+                debug_emit_early(
+                    f"[!] record retention disabled: {target_count} targets exceed limit "
+                    f"{DEFAULT_RECORD_RETENTION_LIMIT}; AuditCommandResult.records will be empty"
+                )
         progress = start_command_progress(
             self.args,
             self.spec.label,
@@ -1412,7 +1502,12 @@ class AuditCommandRunner:
             # so renderers can surface all of them instead of only the last-tried one.
             # Generic + harmless: modules whose renderers ignore this key are unaffected.
             if len(auth_records) > 1:
-                selected_record.extra["attempted_credentials"] = [
+                # E8 fix: when `_should_keep_anonymous_detect_record` returned
+                # `detect_record` unchanged, `selected_record IS detect_record`.
+                # Mutating its `extra` dict poisons every other structure that
+                # holds a reference to the same record. Return a shallow copy
+                # with the attempted_credentials annotation instead.
+                attempts_payload = [
                     {
                         "username": cred.username,
                         "password": cred.password,
@@ -1421,6 +1516,19 @@ class AuditCommandRunner:
                     }
                     for cred, rec in auth_records
                 ]
+                if selected_record is detect_record:
+                    # Replace with a shallow copy sharing everything except a
+                    # fresh `extra` dict so we don't mutate the detect record
+                    # that other structures (auth_records, retained_records)
+                    # still reference.
+                    import dataclasses as _dc
+
+                    selected_record = _dc.replace(
+                        selected_record,
+                        extra={**selected_record.extra, "attempted_credentials": attempts_payload},
+                    )
+                else:
+                    selected_record.extra["attempted_credentials"] = attempts_payload
             if debug_emit is not None:
                 debug_emit(format_stage2_gate(host, int(port), "skip", gate[1] or gate_reason))
             return selected_record
@@ -1433,11 +1541,24 @@ class AuditCommandRunner:
         return record
 
     def _should_keep_anonymous_detect_record(self, detect_record: AuditRecord) -> bool:
-        return (
-            self.spec.module == "kafka"
-            and bool(getattr(self.args, "defcreds", False))
-            and str(detect_record.status or "") == "open_no_auth"
-        )
+        """When detect confirmed anonymous access + defcreds is on, skip the
+        credential loop.
+
+        E3 fix (narrow): the original kafka-only guard is preserved as the
+        default. Modules that opt in via the `keep_anonymous_open_no_auth`
+        attribute on their ModuleAuditSpec ALSO short-circuit — this lets
+        redis/docker/grpc/elastic/clickhouse register the same fast-path
+        gradually without changing the credential loop for every module in
+        one sweep (which broke proxmox's URL-scheme test that relied on the
+        current 2-call behavior when creds were not provided).
+        """
+        if not bool(getattr(self.args, "defcreds", False)):
+            return False
+        if str(detect_record.status or "") != "open_no_auth":
+            return False
+        if self.spec.module == "kafka":
+            return True
+        return bool(getattr(self.spec, "keep_anonymous_open_no_auth", False))
 
     def _safe_record(self, host: str, port: int, task: Callable[[], AuditRecord]) -> AuditRecord:
         """Run a per-host task, converting an operational exception into a fail record.

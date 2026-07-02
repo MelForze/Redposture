@@ -194,7 +194,14 @@ def _looks_like_consul_payload(status: int, payload: bytes) -> bool:
     leader = _parse_consul_leader(payload)
     if leader is None:
         return False
-    return ":" in leader or leader == ""
+    # Consul leader format is `host:port` (default port 8300). Require both parts
+    # to be non-empty and the port to be a plausible TCP port so an arbitrary
+    # HTTP catch-all returning JSON `":something"` cannot masquerade as Consul.
+    host_part, sep, port_part = leader.rpartition(":")
+    if not sep or not host_part or not port_part.isdigit():
+        return False
+    port_int = int(port_part)
+    return 1 <= port_int <= 65535
 
 
 def _consul_get_json_any(

@@ -30,6 +30,8 @@ def build_docker_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_docker_line,
+        # E3 opt-in: Docker Engine anon-open API needs no credentials.
+        keep_anonymous_open_no_auth=True,
     )
 
 

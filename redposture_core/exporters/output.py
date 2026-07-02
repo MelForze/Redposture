@@ -59,9 +59,17 @@ def extract_display_port(target: str) -> str:
     raw = (target or "").strip()
     if not raw:
         return "-"
-    parsed = urlparse(raw if "://" in raw else f"//{raw}", scheme="")
-    if parsed.port is not None:
-        return str(parsed.port)
+    # B2 fix: `parsed.port` raises ValueError on unbracketed IPv6 (colons in
+    # the address are misread as a bad port). Guarding here keeps the whole
+    # render pipeline from crashing when a record smuggled an unbracketed
+    # v6 literal past normalization.
+    try:
+        parsed = urlparse(raw if "://" in raw else f"//{raw}", scheme="")
+        port = parsed.port
+    except ValueError:
+        return "-"
+    if port is not None:
+        return str(port)
     scheme = parsed.scheme.lower()
     if scheme == "http":
         return "80"

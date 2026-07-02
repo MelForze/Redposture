@@ -406,11 +406,16 @@ def _audit_redis_host(
                 elif ping_type == "error" and _is_noauth_error(str(ping_value)):
                     auth_required = True
                 else:
+                    # RESP-shaped `-` errors (LOADING/BUSY/MISCONF/READONLY) still identify a
+                    # Redis-compatible server; anything else (bulk/integer/array/null/simple
+                    # non-PONG) is not Redis — a proxy or gRPC service that happened to accept
+                    # bytes must not be labelled as Redis in the report.
+                    is_redis_response = ping_type == "error"
                     return {
                         "timestamp": utc_now_iso(),
                         "host": host,
                         "port": port,
-                        "is_redis": True,
+                        "is_redis": is_redis_response,
                         "status": "fail",
                         "auth_required": None,
                         "default_credentials": None,

@@ -265,10 +265,14 @@ def test_mongodb_small_helpers_and_collection_validation() -> None:
     assert mongodb._parse_json_object("[1]", field_name="--query")[1] == "--query must be a JSON object"
     assert mongodb._split_csv_values(["a,b", "b", " c "]) == ["a", "b", "c"]
 
+    # A8 fix: `db.users` splits on the dot regardless of whether --database is
+    # set. Before the fix, `--database mydb --collection users.audit` treated
+    # the value as a literal collection named "users.audit" under mydb and
+    # dump/query silently no-op'd against a non-existent collection.
     normalized, grouped, error = mongodb._group_collection_targets(["db.users", "events"], "redposture")
     assert error is None
     assert normalized == ["db.users", "events"]
-    assert grouped == {"redposture": ["db.users", "events"]}
+    assert grouped == {"db": ["users"], "redposture": ["events"]}
 
     normalized, grouped, error = mongodb._group_collection_targets(["db.users", "events"], None)
     assert error is None

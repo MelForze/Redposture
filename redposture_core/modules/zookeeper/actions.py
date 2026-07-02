@@ -216,9 +216,12 @@ def _infer_auth_required_from_anonymous_probes(
     if saw_ok:
         return False, "probe_ok", trace
     if saw_retryable_auth_hint and retryable_count == probe_count and retryable_count >= 2:
-        # Balanced fallback: some ZooKeeper deployments consistently return err_-124 on anonymous reads.
-        # If every anonymous probe returns this marker, treat it as auth-required signal.
-        return True, "probe_retryable_124", trace
+        # A3 fix: the previous version promoted "every anonymous probe returned -124"
+        # to auth_required=True, but -124 is documented as a transient/retryable
+        # marker. During leader election or brief server load every probe legitimately
+        # returns -124 without auth being enabled. Return None (inconclusive) so
+        # callers do not silently label an open cluster as auth-required.
+        return None, "probe_retryable_124_inconclusive", trace
     return None, "inconclusive", trace
 
 
@@ -627,12 +630,49 @@ def _audit_zookeeper_host(
                 last_auth_ms = auth_ms
                 if auth_applied_ok:
                     root_children, root_err, _ = client.get_children2("/")
+                    # A2 fix: if auth succeeded and post-auth root read works, credentials
+                    # are valid — regardless of whether anon also succeeded. The old code
+                    # (`anonymous_root_err != _ZK_ERR_OK`) mislabeled valid creds against
+                    # an open ZK as invalid because both reads returned OK.
                     if root_err == _ZK_ERR_OK:
-                        provided_credentials_ok = anonymous_root_err != _ZK_ERR_OK
+                        provided_credentials_ok = True
+                    # A1 fix: anon was OK but post-auth returns NOAUTH — the ONLY way this
+                    # happens is that the credentials silently didn't authenticate (server
+                    # accepted the digest frame but the associated principal has no
+                    # rights). Mark them invalid explicitly so the outer branch promotes
+                    # to invalid_credentials; the old fall-through left provided_credentials_ok
+                    # at None and bad creds silently passed as open_no_auth.
+                    elif root_err == _ZK_ERR_NOAUTH and anonymous_root_err == _ZK_ERR_OK:
+                        provided_credentials_ok = False
+                    # D3 fix: the old elif ("anonymous_root_err in {NOAUTH,-124}" →
+                    # True) confidently declared creds valid whenever anon was
+                    # gated. But if post-auth STILL returns NOAUTH, we can't tell
+                    # "auth applied to a low-privilege principal" from "auth data
+                    # was silently rejected". Try a control probe against
+                    # `/zookeeper` (a system znode that is world-readable on
+                    # every default ZK deployment); OK → auth is valid, only ACL
+                    # restricts /. NOAUTH → auth was silently rejected.
+                    elif root_err == _ZK_ERR_NOAUTH and anonymous_root_err in {
+                        _ZK_ERR_NOAUTH,
+                        _ZK_ERR_RETRYABLE_ROOT_QUERY,
+                    }:
+                        _sysprobe, sys_err, _ = client.get_children2("/zookeeper")
+                        if sys_err == _ZK_ERR_OK:
+                            provided_credentials_ok = True
+                        elif sys_err == _ZK_ERR_NOAUTH:
+                            provided_credentials_ok = False
+                        else:
+                            provided_credentials_ok = None  # truly inconclusive
                     elif anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_RETRYABLE_ROOT_QUERY}:
                         # Digest auth succeeded, but root listing may still be ACL-restricted.
                         provided_credentials_ok = True
                     if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and provided_credentials_ok is True:
+                        # Auth worked but the root query hit a transient -124. Mark the
+                        # record so downstream renderers show `znodes:unknown` (see the
+                        # A5 fix on the enum-fallback padding below), and keep the
+                        # downstream flow moving without pretending we know the count.
+                        # The A5 fix below guarantees total_count stays at 0 (→ unknown)
+                        # rather than getting padded from the pre-auth root_children.
                         root_retryable_after_auth = True
                         query_error_detail = _zk_error_name(root_err)
                         last_query_error = query_error_detail
@@ -1164,6 +1204,12 @@ def _audit_zookeeper_host(
             query_znode_dump_error: str | None = None
             if query_znode:
                 q_children, q_err, q_stat = client.get_children2(query_znode)
+                # A6 fix: -124 on the target znode is a retryable transient — retry
+                # once with a small delay before recording the error, mirroring the
+                # bonus retry that already exists for the '/' root query.
+                if q_err == _ZK_ERR_RETRYABLE_ROOT_QUERY:
+                    time.sleep(_retry_delay(0))
+                    q_children, q_err, q_stat = client.get_children2(query_znode)
                 if q_err == _ZK_ERR_NONODE:
                     query_znode_value = f"{query_znode}:<not found>"
                     query_error_detail = "NONODE"
@@ -1248,8 +1294,14 @@ def _audit_zookeeper_host(
                 error=stage4_error_value,
             )
 
+            # A5 fix: do NOT fall back to the pre-auth root_children count when
+            # the audit is already in the "-124 after auth" fallback (A4). Prior to
+            # this the padding produced `valid_credentials, znodes:1` records for
+            # servers where the actual enumeration never succeeded, hiding a
+            # transient sync failure. znode_count_unknown flag on the record
+            # ensures the renderer shows "znodes:unknown" for that case.
             root_count = len(root_children or [])
-            if total_count == 0 and root_count > 0:
+            if total_count == 0 and root_count > 0 and not root_retryable_after_auth:
                 total_count = root_count
 
             auth_required_value = inferred_auth_required

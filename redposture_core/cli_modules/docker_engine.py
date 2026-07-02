@@ -28,9 +28,8 @@ def configure_docker_parser(
         help="Docker Engine API port. If omitted, scans 2375, 2376, 4243, 12375, 12376.",
     )
     add_multi_ports_flag(common)
-    add_save_flag(
-        common, "Optional output file path. If omitted, results are printed to stdout.", include_save_alias=False
-    )
+    # F9 fix: align --save alias with every other module.
+    add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(
         "-f",
         "--format",

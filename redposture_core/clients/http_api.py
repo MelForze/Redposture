@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -451,4 +452,96 @@ __all__ = [
     "HttpRequest",
     "HttpResponse",
     "normalize_http_error",
+    "resolve_http_scheme",
 ]
+
+
+_SCHEME_CACHE: dict[tuple[str, int], str] = {}
+_SCHEME_CACHE_LOCK = threading.Lock()
+
+# Ports where TLS is the strong default. Others start with plain HTTP and fall
+# back to HTTPS only when the plain probe reports a transport error.
+_TLS_HINT_PORTS: frozenset[int] = frozenset({443, 4443, 6443, 8443, 8501, 9243})
+
+
+def _looks_like_tls_error(text: str) -> bool:
+    """Heuristics for 'plain HTTP hit a TLS listener' vs a real connection failure."""
+    lowered = text.lower()
+    tls_markers = (
+        "wrong version number",
+        "bad record type",
+        "record layer failure",
+        "http request",
+        "ssl",
+        "tls",
+        "unknown protocol",
+    )
+    return any(marker in lowered for marker in tls_markers)
+
+
+def resolve_http_scheme(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    probe_path: str = "/",
+    force_scheme: str | None = None,
+    insecure: bool = True,
+) -> str:
+    """Return 'http' or 'https' for (host, port), memoized per process.
+
+    When force_scheme is given we honor it. Otherwise for ports commonly served
+    over TLS we start with HTTPS; for the rest we try HTTP first and fall back
+    to HTTPS if the probe error looks TLS-shaped or the connection was refused.
+    Results are cached so a scan of many hosts pays the probe cost at most once
+    per host:port.
+
+    `insecure=True` disables TLS verification for the probe only; downstream
+    calls choose their own verification policy.
+    """
+    if force_scheme in ("http", "https"):
+        return force_scheme
+
+    key = (host, int(port))
+    with _SCHEME_CACHE_LOCK:
+        cached = _SCHEME_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    order = ("https", "http") if int(port) in _TLS_HINT_PORTS else ("http", "https")
+    client_https = HttpApiClient(HttpClientConfig(timeout=timeout, insecure=insecure))
+    client_http = HttpApiClient(HttpClientConfig(timeout=timeout))
+    resolved = order[0]
+
+    def _probe(scheme: str) -> tuple[bool, str]:
+        client = client_https if scheme == "https" else client_http
+        url = f"{scheme}://{host}:{int(port)}{probe_path}"
+        try:
+            response = client.request("GET", url, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 - probe swallows every transport error
+            return False, str(exc)
+        if response.error:
+            return False, response.error
+        return True, ""
+
+    for scheme in order:
+        ok, err = _probe(scheme)
+        if ok:
+            resolved = scheme
+            break
+        # Fall back to the other scheme when the failure looks scheme-related.
+        if scheme == "http" and _looks_like_tls_error(err):
+            continue
+        if scheme == "http" and "refused" in err.lower():
+            continue
+        # HTTPS-first: fall back to plain HTTP if verification/handshake failed.
+        if scheme == "https":
+            continue
+        # Other errors — keep the first scheme's outcome and cache it so we do
+        # not re-probe on every host during a scan.
+        resolved = scheme
+        break
+
+    with _SCHEME_CACHE_LOCK:
+        _SCHEME_CACHE[key] = resolved
+    return resolved
