@@ -669,6 +669,102 @@ def test_audit_kafka_host_uses_valid_credentials_when_auth_is_required(monkeypat
     assert record["topics"] == ["private"]
 
 
+def test_audit_kafka_host_default_pair_yields_weak_default_creds_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Kafka E2E-batch fix: when the winning credential pair matches one of
+    `_KAFKA_DEFAULT_CREDENTIALS`, status must be `weak_default_creds` and
+    `defcreds_enabled=True` — parity with postgres/mongodb. Previously kafka
+    unconditionally reported `valid_credentials` even when `admin:admin`
+    succeeded, hiding a real weak-credential finding from downstream reports.
+    Regressioned against a live SASL/PLAIN lab that seeded `user_admin=admin`.
+    """
+    monkeypatch.setattr(
+        "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (True, None, None))
+    monkeypatch.setattr(
+        kafka,
+        "_fetch_metadata",
+        lambda *_args, **_kwargs: (
+            {"auth_required": True, "topic_map": {}, "error_codes": [29]},
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        kafka,
+        "_authenticate_and_fetch_metadata",
+        lambda *_args, **_kwargs: (True, {"topic_map": {}}, None),
+    )
+
+    record = kafka._audit_kafka_host(
+        "127.0.0.1",
+        9092,
+        1.0,
+        0,
+        username="admin",  # a member of _KAFKA_DEFAULT_CREDENTIALS
+        password="admin",
+        show_topics=True,
+        query_topic=None,
+        dump=False,
+        max_messages=10,
+    )
+
+    assert record["status"] == "weak_default_creds"
+    assert record["defcreds_enabled"] is True
+    assert record["provided_credentials_ok"] is True
+    assert record["effective_username"] == "admin"
+    # credential_attempts populated with the winning attempt so downstream
+    # renderers can surface `admin:admin` as a weak-cred finding.
+    attempts = record["credential_attempts"]
+    assert len(attempts) == 1
+    assert attempts[0]["username"] == "admin"
+    assert attempts[0]["default"] is True
+    assert attempts[0]["ok"] is True
+
+
+def test_audit_kafka_host_non_default_pair_stays_valid_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Twin of the weak_default_creds test: a non-default winning pair MUST
+    stay `valid_credentials` (and `defcreds_enabled=False`), so we don't
+    over-report every successful auth as a weak-credential finding."""
+    monkeypatch.setattr(
+        "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (True, None, None))
+    monkeypatch.setattr(
+        kafka,
+        "_fetch_metadata",
+        lambda *_args, **_kwargs: (
+            {"auth_required": True, "topic_map": {}, "error_codes": [29]},
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        kafka,
+        "_authenticate_and_fetch_metadata",
+        lambda *_args, **_kwargs: (True, {"topic_map": {}}, None),
+    )
+
+    record = kafka._audit_kafka_host(
+        "127.0.0.1",
+        9092,
+        1.0,
+        0,
+        username="metrics",
+        password="metricspass",
+        show_topics=True,
+        query_topic=None,
+        dump=False,
+        max_messages=10,
+    )
+
+    assert record["status"] == "valid_credentials"
+    assert record["defcreds_enabled"] is False
+    assert record["credential_attempts"][0]["default"] is False
+
+
 def test_audit_kafka_host_falls_back_to_sasl_probe_and_retries_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
