@@ -984,12 +984,12 @@ def _call_audit_etcd_host_with_stage_debug(
     debug_emit: Callable[[str], None] | None,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    audit_limit_kwargs = (
+    audit_limit_kwargs: dict[str, Any] = (
         {"show_keys_limit": show_keys_limit if run_deep_checks else None} if show_keys_limit is not None else {}
     )
     if dump_keys_limit is not None:
         audit_limit_kwargs["dump_keys_limit"] = dump_keys_limit if run_deep_checks else None
-    audit_kwargs = dict(audit_limit_kwargs)
+    audit_kwargs: dict[str, Any] = dict(audit_limit_kwargs)
     audit_kwargs["dump_batch"] = dump_batch
     audit_kwargs["dump_delay"] = dump_delay
     # E2E-batch fix: credentials + defcreds must propagate BOTH to the detect

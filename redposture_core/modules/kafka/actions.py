@@ -9,6 +9,7 @@ from typing import Any
 
 from ...clients import kafka as _kafka_client
 from ...clients.kafka import (
+    _KAFKA_DEFAULT_CREDENTIALS,
     KAFKA_AUTH_ERROR_CODES,
     _build_credential_runs,
     _build_metadata_request_body,
@@ -281,8 +282,30 @@ def _audit_kafka_via_sasl_fallback(
                 topic_messages = dump_results.get(query_topic_name)
                 topic_read_error = dump_errors.get(query_topic_name) or dump_error
 
-            status = "valid_credentials" if provided_credentials_ok else "auth_required"
+            # Kafka E2E fix: classify successful auth as `weak_default_creds`
+            # when the winning pair matches _KAFKA_DEFAULT_CREDENTIALS — parity
+            # with postgres/mongodb. Also expose `defcreds_enabled` reflecting
+            # the actual attempt and a single-entry `credential_attempts` list
+            # so downstream renderers/exporters see the metadata for kafka the
+            # same way they see it for other modules.
+            is_default_pair = provided_credentials_ok and ((username, password) in _KAFKA_DEFAULT_CREDENTIALS)
+            if provided_credentials_ok:
+                status = "weak_default_creds" if is_default_pair else "valid_credentials"
+            else:
+                status = "auth_required"
             error = "; ".join(item for item in error_parts if str(item).strip()) or None
+
+            credential_attempts: list[dict[str, Any]] = []
+            if provided_credentials:
+                credential_attempts.append(
+                    {
+                        "username": username,
+                        "password": password,
+                        "default": bool(is_default_pair),
+                        "ok": bool(provided_credentials_ok),
+                        "error": error if not provided_credentials_ok else None,
+                    }
+                )
 
             return {
                 "timestamp": utc_now_iso(),
@@ -295,6 +318,9 @@ def _audit_kafka_via_sasl_fallback(
                 "provided_username": username,
                 "provided_password": password if provided_credentials else None,
                 "provided_credentials_ok": provided_credentials_ok,
+                "defcreds_enabled": bool(is_default_pair),
+                "credential_attempts": credential_attempts,
+                "effective_username": username if provided_credentials_ok else None,
                 "show_topics": show_topics,
                 "show_topics_limit": show_topics_limit,
                 "query_topic": query_topic_name or None,
@@ -488,21 +514,36 @@ def _audit_kafka_host(
                     topic_messages = dump_results.get(query_topic_name)
                     topic_read_error = dump_errors.get(query_topic_name) or dump_error
 
+                # Kafka E2E fix (SASL fallback path): mirror the classification
+                # logic from the main SASL path so the record shape is uniform.
+                is_default_pair = provided_credentials_ok and ((username, password) in _KAFKA_DEFAULT_CREDENTIALS)
                 if auth_required is False:
                     if provided_credentials and provided_credentials_ok is False:
                         status = "invalid_credentials_anonymous"
                     elif provided_credentials_ok:
-                        status = "valid_credentials"
+                        status = "weak_default_creds" if is_default_pair else "valid_credentials"
                     else:
                         status = "open_no_auth"
                 elif provided_credentials_ok:
-                    status = "valid_credentials"
+                    status = "weak_default_creds" if is_default_pair else "valid_credentials"
                 elif auth_required is True:
                     status = "auth_required"
                 else:
                     status = "unknown_auth"
 
                 error = "; ".join(item for item in error_parts if str(item).strip()) or None
+
+                credential_attempts: list[dict[str, Any]] = []
+                if provided_credentials:
+                    credential_attempts.append(
+                        {
+                            "username": username,
+                            "password": password,
+                            "default": bool(is_default_pair),
+                            "ok": bool(provided_credentials_ok),
+                            "error": error if not provided_credentials_ok else None,
+                        }
+                    )
 
                 return {
                     "timestamp": utc_now_iso(),
@@ -515,6 +556,9 @@ def _audit_kafka_host(
                     "provided_username": username,
                     "provided_password": password if provided_credentials else None,
                     "provided_credentials_ok": provided_credentials_ok,
+                    "defcreds_enabled": bool(is_default_pair),
+                    "credential_attempts": credential_attempts,
+                    "effective_username": username if provided_credentials_ok else None,
                     "show_topics": show_topics,
                     "show_topics_limit": show_topics_limit,
                     "query_topic": query_topic_name or None,

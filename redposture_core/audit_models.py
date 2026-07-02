@@ -212,11 +212,14 @@ class AuditRecord:
         # coerce to 0 (rendering as "host:0" downstream). Convert legitimately
         # zero-or-missing values to a stub port so the render stays informative,
         # and log a debug marker in `extra` so operators can trace the origin.
-        raw_port = payload.get("port")
-        try:
-            resolved_port = int(raw_port) if raw_port not in (None, "") else 0
-        except (TypeError, ValueError):
+        raw_port: Any = payload.get("port")
+        if raw_port in (None, ""):
             resolved_port = 0
+        else:
+            try:
+                resolved_port = int(raw_port)
+            except (TypeError, ValueError):
+                resolved_port = 0
         if resolved_port == 0 and "port_missing_marker" not in extra:
             extra["port_missing_marker"] = f"module={module or 'unknown'} payload_missing_port"
         return cls(
