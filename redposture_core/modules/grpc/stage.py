@@ -32,6 +32,9 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_grpc_line,
+        # E3 opt-in: gRPC anon-open (no TLS/auth) is confirmed by the detect
+        # probe alone — the credential loop is redundant.
+        keep_anonymous_open_no_auth=True,
     )
 
 

@@ -54,9 +54,23 @@ def scan_presence_task(
     markers = tuple(str(item) for item in exporter["markers"])
     marker_hit = next((marker for marker in markers if marker in body), None)
 
+    # B4/B5 fix: honor `negative_markers` — when a body clearly belongs to a
+    # different exporter that shares this port (snmp_exporter/apache_exporter
+    # on 9117, node_exporter/haproxy_exporter on 9101), don't produce a
+    # cross-labelled hit. Previously the negative_markers metadata was
+    # declared but never consulted in the presence scan.
+    negative_markers = tuple(str(item) for item in exporter.get("negative_markers") or ())
+    if marker_hit and any(neg in body for neg in negative_markers):
+        marker_hit = None
+
     is_prometheus_like = looks_like_prometheus_metrics(body)
     is_http_ok = status is not None and int(status) < 400
-    detected = bool(is_http_ok and (marker_hit or is_prometheus_like))
+    detected = bool(is_http_ok and marker_hit)
+    if not detected and is_http_ok and is_prometheus_like and not negative_markers:
+        # Fall back to "prometheus-shaped body without strong marker" ONLY when
+        # the exporter has no cross-labelling risk. Ports with shared exporters
+        # must have a real marker match to count.
+        detected = True
     detection_method = "marker" if marker_hit else ("metrics" if detected else "none")
 
     record = {

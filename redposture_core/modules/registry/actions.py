@@ -14,7 +14,7 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig
+from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line
 from ...utils import (
@@ -144,11 +144,14 @@ def _http_request(
     headers: dict[str, str] | None = None,
     body: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
-    url = f"http://{host}:{port}{_normalize_path(path)}"
+    scheme = resolve_http_scheme(host, port, timeout, probe_path="/v2/")
+    url = f"{scheme}://{host}:{port}{_normalize_path(path)}"
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
-    response = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024)).request(
+    response = HttpApiClient(
+        HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True)
+    ).request(
         method,
         url,
         headers=req_headers,
@@ -192,7 +195,8 @@ def _http_download(
     *,
     headers: dict[str, str] | None = None,
 ) -> tuple[int, int, str | None]:
-    url = f"http://{host}:{port}{_normalize_path(path)}"
+    scheme = resolve_http_scheme(host, port, timeout, probe_path="/v2/")
+    url = f"{scheme}://{host}:{port}{_normalize_path(path)}"
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
@@ -1401,7 +1405,20 @@ def _audit_registry_host_core(
                 }
 
             auth_required = status == 401 or (status == 403 and unauthorized_body)
+            anon_probe_status: int | None = None
+            if status == 200 and (provided_credentials or token_provided):
+                # Re-probe /v2/ without credentials to distinguish "valid creds" from
+                # "server is anonymous and never checked what we sent". Without this
+                # distinction any bogus --username/--password against Docker Hub would
+                # be misreported as valid_credentials.
+                anon_status, _anon_body, _anon_headers, anon_error = _http_request(
+                    host, port, "GET", "/v2/", timeout, headers=None
+                )
+                if anon_error is None:
+                    anon_probe_status = anon_status
             if status == 200 and not (provided_credentials or token_provided):
+                state = "open_no_auth"
+            elif status == 200 and anon_probe_status == 200:
                 state = "open_no_auth"
             elif status == 200:
                 state = "valid_credentials"

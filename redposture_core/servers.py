@@ -84,9 +84,43 @@ class ThreadingTCPReuseServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+# C4 fix: hard cap on the number of bytes any listener will read from a request
+# body. Real probes send at most a few kilobytes; anything above this is either
+# a slow-client DoS or a probe smuggling in an oversized payload. Keeps the
+# blackbox / proxmox handlers from committing to a multi-GB Content-Length.
+MAX_LISTENER_REQUEST_BODY_BYTES = 1 * 1024 * 1024
+
+
 class ThreadingHTTPReuseServer(ThreadingHTTPServer):
     allow_reuse_address = True
     daemon_threads = True
+    # C4 fix: BaseHTTPServer never sets a per-request socket timeout, so a slow
+    # client that opens a connection and never finishes headers permanently
+    # parks a handler thread — process leaks threads until server_close().
+    timeout = 30
+
+    def process_request(self, request: socket.socket, client_address: Any) -> None:
+        # Apply the timeout to the accepted socket immediately so BaseHTTPRequestHandler's
+        # rfile/wfile inherit it. Without this the class-level `timeout` only
+        # applies to the accept() call, not to the handler socket.
+        try:
+            request.settimeout(self.timeout)
+        except OSError:
+            pass
+        super().process_request(request, client_address)
+
+
+def _read_bounded_body(rfile: Any, content_length: int, *, cap: int = MAX_LISTENER_REQUEST_BODY_BYTES) -> bytes:
+    """Read at most `cap` bytes of the body, ignoring the advertised length beyond that.
+
+    C5 fix: `self.rfile.read(Content-Length)` used to trust whatever the client
+    advertised, so a 2 GB Content-Length would try to buffer 2 GB (or block
+    forever on a slow client without a socket timeout). Now we clamp reads and
+    silently drop the rest.
+    """
+    if content_length <= 0:
+        return b""
+    return rfile.read(min(int(content_length), max(0, int(cap))))
 
 
 class PostgresListenerHandler(socketserver.BaseRequestHandler):
@@ -367,7 +401,13 @@ def make_proxmox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             length = int(self.headers.get("Content-Length", "0") or "0")
-            body = self.rfile.read(length) if length > 0 else b""
+            # C5 fix: reject oversized/slow bodies instead of allocating whatever
+            # Content-Length claims — a malicious/misconfigured client could pin
+            # a handler thread and drive memory pressure.
+            if length > MAX_LISTENER_REQUEST_BODY_BYTES:
+                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                return
+            body = _read_bounded_body(self.rfile, length)
             content_type = (self.headers.get("Content-Type") or "").lower()
 
             fields: dict[str, Any] = {}
@@ -605,8 +645,11 @@ def make_blackbox_handler(logger: AttemptLogger) -> type[BaseHTTPRequestHandler]
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             body_len = int(self.headers.get("Content-Length", "0") or "0")
-            if body_len > 0:
-                _ = self.rfile.read(body_len)
+            # C5 fix: cap request bodies. See MAX_LISTENER_REQUEST_BODY_BYTES.
+            if body_len > MAX_LISTENER_REQUEST_BODY_BYTES:
+                self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+                return
+            _ = _read_bounded_body(self.rfile, body_len)
 
             if parsed.path == "/probe":
                 target, module = self._extract_probe_params(parsed)

@@ -17,6 +17,17 @@ def normalize_scan_host(value: str) -> str | None:
     raw = (value or "").strip()
     if not raw:
         return None
+
+    # B1 fix: `urlparse('//2001:db8::1').hostname` returns '2001' — the
+    # library interprets the colon as a host/port boundary and silently
+    # truncates the IPv6 literal. Detect unbracketed IPv6 first and hand
+    # it to ipaddress so users get the real address instead of a hextet.
+    if "://" not in raw and raw.count(":") >= 2 and not (raw.startswith("[") or "/" in raw):
+        try:
+            return str(ipaddress.IPv6Address(raw))
+        except ValueError:
+            pass
+
     parsed = urlparse(raw if "://" in raw else f"//{raw}", scheme="")
     host = parsed.hostname or raw
     host = host.strip()
@@ -306,7 +317,17 @@ def _consume_target_tokens(
         if not item:
             return
 
-        if os.path.isfile(item):
+        # B6 fix: only treat a token as a file-of-targets when it clearly looks
+        # like a path (contains `/`, `\`, starts with `.`, or ends with a
+        # common list extension). Previously `-t localhost` silently read a
+        # local file named `./localhost` instead of scanning that hostname.
+        def _looks_like_target_file(candidate: str) -> bool:
+            lowered = candidate.lower()
+            if candidate.startswith((".", "/", "~")) or "\\" in candidate or "/" in candidate:
+                return True
+            return lowered.endswith((".txt", ".list", ".hosts", ".csv"))
+
+        if _looks_like_target_file(item) and os.path.isfile(item):
             real = os.path.realpath(item)
             if real in processed_files:
                 return

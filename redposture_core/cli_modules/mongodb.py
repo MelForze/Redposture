@@ -42,9 +42,8 @@ def configure_mongodb_parser(
         ),
     )
     add_multi_ports_flag(common)
-    add_save_flag(
-        common, "Optional output file path. If omitted, results are printed to stdout.", include_save_alias=False
-    )
+    # F9 fix: align --save alias with every other module.
+    add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(
         "-f",
         "--format",

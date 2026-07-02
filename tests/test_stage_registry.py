@@ -1108,16 +1108,25 @@ def _registry_args(**overrides: object) -> argparse.Namespace:
 
 
 def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    http_error = urllib.error.HTTPError(
-        "http://registry.local/v2/",
-        401,
-        "Unauthorized",
-        {"WWW-Authenticate": "Bearer realm=token"},
-        io.BytesIO(b'{"errors":[{"code":"UNAUTHORIZED"}]}'),
-    )
+    # `_http_request` now runs a one-time HTTP/HTTPS scheme probe that also goes
+    # through urllib.request.urlopen. Preseed the resolver cache so the test
+    # exercises the real error path without the probe consuming the mocked
+    # HTTPError body first.
+    from redposture_core.clients.http_api import _SCHEME_CACHE
+
+    _SCHEME_CACHE[("registry.local", 5000)] = "http"
+
+    def make_http_error() -> urllib.error.HTTPError:
+        return urllib.error.HTTPError(
+            "http://registry.local/v2/",
+            401,
+            "Unauthorized",
+            {"WWW-Authenticate": "Bearer realm=token"},
+            io.BytesIO(b'{"errors":[{"code":"UNAUTHORIZED"}]}'),
+        )
 
     def raise_http_error(*_args, **_kwargs):
-        raise http_error
+        raise make_http_error()
 
     monkeypatch.setattr(registry.urllib.request, "urlopen", raise_http_error)
     status, body, headers, error = registry._http_request("registry.local", 5000, "GET", "/v2/", 1.0, headers={})
@@ -1739,7 +1748,19 @@ def test_audit_registry_host_core_state_matrix(
     creds: dict[str, str | None],
     expected_state: str,
 ) -> None:
-    monkeypatch.setattr(registry, "_http_request", lambda *_a, **_k: (status, body, headers, None))
+    # `valid_credentials` now requires that the anonymous re-probe returns 401
+    # (so we can prove creds were actually needed); the test therefore returns
+    # a 401 when the request lacks an Authorization header and the parametrized
+    # response otherwise. All other rows come from a single-status server, so
+    # the anon probe mirrors that status.
+    def _fake_http_request(*_a, **kwargs):
+        request_headers = kwargs.get("headers") or {}
+        has_auth = "Authorization" in request_headers
+        if expected_state == "valid_credentials" and not has_auth:
+            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', headers, None
+        return status, body, headers, None
+
+    monkeypatch.setattr(registry, "_http_request", _fake_http_request)
     monkeypatch.setattr(registry, "_fetch_gitlab_info", lambda *_a, **_k: (None, "not gitlab"))
     monkeypatch.setattr(registry, "_fetch_harbor_info", lambda *_a, **_k: (None, "not harbor"))
     monkeypatch.setattr(registry, "_fetch_nexus_info", lambda *_a, **_k: (None, "not nexus"))

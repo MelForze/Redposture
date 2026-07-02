@@ -165,6 +165,25 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
     if target_plan.has_scheme("https"):
         console.error("exporters scan accepts only http:// URL targets for -t/--targets")
         return 2
+    # D5 fix: previously any URL path in `-t http://host/api/metrics` was
+    # silently discarded because the probe hard-codes `/metrics`. Warn the
+    # operator so they know their path was ignored rather than sending them
+    # in the dark against a different endpoint than they typed.
+    paths_ignored: list[str] = []
+    try:
+        for spec in target_plan.iter_specs():
+            path_val = str(getattr(spec, "path", "") or "").strip()
+            if path_val and path_val not in {"/", "/metrics"}:
+                paths_ignored.append(f"{spec.host}{path_val}")
+    except AttributeError:
+        pass
+    if paths_ignored:
+        console.warn(
+            "ignoring path on {} target(s) — presence scan always probes /metrics: {}".format(
+                len(paths_ignored),
+                ", ".join(paths_ignored[:5]) + ("..." if len(paths_ignored) > 5 else ""),
+            )
+        )
     try:
         target_specs = (
             [] if target_plan.target_count > DEFAULT_MAX_NETWORK_HOSTS else collect_scan_target_specs(targets)

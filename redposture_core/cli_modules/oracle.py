@@ -31,9 +31,8 @@ def configure_oracle_parser(
         help="Oracle TNS listener port (default: 1521, 11521).",
     )
     add_multi_ports_flag(common)
-    add_save_flag(
-        common, "Optional output file path. If omitted, results are printed to stdout.", include_save_alias=False
-    )
+    # F9 fix: align --save alias with every other module.
+    add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(
         "-f",
         "--format",

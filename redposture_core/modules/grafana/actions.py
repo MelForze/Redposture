@@ -11,7 +11,7 @@ import urllib.parse
 from collections.abc import Callable
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig
+from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line
 from ...stage_runtime import (
@@ -76,11 +76,12 @@ def _http_request(
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
 ) -> tuple[int, str, dict[str, str]]:
-    url = f"http://{host}:{port}{path}"
+    scheme = resolve_http_scheme(host, port, timeout, probe_path="/api/health")
+    url = f"{scheme}://{host}:{port}{path}"
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
-    client = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024))
+    client = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True))
     response = client.request(method, url, headers=req_headers, body=data, timeout=timeout)
     if response.error:
         raise urllib.error.URLError(response.error)

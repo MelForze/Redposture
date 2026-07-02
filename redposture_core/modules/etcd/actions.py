@@ -10,7 +10,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ...clients import transport
-from ...clients.http_api import HttpApiClient, HttpClientConfig
+from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line
 from ...show_limits import (
@@ -22,7 +22,7 @@ from ...stage_runtime import (
     format_retry_decision,
     merge_stage_records,
 )
-from ...utils import utc_now_iso
+from ...utils import is_signature_compat_typeerror, utc_now_iso
 
 # Connection-error classification + framed reads are shared via the transport layer.
 _is_connection_refused_error = transport.is_connection_refused
@@ -33,8 +33,41 @@ _STAGE_DETECT_PROTOCOL = "detect_protocol"
 _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
-_ETCD_DEEP_STATUSES = {"open_no_auth"}
+_ETCD_DEEP_STATUSES = {"open_no_auth", "weak_default_creds", "valid_credentials"}
 _ETCD_V3_ALL_RANGE_KEY_B64 = "AA=="
+_ETCD_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
+    ("root", "root"),
+    ("root", "etcd"),
+    ("etcd", "etcd"),
+)
+
+
+def _etcd_v3_authenticate(
+    host: str,
+    port: int,
+    timeout: float,
+    username: str,
+    password: str,
+) -> tuple[str | None, str | None]:
+    """Ask /v3/auth/authenticate for a token; return (token, error)."""
+    status, body = _http_json_request(
+        host,
+        port,
+        "POST",
+        "/v3/auth/authenticate",
+        timeout,
+        payload={"name": username, "password": password},
+    )
+    if status == 200:
+        parsed = _load_json(body)
+        if isinstance(parsed, dict):
+            token = parsed.get("token")
+            if isinstance(token, str) and token:
+                return token, None
+        return None, "unexpected authenticate response"
+    if status in (401, 403):
+        return None, "invalid credentials"
+    return None, f"authenticate returned status {status}"
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -73,14 +106,21 @@ def _http_json_request(
     timeout: float,
     *,
     payload: dict[str, Any] | None = None,
+    auth_token: str | None = None,
 ) -> tuple[int, str]:
-    url = f"http://{host}:{port}{path}"
+    scheme = resolve_http_scheme(host, port, timeout, probe_path="/version")
+    url = f"{scheme}://{host}:{port}{path}"
     body_bytes: bytes | None = None
     headers = {"User-Agent": "RedPosture/1.0"}
     if payload is not None:
         headers["Content-Type"] = "application/json"
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    client = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024))
+    if auth_token:
+        # etcd gateway accepts the raw token in Authorization; also send the
+        # grpc-metadata alias which upstream tooling uses.
+        headers["Authorization"] = auth_token
+        headers["Grpc-Metadata-Authorization"] = auth_token
+    client = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True))
     response = client.request(method, url, headers=headers, body=body_bytes, timeout=timeout)
     if response.error:
         raise urllib.error.URLError(response.error)
@@ -433,6 +473,10 @@ def _audit_etcd_host(
     dump_keys_limit: int | None = None,
     dump_batch: int = 10000,
     dump_delay: int = 20,
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    defcreds: bool = False,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -515,6 +559,58 @@ def _audit_etcd_host(
             else:
                 auth_required = None
 
+            # ---- v3 authentication attempt --------------------------------------
+            provided_credentials = username is not None and password is not None
+            auth_token: str | None = None
+            credential_attempts: list[dict[str, Any]] = []
+            selected_credential: dict[str, Any] | None = None
+            effective_username: str | None = None
+
+            if v3_supported and auth_required is True and (provided_credentials or defcreds):
+                candidate_pairs: list[tuple[str, str, bool]] = []
+                if provided_credentials and username is not None and password is not None:
+                    candidate_pairs.append((str(username), str(password), False))
+                if defcreds:
+                    for default_user, default_secret in _ETCD_DEFAULT_CREDS:
+                        candidate_pairs.append((default_user, default_secret, True))
+                for user, secret, is_default in candidate_pairs:
+                    token, err = _etcd_v3_authenticate(host, port, timeout, user, secret)
+                    credential_attempts.append(
+                        {
+                            "username": user,
+                            "password": secret,
+                            "default": is_default,
+                            "ok": token is not None,
+                            "error": err,
+                        }
+                    )
+                    if token is not None:
+                        auth_token = token
+                        selected_credential = {"username": user, "password": secret, "default": is_default}
+                        effective_username = user
+                        break
+
+            # If we successfully authenticated, re-run the /v3/kv/range probe with
+            # the token so downstream key enumeration reflects post-auth state.
+            if auth_token is not None:
+                range_status, range_body = _http_json_request(
+                    host,
+                    port,
+                    "POST",
+                    "/v3/kv/range",
+                    timeout,
+                    payload={
+                        "key": _ETCD_V3_ALL_RANGE_KEY_B64,
+                        "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
+                        "count_only": True,
+                    },
+                    auth_token=auth_token,
+                )
+                if range_status == 200:
+                    v3_auth_required = True  # confirmed auth-gated
+                    key_count_v3 = _count_v3_keys(range_body)
+                    auth_required = True
+
             key_count: int | None = None
             keys: list[str] | None = None
             key_values: list[str] | None = None
@@ -522,7 +618,8 @@ def _audit_etcd_host(
             query_key_value: str | None = None
             query_key_entry: dict[str, str | None] | None = None
             key_dump_error: str | None = None
-            if auth_required is False:
+            has_access = auth_required is False or auth_token is not None
+            if has_access:
                 key_count = key_count_v2 if key_count_v2 is not None else key_count_v3
                 if show_keys or dump_keys:
                     all_key_values: list[dict[str, str | None]] | None = None
@@ -611,11 +708,14 @@ def _audit_etcd_host(
                     "error": "service is not etcd",
                 }
 
-            status = "open_no_auth"
-            if auth_required is True:
+            if auth_token is not None and selected_credential is not None:
+                status = "weak_default_creds" if selected_credential.get("default") else "valid_credentials"
+            elif auth_required is True:
                 status = "auth_required"
             elif auth_required is None:
                 status = "unknown_auth"
+            else:
+                status = "open_no_auth"
 
             return {
                 "timestamp": utc_now_iso(),
@@ -626,6 +726,17 @@ def _audit_etcd_host(
                 "api_versions": api_versions,
                 "server_version": server_version,
                 "auth_required": auth_required,
+                "provided_credentials": provided_credentials,
+                "provided_username": username if provided_credentials else None,
+                "provided_password": password if provided_credentials else None,
+                "provided_credentials_ok": (
+                    None
+                    if not provided_credentials
+                    else bool(selected_credential is not None and not selected_credential.get("default"))
+                ),
+                "defcreds_enabled": defcreds,
+                "effective_username": effective_username,
+                "credential_attempts": credential_attempts,
                 "key_count": key_count,
                 "show_keys": show_keys,
                 "show_keys_limit": show_keys_limit,
@@ -715,6 +826,16 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         if isinstance(key_count, int):
             return f"{prefix} [+] anonymous access (keys:{key_count})"
         return f"{prefix} [+] anonymous access (keys:-)"
+
+    if status in {"weak_default_creds", "valid_credentials"}:
+        user = str(record.get("effective_username") or "-")
+        pw = record.get("provided_password") if status == "valid_credentials" else None
+        # For default creds render just user:user pair (matching the tried default);
+        # for user-supplied creds echo the actual password since it validated.
+        password_text = str(pw) if pw is not None else user
+        key_count = record.get("key_count")
+        count_text = f"(keys:{key_count})" if isinstance(key_count, int) else "(keys:-)"
+        return f"{prefix} [+] {user}:{password_text} {count_text}"
 
     if status == "auth_required":
         return f"{prefix} [-] authentication required"
@@ -855,6 +976,9 @@ def _call_audit_etcd_host_with_stage_debug(
     dump_batch: int = 10000,
     dump_delay: int = 20,
     *,
+    username: str | None = None,
+    password: str | None = None,
+    defcreds: bool = False,
     run_deep_checks: bool,
     debug: bool,
     debug_emit: Callable[[str], None] | None,
@@ -865,18 +989,49 @@ def _call_audit_etcd_host_with_stage_debug(
     )
     if dump_keys_limit is not None:
         audit_limit_kwargs["dump_keys_limit"] = dump_keys_limit if run_deep_checks else None
-    record = _audit_etcd_host(
-        host,
-        port,
-        timeout,
-        retries,
-        show_keys if run_deep_checks else False,
-        dump_keys if run_deep_checks else False,
-        query_key if run_deep_checks else None,
-        dump_batch=dump_batch,
-        dump_delay=dump_delay,
-        **audit_limit_kwargs,
-    )
+    audit_kwargs = dict(audit_limit_kwargs)
+    audit_kwargs["dump_batch"] = dump_batch
+    audit_kwargs["dump_delay"] = dump_delay
+    # E2E-batch fix: credentials + defcreds must propagate BOTH to the detect
+    # phase AND the deep phase, because the auth verdict is what determines
+    # whether the runtime's deep_gate allows deep phase to run at all.
+    # Previously we gated defcreds behind `run_deep_checks`, so:
+    #  1. detect phase (run_deep_checks=False) — defcreds disabled → detect
+    #     returned auth_required with zero credential_attempts.
+    #  2. auth phase (run_deep_checks=False) — same, still no defcreds tried.
+    #  3. deep_gate rejected `auth_required` → deep phase never ran.
+    # As a result `redposture etcd --defcreds` reported auth_required with
+    # empty credential_attempts even when root:root would have worked.
+    audit_kwargs["username"] = username
+    audit_kwargs["password"] = password
+    audit_kwargs["defcreds"] = defcreds
+    try:
+        record = _audit_etcd_host(
+            host,
+            port,
+            timeout,
+            retries,
+            show_keys if run_deep_checks else False,
+            dump_keys if run_deep_checks else False,
+            query_key if run_deep_checks else None,
+            **audit_kwargs,
+        )
+    except TypeError as exc:
+        # Backward-compat: tests patch _audit_etcd_host with a legacy signature.
+        if not is_signature_compat_typeerror(exc, expected_keywords={"username", "password", "defcreds"}):
+            raise
+        for legacy_key in ("username", "password", "defcreds"):
+            audit_kwargs.pop(legacy_key, None)
+        record = _audit_etcd_host(
+            host,
+            port,
+            timeout,
+            retries,
+            show_keys if run_deep_checks else False,
+            dump_keys if run_deep_checks else False,
+            query_key if run_deep_checks else None,
+            **audit_kwargs,
+        )
 
     result: dict[str, Any] = dict(record)
     status = str(result.get("status") or "fail")

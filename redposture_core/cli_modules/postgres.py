@@ -43,10 +43,12 @@ def configure_postgres_parser(
         ),
     )
     add_multi_ports_flag(common)
+    # F9 fix: previously postgres/mongo/docker/oracle rejected `--save` while
+    # every other module accepted it, breaking batch scripts. Align the four
+    # holdouts with the rest.
     add_save_flag(
         common,
         "Optional output file path. If omitted, results are printed to stdout.",
-        include_save_alias=False,
     )
     common.add_argument(
         "-f",
