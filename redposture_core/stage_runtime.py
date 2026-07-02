@@ -1033,6 +1033,12 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         return cfg.password
     if name in {"token", "api_token"}:
         return credential.token or getattr(args, name, None) or getattr(args, "token", None)
+    if name == "apitoken":
+        # E2E-batch fix: grafana + elastic use dest="apitoken" (F7 fallback
+        # already resolved cfg.token from this dest for other consumers).
+        # host_stage functions that name their param `apitoken` receive the
+        # value here so the module doesn't need to duck-type args at runtime.
+        return credential.token or getattr(args, "apitoken", None) or getattr(args, "token", None)
     if name == "defcreds":
         return cfg.defcreds and credential.source != "file"
     if name == "run_deep_checks":

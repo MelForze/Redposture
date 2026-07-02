@@ -21,6 +21,7 @@ from ...stage_runtime import (
 )
 from ...utils import (
     DEFAULT_MAX_NETWORK_HOSTS,
+    is_signature_compat_typeerror,
     utc_now_iso,
 )
 
@@ -163,6 +164,27 @@ def _verify_credentials(host: str, port: int, timeout: float, username: str, pas
         return True, None
     if status in {401, 403}:
         return False, "invalid credentials"
+    return False, f"/api/user returned status {status}"
+
+
+def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tuple[bool, str | None]:
+    """E2E-batch fix: previously the grafana module had no way to accept an
+    API key / service-account token; users could only try Basic auth. This
+    helper mirrors `_verify_credentials` for `Authorization: Bearer <token>`
+    so `--apitoken glsa-...` reaches the same success/failure classification
+    as user/pass, and downstream fields (provided_credentials_ok, effective_*)
+    are populated uniformly."""
+    status, _body, _headers = _http_request(
+        host,
+        port,
+        "/api/user",
+        timeout,
+        headers={"Authorization": f"Bearer {apitoken}"},
+    )
+    if status == 200:
+        return True, None
+    if status in {401, 403}:
+        return False, "invalid api token"
     return False, f"/api/user returned status {status}"
 
 
@@ -550,10 +572,11 @@ def _audit_grafana_host(
     password: str | None,
     defcreds: bool,
     check_urls: list[str] | None,
+    apitoken: str | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
-    provided_credentials = password is not None
+    provided_credentials = password is not None or bool(apitoken)
     for attempt in range(attempts):
         started = time.monotonic()
         try:
@@ -580,7 +603,9 @@ def _audit_grafana_host(
                     "provided_credentials_ok": None,
                     "default_credentials": None,
                     "defcreds_enabled": defcreds,
-                    "attempted_credentials": 0,
+                    "attempted_credentials": [],
+                    "attempted_credentials_count": 0,
+                    "credential_attempts": [],
                     "credentials_source": None,
                     "effective_username": None,
                     "effective_password": None,
@@ -650,7 +675,38 @@ def _audit_grafana_host(
                         errors_local.append(cred_error)
 
             if provided_credentials:
-                provided_credentials_ok = False
+                # Reset to False if not already verified elsewhere (e.g. by the
+                # apitoken block below). E2E revealed this line used to
+                # unconditionally overwrite `True` back to `False`, causing a
+                # successful token check to silently downgrade to
+                # `invalid_credentials_anonymous`.
+                if provided_credentials_ok is None:
+                    provided_credentials_ok = False
+
+            # E2E-batch fix: try `--apitoken` BEFORE the username/password
+            # candidate loop. Grafana treats API keys and service-account
+            # tokens as first-class credentials, so downstream fields must
+            # reflect a successful token check just like a successful basic
+            # auth check would.
+            if apitoken:
+                token_ok, token_error = _verify_apitoken(host, port, timeout, apitoken)
+                attempted_credentials += 1
+                auth_attempts.append(
+                    {
+                        "username": None,
+                        "password": None,
+                        "source": "apitoken",
+                        "ok": bool(token_ok),
+                        "error": str(token_error or ""),
+                    }
+                )
+                if token_ok:
+                    provided_credentials_ok = True
+                    credentials_source = "apitoken"
+                    effective_username = None
+                    auth_header = f"Bearer {apitoken}"
+                elif token_error:
+                    errors.append(token_error)
 
             if candidates and (auth_required is True or auth_required is None or provided_credentials or defcreds):
                 _try_candidates()
@@ -693,7 +749,12 @@ def _audit_grafana_host(
                     )
                     check_results.append(res)
 
-            if effective_username is not None:
+            # E2E-batch fix: recognize a successful token check as
+            # valid_credentials too. Previously only `effective_username` was
+            # inspected, so `--apitoken glsa-...` (where effective_username
+            # stays None) fell through to invalid_credentials_anonymous even
+            # when Grafana had returned 200 to the Bearer probe.
+            if effective_username is not None or (provided_credentials_ok is True and credentials_source == "apitoken"):
                 status = "valid_credentials"
             elif auth_required is False and attempted_credentials > 0 and (provided_credentials or defcreds):
                 status = "invalid_credentials_anonymous"
@@ -725,7 +786,14 @@ def _audit_grafana_host(
                 "provided_credentials_ok": provided_credentials_ok,
                 "default_credentials": default_credentials,
                 "defcreds_enabled": defcreds,
-                "attempted_credentials": attempted_credentials,
+                # E2E-batch fix: `attempted_credentials` used to be exposed as an
+                # int counter here, breaking every downstream JSON/render helper
+                # that walks `attempted_credentials` as `list[dict]` (mongo/kafka/
+                # postgres shape). Keep the auth-attempt shape uniform with the
+                # rest of the modules and expose the count under a distinct key.
+                "attempted_credentials": auth_attempts,
+                "attempted_credentials_count": attempted_credentials,
+                "credential_attempts": auth_attempts,
                 "credentials_source": credentials_source,
                 "effective_username": effective_username,
                 "effective_password": effective_password,
@@ -756,7 +824,9 @@ def _audit_grafana_host(
         "provided_credentials_ok": None,
         "default_credentials": None,
         "defcreds_enabled": defcreds,
-        "attempted_credentials": 0,
+        "attempted_credentials": [],
+        "attempted_credentials_count": 0,
+        "credential_attempts": [],
         "credentials_source": None,
         "effective_username": None,
         "effective_password": None,
@@ -828,7 +898,18 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             return _with_optional_datasources(record, f"{prefix} [+] {user}:{password_text}")
         return _with_optional_datasources(record, f"{prefix} [+] {user}")
     if status == "auth_required":
-        if int(record.get("attempted_credentials") or 0) > 0:
+        # E2E fix: `attempted_credentials` is now the list of attempt dicts.
+        # Read the count from `attempted_credentials_count` first, but keep a
+        # `len()`-fallback so we render correctly against any older cached
+        # records that still store the int in `attempted_credentials`.
+        n_attempts_raw = record.get("attempted_credentials_count")
+        if n_attempts_raw is None:
+            legacy = record.get("attempted_credentials")
+            if isinstance(legacy, list):
+                n_attempts_raw = len(legacy)
+            else:
+                n_attempts_raw = legacy
+        if int(n_attempts_raw or 0) > 0:
             return f"{prefix} [-] authentication required (credentials invalid)"
         return f"{prefix} [-] authentication required"
     if status == "unknown_auth":
@@ -1008,21 +1089,40 @@ def _call_audit_grafana_host_with_stage_debug(
     check_urls: list[str] | None,
     *,
     show_datasources: bool,
+    apitoken: str | None = None,
     run_deep_checks: bool,
     debug: bool,
     debug_emit: Callable[[str], None] | None,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    record = _audit_grafana_host(
-        host,
-        port,
-        timeout,
-        retries,
-        username,
-        password,
-        defcreds,
-        check_urls if run_deep_checks else None,
-    )
+    try:
+        record = _audit_grafana_host(
+            host,
+            port,
+            timeout,
+            retries,
+            username,
+            password,
+            defcreds,
+            check_urls if run_deep_checks else None,
+            apitoken=apitoken,
+        )
+    except TypeError as exc:
+        # E2E-batch fix: tests monkeypatch `_audit_grafana_host` with fakes
+        # that predate the `apitoken` kwarg. Fall back to the legacy signature
+        # when only the newly-added keyword is missing.
+        if not is_signature_compat_typeerror(exc, expected_keywords={"apitoken"}):
+            raise
+        record = _audit_grafana_host(
+            host,
+            port,
+            timeout,
+            retries,
+            username,
+            password,
+            defcreds,
+            check_urls if run_deep_checks else None,
+        )
 
     result: dict[str, Any] = dict(record)
     result["show_datasources"] = bool(show_datasources and run_deep_checks)

@@ -395,6 +395,7 @@ run_registry_cases() {
 
 run_grafana_cases() {
   run_case grafana grafana_default 0 grafana -t 127.0.0.1 --defcreds --show-datasources
+  run_case grafana grafana_apitoken 0 grafana -t 127.0.0.1 --port 3000 --apitoken glsa-fake-token-2026 --show-datasources
   run_case grafana grafana_url_http 0 grafana -t "http://127.0.0.1:3000/login?next=%2F" --defcreds --show-datasources
   run_case grafana grafana_url_https_reject 2 grafana -t "https://127.0.0.1:3000/login"
   run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --defcreds --ssrf-target "http://127.0.0.1:19115/probe?module=http_2xx" --show-datasources

@@ -51,6 +51,7 @@ _EXPECTED_LABELS = (
     "registry_url_https_reject",
     "registry_multi_instance_urls",
     "grafana_default",
+    "grafana_apitoken",
     "grafana_url_http",
     "grafana_url_https_reject",
     "grafana_ssrf_edge",
