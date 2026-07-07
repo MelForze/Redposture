@@ -49,19 +49,6 @@ def write_jsonl_payload(tmp_path: Path) -> Callable[[str, Iterable[object]], Pat
     return _write
 
 
-@pytest.fixture
-def lab_full_compose_path() -> Path:
-    lab_dir = Path(os.environ.get("REDPOSTURE_LAB_DIR", "lab"))
-    compose_path = lab_dir / "full" / "docker-compose.yml"
-    if not compose_path.exists():
-        pytest.skip(f"local lab compose not found: {compose_path}; set REDPOSTURE_LAB_DIR")
-    return compose_path
-
-
-@pytest.fixture
-def lab_services_dir() -> Path:
-    lab_dir = Path(os.environ.get("REDPOSTURE_LAB_DIR", "lab"))
-    services_path = lab_dir / "services"
-    if not services_path.exists():
-        pytest.skip(f"lab services dir not found: {services_path}; set REDPOSTURE_LAB_DIR")
-    return services_path
+# Lab-stand fixtures live in `lab_tests/conftest.py` — the whole `lab_tests/`
+# suite is opt-in and gitignored, symmetric with `lab/` itself. `tests/` is
+# CI-scope: pure unit + integration, zero dependency on a running lab.

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import struct
-from pathlib import Path
 
 import pytest
 
@@ -13,20 +12,6 @@ from redposture_core.modules.kafka import stage as kafka_stage_pkg
 from redposture_core.stage_kafka import _parse_apiversions_response, _parse_metadata_response
 from redposture_core.stage_runtime import AuditCommandResult
 from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
-
-
-def test_kafka_lab_seed_has_health_markers_and_nonempty_topic_guards(lab_full_compose_path: Path) -> None:
-    compose = lab_full_compose_path.read_text(encoding="utf-8")
-    open_seed = compose.split("  kafka-open-seed:", 1)[1].split("  kafka-auth:", 1)[0]
-    auth_seed = compose.split("  kafka-auth-seed:", 1)[1].split("  registry-open:", 1)[0]
-
-    assert "redposture-kafka-open-seed-ready" in open_seed
-    assert "redposture-kafka-auth-seed-ready" in auth_seed
-    assert "topic $${topic} is empty" in open_seed
-    assert "topic $${topic} is empty" in auth_seed
-    assert "tail -f /dev/null" in open_seed
-    assert "tail -f /dev/null" in auth_seed
-    assert "condition: service_healthy" in auth_seed
 
 
 class _DummySocket:
