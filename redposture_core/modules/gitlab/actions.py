@@ -1030,7 +1030,7 @@ def _render_colored_gitlab_line(console: Console, line: str) -> bool:
     ):
         return True
     if line.startswith("GITLAB") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="GITLAB", default_color="cyan")
+        return render_tagged_detail_line(console, line, tag="GITLAB", default_color="orange")
     return False
 
 

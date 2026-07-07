@@ -963,7 +963,7 @@ def _render_colored_etcd_line(console: Console, line: str) -> bool:
     if render_colored_marker_line(console, line, tag="ETCD", counts=(CountColorRule("keys", "red"),)):
         return True
     if line.startswith("ETCD") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="ETCD", default_color="cyan")
+        return render_tagged_detail_line(console, line, tag="ETCD", default_color="orange")
     return False
 
 

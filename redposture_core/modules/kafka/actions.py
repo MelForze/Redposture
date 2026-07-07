@@ -1031,7 +1031,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
     # via `render_tagged_detail_line` for visual consistency with the
     # marker lines above — mirrors the gRPC module's two-tier approach.
     if line.startswith("KAFKA") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="KAFKA", default_color="cyan")
+        return render_tagged_detail_line(console, line, tag="KAFKA", default_color="orange")
     return False
 
 

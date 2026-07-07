@@ -1500,8 +1500,12 @@ def test_read_topic_messages_covers_non_auth_and_loop_branches(monkeypatch: pyte
     monkeypatch.setattr(kafka, "_parse_fetch_response", lambda *_args, **_kwargs: next(fetches))
     assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (["p0@10 msg"], None, "plaintext")
 
-    offsets = iter([(10, None)])
-    fetches = iter([(None, "fetch failed")])
+    # Partition-aware routing walks EVERY partition even when the first
+    # one fails, so per-partition errors accumulate and the first-seen
+    # error surfaces if no partition delivered any data. Iterators must
+    # supply enough entries for both partitions.
+    offsets = iter([(10, None), (20, None)])
+    fetches = iter([(None, "fetch failed"), (None, "fetch failed")])
     monkeypatch.setattr(kafka, "_parse_list_offsets_response", lambda *_args, **_kwargs: next(offsets))
     monkeypatch.setattr(kafka, "_parse_fetch_response", lambda *_args, **_kwargs: next(fetches))
     assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (None, "fetch failed", "plaintext")

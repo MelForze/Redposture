@@ -1078,7 +1078,7 @@ def _render_colored_grafana_line(console: Console, line: str) -> bool:
     ):
         return True
     if line.startswith("GRAFANA") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="GRAFANA", default_color="cyan")
+        return render_tagged_detail_line(console, line, tag="GRAFANA", default_color="orange")
     return False
 
 

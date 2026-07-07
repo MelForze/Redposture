@@ -256,6 +256,11 @@ def test_kafka_small_helpers_and_metadata_success_branches() -> None:
     assert metadata["topic_map"] == {"orders": 1}
     assert metadata["auth_required"] is True
     assert metadata["error_codes"] == [29, 29]
+    # Partition-aware routing: the parser must retain the broker list and
+    # per-partition leader map so `_read_topic_messages` can open a socket
+    # per leader and avoid the classic NOT_LEADER_OR_FOLLOWER error.
+    assert metadata["broker_map"] == {1: ("broker.local", 9092)}
+    assert metadata["partition_leaders"] == {"orders": {0: 1}}
 
     offset_payload = struct.pack(">ii", 8, 1) + _kstr("orders") + struct.pack(">iihi", 1, 0, 0, 0)
     no_offset, no_offset_error = kafka._parse_list_offsets_response(offset_payload, 8)
@@ -465,3 +470,119 @@ def test_open_kafka_socket_port_9093_prefers_tls(monkeypatch: pytest.MonkeyPatch
     sock, transport_mode = kafka.open_kafka_socket("kafka.example.com", 9092, 1.0, use_tls=True)
     assert transport_mode == "tls"
     assert wrap_calls == [("kafka.example.com", 9092)]
+
+
+def test_read_topic_messages_partition_aware_routes_to_leader_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Multi-broker Kafka clusters spread partition leaders across brokers.
+    The fix: after Metadata, `_read_topic_messages` must open a fresh socket
+    per leader broker instead of sending every ListOffsets to the bootstrap
+    socket (which returns NOT_LEADER_OR_FOLLOWER for partitions it doesn't
+    lead). This regression pins that routing.
+    """
+
+    class _StubSock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def close(self):
+            pass
+
+        def settimeout(self, _t):
+            pass
+
+    open_calls: list[tuple[str, int]] = []
+
+    def _fake_open(host, port, timeout, *, use_tls=None):
+        _ = timeout, use_tls
+        open_calls.append((host, port))
+        return _StubSock(), "plaintext"
+
+    monkeypatch.setattr(kafka, "open_kafka_socket", _fake_open)
+    monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_a, **_k: (True, None, None))
+    monkeypatch.setattr(
+        kafka,
+        "_fetch_metadata",
+        lambda *_a, **_k: (
+            {
+                "topic_map": {"multi": 2},
+                "broker_map": {10: ("broker-a", 9092), 20: ("broker-b", 9092)},
+                "partition_leaders": {"multi": {0: 10, 1: 20}},
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(kafka, "_send_kafka_request", lambda *_a, **_k: b"x")
+
+    offsets = iter([(100, None), (200, None)])
+    fetches = iter([([(100, "a-msg")], None), ([(200, "b-msg")], None)])
+    monkeypatch.setattr(kafka, "_parse_list_offsets_response", lambda *_a, **_k: next(offsets))
+    monkeypatch.setattr(kafka, "_parse_fetch_response", lambda *_a, **_k: next(fetches))
+
+    items, error, transport_mode = kafka._read_topic_messages("bootstrap", 9092, 1.0, "multi", 10)
+
+    assert error is None
+    assert transport_mode == "plaintext"
+    # Both messages surface (one per partition, each fetched from its leader).
+    assert sorted(items) == ["p0@100 a-msg", "p1@200 b-msg"]
+    # Three sockets were opened: bootstrap + two leader brokers.
+    assert ("bootstrap", 9092) in open_calls
+    assert ("broker-a", 9092) in open_calls
+    assert ("broker-b", 9092) in open_calls
+
+
+def test_read_topic_messages_falls_back_to_bootstrap_when_leader_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the metadata-advertised leader hostname isn't reachable from the
+    auditor's network (e.g. broker advertises `kafka-tls:9093` internal DNS),
+    the client falls back to running the ListOffsets on the bootstrap socket.
+    The broker will likely refuse (NOT_LEADER_OR_FOLLOWER), but the caller
+    gets a per-partition error instead of a hard `ConnectionError`.
+    """
+
+    class _StubSock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_):
+            return None
+
+        def close(self):
+            pass
+
+        def settimeout(self, _t):
+            pass
+
+    def _fake_open(host, port, timeout, *, use_tls=None):
+        _ = timeout, use_tls
+        if host == "unreachable-broker":
+            raise ConnectionRefusedError("cannot resolve unreachable-broker")
+        return _StubSock(), "plaintext"
+
+    monkeypatch.setattr(kafka, "open_kafka_socket", _fake_open)
+    monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_a, **_k: (True, None, None))
+    monkeypatch.setattr(
+        kafka,
+        "_fetch_metadata",
+        lambda *_a, **_k: (
+            {
+                "topic_map": {"orders": 1},
+                "broker_map": {5: ("unreachable-broker", 9092)},
+                "partition_leaders": {"orders": {0: 5}},
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(kafka, "_send_kafka_request", lambda *_a, **_k: b"x")
+    monkeypatch.setattr(kafka, "_parse_list_offsets_response", lambda *_a, **_k: (50, None))
+    monkeypatch.setattr(kafka, "_parse_fetch_response", lambda *_a, **_k: ([(50, "fallback-msg")], None))
+
+    items, error, transport_mode = kafka._read_topic_messages("bootstrap", 9092, 1.0, "orders", 5)
+
+    # Falls back to bootstrap socket, delivers the message (in the test —
+    # in real life the broker would refuse with NOT_LEADER_OR_FOLLOWER,
+    # but the point is we don't crash on unreachable leaders).
+    assert error is None
+    assert items == ["p0@50 fallback-msg"]
+    assert transport_mode == "plaintext"
