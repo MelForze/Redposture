@@ -2754,7 +2754,7 @@ def _render_colored_registry_line(console: Console, line: str) -> bool:
     ):
         return True
     if line.startswith("REGISTRY") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="REGISTRY", default_color="cyan")
+        return render_tagged_detail_line(console, line, tag="REGISTRY", default_color="orange")
     return False
 
 

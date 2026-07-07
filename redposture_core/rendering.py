@@ -203,6 +203,18 @@ def colorize_spans(
     return "".join(chunks)
 
 
+_DETAIL_COUNT_PATTERN = re.compile(r"\(\w+:[^)]+\)")
+
+
+def _detect_count_pattern_spans(text: str, color: str) -> list[tuple[int, int, str]]:
+    """Auto-highlight parenthesised `(word:value)` count markers embedded in
+    detail lines (e.g. `... users_table (rows:1234)`). Cross-module modules
+    render their detail payloads in a warm default (currently orange); count
+    markers are pushed to a neutral color so they don't shout as loudly as
+    the resource name itself. Callers can override by passing explicit spans."""
+    return [(m.start(), m.end(), color) for m in _DETAIL_COUNT_PATTERN.finditer(text)]
+
+
 def render_tagged_detail_line(
     console: Console,
     line: str,
@@ -210,8 +222,14 @@ def render_tagged_detail_line(
     tag: str,
     spans: Iterable[tuple[int, int, str]] = (),
     default_color: str = "white",
+    count_pattern_color: str = "white",
 ) -> bool:
-    """Render a standard TAG host port detail payload line without marker."""
+    """Render a standard TAG host port detail payload line without marker.
+
+    When ``spans`` is empty, `(word:value)` fragments in the payload are
+    auto-colorised in ``count_pattern_color`` (default white) — see
+    ``_detect_count_pattern_spans``. Explicit spans win (used by gRPC).
+    """
 
     if not line.startswith(tag) or "\t" not in line:
         return False
@@ -223,7 +241,8 @@ def render_tagged_detail_line(
         return True
     left, right = line.rsplit("\t", 1)
     rest = left[len(tag) :] if left.startswith(tag) else left
-    right_colored = colorize_spans(console, right, spans, default_color=default_color)
+    resolved_spans = list(spans) if spans else _detect_count_pattern_spans(right, count_pattern_color)
+    right_colored = colorize_spans(console, right, resolved_spans, default_color=default_color)
     colored = f"{console._paint(tag, 'blue', sys.stdout)}{console._paint(rest, 'white', sys.stdout)}\t{right_colored}"
     console.plain(colored)
     return True

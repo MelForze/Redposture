@@ -1124,7 +1124,7 @@ def _render_colored_mongodb_line(console: Console, line: str) -> bool:
     ):
         return True
     if line.startswith(_MONGODB_TAG) and "\t" in line:
-        return render_tagged_detail_line(console, line, tag=_MONGODB_TAG, default_color="cyan")
+        return render_tagged_detail_line(console, line, tag=_MONGODB_TAG, default_color="orange")
     return False
 
 

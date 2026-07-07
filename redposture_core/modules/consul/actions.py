@@ -3731,7 +3731,7 @@ def _render_colored_consul_line(console: Console, line: str) -> bool:
     ):
         return True
     if line.startswith(_CONSUL_TAG) and "\t" in line:
-        return render_tagged_detail_line(console, line, tag=_CONSUL_TAG, default_color="cyan")
+        return render_tagged_detail_line(console, line, tag=_CONSUL_TAG, default_color="orange")
     return False
 
 

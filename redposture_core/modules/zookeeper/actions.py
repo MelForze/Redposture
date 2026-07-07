@@ -1813,7 +1813,7 @@ def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
     ):
         return True
     if line.startswith("ZOOKEEPER") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="ZOOKEEPER", default_color="cyan")
+        return render_tagged_detail_line(console, line, tag="ZOOKEEPER", default_color="orange")
     return False
 
 

@@ -757,7 +757,7 @@ def _render_colored_redis_line(console: Console, line: str) -> bool:
     if render_colored_marker_line(console, line, tag="REDIS", counts=(CountColorRule("keys", "red"),)):
         return True
     if line.startswith("REDIS") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="REDIS", default_color="cyan")
+        return render_tagged_detail_line(console, line, tag="REDIS", default_color="orange")
     return False
 
 

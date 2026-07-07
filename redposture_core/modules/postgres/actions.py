@@ -2829,7 +2829,7 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
     ):
         return True
     if line.startswith("POSTGRES") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="POSTGRES", default_color="cyan")
+        return render_tagged_detail_line(console, line, tag="POSTGRES", default_color="orange")
     return False
 
 

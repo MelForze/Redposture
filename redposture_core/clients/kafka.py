@@ -343,10 +343,19 @@ def _parse_metadata_response(
         broker_count = reader.read_i32()
         if broker_count < 0:
             return None, "invalid broker array size"
+        # `broker_map` is what makes partition-aware routing possible: on
+        # multi-broker clusters each partition's leader can live on a
+        # different broker, and ListOffsets/Fetch requests must go to that
+        # specific leader (otherwise the broker returns NOT_LEADER_OR_FOLLOWER
+        # = error code 6). Previously we discarded these fields entirely
+        # and paid for it with cryptic dump failures on real clusters.
+        broker_map: dict[int, tuple[str, int]] = {}
         for _ in range(broker_count):
-            _ = reader.read_i32()
-            _ = reader.read_string(nullable=False)
-            _ = reader.read_i32()
+            broker_node_id = reader.read_i32()
+            broker_host = reader.read_string(nullable=False) or ""
+            broker_port = reader.read_i32()
+            if broker_host:
+                broker_map[int(broker_node_id)] = (broker_host, int(broker_port))
 
         topic_count_raw = reader.read_i32()
         if topic_count_raw < 0:
@@ -356,6 +365,7 @@ def _parse_metadata_response(
         topic_errors: dict[str, int] = {}
         all_error_codes: list[int] = []
         accessible_topics = 0
+        partition_leaders: dict[str, dict[int, int]] = {}
 
         for _ in range(topic_count_raw):
             topic_error = reader.read_i16()
@@ -364,17 +374,22 @@ def _parse_metadata_response(
             partition_count = 0 if partition_count_raw < 0 else partition_count_raw
             all_error_codes.append(int(topic_error))
 
+            topic_partition_leaders: dict[int, int] = {}
             for _ in range(partition_count):
                 partition_error = reader.read_i16()
-                _ = reader.read_i32()
-                _ = reader.read_i32()
-                reader.skip_i32_array()
-                reader.skip_i32_array()
+                partition_id = reader.read_i32()
+                leader_id = reader.read_i32()
+                reader.skip_i32_array()  # replicas
+                reader.skip_i32_array()  # isr
                 all_error_codes.append(int(partition_error))
+                if leader_id >= 0:
+                    topic_partition_leaders[int(partition_id)] = int(leader_id)
 
             if topic_name:
                 topic_map[topic_name] = partition_count
                 topic_errors[topic_name] = int(topic_error)
+                if topic_partition_leaders:
+                    partition_leaders[topic_name] = topic_partition_leaders
             if topic_error == 0:
                 accessible_topics += 1
 
@@ -390,6 +405,8 @@ def _parse_metadata_response(
                 "topic_errors": topic_errors,
                 "error_codes": all_error_codes,
                 "auth_required": auth_required,
+                "broker_map": broker_map,
+                "partition_leaders": partition_leaders,
             },
             None,
         )
@@ -671,6 +688,84 @@ def _parse_fetch_response(
         return None, f"invalid Fetch response: {exc}"
 
 
+def _authenticate_or_probe(
+    sock: socket.socket,
+    correlation: int,
+    username: str | None,
+    password: str | None,
+) -> tuple[bool, int, str | None]:
+    """Bootstrap a Kafka session on `sock`: SASL PLAIN when credentials are
+    provided, otherwise a bare ApiVersions probe to confirm we're talking to
+    Kafka. Returns `(ok, next_correlation_id, error)`.
+    """
+    if username is not None and password is not None:
+        hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
+        if not hs_ok:
+            return False, correlation, hs_error or "SASL handshake failed"
+        auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
+        if not auth_ok:
+            return False, correlation, auth_error or "authentication failed"
+        return True, correlation, None
+    is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
+    correlation += 1
+    if not is_kafka:
+        return False, correlation, api_error or "service is not kafka"
+    return True, correlation, None
+
+
+def _read_partition_messages_on_leader(
+    leader_sock: socket.socket,
+    correlation: int,
+    topic: str,
+    partition: int,
+    remaining: int,
+) -> tuple[list[str], int, str | None]:
+    """Do ListOffsets + Fetch for a single partition on the leader socket.
+    Returns `(items, next_correlation, error)`. Items are `[f"p{partition}@{offset} text", ...]`.
+    """
+    list_offsets_payload = _send_kafka_request(
+        leader_sock,
+        api_key=KAFKA_LIST_OFFSETS,
+        api_version=0,
+        correlation_id=correlation,
+        client_id=KAFKA_CLIENT_ID,
+        body=_build_list_offsets_request_body(topic, partition, time_value=-2),
+    )
+    earliest_offset, list_offsets_error = _parse_list_offsets_response(list_offsets_payload, correlation)
+    correlation += 1
+    if list_offsets_error:
+        return [], correlation, list_offsets_error
+    if earliest_offset is None:
+        return [], correlation, None
+
+    fetch_payload = _send_kafka_request(
+        leader_sock,
+        api_key=KAFKA_FETCH,
+        api_version=0,
+        correlation_id=correlation,
+        client_id=KAFKA_CLIENT_ID,
+        body=_build_fetch_request_body(
+            topic,
+            partition,
+            earliest_offset,
+            max_bytes=KAFKA_FETCH_MAX_BYTES,
+        ),
+    )
+    fetch_items, fetch_error = _parse_fetch_response(
+        fetch_payload,
+        correlation,
+        expected_partition=partition,
+        max_messages=remaining,
+    )
+    correlation += 1
+    if fetch_error:
+        return [], correlation, fetch_error
+    if not fetch_items:
+        return [], correlation, None
+    items = [f"p{partition}@{offset} {text}" for offset, text in fetch_items[:remaining]]
+    return items, correlation, None
+
+
 def _read_topic_messages(
     host: str,
     port: int,
@@ -682,6 +777,19 @@ def _read_topic_messages(
     password: str | None = None,
     use_tls: bool | None = None,
 ) -> tuple[list[str] | None, str | None, str]:
+    """Read up to `max_messages` messages from `topic` across all partitions.
+
+    Partition-aware routing: after Metadata, we group each partition by its
+    leader broker (multi-broker Kafka clusters have leaders spread across
+    brokers) and open a fresh connection per leader for ListOffsets + Fetch.
+    Sending ListOffsets to a non-leader broker returns error code 6
+    (`NOT_LEADER_OR_FOLLOWER`), which is the bug this routing fixes.
+
+    Backward-compat: when Metadata doesn't expose broker/leader info (test
+    doubles, older brokers) or when the leader hostname isn't reachable
+    from the client, we fall back to running everything on the bootstrap
+    socket — same as the pre-fix behavior.
+    """
     if max_messages <= 0:
         return [], None, "plaintext"
 
@@ -690,18 +798,9 @@ def _read_topic_messages(
         with sock:
             correlation = 1
 
-            if username is not None and password is not None:
-                hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
-                if not hs_ok:
-                    return None, hs_error or "SASL handshake failed", transport_mode
-                auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
-                if not auth_ok:
-                    return None, auth_error or "authentication failed", transport_mode
-            else:
-                is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
-                correlation += 1
-                if not is_kafka:
-                    return None, api_error or "service is not kafka", transport_mode
+            ok, correlation, session_error = _authenticate_or_probe(sock, correlation, username, password)
+            if not ok:
+                return None, session_error, transport_mode
 
             metadata, metadata_error = _fetch_metadata(sock, correlation, topics=[topic])
             correlation += 1
@@ -716,60 +815,94 @@ def _read_topic_messages(
             if partition_count <= 0:
                 return [], None, transport_mode
 
-            out: list[str] = []
+            broker_map: dict[int, tuple[str, int]] = dict(metadata.get("broker_map") or {})
+            topic_leaders: dict[int, int] = dict((metadata.get("partition_leaders") or {}).get(topic, {}))
+
+            # Group partitions by their leader broker so we open one
+            # connection per leader instead of hammering the bootstrap
+            # broker with requests it can't serve.
+            partitions_by_leader: dict[int, list[int]] = {}
+            unassigned_partitions: list[int] = []
             for partition in range(partition_count):
-                if len(out) >= max_messages:
-                    break
+                leader_id = topic_leaders.get(partition)
+                if leader_id is None or leader_id not in broker_map:
+                    unassigned_partitions.append(partition)
+                    continue
+                partitions_by_leader.setdefault(leader_id, []).append(partition)
 
-                list_offsets_payload = _send_kafka_request(
-                    sock,
-                    api_key=KAFKA_LIST_OFFSETS,
-                    api_version=0,
-                    correlation_id=correlation,
-                    client_id=KAFKA_CLIENT_ID,
-                    body=_build_list_offsets_request_body(topic, partition, time_value=-2),
-                )
-                earliest_offset, list_offsets_error = _parse_list_offsets_response(list_offsets_payload, correlation)
-                correlation += 1
-                if list_offsets_error:
-                    if not out:
-                        return None, list_offsets_error, transport_mode
-                    continue
-                if earliest_offset is None:
-                    continue
+            out: list[str] = []
+            fatal_error: str | None = None
 
-                fetch_payload = _send_kafka_request(
-                    sock,
-                    api_key=KAFKA_FETCH,
-                    api_version=0,
-                    correlation_id=correlation,
-                    client_id=KAFKA_CLIENT_ID,
-                    body=_build_fetch_request_body(
-                        topic,
-                        partition,
-                        earliest_offset,
-                        max_bytes=KAFKA_FETCH_MAX_BYTES,
-                    ),
-                )
-                fetch_items, fetch_error = _parse_fetch_response(
-                    fetch_payload,
-                    correlation,
-                    expected_partition=partition,
-                    max_messages=max_messages - len(out),
-                )
-                correlation += 1
-                if fetch_error:
-                    if not out:
-                        return None, fetch_error, transport_mode
-                    continue
-                if not fetch_items:
-                    continue
-
-                for offset, text in fetch_items:
-                    out.append(f"p{partition}@{offset} {text}")
+            def _handle_partitions(leader_sock: socket.socket, partitions: list[int], corr_start: int) -> int:
+                nonlocal fatal_error
+                corr = corr_start
+                for partition in partitions:
                     if len(out) >= max_messages:
                         break
+                    items, corr, err = _read_partition_messages_on_leader(
+                        leader_sock, corr, topic, partition, max_messages - len(out)
+                    )
+                    if err:
+                        # First partition failure with no data accumulated
+                        # is a fatal error for the whole read; subsequent
+                        # failures are recorded silently so a single bad
+                        # partition doesn't kill the whole dump.
+                        if not out and fatal_error is None:
+                            fatal_error = err
+                        continue
+                    out.extend(items)
+                return corr
 
+            # 1) Per-leader connections for partitions with a known leader.
+            for leader_id, partitions in partitions_by_leader.items():
+                if len(out) >= max_messages:
+                    break
+                leader_host, leader_port = broker_map[leader_id]
+                # Bootstrap-broker shortcut: if the leader IS the broker
+                # we already talk to, reuse the existing socket instead of
+                # spinning up a new connection.
+                if (
+                    (leader_host, leader_port) == (host, port)
+                    or leader_host in ("", "localhost", "127.0.0.1")
+                    and leader_port == port
+                ):
+                    correlation = _handle_partitions(sock, partitions, correlation)
+                    continue
+                try:
+                    leader_sock, _leader_transport = open_kafka_socket(
+                        leader_host, leader_port, timeout, use_tls=(transport_mode == "tls") or None
+                    )
+                except (TimeoutError, ConnectionError, OSError):
+                    # Leader broker unreachable from the auditor's network
+                    # (common for advertised-DNS-only clusters). Fall back
+                    # to attempting on the bootstrap socket so we at least
+                    # try; the broker will reject with NOT_LEADER but the
+                    # caller sees a per-partition error, not a total fail.
+                    correlation = _handle_partitions(sock, partitions, correlation)
+                    continue
+                try:
+                    leader_corr = 1
+                    ok, leader_corr, leader_session_error = _authenticate_or_probe(
+                        leader_sock, leader_corr, username, password
+                    )
+                    if not ok:
+                        if not out and fatal_error is None:
+                            fatal_error = f"leader {leader_host}:{leader_port} auth failed: {leader_session_error}"
+                        continue
+                    _handle_partitions(leader_sock, partitions, leader_corr)
+                finally:
+                    try:
+                        leader_sock.close()
+                    except OSError:
+                        pass
+
+            # 2) Partitions without a known leader / broker_map miss:
+            #    fall back to the bootstrap socket (best-effort).
+            if unassigned_partitions and len(out) < max_messages:
+                correlation = _handle_partitions(sock, unassigned_partitions, correlation)
+
+            if not out and fatal_error is not None:
+                return None, fatal_error, transport_mode
             return out, None, transport_mode
     except _TlsProbeError:
         if use_tls is True:
