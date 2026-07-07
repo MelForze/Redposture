@@ -96,6 +96,28 @@ def _port(value: str) -> int:
     return number
 
 
+def _port_spec(value: str) -> str | int:
+    """Accept the same syntax `--ports` used to require (list/range/file) so
+    `--port` alone covers every case. Returns:
+      - `int` when the value is a single valid port (backward-compatible with
+        the previous `_port(int)` behavior — downstream reads args.port as int).
+      - `str` for everything else (list/range/file path). Downstream port
+        collection sees it via `getattr(args, "ports", None)` — see
+        `build_basic_audit_plan` at redposture_core/stage_runtime.py.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        raise argparse.ArgumentTypeError("port must not be empty")
+    # Single integer: enforce range for the historically-strict path.
+    try:
+        number = int(raw)
+    except ValueError:
+        return raw  # list / range / file → parsed later by collect_scan_ports
+    if number < 1 or number > 65535:
+        raise argparse.ArgumentTypeError("port must be in range 1..65535")
+    return number
+
+
 def _positive_float(value: str) -> float:
     try:
         number = float(value)
@@ -259,12 +281,16 @@ def _add_save_flag(
 
 
 def _add_multi_ports_flag(parser: argparse.ArgumentParser | argparse._ArgumentGroup) -> None:
+    # `--port` now accepts the same list/range/file syntax that `--ports`
+    # used to require, so this flag is a deprecated alias kept for backward
+    # compatibility with existing scripts. Suppressed from `--help` so the
+    # UX only shows one canonical way to set ports.
     parser.add_argument(
         "--ports",
         dest="ports",
         default=None,
         metavar="ports",
-        help=("Optional additional ports: single port, comma-separated list/range, or file path with port values."),
+        help=argparse.SUPPRESS,
     )
 
 
@@ -448,7 +474,7 @@ def build_parser() -> argparse.ArgumentParser:
             add_listener_flags=_add_listener_flags,
             append_selected_defaults=_append_selected_defaults,
             mirror_group_actions=_mirror_group_actions,
-            port_type=_port,
+            port_type=_port_spec,
             positive_int=_positive_int,
         ),
     )

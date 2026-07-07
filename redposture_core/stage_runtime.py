@@ -524,16 +524,32 @@ def build_basic_audit_plan(
     default_ports: Iterable[int] | None = None,
 ) -> AuditCommandPlan:
     cfg = AuditConfig.from_namespace(args)
+    # `--port` now accepts the same list/range/file syntax that `--ports`
+    # used to require (see `_port_spec` in cli_args.py). Merge the two into
+    # a single string for the shared parser: if `--port` came in as a spec
+    # (not a bare int) we treat it as if the user had typed `--ports`.
+    port_value = getattr(args, "port", None)
+    ports_raw = getattr(args, "ports", None)
+    port_is_spec = isinstance(port_value, str)
+    combined_ports_spec: str | None
+    if port_is_spec and ports_raw:
+        combined_ports_spec = f"{port_value},{ports_raw}"
+    elif port_is_spec:
+        combined_ports_spec = port_value
+    else:
+        combined_ports_spec = ports_raw
     try:
-        ports = collect_scan_ports(getattr(args, "ports", None))
+        ports = collect_scan_ports(combined_ports_spec)
     except ValueError as exc:
         raise ValueError(f"failed to parse --port: {exc}") from exc
     if not ports:
-        port_value = getattr(args, "port", None)
-        if port_value is None and default_ports is not None:
+        # Only the single-int form of --port flows into this branch — spec
+        # values were already merged into combined_ports_spec above.
+        int_port = port_value if isinstance(port_value, int) else None
+        if int_port is None and default_ports is not None:
             ports = [int(port) for port in default_ports]
         else:
-            ports = [int(port_value if port_value is not None else default_port)]
+            ports = [int(int_port if int_port is not None else default_port)]
 
     targets = getattr(args, "targets", None) or getattr(args, "hosts", None)
     hosts_file = getattr(args, "hosts_file", None)

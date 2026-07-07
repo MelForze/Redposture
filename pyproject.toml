@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "5.9.0"
+version = "5.9.1"
 description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/MongoDB/Docker/Oracle/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper/Elasticsearch/gRPC auditing"
 readme = "README.md"
 requires-python = ">=3.10"
