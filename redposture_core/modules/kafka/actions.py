@@ -141,9 +141,23 @@ def _sasl_authenticate_plain(sock, correlation_id: int, username: str, password:
     return _with_kafka_client_overrides(_CLIENT_SASL_AUTHENTICATE_PLAIN, sock, correlation_id, username, password)
 
 
-def _authenticate_and_fetch_metadata(host: str, port: int, timeout: float, username: str, password: str):
+def _authenticate_and_fetch_metadata(
+    host: str,
+    port: int,
+    timeout: float,
+    username: str,
+    password: str,
+    *,
+    use_tls: bool | None = None,
+):
     return _with_kafka_client_overrides(
-        _CLIENT_AUTHENTICATE_AND_FETCH_METADATA, host, port, timeout, username, password
+        _CLIENT_AUTHENTICATE_AND_FETCH_METADATA,
+        host,
+        port,
+        timeout,
+        username,
+        password,
+        use_tls=use_tls,
     )
 
 
@@ -155,6 +169,8 @@ def _read_topic_messages(
     max_messages: int,
     username: str | None = None,
     password: str | None = None,
+    *,
+    use_tls: bool | None = None,
 ):
     return _with_kafka_client_overrides(
         _CLIENT_READ_TOPIC_MESSAGES,
@@ -165,6 +181,7 @@ def _read_topic_messages(
         max_messages,
         username=username,
         password=password,
+        use_tls=use_tls,
     )
 
 
@@ -177,6 +194,7 @@ def _read_dump_topics(
     max_messages: int,
     username: str | None,
     password: str | None,
+    use_tls: bool | None = None,
 ):
     return _with_kafka_client_overrides(
         _CLIENT_READ_DUMP_TOPICS,
@@ -187,6 +205,7 @@ def _read_dump_topics(
         max_messages=max_messages,
         username=username,
         password=password,
+        use_tls=use_tls,
     )
 
 
@@ -201,12 +220,15 @@ def _audit_kafka_via_sasl_fallback(
     dump: bool,
     max_messages: int,
     show_topics_limit: int | None = None,
+    *,
+    use_tls: bool | None = None,
 ) -> dict[str, Any] | None:
     provided_credentials = username is not None and password is not None
     started = time.monotonic()
 
     try:
-        with open_kafka_socket(host, port, timeout) as sock:
+        sock, transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
+        with sock:
             correlation = 1
             hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
             if not hs_ok:
@@ -274,6 +296,7 @@ def _audit_kafka_via_sasl_fallback(
                         max_messages=max_messages,
                         username=username if provided_credentials_ok else None,
                         password=password if provided_credentials_ok else None,
+                        use_tls=(transport_mode == "tls") or None,
                     )
 
             topic_messages: list[str] | None = None
@@ -337,7 +360,24 @@ def _audit_kafka_via_sasl_fallback(
                 "topic_read_error": topic_read_error,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "error": error,
+                "transport_mode": transport_mode,
             }
+    except _kafka_client._TlsProbeError:
+        if use_tls is True:
+            return None
+        return _audit_kafka_via_sasl_fallback(
+            host,
+            port,
+            timeout,
+            username,
+            password,
+            show_topics,
+            query_topic,
+            dump,
+            max_messages,
+            show_topics_limit=show_topics_limit,
+            use_tls=True,
+        )
     except (TimeoutError, ConnectionError, OSError, ValueError):
         return None
 
@@ -361,62 +401,72 @@ def _audit_kafka_host(
 
     for attempt in range(attempts):
         started = time.monotonic()
-        try:
-            with open_kafka_socket(host, port, timeout) as sock:
-                correlation = 1
-                is_kafka, api_error_code, api_error = _probe_apiversions(sock, correlation)
-                correlation += 1
-                if not is_kafka:
-                    if _is_sasl_probe_candidate(api_error):
-                        fallback_record = _audit_kafka_via_sasl_fallback(
-                            host=host,
-                            port=port,
-                            timeout=timeout,
-                            username=username,
-                            password=password,
-                            show_topics=show_topics,
-                            show_topics_limit=show_topics_limit,
-                            query_topic=query_topic,
-                            dump=dump,
-                            max_messages=max_messages,
-                        )
-                        if fallback_record is not None:
-                            return fallback_record
-                    return {
-                        "timestamp": utc_now_iso(),
-                        "host": host,
-                        "port": port,
-                        "is_kafka": False,
-                        "status": "fail",
-                        "auth_required": None,
-                        "provided_credentials": provided_credentials,
-                        "provided_username": username,
-                        "provided_password": password if provided_credentials else None,
-                        "provided_credentials_ok": None,
-                        "show_topics": show_topics,
-                        "show_topics_limit": show_topics_limit,
-                        "query_topic": query_topic,
-                        "dump": bool(dump),
-                        "max_messages": max_messages if dump else None,
-                        "topic_count": None,
-                        "topics": None,
-                        "query_topic_value": None,
-                        "dump_topics": None,
-                        "dump_results": None,
-                        "dump_errors": None,
-                        "dump_error": None,
-                        "topic_messages": None,
-                        "topic_read_error": None,
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
-                        "error": api_error
-                        or (
-                            f"ApiVersions failed ({_kafka_error_name(int(api_error_code))})"
-                            if api_error_code is not None
-                            else "service is not kafka"
-                        ),
-                    }
+        # Transport-attempt loop: for non-9093 ports we try plaintext first
+        # and, if `_recv_kafka_frame` sees a TLS record prelude, close the
+        # socket and re-enter with `use_tls=True`. For 9093 (SASL_SSL), the
+        # `open_kafka_socket` helper picks TLS on the first pass, so this
+        # loop still runs but the "initial" attempt already opens TLS.
+        transport_use_tls: bool | None = None
+        for _transport_attempt in ("initial", "tls_fallback"):
+            try:
+                sock, transport_mode = open_kafka_socket(host, port, timeout, use_tls=transport_use_tls)
+                with sock:
+                    correlation = 1
+                    is_kafka, api_error_code, api_error = _probe_apiversions(sock, correlation)
+                    correlation += 1
+                    if not is_kafka:
+                        if _is_sasl_probe_candidate(api_error):
+                            fallback_record = _audit_kafka_via_sasl_fallback(
+                                host=host,
+                                port=port,
+                                timeout=timeout,
+                                username=username,
+                                password=password,
+                                show_topics=show_topics,
+                                show_topics_limit=show_topics_limit,
+                                query_topic=query_topic,
+                                dump=dump,
+                                max_messages=max_messages,
+                                use_tls=(transport_mode == "tls") or None,
+                            )
+                            if fallback_record is not None:
+                                return fallback_record
+                        return {
+                            "timestamp": utc_now_iso(),
+                            "host": host,
+                            "port": port,
+                            "is_kafka": False,
+                            "status": "fail",
+                            "auth_required": None,
+                            "provided_credentials": provided_credentials,
+                            "provided_username": username,
+                            "provided_password": password if provided_credentials else None,
+                            "provided_credentials_ok": None,
+                            "show_topics": show_topics,
+                            "show_topics_limit": show_topics_limit,
+                            "query_topic": query_topic,
+                            "dump": bool(dump),
+                            "max_messages": max_messages if dump else None,
+                            "topic_count": None,
+                            "topics": None,
+                            "query_topic_value": None,
+                            "dump_topics": None,
+                            "dump_results": None,
+                            "dump_errors": None,
+                            "dump_error": None,
+                            "topic_messages": None,
+                            "topic_read_error": None,
+                            "elapsed_ms": int((time.monotonic() - started) * 1000),
+                            "error": api_error
+                            or (
+                                f"ApiVersions failed ({_kafka_error_name(int(api_error_code))})"
+                                if api_error_code is not None
+                                else "service is not kafka"
+                            ),
+                            "transport_mode": transport_mode,
+                        }
 
-                metadata, metadata_error = _fetch_metadata(sock, correlation, topics=None)
+                    metadata, metadata_error = _fetch_metadata(sock, correlation, topics=None)
 
                 auth_required: bool | None = None
                 topic_map: dict[str, int] | None = None
@@ -448,8 +498,13 @@ def _audit_kafka_host(
 
                 provided_credentials_ok: bool | None = None
                 if username is not None and password is not None:
-                    auth_ok, auth_metadata, auth_error = _authenticate_and_fetch_metadata(
-                        host, port, timeout, username, password
+                    auth_ok, auth_metadata, auth_error, _auth_transport = _authenticate_and_fetch_metadata(
+                        host,
+                        port,
+                        timeout,
+                        username,
+                        password,
+                        use_tls=(transport_mode == "tls") or None,
                     )
                     provided_credentials_ok = auth_ok
                     if auth_ok and auth_metadata is not None:
@@ -506,6 +561,7 @@ def _audit_kafka_host(
                             max_messages=max_messages,
                             username=username if bool(provided_credentials_ok) else None,
                             password=password if bool(provided_credentials_ok) else None,
+                            use_tls=(transport_mode == "tls") or None,
                         )
 
                 topic_messages: list[str] | None = None
@@ -575,27 +631,40 @@ def _audit_kafka_host(
                     "topic_read_error": topic_read_error,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": error,
+                    "transport_mode": transport_mode,
                 }
-        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
-            last_error = _friendly_error_from_exception(exc)
-            if _is_sasl_probe_candidate(last_error):
-                fallback_record = _audit_kafka_via_sasl_fallback(
-                    host=host,
-                    port=port,
-                    timeout=timeout,
-                    username=username,
-                    password=password,
-                    show_topics=show_topics,
-                    show_topics_limit=show_topics_limit,
-                    query_topic=query_topic,
-                    dump=dump,
-                    max_messages=max_messages,
-                )
-                if fallback_record is not None:
-                    return fallback_record
-            if attempt >= attempts - 1:
+            except _kafka_client._TlsProbeError:
+                # Plaintext connect got a TLS record — close and retry with
+                # TLS on the second transport_attempt. If we're already on
+                # `tls_fallback`, treat as a hard failure and fall through
+                # to the outer retry loop.
+                if transport_use_tls is not True:
+                    transport_use_tls = True
+                    continue
+                last_error = "plaintext read returned TLS record prelude"
                 break
-            time.sleep(_retry_delay(attempt))
+            except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+                last_error = _friendly_error_from_exception(exc)
+                if _is_sasl_probe_candidate(last_error):
+                    fallback_record = _audit_kafka_via_sasl_fallback(
+                        host=host,
+                        port=port,
+                        timeout=timeout,
+                        username=username,
+                        password=password,
+                        show_topics=show_topics,
+                        show_topics_limit=show_topics_limit,
+                        query_topic=query_topic,
+                        dump=dump,
+                        max_messages=max_messages,
+                        use_tls=(transport_use_tls is True) or None,
+                    )
+                    if fallback_record is not None:
+                        return fallback_record
+                break  # break transport-loop; fall through to attempts retry
+        if attempt >= attempts - 1:
+            break
+        time.sleep(_retry_delay(attempt))
 
     return {
         "timestamp": utc_now_iso(),
@@ -624,6 +693,7 @@ def _audit_kafka_host(
         "topic_read_error": None,
         "elapsed_ms": None,
         "error": last_error or "connection failed",
+        "transport_mode": None,
     }
 
 
@@ -638,6 +708,16 @@ def _with_optional_topics(record: dict[str, Any], message: str) -> str:
     if not isinstance(topic_count, int):
         return f"{message} (topics:-)"
     return f"{message} (topics:{topic_count})"
+
+
+def _transport_suffix(record: dict[str, Any]) -> str:
+    # Kafka SASL_SSL / TLS: annotate the audit line with `(transport:tls)` when
+    # the broker was reached over TLS. Plaintext is the silent default (same
+    # convention as docker/grpc/oracle) so backward-compat output stays
+    # byte-identical for plaintext brokers.
+    if record.get("transport_mode") == "tls":
+        return " (transport:tls)"
+    return ""
 
 
 def _attempted_credentials_suffix(record: dict[str, Any]) -> str:
@@ -667,7 +747,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
             },
             ensure_ascii=False,
         )
-    return f"{_nxc_prefix(record)} [*] Kafka Broker (auth required:{auth_required_text})"
+    return f"{_nxc_prefix(record)} [*] Kafka Broker (auth required:{auth_required_text}){_transport_suffix(record)}"
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
@@ -677,26 +757,33 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     status = str(record.get("status") or "fail")
     prefix = _nxc_prefix(record)
     err = _clip(str(record.get("error") or "-"), 72)
+    tls_suffix = _transport_suffix(record)
 
     if status == "open_no_auth":
-        return _with_optional_topics(record, f"{prefix} [+] anonymous access")
+        return _with_optional_topics(record, f"{prefix} [+] anonymous access") + tls_suffix
 
     if status == "invalid_credentials_anonymous":
         username = str(record.get("provided_username") or "user").strip() or "user"
         provided_password = record.get("provided_password")
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
-        return f"{prefix} [-] {username}:{password_text}"
+        return f"{prefix} [-] {username}:{password_text}{tls_suffix}"
 
     if status == "valid_credentials":
         username = str(record.get("provided_username") or "user").strip() or "user"
         provided_password = record.get("provided_password")
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
-        return _with_optional_topics(record, f"{prefix} [+] {username}:{password_text}")
+        return _with_optional_topics(record, f"{prefix} [+] {username}:{password_text}") + tls_suffix
+
+    if status == "weak_default_creds":
+        username = str(record.get("provided_username") or "user").strip() or "user"
+        provided_password = record.get("provided_password")
+        password_text = "<empty>" if provided_password == "" else str(provided_password or "")
+        return _with_optional_topics(record, f"{prefix} [+] {username}:{password_text}") + tls_suffix
 
     if status == "auth_required":
         attempts_suffix = _attempted_credentials_suffix(record)
         if attempts_suffix:
-            return f"{prefix} [-] authentication required {attempts_suffix}"
+            return f"{prefix} [-] authentication required {attempts_suffix}{tls_suffix}"
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "user").strip() or "user"
             provided_password = record.get("provided_password")
@@ -704,18 +791,18 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             base = f"{prefix} [-] {username}:{password_text}"
         else:
             base = f"{prefix} [-] authentication required"
-        return base
+        return base + tls_suffix
 
     if status == "unknown_auth":
         line = f"{prefix} [!] auth status unknown"
         if err != "-":
-            return f"{line} err={err}"
-        return line
+            return f"{line} err={err}{tls_suffix}"
+        return line + tls_suffix
 
     line = f"{prefix} [!] connection failed"
     if err != "-":
-        return f"{line} err={err}"
-    return line
+        return f"{line} err={err}{tls_suffix}"
+    return line + tls_suffix
 
 
 def _format_topics_detail_records(record: dict[str, Any], output_format: str) -> list[str]:

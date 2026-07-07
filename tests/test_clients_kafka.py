@@ -329,3 +329,139 @@ def test_kafka_record_batch_and_sasl_fallback_branches() -> None:
     assert ok is False
     assert corr == 3
     assert "broken pipe" in str(error)
+
+
+# ---------------------------------------------------------------------------
+# TLS auto-detection (regression tests for the SASL_SSL crash on port 9093)
+# ---------------------------------------------------------------------------
+
+
+def test_is_tls_record_prelude_recognizes_all_record_types() -> None:
+    """The TLS record header always starts with a known type byte (0x14..0x17)
+    followed by the TLS major version (0x03) and a minor version byte
+    (0x00..0x04). Miscategorizing a real Kafka frame length as TLS would
+    trigger a spurious retry, so this test pins the false-positive cases too.
+    """
+    assert kafka._is_tls_record_prelude(b"\x15\x03\x03\x00") is True  # TLS 1.2 Alert
+    assert kafka._is_tls_record_prelude(b"\x16\x03\x01\x02") is True  # TLS 1.0 Handshake
+    assert kafka._is_tls_record_prelude(b"\x14\x03\x03\x00") is True  # ChangeCipherSpec
+    assert kafka._is_tls_record_prelude(b"\x17\x03\x04\x00") is True  # TLS 1.3 AppData
+
+    # Not a TLS record: valid Kafka frame length like 0x00000140 (320 bytes).
+    assert kafka._is_tls_record_prelude(b"\x00\x00\x01\x40") is False
+    # Wrong first byte (0x18 not a TLS record type).
+    assert kafka._is_tls_record_prelude(b"\x18\x03\x03\x00") is False
+    # Wrong TLS major version (0x02 — SSLv2 predecessor, not TLS).
+    assert kafka._is_tls_record_prelude(b"\x15\x02\x03\x00") is False
+    # Wrong minor version (0x05 is beyond TLS 1.3 draft numbering).
+    assert kafka._is_tls_record_prelude(b"\x15\x03\x05\x00") is False
+    # Short buffer must never crash and must return False.
+    assert kafka._is_tls_record_prelude(b"") is False
+    assert kafka._is_tls_record_prelude(b"\x15") is False
+    assert kafka._is_tls_record_prelude(b"\x15\x03") is False
+
+
+def test_recv_kafka_frame_raises_tls_probe_error_on_alert() -> None:
+    """`_recv_kafka_frame` on a plaintext socket connected to a TLS listener
+    reads back a TLS Alert record. Historically this raised
+    `ValueError('invalid Kafka frame size 352518912')`, causing the whole
+    Kafka scan to log a misleading error. Now it must raise `_TlsProbeError`
+    so the caller can catch it and retry with `wrap_socket`.
+    """
+
+    class _AlertSocket:
+        def __init__(self) -> None:
+            self._payload = b"\x15\x03\x03\x00"
+
+        def recv(self, size: int) -> bytes:
+            chunk = self._payload[:size]
+            self._payload = self._payload[size:]
+            return chunk
+
+    with pytest.raises(kafka._TlsProbeError):
+        kafka._recv_kafka_frame(_AlertSocket())
+
+    # Sanity: a legit 4-byte length still parses (empty body).
+    class _EmptyFrameSocket:
+        def __init__(self) -> None:
+            self._payload = b"\x00\x00\x00\x00"
+
+        def recv(self, size: int) -> bytes:
+            chunk = self._payload[:size]
+            self._payload = self._payload[size:]
+            return chunk
+
+    # frame_size == 0 hits the existing "invalid Kafka frame size 0" branch,
+    # not the TLS path — proves we still fail closed on genuinely bogus input.
+    with pytest.raises(ValueError, match="invalid Kafka frame size 0"):
+        kafka._recv_kafka_frame(_EmptyFrameSocket())
+
+
+def test_open_kafka_socket_port_9093_prefers_tls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """9093 = well-known SASL_SSL listener. `open_kafka_socket` with
+    `use_tls=None` (the default) must attempt `wrap_socket` on the first
+    pass — otherwise the caller pays the cost of one round-trip probe
+    followed by a re-connect just to discover the well-known layout.
+    """
+    wrap_calls: list[tuple[str, int | None]] = []
+
+    class _FakeBaseSocket:
+        def __init__(self, host: str, port: int) -> None:
+            self.host = host
+            self.port = port
+            self.closed = False
+            self._timeout: float | None = None
+
+        def settimeout(self, timeout: float | None) -> None:
+            self._timeout = timeout
+
+        def close(self) -> None:
+            self.closed = True
+
+    class _FakeWrappedSocket:
+        def __init__(self, base: _FakeBaseSocket, server_hostname: str) -> None:
+            self.base = base
+            self.server_hostname = server_hostname
+            self._timeout: float | None = None
+
+        def settimeout(self, timeout: float | None) -> None:
+            self._timeout = timeout
+
+    class _FakeContext:
+        def __init__(self) -> None:
+            self.check_hostname = True
+            self.verify_mode = 0
+
+        def wrap_socket(self, sock, server_hostname):
+            wrap_calls.append((server_hostname, getattr(sock, "port", None)))
+            return _FakeWrappedSocket(sock, server_hostname)
+
+    def _fake_create_connection(addr, timeout):
+        host, port = addr
+        return _FakeBaseSocket(host, port)
+
+    monkeypatch.setattr(kafka.socket, "create_connection", _fake_create_connection)
+    monkeypatch.setattr(kafka.ssl, "create_default_context", lambda: _FakeContext())
+
+    # 9093 with use_tls=None -> TLS wrap is attempted.
+    sock, transport_mode = kafka.open_kafka_socket("kafka.example.com", 9093, 1.0)
+    assert transport_mode == "tls"
+    assert wrap_calls == [("kafka.example.com", 9093)]
+    assert isinstance(sock, _FakeWrappedSocket)
+
+    # 9092 with use_tls=None -> plaintext, wrap_socket NOT called.
+    wrap_calls.clear()
+    sock, transport_mode = kafka.open_kafka_socket("kafka.example.com", 9092, 1.0)
+    assert transport_mode == "plaintext"
+    assert wrap_calls == []
+    assert isinstance(sock, _FakeBaseSocket)
+
+    # Explicit use_tls=False on 9093 forces plaintext (operator override).
+    sock, transport_mode = kafka.open_kafka_socket("kafka.example.com", 9093, 1.0, use_tls=False)
+    assert transport_mode == "plaintext"
+    assert wrap_calls == []
+
+    # Explicit use_tls=True on 9092 forces TLS.
+    sock, transport_mode = kafka.open_kafka_socket("kafka.example.com", 9092, 1.0, use_tls=True)
+    assert transport_mode == "tls"
+    assert wrap_calls == [("kafka.example.com", 9092)]

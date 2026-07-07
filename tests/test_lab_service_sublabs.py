@@ -185,3 +185,54 @@ def test_proxmox_real_documents_kvm_platform_requirement(lab_services_dir: Path)
     text = (lab_services_dir / "proxmox-real" / "docker-compose.yml").read_text(encoding="utf-8")
     assert "KVM" in text or "kvm" in text, "proxmox-real compose must mention KVM requirement"
     assert "macOS" in text or "arm64" in text, "proxmox-real compose must call out the unsupported platforms"
+
+
+# ---------------------------------------------------------------------------
+# Kafka SASL_SSL sub-lab (`kafka-tls/`)
+# ---------------------------------------------------------------------------
+
+# Kept in its own map because the registry-focused invariants above
+# (aggregate-superset check, README pointer check) don't apply — Kafka has
+# its own aggregate compose and its own docs section.
+_KAFKA_SUBLABS = {
+    "kafka-tls": {"kafka-tls", "kafka-tls-seed"},
+}
+
+
+def test_each_kafka_sublab_directory_exists_and_has_a_compose_file(lab_services_dir: Path) -> None:
+    for sublab in _KAFKA_SUBLABS:
+        sublab_dir = lab_services_dir / sublab
+        assert sublab_dir.is_dir(), f"missing kafka sub-lab directory: {sublab_dir}"
+        compose = sublab_dir / "docker-compose.yml"
+        assert compose.is_file(), f"missing compose file for {sublab}: {compose}"
+
+
+def test_each_kafka_sublab_declares_exactly_its_expected_services(lab_services_dir: Path) -> None:
+    for sublab, expected_services in _KAFKA_SUBLABS.items():
+        services = _services_and_extends(lab_services_dir / sublab / "docker-compose.yml")
+        actual = set(services.keys())
+        assert actual == expected_services, (
+            f"{sublab} services drifted: expected={sorted(expected_services)} actual={sorted(actual)}"
+        )
+
+
+def test_kafka_sublabs_extend_lab_full_docker_compose(lab_services_dir: Path) -> None:
+    """The kafka-tls sub-lab must reference `lab/full/docker-compose.yml`
+    via `extends` — mirrors the registry-sub-lab invariant so service
+    definitions stay single-sourced."""
+    for sublab in _KAFKA_SUBLABS:
+        services = _services_and_extends(lab_services_dir / sublab / "docker-compose.yml")
+        for name, (file_ref, ext_service) in services.items():
+            assert file_ref, f"{sublab}:{name} has no `extends: file:` line"
+            assert "lab/full/docker-compose.yml" in file_ref, f"{sublab}:{name} extends the wrong file: {file_ref!r}"
+            assert ext_service == name, f"{sublab}:{name} extends a mismatched service: {ext_service!r}"
+
+
+def test_kafka_aggregate_lab_includes_all_kafka_sublab_services(lab_services_dir: Path) -> None:
+    """The `lab/services/kafka/` aggregate compose must remain a superset of
+    every kafka sub-lab — the TLS broker should be reachable from the
+    "boot everything Kafka" entrypoint too."""
+    aggregate_services = set(_services_and_extends(lab_services_dir / "kafka" / "docker-compose.yml").keys())
+    expected_union = {svc for names in _KAFKA_SUBLABS.values() for svc in names}
+    missing = expected_union - aggregate_services
+    assert not missing, f"kafka aggregate is missing sub-lab services: {sorted(missing)}"

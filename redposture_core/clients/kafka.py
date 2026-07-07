@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import ssl
 import struct
 from typing import Any
 
@@ -31,10 +32,64 @@ _is_connection_refused_fail_record = transport.is_connection_refused_fail_record
 _recv_exact = transport.recv_exact
 
 
-def open_kafka_socket(host: str, port: int, timeout: float) -> socket.socket:
-    sock = socket.create_connection((host, port), timeout=timeout)
-    sock.settimeout(timeout)
-    return sock
+class _TlsProbeError(Exception):
+    """Raised when a plaintext-read yields a TLS record prelude.
+
+    Signals the caller to close the socket, re-open it wrapped in TLS, and
+    replay the Kafka protocol from ApiVersions. Kept as a distinct exception
+    (not `ValueError`) so plain framing errors stay distinguishable from
+    "listener is TLS, retry with wrap_socket".
+    """
+
+
+def _is_tls_record_prelude(raw: bytes) -> bool:
+    """Return True if `raw` looks like the first bytes of a TLS record header.
+
+    TLS record types: 0x14 ChangeCipherSpec, 0x15 Alert, 0x16 Handshake,
+    0x17 ApplicationData. Second byte is the TLS major version (always 0x03
+    for TLS 1.0-1.3 at the record layer); third byte is the minor version
+    (0x00-0x04 in practice). Kafka frame lengths never look like this — a
+    valid Kafka response of ~350 MiB would exceed `KAFKA_MAX_FRAME` and be
+    rejected anyway.
+    """
+    if len(raw) < 3:
+        return False
+    return raw[0] in (0x14, 0x15, 0x16, 0x17) and raw[1] == 0x03 and raw[2] in (0x00, 0x01, 0x02, 0x03, 0x04)
+
+
+def open_kafka_socket(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    use_tls: bool | None = None,
+) -> tuple[socket.socket, str]:
+    """Open a TCP (or TLS-wrapped) socket to a Kafka broker.
+
+    Returns `(sock, transport_mode)` where transport_mode is `"plaintext"` or
+    `"tls"`. When `use_tls is None`, the well-known SASL_SSL port 9093 is
+    treated as TLS by default; all other ports open plaintext and rely on
+    the caller catching `_TlsProbeError` from `_recv_kafka_frame` to retry.
+
+    Uses `check_hostname=False` + `verify_mode=CERT_NONE` — audit tool posture
+    (recon over self-signed brokers is the common case). Mirrors
+    `_open_grpc_socket` in `redposture_core/clients/grpc.py`.
+    """
+    resolved = use_tls if use_tls is not None else (port == 9093)
+    base = socket.create_connection((host, port), timeout=timeout)
+    base.settimeout(timeout)
+    if not resolved:
+        return base, "plaintext"
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        wrapped = ctx.wrap_socket(base, server_hostname=host)
+        wrapped.settimeout(timeout)
+    except BaseException:
+        base.close()
+        raise
+    return wrapped, "tls"
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -130,6 +185,8 @@ def _is_sasl_probe_candidate(message: str | None) -> bool:
 
 def _recv_kafka_frame(sock: socket.socket) -> bytes:
     raw_size = _recv_exact(sock, 4)
+    if _is_tls_record_prelude(raw_size):
+        raise _TlsProbeError(f"plaintext read returned TLS record prelude: {raw_size!r}")
     (frame_size,) = struct.unpack(">i", raw_size)
     if frame_size <= 0 or frame_size > KAFKA_MAX_FRAME:
         raise ValueError(f"invalid Kafka frame size {frame_size}")
@@ -610,40 +667,41 @@ def _read_topic_messages(
     *,
     username: str | None = None,
     password: str | None = None,
-) -> tuple[list[str] | None, str | None]:
+    use_tls: bool | None = None,
+) -> tuple[list[str] | None, str | None, str]:
     if max_messages <= 0:
-        return [], None
+        return [], None, "plaintext"
 
     try:
-        with socket.create_connection((host, port), timeout=timeout) as sock:
-            sock.settimeout(timeout)
+        sock, transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
+        with sock:
             correlation = 1
 
             if username is not None and password is not None:
                 hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
                 if not hs_ok:
-                    return None, hs_error or "SASL handshake failed"
+                    return None, hs_error or "SASL handshake failed", transport_mode
                 auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
                 if not auth_ok:
-                    return None, auth_error or "authentication failed"
+                    return None, auth_error or "authentication failed", transport_mode
             else:
                 is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
                 correlation += 1
                 if not is_kafka:
-                    return None, api_error or "service is not kafka"
+                    return None, api_error or "service is not kafka", transport_mode
 
             metadata, metadata_error = _fetch_metadata(sock, correlation, topics=[topic])
             correlation += 1
             if metadata is None:
-                return None, metadata_error or "metadata request failed"
+                return None, metadata_error or "metadata request failed", transport_mode
 
             topic_map = dict(metadata.get("topic_map") or {})
             if topic not in topic_map:
-                return [], None
+                return [], None, transport_mode
 
             partition_count = int(topic_map.get(topic) or 0)
             if partition_count <= 0:
-                return [], None
+                return [], None, transport_mode
 
             out: list[str] = []
             for partition in range(partition_count):
@@ -662,7 +720,7 @@ def _read_topic_messages(
                 correlation += 1
                 if list_offsets_error:
                     if not out:
-                        return None, list_offsets_error
+                        return None, list_offsets_error, transport_mode
                     continue
                 if earliest_offset is None:
                     continue
@@ -689,7 +747,7 @@ def _read_topic_messages(
                 correlation += 1
                 if fetch_error:
                     if not out:
-                        return None, fetch_error
+                        return None, fetch_error, transport_mode
                     continue
                 if not fetch_items:
                     continue
@@ -699,9 +757,22 @@ def _read_topic_messages(
                     if len(out) >= max_messages:
                         break
 
-            return out, None
+            return out, None, transport_mode
+    except _TlsProbeError:
+        if use_tls is True:
+            return None, "plaintext read returned TLS record prelude", "tls"
+        return _read_topic_messages(
+            host,
+            port,
+            timeout,
+            topic,
+            max_messages,
+            username=username,
+            password=password,
+            use_tls=True,
+        )
     except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
-        return None, _friendly_error_from_exception(exc)
+        return None, _friendly_error_from_exception(exc), "plaintext" if use_tls is not True else "tls"
 
 
 def _sasl_handshake_plain(sock: socket.socket, correlation_id: int) -> tuple[bool, int, str | None]:
@@ -816,33 +887,43 @@ def _authenticate_and_fetch_metadata(
     timeout: float,
     username: str,
     password: str,
-) -> tuple[bool, dict[str, Any] | None, str | None]:
+    *,
+    use_tls: bool | None = None,
+) -> tuple[bool, dict[str, Any] | None, str | None, str]:
     try:
-        with socket.create_connection((host, port), timeout=timeout) as sock:
-            sock.settimeout(timeout)
-
+        sock, transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
+        with sock:
             correlation = 1
             is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
             correlation += 1
             if not is_kafka:
-                return False, None, api_error or "service is not kafka"
+                return False, None, api_error or "service is not kafka", transport_mode
 
             hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
             if not hs_ok:
-                return False, None, hs_error or "SASL handshake failed"
+                return False, None, hs_error or "SASL handshake failed", transport_mode
 
             auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
             if not auth_ok:
-                return False, None, auth_error or "authentication failed"
+                return False, None, auth_error or "authentication failed", transport_mode
 
             metadata, metadata_error = _fetch_metadata(sock, correlation, topics=None)
             if metadata is None:
-                return False, None, metadata_error or "metadata request failed after auth"
+                return False, None, metadata_error or "metadata request failed after auth", transport_mode
             if bool(metadata.get("auth_required")):
-                return False, None, "authentication failed"
-            return True, metadata, None
+                return False, None, "authentication failed", transport_mode
+            return True, metadata, None, transport_mode
+    except _TlsProbeError:
+        if use_tls is True:
+            return False, None, "plaintext read returned TLS record prelude", "tls"
+        return _authenticate_and_fetch_metadata(host, port, timeout, username, password, use_tls=True)
     except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
-        return False, None, _friendly_error_from_exception(exc)
+        return (
+            False,
+            None,
+            _friendly_error_from_exception(exc),
+            "plaintext" if use_tls is not True else "tls",
+        )
 
 
 def _read_dump_topics(
@@ -854,11 +935,12 @@ def _read_dump_topics(
     max_messages: int,
     username: str | None,
     password: str | None,
+    use_tls: bool | None = None,
 ) -> tuple[dict[str, list[str] | None], dict[str, str]]:
     dump_results: dict[str, list[str] | None] = {}
     dump_errors: dict[str, str] = {}
     for topic_name in topics:
-        read_items, read_error = _read_topic_messages(
+        read_items, read_error, _transport = _read_topic_messages(
             host=host,
             port=port,
             timeout=timeout,
@@ -866,6 +948,7 @@ def _read_dump_topics(
             max_messages=max_messages,
             username=username,
             password=password,
+            use_tls=use_tls,
         )
         dump_results[topic_name] = read_items
         if read_error:
