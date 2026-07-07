@@ -25,7 +25,7 @@ from ...clients.oracle import (
     tns_listener_command,
 )
 from ...console import Console
-from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line
+from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -1780,7 +1780,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
 
 
 def _render_colored_oracle_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag=_ORACLE_TAG,
@@ -1792,7 +1792,11 @@ def _render_colored_oracle_line(console: Console, line: str) -> bool:
                 "orange",
             ),
         ),
-    )
+    ):
+        return True
+    if line.startswith(_ORACLE_TAG) and "\t" in line:
+        return render_tagged_detail_line(console, line, tag=_ORACLE_TAG, default_color="cyan")
+    return False
 
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
