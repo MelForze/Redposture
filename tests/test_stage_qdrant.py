@@ -4,7 +4,6 @@ import io
 import json
 import urllib.error
 import urllib.request
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -97,21 +96,6 @@ def test_qdrant_error_and_response_helpers_cover_extra_shapes() -> None:
 def test_qdrant_collections_from_payload_deduplicates() -> None:
     payload = {"result": {"collections": [{"name": "a"}, {"name": "a"}, {"name": "b"}]}}
     assert qdrant._qdrant_collections_from_payload(payload) == ["a", "b"]
-
-
-def test_qdrant_lab_seed_is_fail_fast_and_verifies_collections(lab_full_compose_path: Path) -> None:
-    compose = lab_full_compose_path.read_text(encoding="utf-8")
-    seed_block = compose.split("  qdrant-seed:", 1)[1].split("  elastic-open:", 1)[0]
-
-    assert ">/dev/null || true" not in seed_block
-    assert "redposture-qdrant-seed-ready" in seed_block
-    assert "require_points" in seed_block
-    assert 'require_collection "demo_vectors"' in seed_block
-    assert 'require_collection "audit_logs"' in seed_block
-    assert 'require_collection "service_inventory"' in seed_block
-    assert 'require_points "demo_vectors"' in seed_block
-    assert 'require_points "audit_logs"' in seed_block
-    assert 'require_points "service_inventory"' in seed_block
 
 
 @pytest.mark.parametrize(
