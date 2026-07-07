@@ -691,6 +691,14 @@ run_kafka_cases() {
   run_case kafka kafka_auth 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
   run_case kafka kafka_multi_ports 0 kafka -t 127.0.0.1 --ports "9092,39092,39093,39094,39095" --show-topics --dump --max-messages 10
   run_text_case kafka kafka_debug_smoke 0 kafka -t 127.0.0.1 --port 9092 --debug
+  # Kafka SASL_SSL / TLS: broker `kafka-tls` binds SASL_SSL on 29093 with
+  # self-signed cert. `admin:admin` is a `_KAFKA_DEFAULT_CREDENTIALS` entry
+  # so `--defcreds` must land the `weak_default_creds` status; text output
+  # must carry the `(transport:tls)` marker. Regression against the
+  # pre-fix crash `invalid Kafka frame size 352518912`.
+  run_case kafka kafka_tls_defcreds 0 kafka -t 127.0.0.1 --port 29093 --defcreds --show-topics --dump --max-messages 5
+  run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 -u admin -p admin --show-topics --dump --max-messages 5
+  run_text_case kafka kafka_tls_debug_smoke 0 kafka -t 127.0.0.1 --port 29093 --debug
   if is_extended_matrix; then
     run_case kafka kafka_extended_topic_dump_count 0 kafka -t 127.0.0.1 --port 9092 --topic orders --show-topics --dump 3
     run_case kafka kafka_extended_dump_max_conflict 2 kafka -t 127.0.0.1 --port 9092 --dump 3 --max-messages 4
@@ -698,6 +706,10 @@ run_kafka_cases() {
     run_case kafka kafka_extended_empty_password 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p "" --show-topics
     # P4-D idempotency twin of kafka_open (must match base CLI exactly).
     run_case kafka kafka_idempotency 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
+    # Extended TLS: named topic dump + wrong password + P4-D idempotency.
+    run_case kafka kafka_tls_extended_topic 0 kafka -t 127.0.0.1 --port 29093 -u admin -p admin --topic tls.orders --show-topics --dump 3
+    run_case kafka kafka_tls_extended_bad_password 0 kafka -t 127.0.0.1 --port 29093 -u admin -p wrong --show-topics
+    run_case kafka kafka_tls_idempotency 0 kafka -t 127.0.0.1 --port 29093 --defcreds --show-topics --dump --max-messages 5
     # P4-E fuzz: negative workers must be rejected at parse.
     run_case kafka fuzz_kafka_negative_workers 2 kafka -t 127.0.0.1 --workers -5 --show-topics
     run_case kafka fuzz_kafka_zero_max_messages 2 kafka -t 127.0.0.1 --max-messages 0 --show-topics

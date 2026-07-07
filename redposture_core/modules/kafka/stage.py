@@ -22,10 +22,14 @@ _DEFAULT_PORT = 9092
 # SASL_SSL on 9093 side-by-side, and users often only have 9093 exposed
 # externally. Adding it to the default scan set means `redposture kafka -t
 # <host>` covers both listeners without extra flags.
-# (Bytes 0x1503* / 0x1603* on a TLS listener would surface as
-#  `invalid Kafka frame size ...` — separate feature-gap for SASL_SSL is
-#  tracked; this default at least surfaces the second listener during
-#  discovery scans.)
+#
+# TLS listeners are auto-detected: `open_kafka_socket` opens 9093 as TLS by
+# default, and `_recv_kafka_frame` recognises the TLS record prelude
+# (0x14/0x15/0x16/0x17 + 0x03) on any port and triggers a retry with
+# `wrap_socket`. See `_is_tls_record_prelude` and `_TlsProbeError` in
+# `redposture_core/clients/kafka.py`; the transport used ends up as the
+# `transport_mode` field on the audit record, rendered as `(transport:tls)`
+# in text output — same convention as docker/grpc/oracle.
 _DEFAULT_PORTS: tuple[int, ...] | None = (9092, 9093, 19092)
 
 
