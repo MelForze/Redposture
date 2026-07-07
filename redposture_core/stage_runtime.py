@@ -1078,6 +1078,13 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         if dump_limit is not None:
             return int(dump_limit)
         return 10
+    if name == "max_messages_explicit":
+        # True if user actually set --max-messages OR --dump N; False when
+        # the value is the internal default. Kafka renderer uses this to
+        # suppress the noisy "(max:10)" header when the user didn't ask.
+        if getattr(args, "max_messages", None) is not None:
+            return True
+        return dump_flag_limit(getattr(args, "dump", None)) is not None
     if name == "credential_candidates":
         if credential.username is not None:
             return [

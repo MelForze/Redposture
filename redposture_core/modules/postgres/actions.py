@@ -17,7 +17,7 @@ from typing import Any
 
 from ...clients import transport
 from ...console import Console
-from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line
+from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -2815,7 +2815,7 @@ def _postgres_extra_color_spans(_marker: str, payload: str) -> list[tuple[int, i
 
 
 def _render_colored_postgres_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag="POSTGRES",
@@ -2826,7 +2826,11 @@ def _render_colored_postgres_line(console: Console, line: str) -> bool:
         ),
         counts=(CountColorRule("DBs", "orange"),),
         extra_spans=_postgres_extra_color_spans,
-    )
+    ):
+        return True
+    if line.startswith("POSTGRES") and "\t" in line:
+        return render_tagged_detail_line(console, line, tag="POSTGRES", default_color="cyan")
+    return False
 
 
 def _call_audit_postgres_host_with_stage_debug(

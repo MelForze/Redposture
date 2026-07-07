@@ -17,7 +17,7 @@ from ...clients.docker_engine import (
     normalize_docker_error,
 )
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line
+from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
     StageTelemetryBuilder,
 )
@@ -655,7 +655,7 @@ def _format_exec_lines(record: dict[str, Any], output_format: str, *, debug: boo
 
 
 def _render_colored_docker_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag=_DOCKER_TAG,
@@ -666,7 +666,11 @@ def _render_colored_docker_line(console: Console, line: str) -> bool:
             CountColorRule("volumes", "red"),
             CountColorRule("count", "orange"),
         ),
-    )
+    ):
+        return True
+    if line.startswith(_DOCKER_TAG) and "\t" in line:
+        return render_tagged_detail_line(console, line, tag=_DOCKER_TAG, default_color="cyan")
+    return False
 
 
 __all__ = [

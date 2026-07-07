@@ -19,7 +19,7 @@ from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line
+from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     DEFAULT_MAX_NETWORK_HOSTS,
     as_dict,
@@ -3712,7 +3712,7 @@ def _detail_lines(record: dict[str, Any], output_format: str, *, debug: bool = F
 
 
 def _render_colored_consul_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag=_CONSUL_TAG,
@@ -3728,7 +3728,11 @@ def _render_colored_consul_line(console: Console, line: str) -> bool:
             CountColorRule("services", "orange"),
             CountColorRule("agents", "orange"),
         ),
-    )
+    ):
+        return True
+    if line.startswith(_CONSUL_TAG) and "\t" in line:
+        return render_tagged_detail_line(console, line, tag=_CONSUL_TAG, default_color="cyan")
+    return False
 
 
 # Typed runner boundary -----------------------------------------------------

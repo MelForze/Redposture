@@ -17,7 +17,7 @@ from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig
 from ...console import Console
-from ...rendering import BooleanColorRule, render_colored_marker_line
+from ...rendering import BooleanColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
@@ -3031,7 +3031,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
 
 
 def _render_colored_elastic_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag=_ELASTIC_TAG,
@@ -3041,7 +3041,11 @@ def _render_colored_elastic_line(console: Console, line: str) -> bool:
             BooleanColorRule("manage"),
             BooleanColorRule("manage_security"),
         ),
-    )
+    ):
+        return True
+    if line.startswith(_ELASTIC_TAG) and "\t" in line:
+        return render_tagged_detail_line(console, line, tag=_ELASTIC_TAG, default_color="cyan")
+    return False
 
 
 def _is_connection_timeout_fail_record(record: dict[str, Any]) -> bool:

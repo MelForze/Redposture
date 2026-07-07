@@ -12,7 +12,7 @@ from typing import Any
 from ...clients import transport
 from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line
+from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -960,7 +960,11 @@ def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> l
 
 
 def _render_colored_etcd_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(console, line, tag="ETCD", counts=(CountColorRule("keys", "red"),))
+    if render_colored_marker_line(console, line, tag="ETCD", counts=(CountColorRule("keys", "red"),)):
+        return True
+    if line.startswith("ETCD") and "\t" in line:
+        return render_tagged_detail_line(console, line, tag="ETCD", default_color="cyan")
+    return False
 
 
 def _call_audit_etcd_host_with_stage_debug(

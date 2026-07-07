@@ -3397,9 +3397,13 @@ def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch:
             _ = color
             self.lines.append(text)
 
+    # After the cross-module colorization pass, tag-prefixed detail lines
+    # (no `[*]/[+]/[-]/[!]` marker) go through `render_tagged_detail_line`
+    # instead of being emitted raw. The colorizer now returns True for these
+    # lines — mirrors the kafka/grpc/redis/etcd/etc. behavior.
     assert (
         zookeeper_stage._render_colored_zookeeper_line(_RenderConsole(), "ZOOKEEPER\t127.0.0.1\t2181\t plain line")
-        is False
+        is True
     )
 
     class _FakeMatch:

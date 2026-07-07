@@ -551,9 +551,10 @@ def test_format_topics_detail_records_text_and_json() -> None:
         "topics": ["orders", "audit"],
         "topic_count": 2,
         "query_topic": "orders",
-        "query_topic_value": "partitions=2",
+        "query_topic_value": "orders (partitions:2)",
         "dump": True,
         "max_messages": 2,
+        "max_messages_explicit": True,
         "dump_topics": ["orders", "audit"],
         "dump_results": {"orders": ["msg-1", "msg-2"]},
         "dump_errors": {"audit": "topic authorization failed"},
@@ -561,8 +562,11 @@ def test_format_topics_detail_records_text_and_json() -> None:
     lines = kafka._format_topics_detail_records(record, "txt")
     joined = "\n".join(lines)
     assert "[*] Show Topics" in joined
-    assert "[*] Topic orders" in joined
-    assert "[*] Dump Topic orders (max:2)" in joined
+    # `--topic X --dump` now folds partition-info into the Dump header
+    # instead of emitting `[*] Topic X` + `X(partitions:N)` + `[*] Dump
+    # Topic X (max:M)` — three lines collapsed to one.
+    assert "[*] Topic orders" not in joined
+    assert "[*] Dump Topic orders (partitions:2) (max:2)" in joined
     assert "msg-1" in joined
 
     json_payloads = [json.loads(item) for item in kafka._format_topics_detail_records(record, "json")]
@@ -1984,39 +1988,41 @@ def test_audit_kafka_host_switches_to_tls_on_prelude(monkeypatch: pytest.MonkeyP
     assert open_calls[1]["use_tls"] is True  # fallback: forced TLS
 
 
-def test_kafka_transport_marker_in_format_record() -> None:
-    """`_format_record` must append ` (transport:tls)` when the record's
-    `transport_mode` is `"tls"`, and must emit no marker otherwise — mirrors
-    the docker/grpc/oracle convention where plaintext is the silent default.
-    Backward compatibility: existing records without `transport_mode` still
-    render byte-identical to the pre-TLS output.
+def test_kafka_tls_marker_only_on_detect_line() -> None:
+    """`_format_detect_record` must annotate the detect line with
+    `(tls:true)` / `(tls:false)` per `transport_mode`. `_format_record`
+    (the status/credential line) must NOT duplicate the marker — the
+    transport is already established by the detect line above and adding
+    it to every credential line is noise the user asked to remove.
     """
-    base = {"host": "127.0.0.1", "port": 9093, "topic_count": 2}
+    base = {"host": "127.0.0.1", "port": 9093, "topic_count": 2, "auth_required": True}
 
-    tls_record = {**base, "status": "open_no_auth", "transport_mode": "tls"}
-    tls_line = kafka._format_record(tls_record, "txt")
-    assert " (transport:tls)" in tls_line
-    assert "[+] anonymous access (topics:2)" in tls_line
+    tls_detect = {**base, "is_kafka": True, "transport_mode": "tls"}
+    assert " (tls:true)" in kafka._format_detect_record(tls_detect, "txt")
 
-    plaintext_record = {**base, "status": "open_no_auth", "transport_mode": "plaintext"}
-    plaintext_line = kafka._format_record(plaintext_record, "txt")
-    assert "transport:" not in plaintext_line
+    plain_detect = {**base, "is_kafka": True, "transport_mode": "plaintext"}
+    assert " (tls:false)" in kafka._format_detect_record(plain_detect, "txt")
 
-    # No transport_mode key at all (legacy records) — still no marker.
-    legacy_record = {**base, "status": "open_no_auth"}
-    assert "transport:" not in kafka._format_record(legacy_record, "txt")
+    # No transport_mode → no marker (backward compat with legacy records).
+    legacy_detect = {**base, "is_kafka": True}
+    assert "(tls:" not in kafka._format_detect_record(legacy_detect, "txt")
 
-    # Marker appears on the weak_default_creds branch too.
-    weak_record = {
+    # Credential/status lines: transport marker must be ABSENT (design fix).
+    tls_open = {**base, "status": "open_no_auth", "transport_mode": "tls"}
+    assert "tls:" not in kafka._format_record(tls_open, "txt")
+    assert "transport:" not in kafka._format_record(tls_open, "txt")
+
+    tls_weak = {
         **base,
         "status": "weak_default_creds",
         "provided_username": "admin",
         "provided_password": "admin",
         "transport_mode": "tls",
     }
-    weak_line = kafka._format_record(weak_record, "txt")
+    weak_line = kafka._format_record(tls_weak, "txt")
     assert "[+] admin:admin" in weak_line
-    assert " (transport:tls)" in weak_line
+    assert "tls:" not in weak_line
+    assert "transport:" not in weak_line
 
 
 def test_kafka_malformed_frame_still_fails_when_not_tls_prelude(monkeypatch: pytest.MonkeyPatch) -> None:

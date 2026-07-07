@@ -40,7 +40,7 @@ from ...clients.kafka import (
     open_kafka_socket,
 )
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line
+from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -710,13 +710,25 @@ def _with_optional_topics(record: dict[str, Any], message: str) -> str:
     return f"{message} (topics:{topic_count})"
 
 
-def _transport_suffix(record: dict[str, Any]) -> str:
-    # Kafka SASL_SSL / TLS: annotate the audit line with `(transport:tls)` when
-    # the broker was reached over TLS. Plaintext is the silent default (same
-    # convention as docker/grpc/oracle) so backward-compat output stays
-    # byte-identical for plaintext brokers.
-    if record.get("transport_mode") == "tls":
-        return " (transport:tls)"
+def _max_messages_is_explicit(record: dict[str, Any]) -> bool:
+    # See `_call_audit_kafka_host_with_stage_debug` — the runner injects a
+    # boolean derived from whether the user actually set --max-messages or
+    # --dump N. When absent (legacy/test payloads) fall back to False so old
+    # tests stay green.
+    return bool(record.get("max_messages_explicit"))
+
+
+def _tls_suffix(record: dict[str, Any]) -> str:
+    # Kafka: annotate the *detect* line only with `(tls:true|false)`. On the
+    # credential/status line the transport is already implied by the detect
+    # line above it, so duplicating the marker just adds noise. Emit both
+    # boolean forms (not just tls:true) so the reader can see at a glance
+    # that plaintext was confirmed rather than "TLS status unknown".
+    mode = record.get("transport_mode")
+    if mode == "tls":
+        return " (tls:true)"
+    if mode == "plaintext":
+        return " (tls:false)"
     return ""
 
 
@@ -747,7 +759,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
             },
             ensure_ascii=False,
         )
-    return f"{_nxc_prefix(record)} [*] Kafka Broker (auth required:{auth_required_text}){_transport_suffix(record)}"
+    return f"{_nxc_prefix(record)} [*] Kafka Broker (auth required:{auth_required_text}){_tls_suffix(record)}"
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
@@ -757,52 +769,49 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     status = str(record.get("status") or "fail")
     prefix = _nxc_prefix(record)
     err = _clip(str(record.get("error") or "-"), 72)
-    tls_suffix = _transport_suffix(record)
 
     if status == "open_no_auth":
-        return _with_optional_topics(record, f"{prefix} [+] anonymous access") + tls_suffix
+        return _with_optional_topics(record, f"{prefix} [+] anonymous access")
 
     if status == "invalid_credentials_anonymous":
         username = str(record.get("provided_username") or "user").strip() or "user"
         provided_password = record.get("provided_password")
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
-        return f"{prefix} [-] {username}:{password_text}{tls_suffix}"
+        return f"{prefix} [-] {username}:{password_text}"
 
     if status == "valid_credentials":
         username = str(record.get("provided_username") or "user").strip() or "user"
         provided_password = record.get("provided_password")
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
-        return _with_optional_topics(record, f"{prefix} [+] {username}:{password_text}") + tls_suffix
+        return _with_optional_topics(record, f"{prefix} [+] {username}:{password_text}")
 
     if status == "weak_default_creds":
         username = str(record.get("provided_username") or "user").strip() or "user"
         provided_password = record.get("provided_password")
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
-        return _with_optional_topics(record, f"{prefix} [+] {username}:{password_text}") + tls_suffix
+        return _with_optional_topics(record, f"{prefix} [+] {username}:{password_text}")
 
     if status == "auth_required":
         attempts_suffix = _attempted_credentials_suffix(record)
         if attempts_suffix:
-            return f"{prefix} [-] authentication required {attempts_suffix}{tls_suffix}"
+            return f"{prefix} [-] authentication required {attempts_suffix}"
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "user").strip() or "user"
             provided_password = record.get("provided_password")
             password_text = "<empty>" if provided_password == "" else str(provided_password or "")
-            base = f"{prefix} [-] {username}:{password_text}"
-        else:
-            base = f"{prefix} [-] authentication required"
-        return base + tls_suffix
+            return f"{prefix} [-] {username}:{password_text}"
+        return f"{prefix} [-] authentication required"
 
     if status == "unknown_auth":
         line = f"{prefix} [!] auth status unknown"
         if err != "-":
-            return f"{line} err={err}{tls_suffix}"
-        return line + tls_suffix
+            return f"{line} err={err}"
+        return line
 
     line = f"{prefix} [!] connection failed"
     if err != "-":
-        return f"{line} err={err}{tls_suffix}"
-    return line + tls_suffix
+        return f"{line} err={err}"
+    return line
 
 
 def _format_topics_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -953,13 +962,32 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
             lines.append(f"{prefix} [*] Show Topics")
         for item in displayed_topic_names:
             lines.append(f"{prefix} {item}")
-    if query_topic:
+    # `--topic X` (without `--dump`) prints a standalone header + partition
+    # info; `--topic X --dump` folds the partition info into the Dump header
+    # to avoid the previous 3-line duplicate:
+    #     [*] Topic X
+    #     X(partitions:N)
+    #     [*] Dump Topic X (max:M)
+    if query_topic and not dump:
         lines.append(f"{prefix} [*] Topic {query_topic}")
         if isinstance(query_topic_value, str):
             lines.append(f"{prefix} {query_topic_value}")
     if dump:
         if query_topic:
-            lines.append(f"{prefix} [*] Dump Topic {query_topic} (max:{max_messages})")
+            # Extract partitions:N from query_topic_value when present so the
+            # dump header carries the same info that the standalone --topic
+            # header would have shown.
+            partitions_suffix = ""
+            if isinstance(query_topic_value, str):
+                import re as _re
+
+                match = _re.search(r"\(partitions:\d+\)", query_topic_value)
+                if match:
+                    partitions_suffix = f" {match.group(0)}"
+            dump_header = f"{prefix} [*] Dump Topic {query_topic}{partitions_suffix}"
+            if _max_messages_is_explicit(record):
+                dump_header += f" (max:{max_messages})"
+            lines.append(dump_header)
             topic_dump_messages = dump_results.get(query_topic, [])
             topic_dump_error = dump_errors.get(query_topic) or dump_error
             if topic_dump_messages:
@@ -970,7 +998,10 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
             else:
                 lines.append(f"{prefix} <no messages>")
         else:
-            lines.append(f"{prefix} [*] Dump Topics (max:{max_messages})")
+            dump_topics_header = f"{prefix} [*] Dump Topics"
+            if _max_messages_is_explicit(record):
+                dump_topics_header += f" (max:{max_messages})"
+            lines.append(dump_topics_header)
             if dump_topics:
                 for topic_name in dump_topics:
                     lines.append(f"{prefix} [*] Topic {topic_name}")
@@ -991,7 +1022,17 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
 
 
 def _render_colored_kafka_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(console, line, tag="KAFKA", counts=(CountColorRule("topics", "red"),))
+    # First try marker-line coloring for `[*]/[+]/[-]/[!]` lead lines.
+    if render_colored_marker_line(console, line, tag="KAFKA", counts=(CountColorRule("topics", "red"),)):
+        return True
+    # Fallback: detail lines like `KAFKA<tab>host<tab>port<tab>topic-name`
+    # (topic-name listings + dumped message payloads) don't carry a marker
+    # and were previously emitted as raw white text. Paint the tag/prefix
+    # via `render_tagged_detail_line` for visual consistency with the
+    # marker lines above — mirrors the gRPC module's two-tier approach.
+    if line.startswith("KAFKA") and "\t" in line:
+        return render_tagged_detail_line(console, line, tag="KAFKA", default_color="cyan")
+    return False
 
 
 def _call_audit_kafka_host_with_stage_debug(
@@ -1010,6 +1051,7 @@ def _call_audit_kafka_host_with_stage_debug(
     debug: bool,
     debug_emit: Callable[[str], None] | None,
     show_topics_limit: int | None = None,
+    max_messages_explicit: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     record = _audit_kafka_host(
@@ -1027,6 +1069,10 @@ def _call_audit_kafka_host_with_stage_debug(
     )
 
     result: dict[str, Any] = dict(record)
+    # E9: propagate whether user explicitly set --max-messages / --dump N so
+    # the renderer can decide whether to emit the "(max:N)" header. Absent =
+    # internal default (currently 10) that the operator didn't ask for.
+    result["max_messages_explicit"] = bool(max_messages_explicit)
     status = str(result.get("status") or "fail")
     is_kafka = bool(result.get("is_kafka"))
     attempts = max(1, retries + 1)

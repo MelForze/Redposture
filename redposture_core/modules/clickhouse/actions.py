@@ -15,7 +15,7 @@ from uuid import UUID
 
 from ...clients import transport
 from ...console import Console
-from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line
+from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -1684,7 +1684,7 @@ def _format_sql_detail_records(record: dict[str, Any], output_format: str) -> li
 
 
 def _render_colored_clickhouse_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag="CLICKHOUSE",
@@ -1694,7 +1694,11 @@ def _render_colored_clickhouse_line(console: Console, line: str) -> bool:
             BooleanColorRule("admin"),
         ),
         counts=(CountColorRule("DBs", "orange"),),
-    )
+    ):
+        return True
+    if line.startswith("CLICKHOUSE") and "\t" in line:
+        return render_tagged_detail_line(console, line, tag="CLICKHOUSE", default_color="cyan")
+    return False
 
 
 def _call_audit_clickhouse_host_with_stage_debug(
