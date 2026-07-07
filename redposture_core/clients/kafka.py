@@ -494,16 +494,35 @@ def _parse_list_offsets_response(payload: bytes, expected_correlation_id: int) -
         return None, f"invalid ListOffsets response: {exc}"
 
 
+KAFKA_FETCH_API_VERSION = 4  # Kafka 0.11+; required by Kafka 4.0+ which dropped v0-v3.
+
+
 def _build_fetch_request_body(
     topic: str, partition: int, offset: int, *, max_bytes: int = KAFKA_FETCH_MAX_BYTES
 ) -> bytes:
+    # Fetch v4 wire format:
+    #   replica_id (-1)             | int32
+    #   max_wait_ms                 | int32
+    #   min_bytes                   | int32
+    #   max_bytes (whole response)  | int32  <- new in v3
+    #   isolation_level             | int8   <- new in v4 (0 = READ_UNCOMMITTED)
+    #   topics [                    | int32 count
+    #     topic name                | string
+    #     partitions [              | int32 count
+    #       partition_id            | int32
+    #       fetch_offset            | int64
+    #       partition_max_bytes     | int32
+    #     ]
+    #   ]
     return (
-        struct.pack(">i", -1)
-        + struct.pack(">i", 300)
-        + struct.pack(">i", 1)
-        + struct.pack(">i", 1)
+        struct.pack(">i", -1)  # replica_id
+        + struct.pack(">i", 300)  # max_wait_ms
+        + struct.pack(">i", 1)  # min_bytes
+        + struct.pack(">i", int(max_bytes) * 2)  # max_bytes (whole response)
+        + struct.pack(">b", 0)  # isolation_level READ_UNCOMMITTED
+        + struct.pack(">i", 1)  # topics count
         + _encode_kafka_string(topic)
-        + struct.pack(">i", 1)
+        + struct.pack(">i", 1)  # partitions count
         + struct.pack(">i", int(partition))
         + struct.pack(">q", int(offset))
         + struct.pack(">i", int(max_bytes))
@@ -655,11 +674,33 @@ def _parse_fetch_response(
     expected_partition: int,
     max_messages: int,
 ) -> tuple[list[tuple[int, str]] | None, str | None]:
+    """Parse a Fetch v4 response.
+
+    Wire format:
+      throttle_time_ms        | int32   (v1+; v0 doesn't have this)
+      topics [                | int32 count
+        topic_name            | string
+        partitions [          | int32 count
+          partition_id        | int32
+          error_code          | int16
+          high_watermark      | int64
+          last_stable_offset  | int64   (v4+)
+          aborted_txns [      | int32 count (nullable, -1 = null)
+            producer_id       | int64
+            first_offset      | int64
+          ]
+          records_size        | int32
+          records             | bytes   (record-batch v2 format)
+        ]
+      ]
+    """
     try:
         reader = _KafkaReader(payload)
         correlation_id = reader.read_i32()
         if correlation_id != expected_correlation_id:
             return None, f"unexpected correlation id {correlation_id} (expected {expected_correlation_id})"
+
+        _ = reader.read_i32()  # throttle_time_ms
 
         topic_count = reader.read_i32()
         if topic_count <= 0:
@@ -671,17 +712,24 @@ def _parse_fetch_response(
             for _ in range(max(0, partition_count)):
                 partition = reader.read_i32()
                 error_code = reader.read_i16()
-                _ = reader.read_i64()  # high watermark
-                message_set_size = reader.read_i32()
-                if message_set_size < 0 or message_set_size > reader.remaining():
+                _ = reader.read_i64()  # high_watermark
+                _ = reader.read_i64()  # last_stable_offset (v4+)
+                aborted_count = reader.read_i32()
+                if aborted_count > 0:
+                    # Skip aborted transactions: each is two int64s.
+                    for _ in range(aborted_count):
+                        _ = reader.read_i64()  # producer_id
+                        _ = reader.read_i64()  # first_offset
+                records_size = reader.read_i32()
+                if records_size < 0 or records_size > reader.remaining():
                     return None, "invalid Fetch message set size"
-                message_set = reader._read(message_set_size)  # noqa: SLF001
+                records = reader._read(records_size)  # noqa: SLF001
 
                 if partition != expected_partition:
                     continue
                 if error_code != 0:
                     return None, f"Fetch failed: {_kafka_error_name(int(error_code))}"
-                return _parse_message_set_entries(message_set, max_messages), None
+                return _parse_message_set_entries(records, max_messages), None
 
         return [], None
     except (ValueError, struct.error) as exc:
@@ -741,7 +789,7 @@ def _read_partition_messages_on_leader(
     fetch_payload = _send_kafka_request(
         leader_sock,
         api_key=KAFKA_FETCH,
-        api_version=0,
+        api_version=KAFKA_FETCH_API_VERSION,
         correlation_id=correlation,
         client_id=KAFKA_CLIENT_ID,
         body=_build_fetch_request_body(

@@ -155,29 +155,65 @@ def test_varint_record_and_message_set_edges() -> None:
         kafka._parse_record_batch_entries(0, invalid_count_batch, 10)
 
 
+def _fetch_v4_partition_header(*, partition: int, error_code: int, records_size: int) -> bytes:
+    # Fetch v4 per-partition prefix (before the records bytes):
+    #   partition_id | error_code | high_watermark | last_stable_offset |
+    #   aborted_txns_count (0) | records_size
+    return (
+        struct.pack(">i", int(partition))
+        + struct.pack(">h", int(error_code))
+        + struct.pack(">q", 10)  # high_watermark
+        + struct.pack(">q", 10)  # last_stable_offset (v4+)
+        + struct.pack(">i", 0)  # aborted_transactions count
+        + struct.pack(">i", int(records_size))
+    )
+
+
+def _fetch_v4_response(*, correlation_id: int, topic: str, partition: int, error_code: int, records: bytes) -> bytes:
+    return (
+        struct.pack(">i", correlation_id)
+        + struct.pack(">i", 0)  # throttle_time_ms
+        + struct.pack(">i", 1)  # topic count
+        + _kstr(topic)
+        + struct.pack(">i", 1)  # partition count
+        + _fetch_v4_partition_header(partition=partition, error_code=error_code, records_size=len(records))
+        + records
+    )
+
+
 def test_fetch_response_success_and_error_edges() -> None:
     message_set = _message_set(3, "payload")
-    fetch_payload = (
-        struct.pack(">ii", 4, 1) + _kstr("orders") + struct.pack(">iihqi", 1, 0, 0, 10, len(message_set)) + message_set
-    )
+    fetch_payload = _fetch_v4_response(correlation_id=4, topic="orders", partition=0, error_code=0, records=message_set)
     items, error = kafka._parse_fetch_response(fetch_payload, 4, expected_partition=0, max_messages=10)
     assert error is None
     assert items == [(3, "payload")]
 
-    items, error = kafka._parse_fetch_response(struct.pack(">ii", 4, 0), 4, expected_partition=0, max_messages=10)
+    # Empty response (throttle_time + topic_count=0).
+    items, error = kafka._parse_fetch_response(struct.pack(">iii", 4, 0, 0), 4, expected_partition=0, max_messages=10)
     assert items == []
     assert error is None
 
-    bad_size = struct.pack(">ii", 4, 1) + _kstr("orders") + struct.pack(">iihqi", 1, 0, 0, 10, 99) + b"x"
+    # Broker claims records_size larger than remaining bytes.
+    bad_size = (
+        struct.pack(">i", 4)  # correlation_id
+        + struct.pack(">i", 0)  # throttle_time
+        + struct.pack(">i", 1)  # topic count
+        + _kstr("orders")
+        + struct.pack(">i", 1)  # partition count
+        + _fetch_v4_partition_header(partition=0, error_code=0, records_size=99)
+        + b"x"
+    )
     items, error = kafka._parse_fetch_response(bad_size, 4, expected_partition=0, max_messages=10)
     assert items is None
     assert error == "invalid Fetch message set size"
 
-    fetch_error = struct.pack(">ii", 4, 1) + _kstr("orders") + struct.pack(">iihqi", 1, 0, 7, 10, 0)
+    # Broker-side per-partition error (e.g. REQUEST_TIMED_OUT=7).
+    fetch_error = _fetch_v4_response(correlation_id=4, topic="orders", partition=0, error_code=7, records=b"")
     items, error = kafka._parse_fetch_response(fetch_error, 4, expected_partition=0, max_messages=10)
     assert items is None
     assert error == "Fetch failed: REQUEST_TIMED_OUT"
 
+    # Correlation-id mismatch.
     items, error = kafka._parse_fetch_response(fetch_payload, 99, expected_partition=0, max_messages=10)
     assert items is None
     assert "unexpected correlation id" in str(error)
