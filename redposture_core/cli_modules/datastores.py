@@ -231,8 +231,8 @@ def configure_kafka_parser(
         metavar="port",
         help=(
             "Kafka port spec: single port, list/range, or file "
-            "(examples: 9092, 9092,29092, ./ports.txt). "
-            "If omitted, scans 9092, 19092."
+            "(examples: 9092, '9092,9093,29092', 9092-9095, ./ports.txt). "
+            "If omitted, scans 9092 (SASL_PLAINTEXT), 9093 (SASL_SSL), 19092."
         ),
     )
     add_multi_ports_flag(common)
