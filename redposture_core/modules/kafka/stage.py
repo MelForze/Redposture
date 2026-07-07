@@ -17,7 +17,16 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 9092
-_DEFAULT_PORTS: tuple[int, ...] | None = (9092, 19092)
+# 9093 = the well-known Kafka SASL_SSL / SSL listener. Many production
+# clusters expose plaintext SASL_PLAINTEXT on 9092 and TLS-wrapped
+# SASL_SSL on 9093 side-by-side, and users often only have 9093 exposed
+# externally. Adding it to the default scan set means `redposture kafka -t
+# <host>` covers both listeners without extra flags.
+# (Bytes 0x1503* / 0x1603* on a TLS listener would surface as
+#  `invalid Kafka frame size ...` — separate feature-gap for SASL_SSL is
+#  tracked; this default at least surfaces the second listener during
+#  discovery scans.)
+_DEFAULT_PORTS: tuple[int, ...] | None = (9092, 9093, 19092)
 
 
 def build_kafka_plan(args: Any) -> AuditCommandPlan:

@@ -62,7 +62,10 @@ class ParserHelperSet:
     add_listener_flags: Callable[..., None]
     append_selected_defaults: Callable[..., None]
     mirror_group_actions: Callable[..., None]
-    port_type: Callable[[str], int]
+    # `--port` now accepts either a single int (returned as int for backward
+    # compatibility) or a list/range/file spec (returned as str and merged
+    # with `args.ports` downstream). See `_port_spec` in cli_args.py.
+    port_type: Callable[[str], int | str]
     positive_int: Callable[[str], int]
 
 

@@ -194,13 +194,15 @@ def test_postgres_help_groups_and_orders_flags() -> None:
 
     targets_idx = _help_option_line_index(help_text, "--targets")
     port_idx = _help_option_line_index(help_text, "--port")
-    ports_idx = _help_option_line_index(help_text, "--ports")
     output_idx = _help_option_line_index(help_text, "--output")
     format_idx = _help_option_line_index(help_text, "--format")
     log_idx = _help_option_line_index(help_text, "--log")
     debug_idx = _help_option_line_index(help_text, "--debug")
-    assert -1 not in {targets_idx, port_idx, ports_idx, output_idx, format_idx, log_idx, debug_idx}
-    assert targets_idx < port_idx < ports_idx < output_idx < format_idx < log_idx < debug_idx
+    assert -1 not in {targets_idx, port_idx, output_idx, format_idx, log_idx, debug_idx}
+    assert targets_idx < port_idx < output_idx < format_idx < log_idx < debug_idx
+    # --ports is now a deprecated hidden alias (merged into --port). It must
+    # NOT surface in --help output any more.
+    assert _help_option_line_index(help_text, "--ports") == -1
 
     username_idx = _help_option_line_index(help_text, "--username")
     password_idx = _help_option_line_index(help_text, "--password")
