@@ -836,17 +836,27 @@ def test_offsets_fetch_and_message_parsers_cover_success_and_errors() -> None:
     assert offset == 42
     assert error is None
 
-    fetch_payload = (
-        struct.pack(">i", correlation_id)
-        + struct.pack(">i", 1)
-        + _kstr("orders")
-        + struct.pack(">i", 1)
-        + struct.pack(">i", 0)
-        + struct.pack(">h", 0)
-        + struct.pack(">q", 99)
-        + struct.pack(">i", len(_fetch_message_set(7, "hello")))
-        + _fetch_message_set(7, "hello")
-    )
+    # Fetch v4 wire format:
+    #   correlation_id | throttle_time_ms | topic_count | topic_name | partition_count |
+    #   partition_id | error_code | high_watermark | last_stable_offset (v4+) |
+    #   aborted_txns_count (0) | records_size | records
+    def _v4_fetch(topic: str, partition: int, error_code: int, records: bytes) -> bytes:
+        return (
+            struct.pack(">i", correlation_id)
+            + struct.pack(">i", 0)  # throttle_time_ms
+            + struct.pack(">i", 1)  # topic count
+            + _kstr(topic)
+            + struct.pack(">i", 1)  # partition count
+            + struct.pack(">i", partition)
+            + struct.pack(">h", error_code)
+            + struct.pack(">q", 99)  # high_watermark
+            + struct.pack(">q", 99)  # last_stable_offset
+            + struct.pack(">i", 0)  # aborted_transactions count
+            + struct.pack(">i", len(records))
+            + records
+        )
+
+    fetch_payload = _v4_fetch("orders", 0, 0, _fetch_message_set(7, "hello"))
     items, fetch_error = kafka._parse_fetch_response(
         fetch_payload,
         correlation_id,
@@ -856,17 +866,7 @@ def test_offsets_fetch_and_message_parsers_cover_success_and_errors() -> None:
     assert fetch_error is None
     assert items == [(7, "hello")]
 
-    record_batch_payload = (
-        struct.pack(">i", correlation_id)
-        + struct.pack(">i", 1)
-        + _kstr("audit.logs")
-        + struct.pack(">i", 1)
-        + struct.pack(">i", 0)
-        + struct.pack(">h", 0)
-        + struct.pack(">q", 99)
-        + struct.pack(">i", len(_fetch_record_batch(11, ["alpha", "beta"])))
-        + _fetch_record_batch(11, ["alpha", "beta"])
-    )
+    record_batch_payload = _v4_fetch("audit.logs", 0, 0, _fetch_record_batch(11, ["alpha", "beta"]))
     record_batch_items, record_batch_error = kafka._parse_fetch_response(
         record_batch_payload,
         correlation_id,
@@ -876,16 +876,7 @@ def test_offsets_fetch_and_message_parsers_cover_success_and_errors() -> None:
     assert record_batch_error is None
     assert record_batch_items == [(11, "alpha"), (12, "beta")]
 
-    bad_fetch_payload = (
-        struct.pack(">i", correlation_id)
-        + struct.pack(">i", 1)
-        + _kstr("orders")
-        + struct.pack(">i", 1)
-        + struct.pack(">i", 0)
-        + struct.pack(">h", 29)
-        + struct.pack(">q", 99)
-        + struct.pack(">i", 0)
-    )
+    bad_fetch_payload = _v4_fetch("orders", 0, 29, b"")
     items, fetch_error = kafka._parse_fetch_response(
         bad_fetch_payload,
         correlation_id,
