@@ -10,7 +10,7 @@ from typing import Any
 
 from ...clients import transport
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line
+from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -754,7 +754,11 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
 
 
 def _render_colored_redis_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(console, line, tag="REDIS", counts=(CountColorRule("keys", "red"),))
+    if render_colored_marker_line(console, line, tag="REDIS", counts=(CountColorRule("keys", "red"),)):
+        return True
+    if line.startswith("REDIS") and "\t" in line:
+        return render_tagged_detail_line(console, line, tag="REDIS", default_color="cyan")
+    return False
 
 
 _REDIS_DEEP_STATUSES = {"open_no_auth", "weak_default_creds", "valid_credentials", "invalid_credentials_anonymous"}

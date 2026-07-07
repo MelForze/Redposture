@@ -21,7 +21,7 @@ from ...clients.mongodb import (
     open_mongodb_client,
 )
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line
+from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -1116,12 +1116,16 @@ def _format_nosql_command_detail_records(record: dict[str, Any], output_format: 
 
 
 def _render_colored_mongodb_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag=_MONGODB_TAG,
         counts=(CountColorRule("DBs", "red"), CountColorRule("collections", "red"), CountColorRule("documents", "red")),
-    )
+    ):
+        return True
+    if line.startswith(_MONGODB_TAG) and "\t" in line:
+        return render_tagged_detail_line(console, line, tag=_MONGODB_TAG, default_color="cyan")
+    return False
 
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:

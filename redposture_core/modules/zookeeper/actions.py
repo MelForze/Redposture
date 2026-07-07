@@ -32,7 +32,7 @@ from ...clients.zookeeper import (
     _znode_detail_entry,
 )
 from ...console import Console
-from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line
+from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
@@ -1804,13 +1804,17 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
 
 
 def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag="ZOOKEEPER",
         booleans=(BooleanColorRule("create"), BooleanColorRule("delete")),
         counts=(CountColorRule("znodes", "red"),),
-    )
+    ):
+        return True
+    if line.startswith("ZOOKEEPER") and "\t" in line:
+        return render_tagged_detail_line(console, line, tag="ZOOKEEPER", default_color="cyan")
+    return False
 
 
 def _update_debug_stats(debug_stats: dict[str, Any], record: dict[str, Any]) -> None:

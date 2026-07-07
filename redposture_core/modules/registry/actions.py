@@ -16,7 +16,7 @@ from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line
+from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
@@ -2746,12 +2746,16 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
 
 
 def _render_colored_registry_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag="REGISTRY",
         counts=(CountColorRule("images", "red"),),
-    )
+    ):
+        return True
+    if line.startswith("REGISTRY") and "\t" in line:
+        return render_tagged_detail_line(console, line, tag="REGISTRY", default_color="cyan")
+    return False
 
 
 def _render_plain_registry_line(console: Console, line: str, *, suspicious: bool = False) -> bool:

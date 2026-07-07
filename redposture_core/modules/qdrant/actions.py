@@ -16,7 +16,7 @@ from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
-from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line
+from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...servers import server_listen_port
 from ...stage_runtime import (
     StageTelemetryBuilder,
@@ -1415,7 +1415,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
 
 
 def _render_colored_qdrant_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag=_QDRANT_TAG,
@@ -1424,7 +1424,11 @@ def _render_colored_qdrant_line(console: Console, line: str) -> bool:
             RegexColorRule(r"RCE!", "orange"),
         ),
         counts=(CountColorRule("collections", "red"),),
-    )
+    ):
+        return True
+    if line.startswith(_QDRANT_TAG) and "\t" in line:
+        return render_tagged_detail_line(console, line, tag=_QDRANT_TAG, default_color="cyan")
+    return False
 
 
 def _call_audit_qdrant_host_with_stage_debug(

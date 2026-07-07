@@ -215,6 +215,12 @@ def render_tagged_detail_line(
 
     if not line.startswith(tag) or "\t" not in line:
         return False
+    # Test doubles for Console may implement only `plain()` without the private
+    # `_paint()` used for ANSI coloring. Fall through to a plain emit so the
+    # colorizer stays no-op-safe in unit tests that stub out the console.
+    if not hasattr(console, "_paint"):
+        console.plain(line)
+        return True
     left, right = line.rsplit("\t", 1)
     rest = left[len(tag) :] if left.startswith(tag) else left
     right_colored = colorize_spans(console, right, spans, default_color=default_color)

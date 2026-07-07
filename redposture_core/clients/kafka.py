@@ -142,9 +142,22 @@ def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
 
 
 def _kafka_error_name(code: int) -> str:
+    # Kafka wire-protocol error codes from `Errors.java`. Extended progressively:
+    # the audit path historically only mapped the auth/version subset because
+    # every other outcome funnels into a single "detected" success. NOT_LEADER
+    # (code 6) shows up when we probe a partition whose leader is on another
+    # broker (multi-broker cluster) and we haven't yet re-connected to it —
+    # the correct fix is a partition-aware Metadata refresh, which is a
+    # separate feature; here we just make the log line self-explanatory.
     names = {
         0: "NO_ERROR",
+        1: "OFFSET_OUT_OF_RANGE",
+        3: "UNKNOWN_TOPIC_OR_PARTITION",
+        5: "LEADER_NOT_AVAILABLE",
+        6: "NOT_LEADER_OR_FOLLOWER",
         7: "REQUEST_TIMED_OUT",
+        9: "REPLICA_NOT_AVAILABLE",
+        13: "NETWORK_EXCEPTION",
         29: "TOPIC_AUTHORIZATION_FAILED",
         31: "CLUSTER_AUTHORIZATION_FAILED",
         33: "UNSUPPORTED_SASL_MECHANISM",

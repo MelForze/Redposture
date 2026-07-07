@@ -13,7 +13,7 @@ from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line
+from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
     StageTelemetryBuilder,
     format_retry_decision,
@@ -1070,12 +1070,16 @@ def _format_check_detail_records(record: dict[str, Any], output_format: str) -> 
 
 
 def _render_colored_grafana_line(console: Console, line: str) -> bool:
-    return render_colored_marker_line(
+    if render_colored_marker_line(
         console,
         line,
         tag="GRAFANA",
         counts=(CountColorRule("datasources", "red"),),
-    )
+    ):
+        return True
+    if line.startswith("GRAFANA") and "\t" in line:
+        return render_tagged_detail_line(console, line, tag="GRAFANA", default_color="cyan")
+    return False
 
 
 def _call_audit_grafana_host_with_stage_debug(
