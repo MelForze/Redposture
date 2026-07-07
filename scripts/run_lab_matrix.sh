@@ -313,6 +313,8 @@ run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071
 run_case kafka kafka_open 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
 run_case kafka kafka_auth 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
 run_case kafka kafka_multi_ports 0 kafka -t 127.0.0.1 --ports "9092,39092,39093,39094,39095" --show-topics --dump --max-messages 10
+run_case kafka kafka_tls_defcreds 0 kafka -t 127.0.0.1 --port 29093 --defcreds --show-topics --dump --max-messages 5
+run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 -u admin -p admin --show-topics --dump --max-messages 5
 
 run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --show-znodes --dump
 run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes --dump

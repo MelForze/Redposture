@@ -646,7 +646,7 @@ def test_audit_kafka_host_uses_valid_credentials_when_auth_is_required(monkeypat
     monkeypatch.setattr(
         kafka,
         "_authenticate_and_fetch_metadata",
-        lambda *_args, **_kwargs: (True, {"topic_map": {"private": 3}}, None),
+        lambda *_args, **_kwargs: (True, {"topic_map": {"private": 3}}, None, "plaintext"),
     )
 
     record = kafka._audit_kafka_host(
@@ -694,7 +694,7 @@ def test_audit_kafka_host_default_pair_yields_weak_default_creds_status(
     monkeypatch.setattr(
         kafka,
         "_authenticate_and_fetch_metadata",
-        lambda *_args, **_kwargs: (True, {"topic_map": {}}, None),
+        lambda *_args, **_kwargs: (True, {"topic_map": {}}, None, "plaintext"),
     )
 
     record = kafka._audit_kafka_host(
@@ -744,7 +744,7 @@ def test_audit_kafka_host_non_default_pair_stays_valid_credentials(
     monkeypatch.setattr(
         kafka,
         "_authenticate_and_fetch_metadata",
-        lambda *_args, **_kwargs: (True, {"topic_map": {}}, None),
+        lambda *_args, **_kwargs: (True, {"topic_map": {}}, None, "plaintext"),
     )
 
     record = kafka._audit_kafka_host(
@@ -952,15 +952,20 @@ def test_sasl_helpers_and_dump_targets(monkeypatch: pytest.MonkeyPatch, tmp_path
         lambda *_args, **_kwargs: ({"topic_map": {"orders": 1}, "auth_required": False}, None),
     )
 
-    ok, metadata, error = kafka._authenticate_and_fetch_metadata("127.0.0.1", 9092, 1.0, "alice", "secret")
+    ok, metadata, error, transport_mode = kafka._authenticate_and_fetch_metadata(
+        "127.0.0.1", 9092, 1.0, "alice", "secret"
+    )
     assert ok is True
     assert error is None
     assert metadata == {"topic_map": {"orders": 1}, "auth_required": False}
+    assert transport_mode == "plaintext"
 
     monkeypatch.setattr(
         kafka,
         "_read_topic_messages",
-        lambda **kwargs: (["p0@7 hello"], None) if kwargs["topic"] == "orders" else (None, "denied"),
+        lambda **kwargs: (
+            (["p0@7 hello"], None, "plaintext") if kwargs["topic"] == "orders" else (None, "denied", "plaintext")
+        ),
     )
     dump_results, dump_errors = kafka._read_dump_topics(
         host="127.0.0.1",
@@ -1482,17 +1487,21 @@ def test_read_topic_messages_covers_non_auth_and_loop_branches(monkeypatch: pyte
     monkeypatch.setattr(
         "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
-    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 0) == ([], None)
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 0) == ([], None, "plaintext")
 
     monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (False, None, "service is not kafka"))
-    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (None, "service is not kafka")
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (
+        None,
+        "service is not kafka",
+        "plaintext",
+    )
 
     monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (True, None, None))
     monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: (None, "metadata failed"))
-    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (None, "metadata failed")
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (None, "metadata failed", "plaintext")
 
     monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: ({"topic_map": {}}, None))
-    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == ([], None)
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == ([], None, "plaintext")
 
     monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: ({"topic_map": {"orders": 2}}, None))
     monkeypatch.setattr(kafka, "_send_kafka_request", lambda *_args, **_kwargs: b"x")
@@ -1500,13 +1509,13 @@ def test_read_topic_messages_covers_non_auth_and_loop_branches(monkeypatch: pyte
     fetches = iter([([(10, "msg")], None)])
     monkeypatch.setattr(kafka, "_parse_list_offsets_response", lambda *_args, **_kwargs: next(offsets))
     monkeypatch.setattr(kafka, "_parse_fetch_response", lambda *_args, **_kwargs: next(fetches))
-    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (["p0@10 msg"], None)
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (["p0@10 msg"], None, "plaintext")
 
     offsets = iter([(10, None)])
     fetches = iter([(None, "fetch failed")])
     monkeypatch.setattr(kafka, "_parse_list_offsets_response", lambda *_args, **_kwargs: next(offsets))
     monkeypatch.setattr(kafka, "_parse_fetch_response", lambda *_args, **_kwargs: next(fetches))
-    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (None, "fetch failed")
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (None, "fetch failed", "plaintext")
 
 
 def test_read_topic_messages_with_credentials_covers_auth_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1522,7 +1531,7 @@ def test_read_topic_messages_with_credentials_covers_auth_failures(monkeypatch: 
         1,
         username="alice",
         password="secret",
-    ) == (None, "hs fail")
+    ) == (None, "hs fail", "plaintext")
 
     monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (True, 2, None))
     monkeypatch.setattr(kafka, "_sasl_authenticate_plain", lambda *_args, **_kwargs: (False, 3, "auth fail"))
@@ -1534,7 +1543,7 @@ def test_read_topic_messages_with_credentials_covers_auth_failures(monkeypatch: 
         1,
         username="alice",
         password="secret",
-    ) == (None, "auth fail")
+    ) == (None, "auth fail", "plaintext")
 
 
 def test_audit_kafka_via_sasl_fallback_branch_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1699,7 +1708,7 @@ def test_kafka_format_detail_records_additional_empty_and_json_branches() -> Non
 
 
 def test_kafka_sasl_fallback_metadata_and_exception_branches(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(kafka, "open_kafka_socket", lambda *_args, **_kwargs: _KafkaContextSocket())
+    monkeypatch.setattr(kafka, "open_kafka_socket", lambda *_args, **_kwargs: (_KafkaContextSocket(), "plaintext"))
 
     monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (True, 2, "listener requires sasl"))
     no_creds = kafka._audit_kafka_via_sasl_fallback(
@@ -1777,7 +1786,7 @@ def test_kafka_sasl_fallback_metadata_and_exception_branches(monkeypatch: pytest
 
 
 def test_kafka_audit_host_metadata_auth_and_fallback_error_branches(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(kafka, "open_kafka_socket", lambda *_args, **_kwargs: _KafkaContextSocket())
+    monkeypatch.setattr(kafka, "open_kafka_socket", lambda *_args, **_kwargs: (_KafkaContextSocket(), "plaintext"))
     monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (False, 35, "plain EOF"))
     monkeypatch.setattr(kafka, "_is_sasl_probe_candidate", lambda _error: True)
     fallback_record = {
@@ -1868,7 +1877,11 @@ def test_kafka_audit_host_metadata_auth_and_fallback_error_branches(monkeypatch:
         "_fetch_metadata",
         lambda *_args, **_kwargs: ({"auth_required": False, "topic_map": {"orders": 1}}, None),
     )
-    monkeypatch.setattr(kafka, "_authenticate_and_fetch_metadata", lambda *_args, **_kwargs: (False, None, "bad sasl"))
+    monkeypatch.setattr(
+        kafka,
+        "_authenticate_and_fetch_metadata",
+        lambda *_args, **_kwargs: (False, None, "bad sasl", "plaintext"),
+    )
     invalid_but_anonymous = kafka._audit_kafka_host(
         "127.0.0.1",
         9092,
@@ -1908,3 +1921,171 @@ def test_kafka_audit_host_metadata_auth_and_fallback_error_branches(monkeypatch:
         max_messages=1,
     )
     assert exception_fallback["status"] == "valid_credentials"
+
+
+# ---------------------------------------------------------------------------
+# TLS auto-detect regression tests (SASL_SSL on port 9093)
+# ---------------------------------------------------------------------------
+
+
+def test_audit_kafka_host_switches_to_tls_on_prelude(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the plaintext ApiVersions probe returns a TLS record (0x15/0x03/...),
+    `_audit_kafka_host` must re-open with TLS on the second transport
+    attempt — not surface `ValueError('invalid Kafka frame size ...')` and
+    not abort the host. Also asserts the resulting record carries
+    `transport_mode="tls"` so downstream renderers can annotate the line.
+    """
+    from redposture_core.clients import kafka as kafka_client
+
+    open_calls: list[dict] = []
+    probe_calls: list[bool] = []
+
+    def _fake_open(host, port, timeout, *, use_tls=None):
+        open_calls.append({"host": host, "port": port, "use_tls": use_tls})
+        if len(open_calls) == 1:
+            # First attempt — pretend we were opened plaintext but the first
+            # probe reveals a TLS listener. The socket is a stub because we
+            # short-circuit before any real send/recv (see _fake_probe).
+            return _KafkaContextSocket(), "plaintext"
+        # Second attempt — TLS wrap succeeded.
+        return _KafkaContextSocket(), "tls"
+
+    def _fake_probe(_sock, _correlation):
+        # First call raises _TlsProbeError to drive the fallback; second call
+        # returns "yes, this is Kafka" so the module can classify normally.
+        probe_calls.append(True)
+        if len(probe_calls) == 1:
+            raise kafka_client._TlsProbeError("plaintext read returned TLS record prelude")
+        return True, None, None
+
+    monkeypatch.setattr(kafka, "open_kafka_socket", _fake_open)
+    monkeypatch.setattr(kafka, "_probe_apiversions", _fake_probe)
+    monkeypatch.setattr(
+        kafka, "_fetch_metadata", lambda *_a, **_k: ({"topic_map": {"tls.orders": 2}, "auth_required": False}, None)
+    )
+
+    record = kafka._audit_kafka_host(
+        "127.0.0.1",
+        29093,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        show_topics=False,
+        query_topic=None,
+        dump=False,
+        max_messages=0,
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert record["transport_mode"] == "tls"
+    assert len(open_calls) == 2
+    assert open_calls[0]["use_tls"] is None  # first attempt: auto (plaintext for non-9093 host)
+    assert open_calls[1]["use_tls"] is True  # fallback: forced TLS
+
+
+def test_kafka_transport_marker_in_format_record() -> None:
+    """`_format_record` must append ` (transport:tls)` when the record's
+    `transport_mode` is `"tls"`, and must emit no marker otherwise — mirrors
+    the docker/grpc/oracle convention where plaintext is the silent default.
+    Backward compatibility: existing records without `transport_mode` still
+    render byte-identical to the pre-TLS output.
+    """
+    base = {"host": "127.0.0.1", "port": 9093, "topic_count": 2}
+
+    tls_record = {**base, "status": "open_no_auth", "transport_mode": "tls"}
+    tls_line = kafka._format_record(tls_record, "txt")
+    assert " (transport:tls)" in tls_line
+    assert "[+] anonymous access (topics:2)" in tls_line
+
+    plaintext_record = {**base, "status": "open_no_auth", "transport_mode": "plaintext"}
+    plaintext_line = kafka._format_record(plaintext_record, "txt")
+    assert "transport:" not in plaintext_line
+
+    # No transport_mode key at all (legacy records) — still no marker.
+    legacy_record = {**base, "status": "open_no_auth"}
+    assert "transport:" not in kafka._format_record(legacy_record, "txt")
+
+    # Marker appears on the weak_default_creds branch too.
+    weak_record = {
+        **base,
+        "status": "weak_default_creds",
+        "provided_username": "admin",
+        "provided_password": "admin",
+        "transport_mode": "tls",
+    }
+    weak_line = kafka._format_record(weak_record, "txt")
+    assert "[+] admin:admin" in weak_line
+    assert " (transport:tls)" in weak_line
+
+
+def test_kafka_malformed_frame_still_fails_when_not_tls_prelude(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Sibling of the existing `test_kafka_malformed_frame_failure_does_not_
+    abort_next_target` regression: when the 4-byte header is NOT a TLS
+    record prelude (0x14/0x15/0x16/0x17 + 0x03), `_recv_kafka_frame` must
+    still raise `ValueError('invalid Kafka frame size ...')` — we haven't
+    accidentally silenced genuine framing errors along with the TLS false
+    positive.
+    """
+    from redposture_core.clients import kafka as kafka_client
+
+    class _BogusHeaderSocket:
+        def __init__(self) -> None:
+            # 0x40000000 = 1_073_741_824 — well above KAFKA_MAX_FRAME.
+            self._payload = b"\x40\x00\x00\x00"
+
+        def recv(self, size: int) -> bytes:
+            chunk = self._payload[:size]
+            self._payload = self._payload[size:]
+            return chunk
+
+    with pytest.raises(ValueError, match="invalid Kafka frame size"):
+        kafka_client._recv_kafka_frame(_BogusHeaderSocket())
+
+    # And when a TLS record prelude comes in, it does NOT surface as a ValueError.
+    class _TlsAlertSocket:
+        def __init__(self) -> None:
+            self._payload = b"\x15\x03\x03\x00"
+
+        def recv(self, size: int) -> bytes:
+            chunk = self._payload[:size]
+            self._payload = self._payload[size:]
+            return chunk
+
+    with pytest.raises(kafka_client._TlsProbeError):
+        kafka_client._recv_kafka_frame(_TlsAlertSocket())
+
+
+def test_open_kafka_socket_9093_is_tls_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end check via the module namespace (not the client module):
+    calling `kafka.open_kafka_socket(host, 9093, timeout)` from `actions.py`
+    with no explicit `use_tls` must open a TLS-wrapped socket, because 9093
+    is the well-known SASL_SSL listener.
+    """
+    from redposture_core.clients import kafka as kafka_client
+
+    monkeypatch.setattr(
+        kafka_client.socket,
+        "create_connection",
+        lambda addr, timeout: _DummySocket(),
+    )
+    wrap_calls: list[str] = []
+
+    class _FakeCtx:
+        check_hostname = True
+        verify_mode = 0
+
+        def wrap_socket(self, sock, server_hostname):
+            wrap_calls.append(server_hostname)
+            return _DummySocket()
+
+    monkeypatch.setattr(kafka_client.ssl, "create_default_context", lambda: _FakeCtx())
+
+    sock, transport_mode = kafka.open_kafka_socket("kafka.internal", 9093, 1.0)
+    assert transport_mode == "tls"
+    assert wrap_calls == ["kafka.internal"]
+
+    wrap_calls.clear()
+    sock, transport_mode = kafka.open_kafka_socket("kafka.internal", 9092, 1.0)
+    assert transport_mode == "plaintext"
+    assert wrap_calls == []
