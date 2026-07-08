@@ -155,41 +155,64 @@ def test_varint_record_and_message_set_edges() -> None:
         kafka._parse_record_batch_entries(0, invalid_count_batch, 10)
 
 
-def _fetch_v4_partition_header(*, partition: int, error_code: int, records_size: int) -> bytes:
-    # Fetch v4 per-partition prefix (before the records bytes):
+def _fetch_v10_partition_header(*, partition: int, error_code: int, records_size: int) -> bytes:
+    # Fetch v10 per-partition prefix (before the records bytes):
     #   partition_id | error_code | high_watermark | last_stable_offset |
-    #   aborted_txns_count (0) | records_size
+    #   log_start_offset | aborted_txns_count (0) | records_size
     return (
         struct.pack(">i", int(partition))
         + struct.pack(">h", int(error_code))
         + struct.pack(">q", 10)  # high_watermark
         + struct.pack(">q", 10)  # last_stable_offset (v4+)
-        + struct.pack(">i", 0)  # aborted_transactions count
+        + struct.pack(">q", 0)  # log_start_offset (v5+)
+        + struct.pack(">i", 0)  # aborted_transactions count (v4+)
         + struct.pack(">i", int(records_size))
     )
 
 
-def _fetch_v4_response(*, correlation_id: int, topic: str, partition: int, error_code: int, records: bytes) -> bytes:
+def _fetch_v10_response(
+    *,
+    correlation_id: int,
+    topic: str,
+    partition: int,
+    error_code: int,
+    records: bytes,
+    top_error_code: int = 0,
+) -> bytes:
+    # Fetch v10 response envelope:
+    #   correlation_id | throttle_time_ms | top_error_code (v7+) |
+    #   session_id (v7+) | topics [...]
     return (
         struct.pack(">i", correlation_id)
         + struct.pack(">i", 0)  # throttle_time_ms
+        + struct.pack(">h", int(top_error_code))  # top-level error_code (v7+)
+        + struct.pack(">i", 0)  # session_id (v7+)
         + struct.pack(">i", 1)  # topic count
         + _kstr(topic)
         + struct.pack(">i", 1)  # partition count
-        + _fetch_v4_partition_header(partition=partition, error_code=error_code, records_size=len(records))
+        + _fetch_v10_partition_header(partition=partition, error_code=error_code, records_size=len(records))
         + records
     )
 
 
 def test_fetch_response_success_and_error_edges() -> None:
     message_set = _message_set(3, "payload")
-    fetch_payload = _fetch_v4_response(correlation_id=4, topic="orders", partition=0, error_code=0, records=message_set)
+    fetch_payload = _fetch_v10_response(
+        correlation_id=4, topic="orders", partition=0, error_code=0, records=message_set
+    )
     items, error = kafka._parse_fetch_response(fetch_payload, 4, expected_partition=0, max_messages=10)
     assert error is None
     assert items == [(3, "payload")]
 
-    # Empty response (throttle_time + topic_count=0).
-    items, error = kafka._parse_fetch_response(struct.pack(">iii", 4, 0, 0), 4, expected_partition=0, max_messages=10)
+    # Empty response envelope (correlation + throttle + top_error=0 + session_id=0 + topic_count=0).
+    empty_response = (
+        struct.pack(">i", 4)  # correlation_id
+        + struct.pack(">i", 0)  # throttle_time
+        + struct.pack(">h", 0)  # top_error_code
+        + struct.pack(">i", 0)  # session_id
+        + struct.pack(">i", 0)  # topic count
+    )
+    items, error = kafka._parse_fetch_response(empty_response, 4, expected_partition=0, max_messages=10)
     assert items == []
     assert error is None
 
@@ -197,10 +220,12 @@ def test_fetch_response_success_and_error_edges() -> None:
     bad_size = (
         struct.pack(">i", 4)  # correlation_id
         + struct.pack(">i", 0)  # throttle_time
+        + struct.pack(">h", 0)  # top_error_code
+        + struct.pack(">i", 0)  # session_id
         + struct.pack(">i", 1)  # topic count
         + _kstr("orders")
         + struct.pack(">i", 1)  # partition count
-        + _fetch_v4_partition_header(partition=0, error_code=0, records_size=99)
+        + _fetch_v10_partition_header(partition=0, error_code=0, records_size=99)
         + b"x"
     )
     items, error = kafka._parse_fetch_response(bad_size, 4, expected_partition=0, max_messages=10)
@@ -211,12 +236,17 @@ def test_fetch_response_success_and_error_edges() -> None:
     assert "invalid Fetch message set size" in error
     assert "got 99" in error
     assert "partition=0" in error
+    assert "high_watermark=10" in error
+    assert "log_start_offset=0" in error
 
     # Broker-side per-partition error (e.g. REQUEST_TIMED_OUT=7).
-    fetch_error = _fetch_v4_response(correlation_id=4, topic="orders", partition=0, error_code=7, records=b"")
+    fetch_error = _fetch_v10_response(correlation_id=4, topic="orders", partition=0, error_code=7, records=b"")
     items, error = kafka._parse_fetch_response(fetch_error, 4, expected_partition=0, max_messages=10)
     assert items is None
-    assert error == "Fetch failed: REQUEST_TIMED_OUT"
+    assert error is not None
+    assert "Fetch failed: REQUEST_TIMED_OUT" in error
+    assert "partition=0" in error
+    assert "high_watermark=10" in error
 
     # Correlation-id mismatch.
     items, error = kafka._parse_fetch_response(fetch_payload, 99, expected_partition=0, max_messages=10)
@@ -235,15 +265,95 @@ def test_fetch_response_treats_records_size_minus_one_as_empty() -> None:
     null_records_payload = (
         struct.pack(">i", 4)  # correlation_id
         + struct.pack(">i", 0)  # throttle_time_ms
+        + struct.pack(">h", 0)  # top_error_code (v7+)
+        + struct.pack(">i", 0)  # session_id (v7+)
         + struct.pack(">i", 1)  # topic count
         + _kstr("keycloak.raw")
         + struct.pack(">i", 1)  # partition count
-        + _fetch_v4_partition_header(partition=0, error_code=0, records_size=-1)
+        + _fetch_v10_partition_header(partition=0, error_code=0, records_size=-1)
         # No records bytes follow: the -1 sentinel means "null/empty".
     )
     items, error = kafka._parse_fetch_response(null_records_payload, 4, expected_partition=0, max_messages=10)
     assert error is None, f"null records must be treated as empty, not an error: {error!r}"
     assert items == []
+
+
+def test_fetch_response_top_level_session_error_is_surfaced() -> None:
+    """Kafka Fetch v7+ has a top-level `error_code` that carries session-wide
+    errors (FETCH_SESSION_ID_NOT_FOUND=70, INVALID_FETCH_SESSION_EPOCH=71).
+    These must surface with the readable name instead of a mysterious parse
+    failure downstream when the per-partition payload is missing entirely.
+    """
+    session_error = (
+        struct.pack(">i", 4)  # correlation_id
+        + struct.pack(">i", 0)  # throttle_time_ms
+        + struct.pack(">h", 70)  # top_error_code = FETCH_SESSION_ID_NOT_FOUND
+        + struct.pack(">i", 0)  # session_id
+        + struct.pack(">i", 0)  # topic count (session error → no topics)
+    )
+    items, error = kafka._parse_fetch_response(session_error, 4, expected_partition=0, max_messages=10)
+    assert items is None
+    assert error == "Fetch session error: FETCH_SESSION_ID_NOT_FOUND"
+
+
+def test_fetch_response_hint_for_compressed_batch() -> None:
+    """When broker returns non-empty records bytes but our parser produces
+    zero decodable messages, that's almost always a compressed record batch
+    (zstd/snappy/lz4/gzip) that our client doesn't decompress. Surface a
+    hint so the operator understands why (max:N) shows zero.
+    """
+    # Craft a "record batch" whose magic byte is 2 (v2 format) with a
+    # non-zero compression code — our _parse_record_batch_entries will
+    # skip it and return []. Combined with non-empty records bytes,
+    # the wrapper should synthesise a helpful error.
+    #
+    # v2 record batch layout (first 61 bytes are the batch header):
+    #   base_offset  (8) | batch_length (4) | leader_epoch (4) |
+    #   magic (1=v2)     | crc (4)          | attributes (2)   |
+    #   last_offset_delta (4) | base_timestamp (8) |
+    #   max_timestamp (8)  | producer_id (8) | producer_epoch (2) |
+    #   base_sequence (4)  | record_count (4)
+    compressed_batch = (
+        struct.pack(">q", 0)  # base_offset
+        + struct.pack(">i", 100)  # batch_length
+        + struct.pack(">i", 0)  # partition_leader_epoch
+        + struct.pack(">b", 2)  # magic = v2
+        + struct.pack(">i", 0)  # crc
+        + struct.pack(">h", 1)  # attributes: bit0-bit2 = compression codec (1 = gzip)
+        + struct.pack(">i", 0)  # last_offset_delta
+        + struct.pack(">q", 0)  # base_timestamp
+        + struct.pack(">q", 0)  # max_timestamp
+        + struct.pack(">q", -1)  # producer_id
+        + struct.pack(">h", -1)  # producer_epoch
+        + struct.pack(">i", -1)  # base_sequence
+        + struct.pack(">i", 1)  # record_count (fake — batch is not decoded)
+    )
+    # Message_set framing wraps the record batch as one entry: offset + size + body.
+    framed = struct.pack(">q", 0) + struct.pack(">i", len(compressed_batch)) + compressed_batch
+
+    payload = _fetch_v10_response(correlation_id=4, topic="orders", partition=0, error_code=0, records=framed)
+    items, error = kafka._parse_fetch_response(payload, 4, expected_partition=0, max_messages=10)
+    assert items is None
+    assert error is not None
+    assert "compressed record batch" in error
+    assert "zstd/snappy/lz4/gzip" in error
+
+
+def test_kafka_error_name_covers_common_codes() -> None:
+    """Regression: no more opaque `ERR_XX` for standard Kafka error codes.
+    Historical debugging pain: the audit output showed `ERR_76` when a
+    broker returned UNSUPPORTED_COMPRESSION_TYPE, forcing the operator to
+    grep Kafka source for the number. All standard codes now decode."""
+    assert kafka._kafka_error_name(6) == "NOT_LEADER_OR_FOLLOWER"
+    assert kafka._kafka_error_name(29) == "TOPIC_AUTHORIZATION_FAILED"
+    assert kafka._kafka_error_name(70) == "FETCH_SESSION_ID_NOT_FOUND"
+    assert kafka._kafka_error_name(71) == "INVALID_FETCH_SESSION_EPOCH"
+    # 76 was the mysterious code that surfaced on production Kafka topics
+    # storing zstd-compressed batches when the client sent Fetch < v10.
+    assert kafka._kafka_error_name(76) == "UNSUPPORTED_COMPRESSION_TYPE"
+    assert kafka._kafka_error_name(90) == "PRODUCER_FENCED"
+    # Unknown codes still fall through to the placeholder.
+    assert kafka._kafka_error_name(9999) == "ERR_9999"
 
 
 def test_send_request_and_sasl_error_paths() -> None:

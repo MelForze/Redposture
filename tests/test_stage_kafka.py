@@ -836,14 +836,17 @@ def test_offsets_fetch_and_message_parsers_cover_success_and_errors() -> None:
     assert offset == 42
     assert error is None
 
-    # Fetch v4 wire format:
-    #   correlation_id | throttle_time_ms | topic_count | topic_name | partition_count |
+    # Fetch v10 wire format:
+    #   correlation_id | throttle_time_ms | top_error_code (v7+) |
+    #   session_id (v7+) | topic_count | topic_name | partition_count |
     #   partition_id | error_code | high_watermark | last_stable_offset (v4+) |
-    #   aborted_txns_count (0) | records_size | records
-    def _v4_fetch(topic: str, partition: int, error_code: int, records: bytes) -> bytes:
+    #   log_start_offset (v5+) | aborted_txns_count (0) | records_size | records
+    def _v10_fetch(topic: str, partition: int, error_code: int, records: bytes) -> bytes:
         return (
             struct.pack(">i", correlation_id)
             + struct.pack(">i", 0)  # throttle_time_ms
+            + struct.pack(">h", 0)  # top_error_code (v7+)
+            + struct.pack(">i", 0)  # session_id (v7+)
             + struct.pack(">i", 1)  # topic count
             + _kstr(topic)
             + struct.pack(">i", 1)  # partition count
@@ -851,12 +854,13 @@ def test_offsets_fetch_and_message_parsers_cover_success_and_errors() -> None:
             + struct.pack(">h", error_code)
             + struct.pack(">q", 99)  # high_watermark
             + struct.pack(">q", 99)  # last_stable_offset
+            + struct.pack(">q", 0)  # log_start_offset (v5+)
             + struct.pack(">i", 0)  # aborted_transactions count
             + struct.pack(">i", len(records))
             + records
         )
 
-    fetch_payload = _v4_fetch("orders", 0, 0, _fetch_message_set(7, "hello"))
+    fetch_payload = _v10_fetch("orders", 0, 0, _fetch_message_set(7, "hello"))
     items, fetch_error = kafka._parse_fetch_response(
         fetch_payload,
         correlation_id,
@@ -866,7 +870,7 @@ def test_offsets_fetch_and_message_parsers_cover_success_and_errors() -> None:
     assert fetch_error is None
     assert items == [(7, "hello")]
 
-    record_batch_payload = _v4_fetch("audit.logs", 0, 0, _fetch_record_batch(11, ["alpha", "beta"]))
+    record_batch_payload = _v10_fetch("audit.logs", 0, 0, _fetch_record_batch(11, ["alpha", "beta"]))
     record_batch_items, record_batch_error = kafka._parse_fetch_response(
         record_batch_payload,
         correlation_id,
@@ -876,7 +880,7 @@ def test_offsets_fetch_and_message_parsers_cover_success_and_errors() -> None:
     assert record_batch_error is None
     assert record_batch_items == [(11, "alpha"), (12, "beta")]
 
-    bad_fetch_payload = _v4_fetch("orders", 0, 29, b"")
+    bad_fetch_payload = _v10_fetch("orders", 0, 29, b"")
     items, fetch_error = kafka._parse_fetch_response(
         bad_fetch_payload,
         correlation_id,
@@ -884,7 +888,12 @@ def test_offsets_fetch_and_message_parsers_cover_success_and_errors() -> None:
         max_messages=5,
     )
     assert items is None
-    assert fetch_error == "Fetch failed: TOPIC_AUTHORIZATION_FAILED"
+    assert fetch_error is not None
+    assert "Fetch failed: TOPIC_AUTHORIZATION_FAILED" in fetch_error
+    # Diagnostics: partition + high_watermark carried through so operators
+    # can see broker-side state without wire tracing.
+    assert "partition=0" in fetch_error
+    assert "high_watermark=99" in fetch_error
 
 
 def test_sasl_helpers_and_dump_targets(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
