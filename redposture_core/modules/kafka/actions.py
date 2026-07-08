@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -394,6 +395,7 @@ def _audit_kafka_host(
     dump: bool,
     max_messages: int,
     show_topics_limit: int | None = None,
+    probe_write: bool = False,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     provided_credentials = username is not None and password is not None
@@ -601,6 +603,29 @@ def _audit_kafka_host(
                         }
                     )
 
+                # ACL probing at --show-topics: for every displayed topic,
+                # send a lightweight Fetch(offset=0, max_bytes=1) and, when
+                # --probe-write is on, a Produce with a marker record. The
+                # broker's per-topic ACL check surfaces as error_code=29
+                # (TOPIC_AUTHORIZATION_FAILED) → read/write=false.
+                topic_permissions: dict[str, dict[str, bool | None]] = {}
+                if show_topics and topic_names and (provided_credentials_ok or auth_required is False):
+                    probe_targets = (
+                        sorted(topic_names)[:show_topics_limit]
+                        if isinstance(show_topics_limit, int)
+                        else sorted(topic_names)
+                    )
+                    topic_permissions = _kafka_client._probe_topic_permissions_bulk(
+                        host,
+                        port,
+                        timeout,
+                        probe_targets,
+                        username=username if provided_credentials_ok else None,
+                        password=password if provided_credentials_ok else None,
+                        use_tls=(transport_mode == "tls") or None,
+                        probe_write=bool(probe_write),
+                    )
+
                 return {
                     "timestamp": utc_now_iso(),
                     "host": host,
@@ -622,6 +647,7 @@ def _audit_kafka_host(
                     "max_messages": max_messages if dump else None,
                     "topic_count": topic_count,
                     "topics": topic_names,
+                    "topic_permissions": topic_permissions or None,
                     "query_topic_value": query_topic_value,
                     "dump_topics": dump_topics if dump else None,
                     "dump_results": dump_results if dump else None,
@@ -814,7 +840,22 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     return line
 
 
-def _format_topics_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+_KAFKA_DEBUG_DIAG_SUFFIX_RE = re.compile(r"\s*\(topic=.*\)$")
+
+
+def _strip_debug_context(text: str, *, debug: bool) -> str:
+    # Fetch errors from the client carry rich diagnostic context in a
+    # trailing `(topic=..., partition=..., high_watermark=..., ...)` block
+    # (see `_parse_fetch_response` in `redposture_core/clients/kafka.py`).
+    # That's invaluable in `--debug` mode but noisy in the default one-line
+    # summary. When debug is off, chop off the diagnostic tail so the user
+    # sees just `[-] Fetch failed: TOPIC_AUTHORIZATION_FAILED`.
+    if debug:
+        return text
+    return _KAFKA_DEBUG_DIAG_SUFFIX_RE.sub("", text)
+
+
+def _format_topics_detail_records(record: dict[str, Any], output_format: str, *, debug: bool = False) -> list[str]:
     show_topics = bool(record.get("show_topics"))
     query_topic = str(record.get("query_topic") or "").strip()
     query_topic_value = record.get("query_topic_value")
@@ -954,6 +995,17 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
 
     prefix = _nxc_prefix(record)
     lines = []
+    # Per-topic ACL probe results (read/write) — populated by
+    # `_probe_topic_permissions_bulk`. Each entry is a dict {read: bool|None,
+    # write: bool|None} where None means "inconclusive" (transient error,
+    # not-leader, no auth). Renderer uses only what's present so operators
+    # who didn't opt into --probe-write still get clean read-only markers.
+    topic_permissions_raw = record.get("topic_permissions")
+    topic_permissions: dict[str, dict[str, bool | None]] = (
+        topic_permissions_raw if isinstance(topic_permissions_raw, dict) else {}
+    )
+    prefix = _nxc_prefix(record)
+    lines = []
     if show_topics and topic_names:
         total = record.get("topic_count")
         if show_topics_limit is not None and isinstance(total, int) and total > len(displayed_topic_names):
@@ -961,7 +1013,20 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
         else:
             lines.append(f"{prefix} [*] Show Topics")
         for item in displayed_topic_names:
-            lines.append(f"{prefix} {item}")
+            perms = topic_permissions.get(item, {})
+            markers: list[str] = []
+            read_value = perms.get("read") if isinstance(perms, dict) else None
+            if read_value is True:
+                markers.append("(read:true)")
+            elif read_value is False:
+                markers.append("(read:false)")
+            write_value = perms.get("write") if isinstance(perms, dict) else None
+            if write_value is True:
+                markers.append("(write:true)")
+            elif write_value is False:
+                markers.append("(write:false)")
+            suffix = (" " + " ".join(markers)) if markers else ""
+            lines.append(f"{prefix} {item}{suffix}")
     # `--topic X` (without `--dump`) prints a standalone header + partition
     # info; `--topic X --dump` folds the partition info into the Dump header
     # to avoid the previous 3-line duplicate:
@@ -994,7 +1059,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
                 for item in topic_dump_messages:
                     lines.append(f"{prefix} {item}")
             elif topic_dump_error:
-                lines.append(f"{prefix} [-] {topic_dump_error}")
+                lines.append(f"{prefix} [-] {_strip_debug_context(topic_dump_error, debug=debug)}")
             else:
                 lines.append(f"{prefix} <no messages>")
         else:
@@ -1015,7 +1080,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
                     else:
                         lines.append(f"{prefix} <no messages>")
             elif dump_error:
-                lines.append(f"{prefix} [-] {dump_error}")
+                lines.append(f"{prefix} [-] {_strip_debug_context(dump_error, debug=debug)}")
             else:
                 lines.append(f"{prefix} <no topics>")
     return lines
@@ -1023,7 +1088,18 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str) ->
 
 def _render_colored_kafka_line(console: Console, line: str) -> bool:
     # First try marker-line coloring for `[*]/[+]/[-]/[!]` lead lines.
-    if render_colored_marker_line(console, line, tag="KAFKA", counts=(CountColorRule("topics", "red"),)):
+    # `partitions:N` follows the same "count of dangerous exposed resources"
+    # convention as `topics:N` (both indicate access surface), so they share
+    # the red highlight — makes multi-partition dumps stand out at a glance.
+    if render_colored_marker_line(
+        console,
+        line,
+        tag="KAFKA",
+        counts=(
+            CountColorRule("topics", "red"),
+            CountColorRule("partitions", "red"),
+        ),
+    ):
         return True
     # Fallback: detail lines like `KAFKA<tab>host<tab>port<tab>topic-name`
     # (topic-name listings + dumped message payloads) don't carry a marker
@@ -1052,6 +1128,7 @@ def _call_audit_kafka_host_with_stage_debug(
     debug_emit: Callable[[str], None] | None,
     show_topics_limit: int | None = None,
     max_messages_explicit: bool = False,
+    probe_write: bool = False,
 ) -> dict[str, Any]:
     started = time.monotonic()
     record = _audit_kafka_host(
@@ -1066,6 +1143,7 @@ def _call_audit_kafka_host_with_stage_debug(
         dump if run_deep_checks else False,
         max_messages,
         show_topics_limit=show_topics_limit if run_deep_checks else None,
+        probe_write=bool(probe_write) if run_deep_checks else False,
     )
 
     result: dict[str, Any] = dict(record)

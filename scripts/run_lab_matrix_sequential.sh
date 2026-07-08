@@ -710,6 +710,8 @@ run_kafka_cases() {
     run_case kafka kafka_tls_extended_topic 0 kafka -t 127.0.0.1 --port 29093 -u admin -p admin --topic tls.orders --show-topics --dump 3
     run_case kafka kafka_tls_extended_bad_password 0 kafka -t 127.0.0.1 --port 29093 -u admin -p wrong --show-topics
     run_case kafka kafka_tls_idempotency 0 kafka -t 127.0.0.1 --port 29093 --defcreds --show-topics --dump --max-messages 5
+    # ACL probing (--probe-write is destructive: writes a marker record).
+    run_case kafka kafka_extended_probe_write 0 kafka -t 127.0.0.1 --port 29092 -u admin -p admin --show-topics --probe-write
     # P4-E fuzz: negative workers must be rejected at parse.
     run_case kafka fuzz_kafka_negative_workers 2 kafka -t 127.0.0.1 --workers -5 --show-topics
     run_case kafka fuzz_kafka_zero_max_messages 2 kafka -t 127.0.0.1 --max-messages 0 --show-topics

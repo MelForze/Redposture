@@ -262,6 +262,16 @@ def configure_kafka_parser(
         **optional_show_count_kwargs("Show topic names after successful access/auth. Optional count limits output."),
     )
     actions.add_argument(
+        "--probe-write",
+        dest="probe_write",
+        action="store_true",
+        help=(
+            "DESTRUCTIVE: also probe topic write ACL by producing a marker record "
+            "'[REDPOSTURE-AUDIT-PROBE-DO-NOT-USE]'. Only combine with --show-topics on "
+            "topics you own; the marker is a real record and stays in the log."
+        ),
+    )
+    actions.add_argument(
         "--topic",
         dest="topic",
         default=None,
