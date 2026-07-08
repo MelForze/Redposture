@@ -721,9 +721,24 @@ def _parse_fetch_response(
                         _ = reader.read_i64()  # producer_id
                         _ = reader.read_i64()  # first_offset
                 records_size = reader.read_i32()
-                if records_size < 0 or records_size > reader.remaining():
-                    return None, "invalid Fetch message set size"
-                records = reader._read(records_size)  # noqa: SLF001
+                # Kafka spec: `records` is a NULLABLE_BYTES field
+                # (nullableVersions "0+" in FetchResponse.json). A `-1` size is
+                # the null-sentinel and means "broker sent no records for this
+                # partition" — common for empty partitions, partitions where
+                # the requested offset equals high_watermark, or after a
+                # fetch-session throttle. Previously we treated -1 as a fatal
+                # framing error, which killed dumps on real multi-partition
+                # topics where some partitions were idle.
+                if records_size == -1:
+                    records = b""
+                elif records_size < 0 or records_size > reader.remaining():
+                    return None, (
+                        f"invalid Fetch message set size: got {records_size} "
+                        f"but only {reader.remaining()} bytes remain "
+                        f"(partition={partition}, error_code={error_code})"
+                    )
+                else:
+                    records = reader._read(records_size)  # noqa: SLF001
 
                 if partition != expected_partition:
                     continue

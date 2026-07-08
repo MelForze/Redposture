@@ -205,7 +205,12 @@ def test_fetch_response_success_and_error_edges() -> None:
     )
     items, error = kafka._parse_fetch_response(bad_size, 4, expected_partition=0, max_messages=10)
     assert items is None
-    assert error == "invalid Fetch message set size"
+    assert error is not None
+    # Diagnostic error includes what the parser saw so operators can debug
+    # against a real broker without adding wire-level trace logging.
+    assert "invalid Fetch message set size" in error
+    assert "got 99" in error
+    assert "partition=0" in error
 
     # Broker-side per-partition error (e.g. REQUEST_TIMED_OUT=7).
     fetch_error = _fetch_v4_response(correlation_id=4, topic="orders", partition=0, error_code=7, records=b"")
@@ -217,6 +222,28 @@ def test_fetch_response_success_and_error_edges() -> None:
     items, error = kafka._parse_fetch_response(fetch_payload, 99, expected_partition=0, max_messages=10)
     assert items is None
     assert "unexpected correlation id" in str(error)
+
+
+def test_fetch_response_treats_records_size_minus_one_as_empty() -> None:
+    """Regression for the `[-] invalid Fetch message set size` bug on multi-
+    partition real-world topics. Kafka's `records` field is `nullableVersions
+    "0+"`, so a `-1` size in a Fetch response is a valid null-sentinel meaning
+    "no records for this partition" — common when a partition is idle or the
+    requested offset equals high_watermark. The parser must accept -1 and
+    return an empty list, not a fatal 'invalid Fetch message set size'.
+    """
+    null_records_payload = (
+        struct.pack(">i", 4)  # correlation_id
+        + struct.pack(">i", 0)  # throttle_time_ms
+        + struct.pack(">i", 1)  # topic count
+        + _kstr("keycloak.raw")
+        + struct.pack(">i", 1)  # partition count
+        + _fetch_v4_partition_header(partition=0, error_code=0, records_size=-1)
+        # No records bytes follow: the -1 sentinel means "null/empty".
+    )
+    items, error = kafka._parse_fetch_response(null_records_payload, 4, expected_partition=0, max_messages=10)
+    assert error is None, f"null records must be treated as empty, not an error: {error!r}"
+    assert items == []
 
 
 def test_send_request_and_sasl_error_paths() -> None:
