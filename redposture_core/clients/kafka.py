@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 import socket
 import ssl
 import struct
@@ -15,6 +16,8 @@ KAFKA_METADATA = 3
 KAFKA_FETCH = 1
 KAFKA_LIST_OFFSETS = 2
 KAFKA_PRODUCE = 0
+KAFKA_CREATE_TOPICS = 19
+KAFKA_DELETE_TOPICS = 20
 KAFKA_SASL_HANDSHAKE = 17
 KAFKA_SASL_AUTHENTICATE = 36
 KAFKA_AUTH_ERROR_CODES = {29, 31, 58}
@@ -58,6 +61,14 @@ def _is_tls_record_prelude(raw: bytes) -> bool:
     return raw[0] in (0x14, 0x15, 0x16, 0x17) and raw[1] == 0x03 and raw[2] in (0x00, 0x01, 0x02, 0x03, 0x04)
 
 
+# Well-known Kafka SASL_SSL / SSL listener ports. Mixed odd/even by
+# convention: even = plaintext / SASL_PLAINTEXT, odd = SASL_SSL / SSL.
+# We treat these as "TLS-first" when `use_tls=None` — the auto-detect path
+# for the plaintext side stays a `_TlsProbeError` retry, but this shortcut
+# spares a round-trip on ports we know are TLS-shaped.
+_TLS_FIRST_PORTS = frozenset({9093, 19093, 29093})
+
+
 def open_kafka_socket(
     host: str,
     port: int,
@@ -68,15 +79,16 @@ def open_kafka_socket(
     """Open a TCP (or TLS-wrapped) socket to a Kafka broker.
 
     Returns `(sock, transport_mode)` where transport_mode is `"plaintext"` or
-    `"tls"`. When `use_tls is None`, the well-known SASL_SSL port 9093 is
-    treated as TLS by default; all other ports open plaintext and rely on
-    the caller catching `_TlsProbeError` from `_recv_kafka_frame` to retry.
+    `"tls"`. When `use_tls is None`, the well-known SASL_SSL ports
+    (9093 / 19093 / 29093) are treated as TLS by default; all other ports
+    open plaintext and rely on the caller catching `_TlsProbeError` from
+    `_recv_kafka_frame` to retry.
 
     Uses `check_hostname=False` + `verify_mode=CERT_NONE` — audit tool posture
     (recon over self-signed brokers is the common case). Mirrors
     `_open_grpc_socket` in `redposture_core/clients/grpc.py`.
     """
-    resolved = use_tls if use_tls is not None else (port == 9093)
+    resolved = use_tls if use_tls is not None else (port in _TLS_FIRST_PORTS)
     base = socket.create_connection((host, port), timeout=timeout)
     base.settimeout(timeout)
     if not resolved:
@@ -276,13 +288,82 @@ def _is_sasl_probe_candidate(message: str | None) -> bool:
     return any(needle in text for needle in needles)
 
 
+# HTTP request-method / response prefixes we may see when the peer is an
+# HTTP server rather than a Kafka broker. Confluent REST Proxy, misconfigured
+# admin panels and general web servers behind SSH tunnels all show up here.
+_HTTP_REQUEST_PREFIXES = frozenset({b"GET ", b"POST", b"PUT ", b"HEAD", b"OPTI", b"DELE", b"PATC", b"TRAC", b"CONN"})
+# `HTTP/1.x` server responses (e.g. `HTTP/1.1 400 Bad Request`).
+_HTTP_RESPONSE_PREFIX = b"HTTP"
+
+
+def _identify_non_kafka_prelude(raw: bytes) -> str | None:
+    """Return a human-readable hint when the first 4 bytes of a "Kafka
+    frame" are clearly speaking a different protocol.
+
+    Kafka frame_size is a big-endian int32 in [1, 16 MiB]. If we see the
+    peer respond with printable ASCII, chances are it's not Kafka at all
+    (typical decoded values like 1213486160 = 0x48545450 = 'HTTP' or
+    1195725856 = 0x47455420 = 'GET ' are dead giveaways). This helper lets
+    the caller report "this port isn't Kafka" instead of the cryptic
+    "invalid Kafka frame size N".
+
+    Returns:
+      "HTTP request"  — first bytes look like an HTTP request method
+      "HTTP response" — starts with `HTTP` (e.g. `HTTP/1.1 400`)
+      "ASCII text"    — all 4 bytes are printable ASCII, no known match
+      None            — first bytes look genuinely binary; fall through
+                        to the generic "invalid Kafka frame size" path.
+    """
+    if len(raw) < 4:
+        return None
+    if raw[:4] == _HTTP_RESPONSE_PREFIX:
+        return "HTTP response"
+    if raw[:4] in _HTTP_REQUEST_PREFIXES:
+        return "HTTP request"
+    if all(0x20 <= byte <= 0x7E for byte in raw):
+        return "ASCII text"
+    return None
+
+
 def _recv_kafka_frame(sock: socket.socket) -> bytes:
     raw_size = _recv_exact(sock, 4)
     if _is_tls_record_prelude(raw_size):
         raise _TlsProbeError(f"plaintext read returned TLS record prelude: {raw_size!r}")
+    non_kafka_kind = _identify_non_kafka_prelude(raw_size)
+    if non_kafka_kind is not None:
+        # Peek a bit more to preview what the peer is actually saying so the
+        # operator can jump straight to the culprit. Non-blocking best-effort:
+        # if the socket has no more data ready or it errors, we still surface
+        # the first 4 bytes.
+        peek = b""
+        previous_timeout = sock.gettimeout()
+        try:
+            sock.settimeout(0.2)
+            peek = sock.recv(120)
+        except (OSError, TimeoutError, ValueError):
+            peek = b""
+        finally:
+            try:
+                sock.settimeout(previous_timeout)
+            except (OSError, ValueError):
+                pass
+        preview = (raw_size + peek).decode("ascii", errors="replace").strip().splitlines()
+        first_line = preview[0][:60] if preview else raw_size.decode("ascii", errors="replace")
+        raise ValueError(
+            f"not a Kafka broker: peer sent {non_kafka_kind} "
+            f"({first_line!r}). Check the port — an HTTP service or admin "
+            f"panel is likely listening here instead of Kafka."
+        )
     (frame_size,) = struct.unpack(">i", raw_size)
     if frame_size <= 0 or frame_size > KAFKA_MAX_FRAME:
-        raise ValueError(f"invalid Kafka frame size {frame_size}")
+        # Fall-through: printable-ASCII was already filtered above, so if we
+        # got here the bytes are genuinely binary garbage. Include the raw
+        # hex so the operator can eyeball it against a wire trace.
+        raise ValueError(
+            f"invalid Kafka frame size {frame_size} (raw bytes: 0x{raw_size.hex()}; "
+            f"expected 1..{KAFKA_MAX_FRAME}). The peer may be a load balancer "
+            f"or proxy speaking an unknown protocol."
+        )
     return _recv_exact(sock, frame_size)
 
 
@@ -1188,6 +1269,199 @@ def _probe_topic_write_permission(
         return None, correlation
 
 
+def _probe_create_topic_permission(
+    sock: socket.socket,
+    correlation: int,
+) -> tuple[bool | None, int]:
+    """Probe the cluster's `Create` ACL for topics.
+
+    Non-destructive: uses `CreateTopics(validateOnly=true)` — the broker
+    walks the full ACL / validation path but does NOT create the topic
+    when `validate_only=true`, even if the caller has permission. The
+    random probe name (`__redposture_probe_create_<12hex>`) guarantees the
+    request never collides with a real topic.
+
+    Returns `(True|False|None, next_correlation_id)`:
+      - True  — broker accepted the request (or said TOPIC_ALREADY_EXISTS,
+                which also implies we have the `Create` ACL — improbable
+                for the random name but handled)
+      - False — TOPIC_AUTHORIZATION_FAILED / CLUSTER_AUTHORIZATION_FAILED
+      - None  — inconclusive (unknown error / timeout / malformed response)
+    """
+    probe_name = f"__redposture_probe_create_{secrets.token_hex(6)}"
+    # CreateTopics v2 request body:
+    #   topics [
+    #     name (string) | num_partitions (int32) | replication_factor (int16)
+    #     replica_assignments [ partition_index (int32), broker_ids [int32] ]
+    #     configs [ name (string), value (nullable_string) ]
+    #   ]
+    #   timeout_ms (int32) | validate_only (bool)
+    body = (
+        struct.pack(">i", 1)  # topics count
+        + _encode_kafka_string(probe_name)
+        + struct.pack(">i", 1)  # num_partitions
+        + struct.pack(">h", 1)  # replication_factor
+        + struct.pack(">i", 0)  # replica_assignments count
+        + struct.pack(">i", 0)  # configs count
+        + struct.pack(">i", 5000)  # timeout_ms
+        + struct.pack(">?", True)  # validate_only
+    )
+    try:
+        payload = _send_kafka_request(
+            sock,
+            api_key=KAFKA_CREATE_TOPICS,
+            api_version=2,
+            correlation_id=correlation,
+            client_id=KAFKA_CLIENT_ID,
+            body=body,
+        )
+    except (TimeoutError, ConnectionError, OSError, ValueError):
+        return None, correlation + 1
+    correlation += 1
+    # CreateTopics v2 response: correlation | throttle_time_ms | topics [ name, error_code, error_message ]
+    try:
+        reader = _KafkaReader(payload)
+        _ = reader.read_i32()  # correlation
+        _ = reader.read_i32()  # throttle_time_ms
+        topic_count = reader.read_i32()
+        for _ in range(max(0, topic_count)):
+            _ = reader.read_string(nullable=False) or ""
+            error_code = reader.read_i16()
+            _ = reader.read_string(nullable=True)  # error_message (v1+)
+            if error_code in (29, 31):
+                return False, correlation
+            if error_code in (0, 36):  # 0 = NO_ERROR, 36 = TOPIC_ALREADY_EXISTS
+                return True, correlation
+            return None, correlation
+        return None, correlation
+    except (ValueError, struct.error):
+        return None, correlation
+
+
+def _probe_delete_topic_permission(
+    sock: socket.socket,
+    correlation: int,
+) -> tuple[bool | None, int]:
+    """Probe the cluster's `Delete` ACL for topics.
+
+    Non-destructive: sends `DeleteTopics` for a random probe name that
+    doesn't exist. The broker walks the ACL check first; if allowed, it
+    proceeds to delete and returns `UNKNOWN_TOPIC_OR_PARTITION` (3) since
+    there was nothing to delete. If ACL rejects, it returns
+    `TOPIC_AUTHORIZATION_FAILED` (29) or `CLUSTER_AUTHORIZATION_FAILED` (31)
+    without touching the log directory.
+
+    ⚠️ There's a tiny theoretical race: if a real topic happened to be
+    created with the exact `__redposture_probe_delete_<12hex>` name in the
+    window between our sending and the broker acting on the request, it
+    would be deleted. Odds are astronomically low (2^48 name space) and
+    the probe name is unmistakably ours by convention.
+
+    Returns `(True|False|None, next_correlation_id)`:
+      - True  — UNKNOWN_TOPIC_OR_PARTITION (delete would have succeeded)
+      - False — TOPIC_AUTHORIZATION_FAILED / CLUSTER_AUTHORIZATION_FAILED
+      - None  — inconclusive
+    """
+    probe_name = f"__redposture_probe_delete_{secrets.token_hex(6)}"
+    # DeleteTopics v1 request body: topic_names [string], timeout_ms (int32)
+    body = (
+        struct.pack(">i", 1)  # topic_names count
+        + _encode_kafka_string(probe_name)
+        + struct.pack(">i", 5000)  # timeout_ms
+    )
+    try:
+        payload = _send_kafka_request(
+            sock,
+            api_key=KAFKA_DELETE_TOPICS,
+            api_version=1,
+            correlation_id=correlation,
+            client_id=KAFKA_CLIENT_ID,
+            body=body,
+        )
+    except (TimeoutError, ConnectionError, OSError, ValueError):
+        return None, correlation + 1
+    correlation += 1
+    # DeleteTopics v1 response: correlation | throttle_time_ms | responses [ name, error_code ]
+    try:
+        reader = _KafkaReader(payload)
+        _ = reader.read_i32()  # correlation
+        _ = reader.read_i32()  # throttle_time_ms
+        response_count = reader.read_i32()
+        for _ in range(max(0, response_count)):
+            _ = reader.read_string(nullable=False) or ""
+            error_code = reader.read_i16()
+            if error_code in (29, 31):
+                return False, correlation
+            # 3 = UNKNOWN_TOPIC_OR_PARTITION — perfect signal that Delete
+            # ACL would have applied; the topic just wasn't there.
+            if error_code in (0, 3):
+                return True, correlation
+            return None, correlation
+        return None, correlation
+    except (ValueError, struct.error):
+        return None, correlation
+
+
+def _probe_kafka_acls(
+    host: str,
+    port: int,
+    timeout: float,
+    topics: list[str],
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    use_tls: bool | None = None,
+    probe_write: bool = False,
+    probe_cluster: bool = True,
+) -> dict[str, Any]:
+    """Probe Read (and optionally Write) ACLs per topic AND cluster-level
+    Create/Delete ACLs — all on a single authenticated socket.
+
+    Returns:
+        {
+            "cluster": {"create": bool | None, "delete": bool | None},
+            "topics":  {topic: {"read": bool | None, "write": bool | None}},
+        }
+
+    ⚠️ `probe_write=True` is destructive — see
+    `_probe_topic_write_permission`. `probe_cluster=True` (default) is
+    non-destructive: create-probe uses `validateOnly=true`, delete-probe
+    targets a random nonexistent name.
+    """
+    empty: dict[str, Any] = {
+        "cluster": {"create": None, "delete": None},
+        "topics": {topic: {"read": None, "write": None} for topic in topics},
+    }
+    # Broad exception net around the whole probe flow. Best-effort probing
+    # must never sink the parent audit — degrade to `None` markers instead.
+    try:
+        sock, _transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
+    except BaseException:  # noqa: BLE001
+        return empty
+    try:
+        with sock:
+            correlation = 1
+            ok, correlation, _session_error = _authenticate_or_probe(sock, correlation, username, password)
+            if not ok:
+                return empty
+            cluster_perms: dict[str, bool | None] = {"create": None, "delete": None}
+            if probe_cluster:
+                cluster_perms["create"], correlation = _probe_create_topic_permission(sock, correlation)
+                cluster_perms["delete"], correlation = _probe_delete_topic_permission(sock, correlation)
+            topic_perms: dict[str, dict[str, bool | None]] = {}
+            for topic in topics:
+                read_result, correlation = _probe_topic_read_permission(sock, correlation, topic)
+                write_result: bool | None = None
+                if probe_write:
+                    write_result, correlation = _probe_topic_write_permission(sock, correlation, topic)
+                topic_perms[topic] = {"read": read_result, "write": write_result}
+            return {"cluster": cluster_perms, "topics": topic_perms}
+    except BaseException:  # noqa: BLE001
+        return empty
+
+
+# Deprecated: kept as a thin wrapper for backward-compat with older callers /
+# tests that import the old name. Prefer `_probe_kafka_acls`.
 def _probe_topic_permissions_bulk(
     host: str,
     port: int,
@@ -1199,46 +1473,17 @@ def _probe_topic_permissions_bulk(
     use_tls: bool | None = None,
     probe_write: bool = False,
 ) -> dict[str, dict[str, bool | None]]:
-    """Probe Read (and optionally Write) ACLs for a list of topics.
-
-    Opens one authenticated socket and reuses it across all probes to keep
-    the per-topic overhead to a single Fetch request (plus one Produce
-    request when `probe_write=True`).
-
-    Returns `{topic: {"read": bool | None, "write": bool | None}}`. Unknown
-    outcomes surface as `None` so the renderer can render `(read:?)` rather
-    than making up a state.
-
-    ⚠️ `probe_write=True` is destructive — see `_probe_topic_write_permission`.
-    """
-    if not topics:
-        return {}
-    results: dict[str, dict[str, bool | None]] = {}
-    # Broad exception net around the whole probe flow. The probe is a
-    # *best-effort* enrichment on top of a successful audit — if anything
-    # goes sideways (test doubles missing sendall, socket refused, TLS
-    # mismatch, malformed response), we degrade to `read/write = None` for
-    # every requested topic rather than sinking the parent audit.
-    try:
-        sock, _transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
-    except BaseException:  # noqa: BLE001
-        return {topic: {"read": None, "write": None if probe_write else None} for topic in topics}
-    try:
-        with sock:
-            correlation = 1
-            ok, correlation, _session_error = _authenticate_or_probe(sock, correlation, username, password)
-            if not ok:
-                return {topic: {"read": None, "write": None if probe_write else None} for topic in topics}
-            for topic in topics:
-                read_result, correlation = _probe_topic_read_permission(sock, correlation, topic)
-                write_result: bool | None = None
-                if probe_write:
-                    write_result, correlation = _probe_topic_write_permission(sock, correlation, topic)
-                results[topic] = {"read": read_result, "write": write_result}
-    except BaseException:  # noqa: BLE001
-        for topic in topics:
-            results.setdefault(topic, {"read": None, "write": None if probe_write else None})
-    return results
+    return _probe_kafka_acls(
+        host,
+        port,
+        timeout,
+        topics,
+        username=username,
+        password=password,
+        use_tls=use_tls,
+        probe_write=probe_write,
+        probe_cluster=False,
+    )["topics"]
 
 
 def _read_topic_messages(

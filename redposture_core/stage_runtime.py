@@ -954,6 +954,13 @@ _PRE_DETECT_NOISE_MARKERS = (
     "proxy connect",
     "socks",
     "tunnel failed",
+    # Cross-module marker for hosts where the peer clearly speaks a
+    # different protocol (HTTP admin panel, misconfigured proxy, ...). The
+    # Kafka client emits "not a Kafka broker: peer sent HTTP request ..."
+    # from `_recv_kafka_frame`; suppressing the whole line in default TXT
+    # output keeps scans of large target lists clean while `--debug` still
+    # surfaces the full non-Kafka response for diagnosis.
+    "not a kafka broker",
 )
 
 

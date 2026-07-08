@@ -30,7 +30,7 @@ _DEFAULT_PORT = 9092
 # `redposture_core/clients/kafka.py`; the transport used ends up as the
 # `transport_mode` field on the audit record, rendered as `(transport:tls)`
 # in text output — same convention as docker/grpc/oracle.
-_DEFAULT_PORTS: tuple[int, ...] | None = (9092, 9093, 19092)
+_DEFAULT_PORTS: tuple[int, ...] | None = (9092, 9093, 19092, 19093, 29092, 29093)
 
 
 def build_kafka_plan(args: Any) -> AuditCommandPlan:
