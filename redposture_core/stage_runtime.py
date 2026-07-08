@@ -961,6 +961,21 @@ _PRE_DETECT_NOISE_MARKERS = (
     # output keeps scans of large target lists clean while `--debug` still
     # surfaces the full non-Kafka response for diagnosis.
     "not a kafka broker",
+    # TLS-side mirror of the same story: hosts on port 9093 (or any TLS-
+    # first Kafka port) where the peer isn't actually Kafka/TLS at all.
+    # `open_kafka_socket` auto-falls-back to plaintext when TLS was
+    # inferred, but if the caller pinned TLS explicitly we surface
+    # `TLS handshake failed: peer answered plaintext to TLS ClientHello`
+    # or similar — those are non-Kafka network noise, drop them by
+    # default and let --debug show them.
+    "tls handshake failed",
+    "peer answered plaintext to tls",
+    "peer closed tls handshake",
+    "peer requires client certificate",
+    "peer rejected tls handshake",
+    "wrong_version_number",
+    "unexpected_eof_while_reading",
+    "sslv3_alert",
 )
 
 
