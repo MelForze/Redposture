@@ -14,6 +14,7 @@ KAFKA_API_VERSIONS = 18
 KAFKA_METADATA = 3
 KAFKA_FETCH = 1
 KAFKA_LIST_OFFSETS = 2
+KAFKA_PRODUCE = 0
 KAFKA_SASL_HANDSHAKE = 17
 KAFKA_SASL_AUTHENTICATE = 36
 KAFKA_AUTH_ERROR_CODES = {29, 31, 58}
@@ -955,6 +956,289 @@ def _read_partition_messages_on_leader(
         return [], correlation, None
     items = [f"p{partition}@{offset} {text}" for offset, text in fetch_items[:remaining]]
     return items, correlation, None
+
+
+def _probe_topic_read_permission(
+    sock: socket.socket,
+    correlation: int,
+    topic: str,
+    partition: int = 0,
+) -> tuple[bool | None, int]:
+    """Probe whether the current SASL session can Read a topic.
+
+    Sends a tiny `Fetch(topic, partition, offset=0, max_bytes=1)` — this is
+    the standard non-destructive way to check the Kafka `Read` ACL. Broker
+    replies with:
+      - error_code = 29 (TOPIC_AUTHORIZATION_FAILED) → read = False
+      - error_code = 0                              → read = True
+      - anything else (transient / not-leader / storage errors) → None
+        (inconclusive; the caller renders the topic without a marker)
+
+    Returns `(read_or_none, next_correlation_id)`.
+    """
+    try:
+        payload = _send_kafka_request(
+            sock,
+            api_key=KAFKA_FETCH,
+            api_version=KAFKA_FETCH_API_VERSION,
+            correlation_id=correlation,
+            client_id=KAFKA_CLIENT_ID,
+            body=_build_fetch_request_body(topic, partition, offset=0, max_bytes=1),
+        )
+    except (TimeoutError, ConnectionError, OSError, ValueError):
+        return None, correlation + 1
+    correlation += 1
+    # Walk the response manually so a per-partition error surfaces even
+    # when max_bytes=1 truncates the batch to zero records.
+    try:
+        reader = _KafkaReader(payload)
+        _ = reader.read_i32()  # correlation
+        _ = reader.read_i32()  # throttle_time_ms
+        top_error = reader.read_i16()  # v7+ top-level error
+        if top_error == 29:
+            return False, correlation
+        _ = reader.read_i32()  # session_id
+        topic_count = reader.read_i32()
+        for _ in range(max(0, topic_count)):
+            _ = reader.read_string(nullable=False) or ""
+            partition_count = reader.read_i32()
+            for _ in range(max(0, partition_count)):
+                _ = reader.read_i32()  # partition_id
+                error_code = reader.read_i16()
+                _ = reader.read_i64()  # high_watermark
+                _ = reader.read_i64()  # last_stable_offset
+                _ = reader.read_i64()  # log_start_offset
+                aborted_count = reader.read_i32()
+                if aborted_count > 0:
+                    for _ in range(aborted_count):
+                        _ = reader.read_i64()  # producer_id
+                        _ = reader.read_i64()  # first_offset
+                records_size = reader.read_i32()
+                if records_size > 0:
+                    _ = reader._read(records_size)  # noqa: SLF001
+                if error_code == 29:
+                    return False, correlation
+                if error_code == 0:
+                    return True, correlation
+                # Any other code (LEADER_NOT_AVAILABLE, NOT_LEADER, etc.)
+                # is inconclusive for the Read ACL — don't paint a marker.
+                return None, correlation
+        return None, correlation
+    except (ValueError, struct.error):
+        return None, correlation
+
+
+_WRITE_PROBE_MARKER = b"[REDPOSTURE-AUDIT-PROBE-DO-NOT-USE]"
+
+
+def _build_produce_probe_batch() -> bytes:
+    """Build a minimal but VALID Kafka v2 record batch containing one marker
+    record (`[REDPOSTURE-AUDIT-PROBE-DO-NOT-USE]`). Used by
+    `_probe_topic_write_permission` — a `Produce` request with this batch
+    goes through the broker's ACL check before it accepts the record,
+    letting us see `TOPIC_AUTHORIZATION_FAILED` for topics we can't write.
+
+    ⚠️ IF THE PROBE SUCCEEDS, THE RECORD IS ACTUALLY WRITTEN to the topic
+    (destructive). Callers must gate this behind an explicit opt-in flag.
+    """
+    # v2 record: length(varint) | attributes(int8) | timestamp_delta(varlong) |
+    #            offset_delta(varint) | key_size(varint,-1=null) |
+    #            value_size(varint) | value(bytes) | headers_count(varint,0)
+    value = _WRITE_PROBE_MARKER
+    record_body = (
+        struct.pack(">b", 0)  # attributes (no compression)
+        + _write_varlong(0)  # timestamp_delta
+        + _write_varint(0)  # offset_delta
+        + _write_varint(-1)  # key = null
+        + _write_varint(len(value))
+        + value
+        + _write_varint(0)  # headers count = 0
+    )
+    record = _write_varint(len(record_body)) + record_body
+    # Batch header layout (61 bytes fixed + records):
+    #   base_offset(int64) | batch_length(int32) | leader_epoch(int32) |
+    #   magic(int8=2) | crc(int32) | attributes(int16) |
+    #   last_offset_delta(int32) | base_timestamp(int64) |
+    #   max_timestamp(int64) | producer_id(int64) | producer_epoch(int16) |
+    #   base_sequence(int32) | record_count(int32) | records
+    body_after_crc = (
+        struct.pack(">h", 0)  # attributes
+        + struct.pack(">i", 0)  # last_offset_delta
+        + struct.pack(">q", 0)  # base_timestamp
+        + struct.pack(">q", 0)  # max_timestamp
+        + struct.pack(">q", -1)  # producer_id
+        + struct.pack(">h", -1)  # producer_epoch
+        + struct.pack(">i", -1)  # base_sequence
+        + struct.pack(">i", 1)  # record_count
+        + record
+    )
+    header_with_crc_placeholder = (
+        struct.pack(">i", 0)
+        + struct.pack(">b", 2)
+        + struct.pack(">I", 0)  # partition_leader_epoch, magic, crc placeholder
+    )
+    # batch_length = bytes after (base_offset + batch_length) = everything
+    # from `partition_leader_epoch` through the last record byte.
+    batch_body = header_with_crc_placeholder + body_after_crc
+    batch_length = len(batch_body)
+    return struct.pack(">q", 0) + struct.pack(">i", batch_length) + batch_body
+
+
+def _write_varint(value: int) -> bytes:
+    return _write_unsigned_varint((int(value) << 1) ^ (int(value) >> 63))
+
+
+def _write_varlong(value: int) -> bytes:
+    return _write_unsigned_varint((int(value) << 1) ^ (int(value) >> 63))
+
+
+def _write_unsigned_varint(value: int) -> bytes:
+    value &= 0xFFFFFFFFFFFFFFFF  # constrain to 64-bit for varlong-safety
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            break
+    return bytes(out)
+
+
+def _probe_topic_write_permission(
+    sock: socket.socket,
+    correlation: int,
+    topic: str,
+    partition: int = 0,
+) -> tuple[bool | None, int]:
+    """Probe whether the current SASL session can Write a topic.
+
+    ⚠️ **DESTRUCTIVE**: if the topic accepts writes, a marker record
+    (`[REDPOSTURE-AUDIT-PROBE-DO-NOT-USE]`) is actually appended to the log.
+    Callers must gate this behind an explicit opt-in flag.
+
+    Non-destructive alternative doesn't exist in the Kafka wire protocol:
+    the broker checks the topic's Write ACL BEFORE producing, but there's
+    no dry-run mode for Produce. Sending an invalid batch (empty / bad crc)
+    is rejected as INVALID_RECORD (code 87) before or after the ACL check
+    depending on broker version — not reliable.
+
+    Returns `(write_or_none, next_correlation_id)`:
+      - error_code = 29 (TOPIC_AUTHORIZATION_FAILED) → write = False
+      - error_code = 0                              → write = True (probe record written)
+      - other codes → None (inconclusive)
+    """
+    batch = _build_produce_probe_batch()
+    # Produce v3 request body:
+    #   transactional_id (nullable string, null = -1)
+    #   acks (int16, 1 = leader ack)
+    #   timeout_ms (int32)
+    #   topics [
+    #     topic (string)
+    #     partitions [
+    #       partition (int32)
+    #       records (bytes: int32 length + batch)
+    #     ]
+    #   ]
+    body = (
+        struct.pack(">h", -1)  # transactional_id = null
+        + struct.pack(">h", 1)  # acks = 1 (leader)
+        + struct.pack(">i", 5000)  # timeout_ms
+        + struct.pack(">i", 1)  # topics count
+        + _encode_kafka_string(topic)
+        + struct.pack(">i", 1)  # partitions count
+        + struct.pack(">i", int(partition))
+        + struct.pack(">i", len(batch))
+        + batch
+    )
+    try:
+        payload = _send_kafka_request(
+            sock,
+            api_key=KAFKA_PRODUCE,
+            api_version=3,
+            correlation_id=correlation,
+            client_id=KAFKA_CLIENT_ID,
+            body=body,
+        )
+    except (TimeoutError, ConnectionError, OSError, ValueError):
+        return None, correlation + 1
+    correlation += 1
+    # Parse Produce v3 response: correlation_id | topics [ name, partitions
+    # [ partition, error_code, base_offset, log_append_time ] ] | throttle_time
+    try:
+        reader = _KafkaReader(payload)
+        _ = reader.read_i32()  # correlation
+        topic_count = reader.read_i32()
+        for _ in range(max(0, topic_count)):
+            _ = reader.read_string(nullable=False) or ""
+            partition_count = reader.read_i32()
+            for _ in range(max(0, partition_count)):
+                _ = reader.read_i32()  # partition_id
+                error_code = reader.read_i16()
+                _ = reader.read_i64()  # base_offset
+                _ = reader.read_i64()  # log_append_time (v2+)
+                if error_code == 29:
+                    return False, correlation
+                if error_code == 0:
+                    return True, correlation
+                return None, correlation
+        return None, correlation
+    except (ValueError, struct.error):
+        return None, correlation
+
+
+def _probe_topic_permissions_bulk(
+    host: str,
+    port: int,
+    timeout: float,
+    topics: list[str],
+    *,
+    username: str | None = None,
+    password: str | None = None,
+    use_tls: bool | None = None,
+    probe_write: bool = False,
+) -> dict[str, dict[str, bool | None]]:
+    """Probe Read (and optionally Write) ACLs for a list of topics.
+
+    Opens one authenticated socket and reuses it across all probes to keep
+    the per-topic overhead to a single Fetch request (plus one Produce
+    request when `probe_write=True`).
+
+    Returns `{topic: {"read": bool | None, "write": bool | None}}`. Unknown
+    outcomes surface as `None` so the renderer can render `(read:?)` rather
+    than making up a state.
+
+    ⚠️ `probe_write=True` is destructive — see `_probe_topic_write_permission`.
+    """
+    if not topics:
+        return {}
+    results: dict[str, dict[str, bool | None]] = {}
+    # Broad exception net around the whole probe flow. The probe is a
+    # *best-effort* enrichment on top of a successful audit — if anything
+    # goes sideways (test doubles missing sendall, socket refused, TLS
+    # mismatch, malformed response), we degrade to `read/write = None` for
+    # every requested topic rather than sinking the parent audit.
+    try:
+        sock, _transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
+    except BaseException:  # noqa: BLE001
+        return {topic: {"read": None, "write": None if probe_write else None} for topic in topics}
+    try:
+        with sock:
+            correlation = 1
+            ok, correlation, _session_error = _authenticate_or_probe(sock, correlation, username, password)
+            if not ok:
+                return {topic: {"read": None, "write": None if probe_write else None} for topic in topics}
+            for topic in topics:
+                read_result, correlation = _probe_topic_read_permission(sock, correlation, topic)
+                write_result: bool | None = None
+                if probe_write:
+                    write_result, correlation = _probe_topic_write_permission(sock, correlation, topic)
+                results[topic] = {"read": read_result, "write": write_result}
+    except BaseException:  # noqa: BLE001
+        for topic in topics:
+            results.setdefault(topic, {"read": None, "write": None if probe_write else None})
+    return results
 
 
 def _read_topic_messages(

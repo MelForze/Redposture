@@ -220,6 +220,7 @@ _EXTENDED_EXPECTED_LABELS = (
     "kafka_extended_dump_max_conflict",
     "kafka_extended_defcreds",
     "kafka_extended_empty_password",
+    "kafka_extended_probe_write",
     "kafka_tls_extended_topic",
     "kafka_tls_extended_bad_password",
     "zookeeper_debug_smoke",

@@ -1085,6 +1085,12 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         if getattr(args, "max_messages", None) is not None:
             return True
         return dump_flag_limit(getattr(args, "dump", None)) is not None
+    if name == "probe_write":
+        # Kafka --probe-write flag: opt-in destructive per-topic Write-ACL
+        # probe (attempts a Produce with a marker record). Silent False when
+        # the flag isn't on the args namespace at all — same shape as other
+        # opt-in module knobs.
+        return bool(getattr(args, "probe_write", False))
     if name == "credential_candidates":
         if credential.username is not None:
             return [
