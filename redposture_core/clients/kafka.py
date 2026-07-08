@@ -142,28 +142,107 @@ def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
 
 
 def _kafka_error_name(code: int) -> str:
-    # Kafka wire-protocol error codes from `Errors.java`. Extended progressively:
-    # the audit path historically only mapped the auth/version subset because
-    # every other outcome funnels into a single "detected" success. NOT_LEADER
-    # (code 6) shows up when we probe a partition whose leader is on another
-    # broker (multi-broker cluster) and we haven't yet re-connected to it —
-    # the correct fix is a partition-aware Metadata refresh, which is a
-    # separate feature; here we just make the log line self-explanatory.
+    # Complete map of Kafka wire-protocol error codes from `Errors.java`.
+    # Any opaque `ERR_XX` in the audit output means the broker returned a
+    # code we don't recognize yet — file an issue with the number so it can
+    # be added here. All commonly-hit codes are covered.
     names = {
         0: "NO_ERROR",
         1: "OFFSET_OUT_OF_RANGE",
+        2: "CORRUPT_MESSAGE",
         3: "UNKNOWN_TOPIC_OR_PARTITION",
+        4: "INVALID_FETCH_SIZE",
         5: "LEADER_NOT_AVAILABLE",
         6: "NOT_LEADER_OR_FOLLOWER",
         7: "REQUEST_TIMED_OUT",
+        8: "BROKER_NOT_AVAILABLE",
         9: "REPLICA_NOT_AVAILABLE",
+        10: "MESSAGE_TOO_LARGE",
+        11: "STALE_CONTROLLER_EPOCH",
+        12: "OFFSET_METADATA_TOO_LARGE",
         13: "NETWORK_EXCEPTION",
+        14: "COORDINATOR_LOAD_IN_PROGRESS",
+        15: "COORDINATOR_NOT_AVAILABLE",
+        16: "NOT_COORDINATOR",
+        17: "INVALID_TOPIC_EXCEPTION",
+        18: "RECORD_LIST_TOO_LARGE",
+        19: "NOT_ENOUGH_REPLICAS",
+        20: "NOT_ENOUGH_REPLICAS_AFTER_APPEND",
+        21: "INVALID_REQUIRED_ACKS",
+        22: "ILLEGAL_GENERATION",
+        23: "INCONSISTENT_GROUP_PROTOCOL",
+        24: "INVALID_GROUP_ID",
+        25: "UNKNOWN_MEMBER_ID",
+        26: "INVALID_SESSION_TIMEOUT",
+        27: "REBALANCE_IN_PROGRESS",
+        28: "INVALID_COMMIT_OFFSET_SIZE",
         29: "TOPIC_AUTHORIZATION_FAILED",
+        30: "GROUP_AUTHORIZATION_FAILED",
         31: "CLUSTER_AUTHORIZATION_FAILED",
+        32: "INVALID_TIMESTAMP",
         33: "UNSUPPORTED_SASL_MECHANISM",
+        34: "ILLEGAL_SASL_STATE",
         35: "UNSUPPORTED_VERSION",
-        57: "SECURITY_DISABLED",
+        36: "TOPIC_ALREADY_EXISTS",
+        37: "INVALID_PARTITIONS",
+        38: "INVALID_REPLICATION_FACTOR",
+        39: "INVALID_REPLICA_ASSIGNMENT",
+        40: "INVALID_CONFIG",
+        41: "NOT_CONTROLLER",
+        42: "INVALID_REQUEST",
+        43: "UNSUPPORTED_FOR_MESSAGE_FORMAT",
+        44: "POLICY_VIOLATION",
+        45: "OUT_OF_ORDER_SEQUENCE_NUMBER",
+        46: "DUPLICATE_SEQUENCE_NUMBER",
+        47: "INVALID_PRODUCER_EPOCH",
+        48: "INVALID_TXN_STATE",
+        49: "INVALID_PRODUCER_ID_MAPPING",
+        50: "INVALID_TRANSACTION_TIMEOUT",
+        51: "CONCURRENT_TRANSACTIONS",
+        52: "TRANSACTION_COORDINATOR_FENCING",
+        53: "TRANSACTIONAL_ID_AUTHORIZATION_FAILED",
+        54: "SECURITY_DISABLED",
+        55: "OPERATION_NOT_ATTEMPTED",
+        56: "KAFKA_STORAGE_ERROR",
+        57: "LOG_DIR_NOT_FOUND",
         58: "SASL_AUTHENTICATION_FAILED",
+        59: "UNKNOWN_PRODUCER_ID",
+        60: "REASSIGNMENT_IN_PROGRESS",
+        61: "DELEGATION_TOKEN_AUTH_DISABLED",
+        62: "DELEGATION_TOKEN_NOT_FOUND",
+        63: "DELEGATION_TOKEN_OWNER_MISMATCH",
+        64: "DELEGATION_TOKEN_REQUEST_NOT_ALLOWED",
+        65: "DELEGATION_TOKEN_AUTHORIZATION_FAILED",
+        66: "DELEGATION_TOKEN_EXPIRED",
+        67: "INVALID_PRINCIPAL_TYPE",
+        68: "NON_EMPTY_GROUP",
+        69: "GROUP_ID_NOT_FOUND",
+        70: "FETCH_SESSION_ID_NOT_FOUND",
+        71: "INVALID_FETCH_SESSION_EPOCH",
+        72: "LISTENER_NOT_FOUND",
+        73: "TOPIC_DELETION_DISABLED",
+        74: "FENCED_LEADER_EPOCH",
+        75: "UNKNOWN_LEADER_EPOCH",
+        # 76 = UNSUPPORTED_COMPRESSION_TYPE — legacy Fetch API versions can't
+        # decode records the broker stored with certain codecs (notably zstd,
+        # KIP-110). The client now sends Fetch v10 which supports every
+        # codec zstd/snappy/lz4/gzip out of the box, so this shouldn't
+        # surface on a modern deployment.
+        76: "UNSUPPORTED_COMPRESSION_TYPE",
+        77: "STALE_BROKER_EPOCH",
+        78: "OFFSET_NOT_AVAILABLE",
+        79: "MEMBER_ID_REQUIRED",
+        80: "PREFERRED_LEADER_NOT_AVAILABLE",
+        81: "GROUP_MAX_SIZE_REACHED",
+        82: "FENCED_INSTANCE_ID",
+        83: "ELIGIBLE_LEADERS_NOT_AVAILABLE",
+        84: "ELECTION_NOT_NEEDED",
+        85: "NO_REASSIGNMENT_IN_PROGRESS",
+        86: "GROUP_SUBSCRIBED_TO_TOPIC",
+        87: "INVALID_RECORD",
+        88: "UNSTABLE_OFFSET_COMMIT",
+        89: "THROTTLING_QUOTA_EXCEEDED",
+        90: "PRODUCER_FENCED",
     }
     return names.get(code, f"ERR_{code}")
 
@@ -494,38 +573,56 @@ def _parse_list_offsets_response(payload: bytes, expected_correlation_id: int) -
         return None, f"invalid ListOffsets response: {exc}"
 
 
-KAFKA_FETCH_API_VERSION = 4  # Kafka 0.11+; required by Kafka 4.0+ which dropped v0-v3.
+KAFKA_FETCH_API_VERSION = 10  # Kafka 2.3+; required for zstd (KIP-110). Fixes ERR_76.
 
 
 def _build_fetch_request_body(
     topic: str, partition: int, offset: int, *, max_bytes: int = KAFKA_FETCH_MAX_BYTES
 ) -> bytes:
-    # Fetch v4 wire format:
+    # Fetch v10 wire format:
     #   replica_id (-1)             | int32
     #   max_wait_ms                 | int32
     #   min_bytes                   | int32
     #   max_bytes (whole response)  | int32  <- new in v3
     #   isolation_level             | int8   <- new in v4 (0 = READ_UNCOMMITTED)
+    #   session_id                  | int32  <- new in v7 (0 = no fetch session)
+    #   session_epoch               | int32  <- new in v7 (-1 = INITIAL_EPOCH)
     #   topics [                    | int32 count
     #     topic name                | string
     #     partitions [              | int32 count
     #       partition_id            | int32
+    #       current_leader_epoch    | int32  <- new in v9 (-1 = unknown)
     #       fetch_offset            | int64
+    #       log_start_offset        | int64  <- new in v5 (-1 = broker default)
     #       partition_max_bytes     | int32
     #     ]
     #   ]
+    #   forgotten_topics [          | int32 count  <- new in v7
+    #     topic name                | string
+    #     partitions [int32]        | int32 count
+    #   ]
+    #
+    # v10 is important: KIP-110 wired the response schema so brokers can
+    # send zstd-compressed records without upgrading the client further.
+    # Fetch v4 gets ERR_76 (UNSUPPORTED_COMPRESSION_TYPE) on any topic
+    # whose stored batches use zstd — very common on high-throughput topics.
     return (
         struct.pack(">i", -1)  # replica_id
         + struct.pack(">i", 300)  # max_wait_ms
         + struct.pack(">i", 1)  # min_bytes
         + struct.pack(">i", int(max_bytes) * 2)  # max_bytes (whole response)
         + struct.pack(">b", 0)  # isolation_level READ_UNCOMMITTED
+        + struct.pack(">i", 0)  # session_id (v7+)
+        + struct.pack(">i", -1)  # session_epoch (v7+)
         + struct.pack(">i", 1)  # topics count
         + _encode_kafka_string(topic)
         + struct.pack(">i", 1)  # partitions count
         + struct.pack(">i", int(partition))
+        + struct.pack(">i", -1)  # current_leader_epoch (v9+)
         + struct.pack(">q", int(offset))
+        + struct.pack(">q", -1)  # log_start_offset (v5+)
         + struct.pack(">i", int(max_bytes))
+        + struct.pack(">i", 0)  # forgotten_topics count (v7+)
     )
 
 
@@ -674,10 +771,12 @@ def _parse_fetch_response(
     expected_partition: int,
     max_messages: int,
 ) -> tuple[list[tuple[int, str]] | None, str | None]:
-    """Parse a Fetch v4 response.
+    """Parse a Fetch v10 response.
 
     Wire format:
-      throttle_time_ms        | int32   (v1+; v0 doesn't have this)
+      throttle_time_ms        | int32   (v1+)
+      top_error_code          | int16   (v7+ — session-level error)
+      session_id              | int32   (v7+ — for incremental fetch)
       topics [                | int32 count
         topic_name            | string
         partitions [          | int32 count
@@ -685,11 +784,12 @@ def _parse_fetch_response(
           error_code          | int16
           high_watermark      | int64
           last_stable_offset  | int64   (v4+)
+          log_start_offset    | int64   (v5+)
           aborted_txns [      | int32 count (nullable, -1 = null)
             producer_id       | int64
             first_offset      | int64
           ]
-          records_size        | int32
+          records_size        | int32   (nullable, -1 = null)
           records             | bytes   (record-batch v2 format)
         ]
       ]
@@ -701,19 +801,25 @@ def _parse_fetch_response(
             return None, f"unexpected correlation id {correlation_id} (expected {expected_correlation_id})"
 
         _ = reader.read_i32()  # throttle_time_ms
+        top_error_code = reader.read_i16()  # v7+
+        if top_error_code != 0:
+            # Session-level error — the whole response is invalid.
+            return None, f"Fetch session error: {_kafka_error_name(int(top_error_code))}"
+        _ = reader.read_i32()  # session_id (v7+)
 
         topic_count = reader.read_i32()
         if topic_count <= 0:
             return [], None
 
         for _ in range(topic_count):
-            _ = reader.read_string(nullable=False) or ""
+            topic_name = reader.read_string(nullable=False) or ""
             partition_count = reader.read_i32()
             for _ in range(max(0, partition_count)):
                 partition = reader.read_i32()
                 error_code = reader.read_i16()
-                _ = reader.read_i64()  # high_watermark
-                _ = reader.read_i64()  # last_stable_offset (v4+)
+                high_watermark = reader.read_i64()
+                last_stable_offset = reader.read_i64()  # v4+
+                log_start_offset = reader.read_i64()  # v5+
                 aborted_count = reader.read_i32()
                 if aborted_count > 0:
                     # Skip aborted transactions: each is two int64s.
@@ -724,18 +830,19 @@ def _parse_fetch_response(
                 # Kafka spec: `records` is a NULLABLE_BYTES field
                 # (nullableVersions "0+" in FetchResponse.json). A `-1` size is
                 # the null-sentinel and means "broker sent no records for this
-                # partition" — common for empty partitions, partitions where
-                # the requested offset equals high_watermark, or after a
-                # fetch-session throttle. Previously we treated -1 as a fatal
-                # framing error, which killed dumps on real multi-partition
-                # topics where some partitions were idle.
+                # partition" — common for empty partitions or when the
+                # requested offset equals high_watermark.
                 if records_size == -1:
                     records = b""
                 elif records_size < 0 or records_size > reader.remaining():
                     return None, (
                         f"invalid Fetch message set size: got {records_size} "
                         f"but only {reader.remaining()} bytes remain "
-                        f"(partition={partition}, error_code={error_code})"
+                        f"(topic={topic_name!r}, partition={partition}, "
+                        f"error_code={error_code} = {_kafka_error_name(int(error_code))}, "
+                        f"high_watermark={high_watermark}, "
+                        f"last_stable_offset={last_stable_offset}, "
+                        f"log_start_offset={log_start_offset})"
                     )
                 else:
                     records = reader._read(records_size)  # noqa: SLF001
@@ -743,8 +850,29 @@ def _parse_fetch_response(
                 if partition != expected_partition:
                     continue
                 if error_code != 0:
-                    return None, f"Fetch failed: {_kafka_error_name(int(error_code))}"
-                return _parse_message_set_entries(records, max_messages), None
+                    return None, (
+                        f"Fetch failed: {_kafka_error_name(int(error_code))} "
+                        f"(topic={topic_name!r}, partition={partition}, "
+                        f"high_watermark={high_watermark}, "
+                        f"log_start_offset={log_start_offset})"
+                    )
+                entries = _parse_message_set_entries(records, max_messages)
+                if not entries and records:
+                    # Broker returned records bytes but our parser produced
+                    # zero decodable messages. Most common cause: the batch
+                    # uses a compression codec (zstd/snappy/lz4/gzip) and
+                    # `_parse_record_batch_entries` skips compressed batches
+                    # because we don't ship decompression libs. Surface a
+                    # hint so the operator understands why (max:N) shows
+                    # zero.
+                    return None, (
+                        f"Fetch returned {len(records)} bytes of records but zero "
+                        f"decodable messages — likely a compressed record batch "
+                        f"(zstd/snappy/lz4/gzip). Decompression is not implemented "
+                        f"in the audit client. (topic={topic_name!r}, "
+                        f"partition={partition}, high_watermark={high_watermark})"
+                    )
+                return entries, None
 
         return [], None
     except (ValueError, struct.error) as exc:
