@@ -850,6 +850,138 @@ def test_recv_kafka_frame_hex_hint_for_binary_garbage() -> None:
     assert "load balancer" in message or "proxy" in message
 
 
+def test_classify_ssl_error_maps_common_openssl_verdicts() -> None:
+    """The audit line for a non-Kafka TLS listener needs to be
+    self-explanatory. `_classify_ssl_error` turns raw OpenSSL text into a
+    root-cause sentence per family. The tail `_ssl.c:LINE` marker (which
+    drifts across Python patch releases) must never leak through."""
+    import ssl as _ssl
+
+    def _mk(msg: str) -> _ssl.SSLError:
+        # SSLError doesn't accept a message positional cleanly across
+        # versions; build via constructor with a single-arg fallback.
+        try:
+            return _ssl.SSLError(1, msg)
+        except TypeError:
+            return _ssl.SSLError(msg)
+
+    assert (
+        kafka._classify_ssl_error(_mk("[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:992)"))
+        == "peer answered plaintext to TLS ClientHello (not a TLS listener)"
+    )
+    assert (
+        kafka._classify_ssl_error(_mk("TLS/SSL connection has been closed (EOF) (_ssl.c:992)"))
+        == "peer closed TLS handshake without alert (SNI filter / firewall / non-Kafka listener)"
+    )
+    assert (
+        kafka._classify_ssl_error(_mk("[SSL: SSLV3_ALERT_BAD_CERTIFICATE] sslv3 alert bad certificate (_ssl.c:992)"))
+        == "peer requires client certificate (mTLS) — need --tls-cert to proceed"
+    )
+    assert (
+        kafka._classify_ssl_error(_mk("[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE] handshake failure (_ssl.c:992)"))
+        == "peer rejected TLS handshake (cipher/protocol mismatch or client auth required)"
+    )
+    # Fallback path: unknown SSL error class → strip the noisy
+    # `_ssl.c:LINE` trailer but keep the rest.
+    friendly = kafka._classify_ssl_error(_mk("[SSL: UNKNOWN_THING] something odd (_ssl.c:992)"))
+    assert "_ssl.c" not in friendly
+    assert "SSL" in friendly or "unknown" in friendly.lower() or "handshake" in friendly.lower()
+
+
+def test_open_kafka_socket_falls_back_to_plaintext_on_inferred_tls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When TLS was auto-inferred from the port (9093/19093/29093) and the
+    handshake fails, `open_kafka_socket` retries as plaintext instead of
+    letting the raw `SSLError` bubble up. This is the fix for the
+    `[!] connection failed err=[SSL: WRONG_VERSION_NUMBER]` spam on hosts
+    where port 9093 hosts something other than TLS Kafka."""
+    import ssl as _ssl
+
+    class _FakeSocket:
+        def __init__(self):
+            self._timeout: float | None = None
+            self.closed = False
+
+        def settimeout(self, timeout):
+            self._timeout = timeout
+
+        def close(self):
+            self.closed = True
+
+    class _FakeCtx:
+        check_hostname = True
+        verify_mode = 0
+
+        def wrap_socket(self, _sock, server_hostname):
+            _ = server_hostname
+            raise _ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:992)")
+
+    connect_calls: list[tuple[str, int]] = []
+    made_sockets: list[_FakeSocket] = []
+
+    def _fake_connect(addr, timeout):
+        _ = timeout
+        connect_calls.append(addr)
+        sock = _FakeSocket()
+        made_sockets.append(sock)
+        return sock
+
+    monkeypatch.setattr(kafka.socket, "create_connection", _fake_connect)
+    monkeypatch.setattr(kafka.ssl, "create_default_context", lambda: _FakeCtx())
+
+    # Inferred TLS via port 9093 — handshake fails, fallback opens plaintext.
+    sock, transport = kafka.open_kafka_socket("kafka.example.com", 9093, 1.0)
+    assert transport == "plaintext"
+    assert connect_calls == [("kafka.example.com", 9093), ("kafka.example.com", 9093)]
+    # First socket must be closed after the failed handshake, second is
+    # the plaintext fallback returned to the caller.
+    assert made_sockets[0].closed is True
+    assert sock is made_sockets[1]
+
+
+def test_open_kafka_socket_reraises_ssl_error_when_use_tls_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the caller *explicitly* asked for TLS (`use_tls=True`), we don't
+    hide the failure — we surface a friendly classification so audit
+    output shows e.g. `not a TLS listener` instead of the raw OpenSSL
+    text. No plaintext fallback is attempted in the explicit case."""
+    import ssl as _ssl
+
+    class _FakeSocket:
+        def __init__(self):
+            self.closed = False
+
+        def settimeout(self, _t):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    class _FakeCtx:
+        check_hostname = True
+        verify_mode = 0
+
+        def wrap_socket(self, _sock, server_hostname):
+            _ = server_hostname
+            raise _ssl.SSLError(1, "[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:992)")
+
+    connect_calls: list[tuple[str, int]] = []
+
+    def _fake_connect(addr, timeout):
+        _ = timeout
+        connect_calls.append(addr)
+        return _FakeSocket()
+
+    monkeypatch.setattr(kafka.socket, "create_connection", _fake_connect)
+    monkeypatch.setattr(kafka.ssl, "create_default_context", lambda: _FakeCtx())
+
+    with pytest.raises(ValueError) as exc:
+        kafka.open_kafka_socket("kafka.example.com", 9092, 1.0, use_tls=True)
+    message = str(exc.value)
+    assert "TLS handshake failed" in message
+    assert "not a TLS listener" in message
+    # Only ONE connect attempt: no plaintext fallback in the explicit case.
+    assert connect_calls == [("kafka.example.com", 9092)]
+
+
 def test_open_kafka_socket_extended_tls_first_ports(monkeypatch: pytest.MonkeyPatch) -> None:
     """Docker/lab deployments commonly expose SASL_SSL on 19093 (bitnami)
     or 29093 (Confluent cp-kafka). Both should be TLS-first now — no probe

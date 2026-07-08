@@ -69,6 +69,44 @@ def _is_tls_record_prelude(raw: bytes) -> bool:
 _TLS_FIRST_PORTS = frozenset({9093, 19093, 29093})
 
 
+def _classify_ssl_error(exc: ssl.SSLError) -> str:
+    """Turn a raw OpenSSL exception into a short, non-scary explanation.
+
+    The default `str(SSLError)` is `[SSL: WRONG_VERSION_NUMBER] wrong
+    version number (_ssl.c:992)` — technically accurate, but for an
+    auditor scanning hundreds of hosts it's noise. Boil it down to the
+    root cause the operator actually cares about.
+    """
+    text = str(exc or "").lower()
+    if "wrong_version_number" in text or "wrong version number" in text:
+        # Client sent TLS ClientHello, peer answered plaintext (or a
+        # totally different protocol). Almost always means "this port
+        # isn't TLS at all".
+        return "peer answered plaintext to TLS ClientHello (not a TLS listener)"
+    if "unexpected_eof_while_reading" in text or "connection has been closed (eof)" in text:
+        # Peer accepted the TCP handshake and then immediately hung up on
+        # the TLS layer without an alert. Typical for SNI-firewalls,
+        # service meshes, or LBs that vet clients before forwarding.
+        return "peer closed TLS handshake without alert (SNI filter / firewall / non-Kafka listener)"
+    if "sslv3_alert_bad_certificate" in text or "bad_certificate" in text:
+        # Peer requires a client certificate (mutual TLS) and rejected
+        # our anonymous handshake. Fine — just not something the audit
+        # tool can bypass without --tls-cert.
+        return "peer requires client certificate (mTLS) — need --tls-cert to proceed"
+    if "sslv3_alert_handshake_failure" in text or "handshake_failure" in text:
+        return "peer rejected TLS handshake (cipher/protocol mismatch or client auth required)"
+    if "certificate_unknown" in text or "certificate verify failed" in text:
+        return "peer's TLS certificate is unrecognised (should be masked by CERT_NONE — file bug)"
+    if "record layer failure" in text or "no shared cipher" in text:
+        return "peer has no shared TLS cipher with client"
+    # Last-resort fallback: keep the exception text but strip the noisy
+    # _ssl.c:LINE trailer that changes across Python patch releases.
+    trimmed = str(exc or "").strip()
+    if " (_ssl.c:" in trimmed:
+        trimmed = trimmed.split(" (_ssl.c:", 1)[0]
+    return trimmed or "TLS handshake failed"
+
+
 def open_kafka_socket(
     host: str,
     port: int,
@@ -84,10 +122,17 @@ def open_kafka_socket(
     open plaintext and rely on the caller catching `_TlsProbeError` from
     `_recv_kafka_frame` to retry.
 
+    TLS handshake errors get an auto-fallback to plaintext when `use_tls`
+    was inferred (None). That covers the symmetrical case of the TLS-record
+    prelude path: instead of a scary `[SSL: WRONG_VERSION_NUMBER]` on a
+    port that turns out to be plaintext, we quietly retry as plaintext
+    and let the ApiVersions probe decide if it's Kafka.
+
     Uses `check_hostname=False` + `verify_mode=CERT_NONE` — audit tool posture
     (recon over self-signed brokers is the common case). Mirrors
     `_open_grpc_socket` in `redposture_core/clients/grpc.py`.
     """
+    tls_inferred = use_tls is None
     resolved = use_tls if use_tls is not None else (port in _TLS_FIRST_PORTS)
     base = socket.create_connection((host, port), timeout=timeout)
     base.settimeout(timeout)
@@ -99,8 +144,28 @@ def open_kafka_socket(
     try:
         wrapped = ctx.wrap_socket(base, server_hostname=host)
         wrapped.settimeout(timeout)
+    except ssl.SSLError as ssl_exc:
+        try:
+            base.close()
+        except OSError:
+            pass
+        if tls_inferred:
+            # Auto-fallback: reopen as plaintext. If it really is Kafka
+            # on the "TLS-first" port, the ApiVersions probe upstairs
+            # will confirm; if it isn't, the non-Kafka detection path
+            # (`_identify_non_kafka_prelude`) surfaces a clean summary.
+            fallback = socket.create_connection((host, port), timeout=timeout)
+            fallback.settimeout(timeout)
+            return fallback, "plaintext"
+        # Caller forced TLS explicitly — surface the friendly reason so
+        # the audit line reads e.g. `not a TLS listener` instead of
+        # `[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:992)`.
+        raise ValueError(f"TLS handshake failed: {_classify_ssl_error(ssl_exc)}") from ssl_exc
     except BaseException:
-        base.close()
+        try:
+            base.close()
+        except OSError:
+            pass
         raise
     return wrapped, "tls"
 
