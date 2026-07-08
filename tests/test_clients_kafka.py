@@ -759,3 +759,133 @@ def test_read_topic_messages_falls_back_to_bootstrap_when_leader_unreachable(mon
     assert error is None
     assert items == ["p0@50 fallback-msg"]
     assert transport_mode == "plaintext"
+
+
+# ---------------------------------------------------------------------------
+# Non-Kafka peer detection (regression: `invalid Kafka frame size 1213486160`
+# on hosts where port 9092 actually runs an HTTP admin / REST proxy)
+# ---------------------------------------------------------------------------
+
+
+class _CannedRecvSocket:
+    """Deterministic socket stub that hands back `payload` in chunks."""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+        self._timeout: float | None = 1.0
+
+    def sendall(self, _data: bytes) -> None:
+        return None
+
+    def recv(self, size: int) -> bytes:
+        chunk = self._payload[:size]
+        self._payload = self._payload[size:]
+        return chunk
+
+    def gettimeout(self) -> float | None:
+        return self._timeout
+
+    def settimeout(self, timeout: float | None) -> None:
+        self._timeout = timeout
+
+
+def test_identify_non_kafka_prelude_covers_http_and_text_shapes() -> None:
+    """Root-cause helper for the `invalid frame size 1213486160` mystery.
+    1213486160 = 0x48545450 = ASCII 'HTTP' — the peer was an HTTP server."""
+    assert kafka._identify_non_kafka_prelude(b"HTTP") == "HTTP response"
+    assert kafka._identify_non_kafka_prelude(b"GET ") == "HTTP request"
+    assert kafka._identify_non_kafka_prelude(b"POST") == "HTTP request"
+    assert kafka._identify_non_kafka_prelude(b"HEAD") == "HTTP request"
+    # A random printable-ASCII prefix isn't HTTP but is clearly text —
+    # still a strong signal that the peer isn't Kafka.
+    assert kafka._identify_non_kafka_prelude(b"USER") == "ASCII text"
+    # Real Kafka frame sizes (binary, high byte 0x00) fall through.
+    assert kafka._identify_non_kafka_prelude(b"\x00\x00\x01\x40") is None
+    # Buffer shorter than 4 bytes: no decision.
+    assert kafka._identify_non_kafka_prelude(b"HT") is None
+
+
+def test_recv_kafka_frame_reports_http_peer_clearly() -> None:
+    """The runtime must surface a human-readable 'not a Kafka broker' hint
+    for HTTP responses instead of the historical
+    `invalid Kafka frame size 1213486160`.
+    """
+    sock = _CannedRecvSocket(b"HTTP/1.1 400 Bad Request\r\nServer: nginx\r\n\r\n")
+    with pytest.raises(ValueError) as exc:
+        kafka._recv_kafka_frame(sock)
+    message = str(exc.value)
+    assert "not a Kafka broker" in message
+    assert "HTTP response" in message
+    # First-line preview is included so operators can see what actually
+    # answered without breaking out `tcpdump`.
+    assert "HTTP/1.1" in message
+
+
+def test_recv_kafka_frame_reports_http_request_prelude() -> None:
+    """When the peer replies with what looks like an HTTP request line
+    (`GET /`, `POST /`, etc.) — often a reverse proxy misconfigured to
+    forward inbound traffic — the parser still classifies it correctly.
+    """
+    sock = _CannedRecvSocket(b"GET /health HTTP/1.1\r\nHost: kafka\r\n\r\n")
+    with pytest.raises(ValueError) as exc:
+        kafka._recv_kafka_frame(sock)
+    assert "not a Kafka broker" in str(exc.value)
+    assert "HTTP request" in str(exc.value)
+
+
+def test_recv_kafka_frame_hex_hint_for_binary_garbage() -> None:
+    """Genuinely-binary garbage from a load balancer / non-Kafka protocol
+    still fails, but now the error carries the raw hex so the user can
+    match it against a wire trace instead of guessing what the number
+    means."""
+    # 0x40000000 = 1_073_741_824, larger than KAFKA_MAX_FRAME (16 MiB),
+    # so `_recv_kafka_frame` walks to the "invalid Kafka frame size"
+    # branch — but the bytes aren't ASCII, so the HTTP path is skipped.
+    sock = _CannedRecvSocket(b"\x40\x00\x00\x00")
+    with pytest.raises(ValueError) as exc:
+        kafka._recv_kafka_frame(sock)
+    message = str(exc.value)
+    assert "invalid Kafka frame size" in message
+    assert "0x40000000" in message
+    assert "load balancer" in message or "proxy" in message
+
+
+def test_open_kafka_socket_extended_tls_first_ports(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Docker/lab deployments commonly expose SASL_SSL on 19093 (bitnami)
+    or 29093 (Confluent cp-kafka). Both should be TLS-first now — no probe
+    round-trip needed for the well-known layout."""
+
+    wrap_calls: list[str] = []
+
+    class _FakeCtx:
+        check_hostname = True
+        verify_mode = 0
+
+        def wrap_socket(self, sock, server_hostname):
+            wrap_calls.append(server_hostname)
+            return sock
+
+    class _FakeSocket:
+        def __init__(self):
+            self._timeout: float | None = None
+
+        def settimeout(self, timeout):
+            self._timeout = timeout
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(kafka.socket, "create_connection", lambda *_a, **_kw: _FakeSocket())
+    monkeypatch.setattr(kafka.ssl, "create_default_context", lambda: _FakeCtx())
+
+    _, transport = kafka.open_kafka_socket("kafka.internal", 19093, 1.0)
+    assert transport == "tls"
+    _, transport = kafka.open_kafka_socket("kafka.internal", 29093, 1.0)
+    assert transport == "tls"
+    assert wrap_calls == ["kafka.internal", "kafka.internal"]
+
+    # A non-TLS port still opens plaintext by default.
+    wrap_calls.clear()
+    _, transport = kafka.open_kafka_socket("kafka.internal", 29092, 1.0)
+    assert transport == "plaintext"
+    assert wrap_calls == []

@@ -41,7 +41,7 @@ from ...clients.kafka import (
     open_kafka_socket,
 )
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import CountColorRule, LiteralColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -608,14 +608,19 @@ def _audit_kafka_host(
                 # --probe-write is on, a Produce with a marker record. The
                 # broker's per-topic ACL check surfaces as error_code=29
                 # (TOPIC_AUTHORIZATION_FAILED) → read/write=false.
+                #
+                # Cluster-level ACLs (Create/Delete topics) are also probed
+                # non-destructively on the same session — see
+                # `_probe_kafka_acls`.
                 topic_permissions: dict[str, dict[str, bool | None]] = {}
+                cluster_permissions: dict[str, bool | None] = {"create": None, "delete": None}
                 if show_topics and topic_names and (provided_credentials_ok or auth_required is False):
                     probe_targets = (
                         sorted(topic_names)[:show_topics_limit]
                         if isinstance(show_topics_limit, int)
                         else sorted(topic_names)
                     )
-                    topic_permissions = _kafka_client._probe_topic_permissions_bulk(
+                    acl_state = _kafka_client._probe_kafka_acls(
                         host,
                         port,
                         timeout,
@@ -624,7 +629,10 @@ def _audit_kafka_host(
                         password=password if provided_credentials_ok else None,
                         use_tls=(transport_mode == "tls") or None,
                         probe_write=bool(probe_write),
+                        probe_cluster=True,
                     )
+                    topic_permissions = acl_state.get("topics", {}) or {}
+                    cluster_permissions = acl_state.get("cluster", cluster_permissions) or cluster_permissions
 
                 return {
                     "timestamp": utc_now_iso(),
@@ -648,6 +656,9 @@ def _audit_kafka_host(
                     "topic_count": topic_count,
                     "topics": topic_names,
                     "topic_permissions": topic_permissions or None,
+                    "cluster_permissions": cluster_permissions
+                    if any(v is not None for v in cluster_permissions.values())
+                    else None,
                     "query_topic_value": query_topic_value,
                     "dump_topics": dump_topics if dump else None,
                     "dump_results": dump_results if dump else None,
@@ -729,11 +740,38 @@ def _nxc_prefix(record: dict[str, Any]) -> str:
     return f"{'KAFKA':<8}\t{host}\t{port}\t"
 
 
+def _cluster_permission_markers(record: dict[str, Any]) -> list[str]:
+    """Return `(create:X)` / `(delete:X)` markers derived from the record's
+    `cluster_permissions` dict. Only booleans are emitted; `None` (probe
+    was inconclusive) yields no marker to avoid faking a state. Ordered
+    create-then-delete for a stable read direction.
+    """
+    perms = record.get("cluster_permissions")
+    if not isinstance(perms, dict):
+        return []
+    markers: list[str] = []
+    for key in ("create", "delete"):
+        value = perms.get(key)
+        if value is True:
+            markers.append(f"({key}:true)")
+        elif value is False:
+            markers.append(f"({key}:false)")
+    return markers
+
+
 def _with_optional_topics(record: dict[str, Any], message: str) -> str:
+    # Layout: `<message> (create:X) (delete:X) (topics:N)`. Cluster ACL
+    # markers land immediately after credentials but before the topic
+    # count so the "identity → power → surface" reading flow stays left-
+    # to-right, and topics — the noisiest number — sits at the end.
+    parts = [message]
+    parts.extend(_cluster_permission_markers(record))
     topic_count = record.get("topic_count")
-    if not isinstance(topic_count, int):
-        return f"{message} (topics:-)"
-    return f"{message} (topics:{topic_count})"
+    if isinstance(topic_count, int):
+        parts.append(f"(topics:{topic_count})")
+    else:
+        parts.append("(topics:-)")
+    return " ".join(parts)
 
 
 def _max_messages_is_explicit(record: dict[str, Any]) -> bool:
@@ -1091,10 +1129,33 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
     # `partitions:N` follows the same "count of dangerous exposed resources"
     # convention as `topics:N` (both indicate access surface), so they share
     # the red highlight — makes multi-partition dumps stand out at a glance.
+    #
+    # Semantic booleans get the two-color treatment:
+    #   * `tls:true` and per-topic `read:true` → bright_green (a *good* state
+    #     for a defender inspecting an audit result: TLS confirmed, ACL
+    #     enforced against reads or the auth session succeeded)
+    #   * `tls:false` and per-topic ACL `false` → red (dangerous surface:
+    #     plaintext broker, or the current identity really can read/write
+    #     the topic)
+    #   * `create:true` and `delete:true` at the cluster level → red — those
+    #     are unambiguously destructive powers, so a *true* is a finding
+    #     even if the audit itself succeeded.
     if render_colored_marker_line(
         console,
         line,
         tag="KAFKA",
+        literals=(
+            LiteralColorRule("(tls:true)", "bright_green"),
+            LiteralColorRule("(tls:false)", "red"),
+            LiteralColorRule("(read:true)", "red"),
+            LiteralColorRule("(read:false)", "bright_green"),
+            LiteralColorRule("(write:true)", "red"),
+            LiteralColorRule("(write:false)", "bright_green"),
+            LiteralColorRule("(create:true)", "red"),
+            LiteralColorRule("(create:false)", "bright_green"),
+            LiteralColorRule("(delete:true)", "red"),
+            LiteralColorRule("(delete:false)", "bright_green"),
+        ),
         counts=(
             CountColorRule("topics", "red"),
             CountColorRule("partitions", "red"),

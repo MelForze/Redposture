@@ -190,14 +190,19 @@ def test_build_basic_audit_plan_int_port_takes_precedence_over_defaults() -> Non
 
 
 def test_kafka_default_ports_include_sasl_ssl_listener_9093() -> None:
-    """9093 = well-known SASL_SSL listener. Users often only expose 9093
-    externally; the default scan must find it without extra flags."""
+    """The default scan set must cover every listener a real Kafka broker
+    is likely to expose without requiring `--port`. Convention: even ports
+    = plaintext / SASL_PLAINTEXT, odd = SASL_SSL / SSL. Three port families:
+
+      * 9092 / 9093   — production standard
+      * 19092 / 19093 — bitnami / lab docker-compose maps
+      * 29092 / 29093 — Confluent docker examples
+    """
     from redposture_core.modules.kafka.stage import _DEFAULT_PORTS
 
     assert _DEFAULT_PORTS is not None
-    assert 9092 in _DEFAULT_PORTS  # SASL_PLAINTEXT baseline
-    assert 9093 in _DEFAULT_PORTS  # SASL_SSL — new
-    assert 19092 in _DEFAULT_PORTS  # docker-compose commonly maps to 19092
+    for port in (9092, 9093, 19092, 19093, 29092, 29093):
+        assert port in _DEFAULT_PORTS, f"port {port} missing from Kafka default scan set"
 
 
 def test_kafka_default_ports_are_used_when_no_port_flag_given() -> None:
