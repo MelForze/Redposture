@@ -1515,6 +1515,10 @@ def test_read_topic_messages_with_credentials_covers_auth_failures(monkeypatch: 
     monkeypatch.setattr(
         "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
+    # `_authenticate_or_probe` now always starts with ApiVersions before
+    # optional SASL (matches real Kafka session lifecycle); mock the probe
+    # to succeed so the SASL branch is exercised.
+    monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_args, **_kwargs: (True, None, None))
     monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (False, 2, "hs fail"))
     assert kafka._read_topic_messages(
         "127.0.0.1",

@@ -1032,10 +1032,17 @@ def _authenticate_or_probe(
     username: str | None,
     password: str | None,
 ) -> tuple[bool, int, str | None]:
-    """Bootstrap a Kafka session on `sock`: SASL PLAIN when credentials are
-    provided, otherwise a bare ApiVersions probe to confirm we're talking to
-    Kafka. Returns `(ok, next_correlation_id, error)`.
+    """Bootstrap a Kafka session on `sock`: always start with ApiVersions
+    (many brokers require it as the opening exchange even on SASL_SSL —
+    skipping it caused the ACL probe to silently fail on real Confluent
+    deployments), then SASL PLAIN when credentials are provided.
+
+    Returns `(ok, next_correlation_id, error)`.
     """
+    is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
+    correlation += 1
+    if not is_kafka:
+        return False, correlation, api_error or "service is not kafka"
     if username is not None and password is not None:
         hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
         if not hs_ok:
@@ -1043,11 +1050,6 @@ def _authenticate_or_probe(
         auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
         if not auth_ok:
             return False, correlation, auth_error or "authentication failed"
-        return True, correlation, None
-    is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
-    correlation += 1
-    if not is_kafka:
-        return False, correlation, api_error or "service is not kafka"
     return True, correlation, None
 
 

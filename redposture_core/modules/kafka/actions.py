@@ -1203,12 +1203,23 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
     if line.startswith("KAFKA") and "\t" in line:
         _left, right = line.rsplit("\t", 1)
         spans: list[tuple[int, int, str]] = []
-        # Full-token red for count markers (`(topics:N)`, `(partitions:N)`)
-        # AND ACL markers where `true` is a finding (`(read:true)`,
-        # `(write:true)`, `(create:true)`, `(delete:true)`, `(tls:false)`).
-        # Paint the whole `(name:value)` including parens so nothing reads
-        # as neutral orange the moment the underlying value is dangerous.
-        for match in re.finditer(r"\((?:topics|partitions|read|write|create|delete|tls):[^)]+\)", right):
+        # Count markers `(topics:N)` and `(partitions:N)`: the value is
+        # the scary number (red), and the framing — both parens plus the
+        # label — is neutral WHITE (not orange, so it doesn't blur with
+        # the topic-name text next to it). We emit three explicit spans
+        # per match so `strip_paren_wrappers=False` doesn't accidentally
+        # cascade a single color across the whole token.
+        for match in re.finditer(r"\((topics|partitions):(\d+)\)", right):
+            value_start = match.start(2)
+            value_end = match.end(2)
+            spans.append((match.start(), value_start, "white"))  # "(topics:" / "(partitions:"
+            spans.append((value_start, value_end, "red"))  # the number
+            spans.append((value_end, match.end(), "white"))  # ")"
+        # ACL markers `(read/write/create/delete/tls:true|false)`: whole
+        # token (including parens) uniformly painted by semantic — red
+        # for "dangerous power confirmed" / "plaintext confirmed",
+        # bright_green for "ACL blocked" / "TLS active".
+        for match in re.finditer(r"\((?:read|write|create|delete|tls):(?:true|false)\)", right):
             token = match.group(0)
             if token in {
                 "(tls:false)",
@@ -1216,7 +1227,7 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
                 "(write:true)",
                 "(create:true)",
                 "(delete:true)",
-            } or token.startswith(("(topics:", "(partitions:")):
+            }:
                 spans.append((match.start(), match.end(), "red"))
             elif token in {
                 "(tls:true)",
