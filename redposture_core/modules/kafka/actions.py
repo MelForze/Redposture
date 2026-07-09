@@ -396,6 +396,7 @@ def _audit_kafka_host(
     max_messages: int,
     show_topics_limit: int | None = None,
     probe_write: bool = False,
+    debug_emit: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     provided_credentials = username is not None and password is not None
@@ -614,25 +615,45 @@ def _audit_kafka_host(
                 # `_probe_kafka_acls`.
                 topic_permissions: dict[str, dict[str, bool | None]] = {}
                 cluster_permissions: dict[str, bool | None] = {"create": None, "delete": None}
-                if show_topics and topic_names and (provided_credentials_ok or auth_required is False):
-                    probe_targets = (
-                        sorted(topic_names)[:show_topics_limit]
-                        if isinstance(show_topics_limit, int)
-                        else sorted(topic_names)
-                    )
-                    acl_state = _kafka_client._probe_kafka_acls(
-                        host,
-                        port,
-                        timeout,
-                        probe_targets,
-                        username=username if provided_credentials_ok else None,
-                        password=password if provided_credentials_ok else None,
-                        use_tls=(transport_mode == "tls") or None,
-                        probe_write=bool(probe_write),
-                        probe_cluster=True,
-                    )
-                    topic_permissions = acl_state.get("topics", {}) or {}
-                    cluster_permissions = acl_state.get("cluster", cluster_permissions) or cluster_permissions
+                # Trigger ACL probing whenever we have any topic-oriented
+                # output flag on — --show-topics, --topic X, or --dump.
+                # Previously only --show-topics kicked off the probe, which
+                # left `--topic X` without any (read:*) markers even though
+                # the info was available. Also probe when we have a valid
+                # SASL session (creds ok) OR when the broker is open (no
+                # auth required); anonymous probes on a locked broker just
+                # return unknowns which the renderer already skips.
+                any_probe_target = bool(topic_names) or bool(query_topic_name)
+                any_probe_action = bool(show_topics or query_topic_name or dump)
+                session_probable = provided_credentials_ok or auth_required is False
+                if any_probe_target and any_probe_action and session_probable:
+                    if query_topic_name and query_topic_name in (topic_names or ()):
+                        # --topic X path: probe just the one topic (skip the
+                        # rest of the catalogue — no need to sweep hundreds
+                        # of unrelated topics when the operator asked about
+                        # one).
+                        probe_targets = [query_topic_name]
+                    else:
+                        probe_targets = (
+                            sorted(topic_names or ())[:show_topics_limit]
+                            if isinstance(show_topics_limit, int)
+                            else sorted(topic_names or ())
+                        )
+                    if probe_targets:
+                        acl_state = _kafka_client._probe_kafka_acls(
+                            host,
+                            port,
+                            timeout,
+                            probe_targets,
+                            username=username if provided_credentials_ok else None,
+                            password=password if provided_credentials_ok else None,
+                            use_tls=(transport_mode == "tls") or None,
+                            probe_write=bool(probe_write),
+                            probe_cluster=True,
+                            debug_emit=debug_emit,
+                        )
+                        topic_permissions = acl_state.get("topics", {}) or {}
+                        cluster_permissions = acl_state.get("cluster", cluster_permissions) or cluster_permissions
 
                 return {
                     "timestamp": utc_now_iso(),
@@ -1042,6 +1063,28 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
     topic_permissions: dict[str, dict[str, bool | None]] = (
         topic_permissions_raw if isinstance(topic_permissions_raw, dict) else {}
     )
+
+    def _topic_marker_suffix(topic_name: str) -> str:
+        # Shared per-topic (read/write) marker suffix. Used by both the
+        # `--show-topics` list and the single-topic `--topic X` header so
+        # the operator sees the same ACL info regardless of which flag
+        # they chose.
+        perms = topic_permissions.get(topic_name, {})
+        if not isinstance(perms, dict):
+            return ""
+        parts: list[str] = []
+        read_value = perms.get("read")
+        if read_value is True:
+            parts.append("(read:true)")
+        elif read_value is False:
+            parts.append("(read:false)")
+        write_value = perms.get("write")
+        if write_value is True:
+            parts.append("(write:true)")
+        elif write_value is False:
+            parts.append("(write:false)")
+        return (" " + " ".join(parts)) if parts else ""
+
     prefix = _nxc_prefix(record)
     lines = []
     if show_topics and topic_names:
@@ -1051,20 +1094,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
         else:
             lines.append(f"{prefix} [*] Show Topics")
         for item in displayed_topic_names:
-            perms = topic_permissions.get(item, {})
-            markers: list[str] = []
-            read_value = perms.get("read") if isinstance(perms, dict) else None
-            if read_value is True:
-                markers.append("(read:true)")
-            elif read_value is False:
-                markers.append("(read:false)")
-            write_value = perms.get("write") if isinstance(perms, dict) else None
-            if write_value is True:
-                markers.append("(write:true)")
-            elif write_value is False:
-                markers.append("(write:false)")
-            suffix = (" " + " ".join(markers)) if markers else ""
-            lines.append(f"{prefix} {item}{suffix}")
+            lines.append(f"{prefix} {item}{_topic_marker_suffix(item)}")
     # `--topic X` (without `--dump`) prints a standalone header + partition
     # info; `--topic X --dump` folds the partition info into the Dump header
     # to avoid the previous 3-line duplicate:
@@ -1074,7 +1104,9 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
     if query_topic and not dump:
         lines.append(f"{prefix} [*] Topic {query_topic}")
         if isinstance(query_topic_value, str):
-            lines.append(f"{prefix} {query_topic_value}")
+            # ACL markers get suffixed onto the detail line so `--topic X`
+            # gains parity with `--show-topics` (both show read/write).
+            lines.append(f"{prefix} {query_topic_value}{_topic_marker_suffix(query_topic)}")
     if dump:
         if query_topic:
             # Extract partitions:N from query_topic_value when present so the
@@ -1090,6 +1122,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
             dump_header = f"{prefix} [*] Dump Topic {query_topic}{partitions_suffix}"
             if _max_messages_is_explicit(record):
                 dump_header += f" (max:{max_messages})"
+            dump_header += _topic_marker_suffix(query_topic)
             lines.append(dump_header)
             topic_dump_messages = dump_results.get(query_topic, [])
             topic_dump_error = dump_errors.get(query_topic) or dump_error
@@ -1168,7 +1201,39 @@ def _render_colored_kafka_line(console: Console, line: str) -> bool:
     # via `render_tagged_detail_line` for visual consistency with the
     # marker lines above — mirrors the gRPC module's two-tier approach.
     if line.startswith("KAFKA") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="KAFKA", default_color="orange")
+        _left, right = line.rsplit("\t", 1)
+        spans: list[tuple[int, int, str]] = []
+        # Full-token red for count markers (`(topics:N)`, `(partitions:N)`)
+        # AND ACL markers where `true` is a finding (`(read:true)`,
+        # `(write:true)`, `(create:true)`, `(delete:true)`, `(tls:false)`).
+        # Paint the whole `(name:value)` including parens so nothing reads
+        # as neutral orange the moment the underlying value is dangerous.
+        for match in re.finditer(r"\((?:topics|partitions|read|write|create|delete|tls):[^)]+\)", right):
+            token = match.group(0)
+            if token in {
+                "(tls:false)",
+                "(read:true)",
+                "(write:true)",
+                "(create:true)",
+                "(delete:true)",
+            } or token.startswith(("(topics:", "(partitions:")):
+                spans.append((match.start(), match.end(), "red"))
+            elif token in {
+                "(tls:true)",
+                "(read:false)",
+                "(write:false)",
+                "(create:false)",
+                "(delete:false)",
+            }:
+                spans.append((match.start(), match.end(), "bright_green"))
+        return render_tagged_detail_line(
+            console,
+            line,
+            tag="KAFKA",
+            spans=spans,
+            default_color="orange",
+            strip_paren_wrappers=False,
+        )
     return False
 
 
@@ -1205,6 +1270,7 @@ def _call_audit_kafka_host_with_stage_debug(
         max_messages,
         show_topics_limit=show_topics_limit if run_deep_checks else None,
         probe_write=bool(probe_write) if run_deep_checks else False,
+        debug_emit=debug_emit if debug else None,
     )
 
     result: dict[str, Any] = dict(record)
