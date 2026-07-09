@@ -167,8 +167,17 @@ def colorize_spans(
     spans: Iterable[tuple[int, int, str]],
     *,
     default_color: str = "white",
+    strip_paren_wrappers: bool = True,
 ) -> str:
-    """Color selected text spans while preserving uncolored gaps."""
+    """Color selected text spans while preserving uncolored gaps.
+
+    ``strip_paren_wrappers`` (default True) preserves the historical
+    behavior of `(auth required:True)`-style markers where the outer
+    parens stay in the default color and only the inner payload is
+    highlighted. Pass ``False`` when the whole `(name:value)` token
+    should be painted uniformly (e.g. counts like `(topics:N)` where the
+    brackets are visually part of the counter, not neutral structure).
+    """
 
     normalized: list[tuple[int, int, str]] = []
     text_len = len(text)
@@ -177,9 +186,11 @@ def colorize_spans(
         bounded_end = max(bounded_start, min(text_len, int(end)))
         if bounded_start == bounded_end:
             continue
-        # Keep structural parentheses visually neutral while highlighting the
-        # useful key/value payload inside tokens such as ``(auth required:True)``.
-        if text[bounded_start : bounded_start + 1] == "(" and text[bounded_end - 1 : bounded_end] == ")":
+        if (
+            strip_paren_wrappers
+            and text[bounded_start : bounded_start + 1] == "("
+            and text[bounded_end - 1 : bounded_end] == ")"
+        ):
             bounded_start += 1
             bounded_end -= 1
         if bounded_start == bounded_end:
@@ -223,12 +234,20 @@ def render_tagged_detail_line(
     spans: Iterable[tuple[int, int, str]] = (),
     default_color: str = "white",
     count_pattern_color: str = "white",
+    strip_paren_wrappers: bool = True,
 ) -> bool:
     """Render a standard TAG host port detail payload line without marker.
 
     When ``spans`` is empty, `(word:value)` fragments in the payload are
     auto-colorised in ``count_pattern_color`` (default white) — see
     ``_detect_count_pattern_spans``. Explicit spans win (used by gRPC).
+
+    ``strip_paren_wrappers`` (default True) preserves the historical
+    behavior where outer parens stay in the default color while the inner
+    payload is highlighted. Pass ``False`` when the whole `(name:value)`
+    token should be painted uniformly — e.g. `(topics:N)` on a Kafka
+    detail line, where the parens are part of the counter, not neutral
+    structure.
     """
 
     if not line.startswith(tag) or "\t" not in line:
@@ -242,7 +261,13 @@ def render_tagged_detail_line(
     left, right = line.rsplit("\t", 1)
     rest = left[len(tag) :] if left.startswith(tag) else left
     resolved_spans = list(spans) if spans else _detect_count_pattern_spans(right, count_pattern_color)
-    right_colored = colorize_spans(console, right, resolved_spans, default_color=default_color)
+    right_colored = colorize_spans(
+        console,
+        right,
+        resolved_spans,
+        default_color=default_color,
+        strip_paren_wrappers=strip_paren_wrappers,
+    )
     colored = f"{console._paint(tag, 'blue', sys.stdout)}{console._paint(rest, 'white', sys.stdout)}\t{right_colored}"
     console.plain(colored)
     return True

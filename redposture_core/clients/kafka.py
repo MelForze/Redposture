@@ -1478,6 +1478,7 @@ def _probe_kafka_acls(
     use_tls: bool | None = None,
     probe_write: bool = False,
     probe_cluster: bool = True,
+    debug_emit: Any = None,
 ) -> dict[str, Any]:
     """Probe Read (and optionally Write) ACLs per topic AND cluster-level
     Create/Delete ACLs — all on a single authenticated socket.
@@ -1492,7 +1493,21 @@ def _probe_kafka_acls(
     `_probe_topic_write_permission`. `probe_cluster=True` (default) is
     non-destructive: create-probe uses `validateOnly=true`, delete-probe
     targets a random nonexistent name.
+
+    ``debug_emit`` — optional callable. When set, every silent-failure path
+    (socket refused, TLS handshake failed, auth rejected, probe exception)
+    emits a one-line diagnostic so `--debug` can explain why the audit
+    output shows no `(read:...)` markers.
     """
+
+    def _log(reason: str) -> None:
+        if callable(debug_emit):
+            try:
+                debug_emit(f"[!] {host}:{port} probe_kafka_acls degraded: {reason}")
+            except Exception:  # noqa: BLE001
+                # Never let a debug emit crash a probe.
+                pass
+
     empty: dict[str, Any] = {
         "cluster": {"create": None, "delete": None},
         "topics": {topic: {"read": None, "write": None} for topic in topics},
@@ -1501,13 +1516,15 @@ def _probe_kafka_acls(
     # must never sink the parent audit — degrade to `None` markers instead.
     try:
         sock, _transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
-    except BaseException:  # noqa: BLE001
+    except BaseException as exc:  # noqa: BLE001
+        _log(f"open_kafka_socket failed: {exc.__class__.__name__}: {exc}")
         return empty
     try:
         with sock:
             correlation = 1
-            ok, correlation, _session_error = _authenticate_or_probe(sock, correlation, username, password)
+            ok, correlation, session_error = _authenticate_or_probe(sock, correlation, username, password)
             if not ok:
+                _log(f"authenticate_or_probe rejected: {session_error!r}")
                 return empty
             cluster_perms: dict[str, bool | None] = {"create": None, "delete": None}
             if probe_cluster:
@@ -1521,7 +1538,8 @@ def _probe_kafka_acls(
                     write_result, correlation = _probe_topic_write_permission(sock, correlation, topic)
                 topic_perms[topic] = {"read": read_result, "write": write_result}
             return {"cluster": cluster_perms, "topics": topic_perms}
-    except BaseException:  # noqa: BLE001
+    except BaseException as exc:  # noqa: BLE001
+        _log(f"probe session raised: {exc.__class__.__name__}: {exc}")
         return empty
 
 
