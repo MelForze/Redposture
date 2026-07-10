@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from redposture_core.exporters.postprocess import AsyncPostprocessWorker
@@ -40,3 +42,30 @@ def test_async_postprocess_worker_close_is_idempotent() -> None:
 
     worker.close()
     worker.close()
+
+
+def test_async_postprocess_worker_applies_backpressure_when_queue_is_full() -> None:
+    handler_started = threading.Event()
+    release_handler = threading.Event()
+    producer_done = threading.Event()
+    seen: list[int] = []
+
+    def slow_handler(value: int) -> None:
+        handler_started.set()
+        release_handler.wait(timeout=2)
+        seen.append(value)
+
+    worker = AsyncPostprocessWorker(slow_handler, name="test-postprocess", max_queue_size=1)
+    worker.put(1)
+    assert handler_started.wait(timeout=1)
+    worker.put(2)
+
+    producer = threading.Thread(target=lambda: (worker.put(3), producer_done.set()))
+    producer.start()
+    assert not producer_done.wait(timeout=0.05)
+
+    release_handler.set()
+    assert producer_done.wait(timeout=1)
+    producer.join(timeout=1)
+    worker.close()
+    assert seen == [1, 2, 3]

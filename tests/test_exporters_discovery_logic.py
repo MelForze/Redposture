@@ -8,7 +8,12 @@ from redposture_core.exporters.discovery_logic import (
     score_metrics_candidate,
     select_fingerprint_candidates,
 )
-from redposture_core.exporters.workflows import build_scan_work_items, canonical_scan_host_key
+from redposture_core.exporters.workflows import (
+    build_scan_work_items,
+    canonical_scan_host_key,
+    iter_scan_work_items,
+    scan_work_item_count,
+)
 
 
 def test_token_tuple_deduplicates_and_ignores_empty_values() -> None:
@@ -65,3 +70,11 @@ def test_scan_work_items_canonicalize_and_dedupe_hosts() -> None:
         ("Other", 9100),
         ("Other", 9200),
     ]
+
+
+def test_scan_work_item_iterator_is_lazy_and_matches_compatibility_helper() -> None:
+    hosts = ["Example.COM.", "example.com", "Other"]
+    ports = [9100, 9100, 9200]
+
+    assert scan_work_item_count(hosts, ports) == 4
+    assert list(iter_scan_work_items(hosts, ports)) == build_scan_work_items(hosts, ports)

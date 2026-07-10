@@ -1700,6 +1700,15 @@ def _normalize_for_golden(payload: Any) -> Any:
     return payload
 
 
+def _canonicalize_golden_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return JSONL audit records in a stable order for snapshot comparison."""
+
+    return sorted(
+        records,
+        key=lambda payload: json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+    )
+
+
 def _golden_text_for_row(row: dict[str, str]) -> str | None:
     json_path = row.get("json_path") or "-"
     if json_path in {"", "-"}:
@@ -1712,6 +1721,12 @@ def _golden_text_for_row(row: dict[str, str]) -> str | None:
     for payload in _iter_json_objects(text):
         if isinstance(payload, dict):
             normalized.append(_normalize_for_golden(payload))
+    # Multi-target audits intentionally emit records as futures complete. The
+    # completion order is not a semantic part of an audit result: the set of
+    # discovered host/port records is. Canonicalize only the outer JSONL
+    # record order so golden snapshots still catch a missing or changed target
+    # while accepting a different scheduling order.
+    normalized = _canonicalize_golden_records(normalized)
     return json.dumps(normalized, ensure_ascii=False, indent=2, sort_keys=True)
 
 
@@ -1739,6 +1754,17 @@ def _validate_golden_snapshots(rows: list[dict[str, str]], *, update: bool = Fal
         if not golden_path.exists():
             continue  # new label without a golden yet; covered by --update-golden run
         previous = golden_path.read_text(encoding="utf-8").rstrip("\n")
+        try:
+            previous_payload = json.loads(previous)
+        except json.JSONDecodeError:
+            previous_payload = None
+        if isinstance(previous_payload, list) and all(isinstance(item, dict) for item in previous_payload):
+            previous = json.dumps(
+                _canonicalize_golden_records(previous_payload),
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
         if current != previous:
             # Surface a compact diff hint (first differing field path)
             try:

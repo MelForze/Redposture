@@ -210,6 +210,63 @@ def _read_dump_topics(
     )
 
 
+def _probe_kafka_acl_state(
+    *,
+    host: str,
+    port: int,
+    timeout: float,
+    topic_names: list[str] | None,
+    query_topic_name: str,
+    show_topics: bool,
+    dump: bool,
+    provided_credentials_ok: bool | None,
+    auth_required: bool | None,
+    username: str | None,
+    password: str | None,
+    transport_mode: str,
+    show_topics_limit: int | None,
+    probe_write: bool,
+    debug_emit: Callable[[str], None] | None,
+) -> tuple[dict[str, dict[str, bool | None]], dict[str, bool | None]]:
+    """Collect topic and cluster ACL markers for either Kafka auth path."""
+
+    topic_permissions: dict[str, dict[str, bool | None]] = {}
+    cluster_permissions: dict[str, bool | None] = {"create": None, "delete": None}
+    any_probe_target = bool(topic_names) or bool(query_topic_name)
+    any_probe_action = bool(show_topics or query_topic_name or dump)
+    session_probable = provided_credentials_ok or auth_required is False
+    if not (any_probe_target and any_probe_action and session_probable):
+        return topic_permissions, cluster_permissions
+
+    if query_topic_name and query_topic_name in (topic_names or ()):
+        probe_targets = [query_topic_name]
+    else:
+        probe_targets = (
+            sorted(topic_names or ())[:show_topics_limit]
+            if isinstance(show_topics_limit, int)
+            else sorted(topic_names or ())
+        )
+    if not probe_targets:
+        return topic_permissions, cluster_permissions
+
+    acl_state = _kafka_client._probe_kafka_acls(
+        host,
+        port,
+        timeout,
+        probe_targets,
+        username=username if provided_credentials_ok else None,
+        password=password if provided_credentials_ok else None,
+        use_tls=(transport_mode == "tls") or None,
+        probe_write=bool(probe_write),
+        probe_cluster=True,
+        debug_emit=debug_emit,
+    )
+    return (
+        acl_state.get("topics", {}) or {},
+        acl_state.get("cluster", cluster_permissions) or cluster_permissions,
+    )
+
+
 def _audit_kafka_via_sasl_fallback(
     host: str,
     port: int,
@@ -223,6 +280,8 @@ def _audit_kafka_via_sasl_fallback(
     show_topics_limit: int | None = None,
     *,
     use_tls: bool | None = None,
+    probe_write: bool = False,
+    debug_emit: Callable[[str], None] | None = None,
 ) -> dict[str, Any] | None:
     provided_credentials = username is not None and password is not None
     started = time.monotonic()
@@ -331,6 +390,24 @@ def _audit_kafka_via_sasl_fallback(
                     }
                 )
 
+            topic_permissions, cluster_permissions = _probe_kafka_acl_state(
+                host=host,
+                port=port,
+                timeout=timeout,
+                topic_names=topic_names,
+                query_topic_name=query_topic_name,
+                show_topics=show_topics,
+                dump=dump,
+                provided_credentials_ok=provided_credentials_ok,
+                auth_required=auth_required,
+                username=username,
+                password=password,
+                transport_mode=transport_mode,
+                show_topics_limit=show_topics_limit,
+                probe_write=probe_write,
+                debug_emit=debug_emit,
+            )
+
             return {
                 "timestamp": utc_now_iso(),
                 "host": host,
@@ -350,6 +427,10 @@ def _audit_kafka_via_sasl_fallback(
                 "query_topic": query_topic_name or None,
                 "topic_count": topic_count,
                 "topics": topic_names,
+                "topic_permissions": topic_permissions or None,
+                "cluster_permissions": cluster_permissions
+                if any(value is not None for value in cluster_permissions.values())
+                else None,
                 "query_topic_value": query_topic_value,
                 "dump": bool(dump),
                 "max_messages": max_messages if dump else None,
@@ -362,6 +443,7 @@ def _audit_kafka_via_sasl_fallback(
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "error": error,
                 "transport_mode": transport_mode,
+                "auth_flow": "sasl_fallback",
             }
     except _kafka_client._TlsProbeError:
         if use_tls is True:
@@ -378,6 +460,8 @@ def _audit_kafka_via_sasl_fallback(
             max_messages,
             show_topics_limit=show_topics_limit,
             use_tls=True,
+            probe_write=probe_write,
+            debug_emit=debug_emit,
         )
     except (TimeoutError, ConnectionError, OSError, ValueError):
         return None
@@ -431,6 +515,8 @@ def _audit_kafka_host(
                                 dump=dump,
                                 max_messages=max_messages,
                                 use_tls=(transport_mode == "tls") or None,
+                                probe_write=probe_write,
+                                debug_emit=debug_emit,
                             )
                             if fallback_record is not None:
                                 return fallback_record
@@ -604,56 +690,23 @@ def _audit_kafka_host(
                         }
                     )
 
-                # ACL probing at --show-topics: for every displayed topic,
-                # send a lightweight Fetch(offset=0, max_bytes=1) and, when
-                # --probe-write is on, a Produce with a marker record. The
-                # broker's per-topic ACL check surfaces as error_code=29
-                # (TOPIC_AUTHORIZATION_FAILED) → read/write=false.
-                #
-                # Cluster-level ACLs (Create/Delete topics) are also probed
-                # non-destructively on the same session — see
-                # `_probe_kafka_acls`.
-                topic_permissions: dict[str, dict[str, bool | None]] = {}
-                cluster_permissions: dict[str, bool | None] = {"create": None, "delete": None}
-                # Trigger ACL probing whenever we have any topic-oriented
-                # output flag on — --show-topics, --topic X, or --dump.
-                # Previously only --show-topics kicked off the probe, which
-                # left `--topic X` without any (read:*) markers even though
-                # the info was available. Also probe when we have a valid
-                # SASL session (creds ok) OR when the broker is open (no
-                # auth required); anonymous probes on a locked broker just
-                # return unknowns which the renderer already skips.
-                any_probe_target = bool(topic_names) or bool(query_topic_name)
-                any_probe_action = bool(show_topics or query_topic_name or dump)
-                session_probable = provided_credentials_ok or auth_required is False
-                if any_probe_target and any_probe_action and session_probable:
-                    if query_topic_name and query_topic_name in (topic_names or ()):
-                        # --topic X path: probe just the one topic (skip the
-                        # rest of the catalogue — no need to sweep hundreds
-                        # of unrelated topics when the operator asked about
-                        # one).
-                        probe_targets = [query_topic_name]
-                    else:
-                        probe_targets = (
-                            sorted(topic_names or ())[:show_topics_limit]
-                            if isinstance(show_topics_limit, int)
-                            else sorted(topic_names or ())
-                        )
-                    if probe_targets:
-                        acl_state = _kafka_client._probe_kafka_acls(
-                            host,
-                            port,
-                            timeout,
-                            probe_targets,
-                            username=username if provided_credentials_ok else None,
-                            password=password if provided_credentials_ok else None,
-                            use_tls=(transport_mode == "tls") or None,
-                            probe_write=bool(probe_write),
-                            probe_cluster=True,
-                            debug_emit=debug_emit,
-                        )
-                        topic_permissions = acl_state.get("topics", {}) or {}
-                        cluster_permissions = acl_state.get("cluster", cluster_permissions) or cluster_permissions
+                topic_permissions, cluster_permissions = _probe_kafka_acl_state(
+                    host=host,
+                    port=port,
+                    timeout=timeout,
+                    topic_names=topic_names,
+                    query_topic_name=query_topic_name,
+                    show_topics=show_topics,
+                    dump=dump,
+                    provided_credentials_ok=provided_credentials_ok,
+                    auth_required=auth_required,
+                    username=username,
+                    password=password,
+                    transport_mode=transport_mode,
+                    show_topics_limit=show_topics_limit,
+                    probe_write=probe_write,
+                    debug_emit=debug_emit,
+                )
 
                 return {
                     "timestamp": utc_now_iso(),
@@ -716,6 +769,8 @@ def _audit_kafka_host(
                         dump=dump,
                         max_messages=max_messages,
                         use_tls=(transport_use_tls is True) or None,
+                        probe_write=probe_write,
+                        debug_emit=debug_emit,
                     )
                     if fallback_record is not None:
                         return fallback_record

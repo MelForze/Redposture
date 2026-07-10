@@ -148,6 +148,15 @@ def test_collect_scan_target_specs_preserves_mixed_url_variants() -> None:
     ]
 
 
+def test_collect_scan_target_specs_keeps_distinct_ipv6_url_targets() -> None:
+    specs = collect_scan_target_specs("http://[2001:db8::1]:443,http://[2001:db8::1:443]")
+
+    assert [(item.host, item.explicit_port, item.normalized_key) for item in specs] == [
+        ("2001:db8::1", 443, "http://[2001:db8::1]:443"),
+        ("2001:db8::1:443", None, "http://[2001:db8::1:443]"),
+    ]
+
+
 def test_collect_scan_target_specs_handles_mixed_hosts_and_file(tmp_path: Path) -> None:
     hosts_file = tmp_path / "targets.txt"
     hosts_file.write_text(

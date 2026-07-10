@@ -1,6 +1,21 @@
 [
   {
+    "auth_flow": "sasl_fallback",
     "auth_required": true,
+    "cluster_permissions": {
+      "create": true,
+      "delete": true
+    },
+    "credential_attempts": [
+      {
+        "error": null,
+        "ok": true,
+        "password": "metricspass",
+        "token": null,
+        "username": "metrics"
+      }
+    ],
+    "defcreds_enabled": false,
     "dump": true,
     "dump_error": null,
     "dump_errors": {},
@@ -29,10 +44,12 @@
       "secure.orders",
       "secure.pipeline"
     ],
+    "effective_username": "metrics",
     "error": null,
     "host": "127.0.0.1",
     "is_kafka": true,
     "max_messages": 50,
+    "max_messages_explicit": true,
     "module": "kafka",
     "port": 29092,
     "provided_credentials": true,
@@ -73,12 +90,32 @@
     "status": "valid_credentials",
     "topic_count": 4,
     "topic_messages": null,
+    "topic_permissions": {
+      "secure.audit": {
+        "read": true,
+        "write": null
+      },
+      "secure.metrics": {
+        "read": true,
+        "write": null
+      },
+      "secure.orders": {
+        "read": true,
+        "write": null
+      },
+      "secure.pipeline": {
+        "read": true,
+        "write": null
+      }
+    },
     "topic_read_error": null,
     "topics": [
       "secure.audit",
       "secure.metrics",
       "secure.orders",
       "secure.pipeline"
-    ]
+    ],
+    "transport": "plaintext",
+    "transport_mode": "plaintext"
   }
 ]

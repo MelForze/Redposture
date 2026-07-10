@@ -126,7 +126,12 @@ class HTTPConnectionPool:
                 truncated = len(raw) > max_bytes
                 if truncated:
                     raw = raw[:max_bytes]
-            reusable = not response.will_close
+            # A capped read leaves the remainder of a keep-alive response on
+            # the socket. Returning that connection to the pool makes the
+            # next request fail with ``ResponseNotReady`` or consume stale
+            # framing bytes. Do not drain here: that would defeat the cap on
+            # a peer that keeps sending an unbounded body.
+            reusable = not truncated and not response.will_close
             return int(response.status), raw, response.getheader("Content-Type"), None, truncated
         except Exception as exc:
             return None, b"", None, exc, False

@@ -1,6 +1,11 @@
 [
   {
     "auth_required": false,
+    "cluster_permissions": {
+      "create": true,
+      "delete": true
+    },
+    "defcreds_enabled": false,
     "dump": true,
     "dump_error": null,
     "dump_errors": {},
@@ -38,10 +43,12 @@
       "payments.events",
       "security.alerts"
     ],
+    "effective_username": null,
     "error": null,
     "host": "127.0.0.1",
     "is_kafka": true,
     "max_messages": 50,
+    "max_messages_explicit": true,
     "module": "kafka",
     "port": 9092,
     "provided_credentials": false,
@@ -82,6 +89,28 @@
     "status": "open_no_auth",
     "topic_count": 5,
     "topic_messages": null,
+    "topic_permissions": {
+      "audit.logs": {
+        "read": true,
+        "write": null
+      },
+      "inventory.events": {
+        "read": true,
+        "write": null
+      },
+      "orders": {
+        "read": true,
+        "write": null
+      },
+      "payments.events": {
+        "read": true,
+        "write": null
+      },
+      "security.alerts": {
+        "read": true,
+        "write": null
+      }
+    },
     "topic_read_error": null,
     "topics": [
       "audit.logs",
@@ -89,6 +118,8 @@
       "orders",
       "payments.events",
       "security.alerts"
-    ]
+    ],
+    "transport": "plaintext",
+    "transport_mode": "plaintext"
   }
 ]

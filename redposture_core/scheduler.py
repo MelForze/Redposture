@@ -50,7 +50,6 @@ class BoundedScheduler(Generic[T, R]):
         *,
         key_fn: Callable[[T], K] | None = None,
     ) -> list[R]:
-        indexed = list(enumerate(items))
         results: dict[int, R] = {}
         semaphores: dict[K, threading.Semaphore] = {}
 
@@ -65,12 +64,20 @@ class BoundedScheduler(Generic[T, R]):
         executor = ThreadPoolExecutor(max_workers=self.max_workers)
         pending: dict[Future[R], int] = {}
         try:
-            cursor = 0
-            while cursor < len(indexed) or pending:
-                while cursor < len(indexed) and len(pending) < self.max_inflight:
-                    idx, item = indexed[cursor]
+            iterator = enumerate(items)
+            exhausted = False
+            submitted = 0
+            while not exhausted or pending:
+                while not exhausted and len(pending) < self.max_inflight:
+                    try:
+                        idx, item = next(iterator)
+                    except StopIteration:
+                        exhausted = True
+                        break
                     pending[executor.submit(_run, item)] = idx
-                    cursor += 1
+                    submitted += 1
+                if not pending:
+                    continue
                 done, _ = wait(pending, return_when=FIRST_COMPLETED)
                 for future in done:
                     idx = pending.pop(future)
@@ -90,7 +97,7 @@ class BoundedScheduler(Generic[T, R]):
             raise
         else:
             executor.shutdown(wait=True)
-        return [results[idx] for idx, _item in indexed]
+        return [results[idx] for idx in range(submitted)]
 
     def iter_completed(
         self,
@@ -106,7 +113,6 @@ class BoundedScheduler(Generic[T, R]):
         by their own item key.
         """
 
-        indexed = list(enumerate(items))
         semaphores: dict[K, threading.Semaphore] = {}
 
         def _run(item: T) -> R:
@@ -118,18 +124,24 @@ class BoundedScheduler(Generic[T, R]):
                 return worker(item)
 
         executor = ThreadPoolExecutor(max_workers=self.max_workers)
-        pending: dict[Future[R], tuple[int, T]] = {}
+        pending: dict[Future[R], T] = {}
         drained_normally = False
         try:
-            cursor = 0
-            while cursor < len(indexed) or pending:
-                while cursor < len(indexed) and len(pending) < self.max_inflight:
-                    _idx, item = indexed[cursor]
-                    pending[executor.submit(_run, item)] = (_idx, item)
-                    cursor += 1
+            iterator = iter(items)
+            exhausted = False
+            while not exhausted or pending:
+                while not exhausted and len(pending) < self.max_inflight:
+                    try:
+                        item = next(iterator)
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    pending[executor.submit(_run, item)] = item
+                if not pending:
+                    continue
                 done, _ = wait(pending, return_when=FIRST_COMPLETED)
                 for future in done:
-                    _idx, item = pending.pop(future)
+                    item = pending.pop(future)
                     yield item, future.result()
             drained_normally = True
         finally:

@@ -2,6 +2,15 @@
   {
     "api_versions": "v2,v3",
     "auth_required": true,
+    "credential_attempts": [
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "root",
+        "token": null,
+        "username": "root"
+      }
+    ],
     "defcreds_enabled": false,
     "dump_keys": false,
     "effective_username": null,
@@ -14,10 +23,10 @@
     "keys": null,
     "module": "etcd",
     "port": 22379,
-    "provided_credentials": false,
-    "provided_credentials_ok": null,
-    "provided_password": null,
-    "provided_username": null,
+    "provided_credentials": true,
+    "provided_credentials_ok": false,
+    "provided_password": "root",
+    "provided_username": "root",
     "query_key": null,
     "query_key_entry": null,
     "query_key_value": null,

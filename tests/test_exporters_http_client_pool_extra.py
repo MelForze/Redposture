@@ -202,12 +202,13 @@ def test_http_connection_pool_target_release_and_compat_paths(monkeypatch) -> No
     assert content_type == "text/plain"
     assert error is None
     assert truncated is True
-    assert pool._idle_total == 1
+    # A capped response leaves unread bytes on the connection, so it must
+    # never be returned to the keep-alive pool.
+    assert pool._idle_total == 0
+    assert created[0].closed is True
 
-    old = created[0]
     new = FakeConnection("other.test", 80, 1.0)
     pool._release("other.test", 80, new, True)
-    assert old.closed is True
     assert pool._idle_total == 1
     pool.close()
     assert pool._idle_total == 0

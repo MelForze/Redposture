@@ -1602,6 +1602,52 @@ def test_audit_kafka_via_sasl_fallback_branch_coverage(monkeypatch: pytest.Monke
     assert allowed["topic_messages"] == ["p0@1 hello"]
 
 
+def test_sasl_fallback_collects_and_renders_acl_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kafka, "open_kafka_socket", lambda *_args, **_kwargs: (_KafkaContextSocket(), "tls"))
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda *_args, **_kwargs: (True, 2, None))
+    monkeypatch.setattr(kafka, "_sasl_authenticate_plain", lambda *_args, **_kwargs: (True, 3, None))
+    monkeypatch.setattr(kafka, "_fetch_metadata", lambda *_args, **_kwargs: ({"topic_map": {"raw-keycloak": 1}}, None))
+    acl_calls: list[dict[str, object]] = []
+
+    def fake_probe(*_args, **kwargs):
+        acl_calls.append(kwargs)
+        return {
+            "cluster": {"create": True, "delete": False},
+            "topics": {"raw-keycloak": {"read": True, "write": None}},
+        }
+
+    monkeypatch.setattr(kafka_actions._kafka_client, "_probe_kafka_acls", fake_probe)
+    record = kafka._audit_kafka_via_sasl_fallback(
+        host="10.14.0.26",
+        port=9093,
+        timeout=1.0,
+        username="user",
+        password="pass",
+        show_topics=True,
+        query_topic=None,
+        dump=False,
+        max_messages=1,
+        probe_write=True,
+    )
+
+    assert isinstance(record, dict)
+    assert record["auth_flow"] == "sasl_fallback"
+    assert record["cluster_permissions"] == {"create": True, "delete": False}
+    assert record["topic_permissions"] == {"raw-keycloak": {"read": True, "write": None}}
+    assert acl_calls == [
+        {
+            "username": "user",
+            "password": "pass",
+            "use_tls": True,
+            "probe_write": True,
+            "probe_cluster": True,
+            "debug_emit": None,
+        }
+    ]
+    assert "[+] user:pass (create:true) (delete:false) (topics:1)" in kafka._format_record(record, "txt")
+    assert kafka._format_topics_detail_records(record, "txt")[-1].endswith("raw-keycloak (read:true)")
+
+
 class _KafkaContextSocket(_DummySocket):
     def __init__(self) -> None:
         self.timeout: float | None = 1.0

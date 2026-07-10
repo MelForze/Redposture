@@ -2,7 +2,30 @@
   {
     "api_versions": "v2,v3",
     "auth_required": true,
-    "defcreds_enabled": false,
+    "credential_attempts": [
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "root",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "etcd",
+        "token": null,
+        "username": "root"
+      },
+      {
+        "error": "authenticate returned status 400",
+        "ok": false,
+        "password": "etcd",
+        "token": null,
+        "username": "etcd"
+      }
+    ],
+    "defcreds_enabled": true,
     "dump_keys": false,
     "effective_username": null,
     "error": null,

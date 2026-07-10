@@ -1,6 +1,7 @@
 [
   {
-    "attempted_credentials": 0,
+    "attempted_credentials": [],
+    "attempted_credentials_count": 0,
     "auth_attempts": [],
     "auth_required": null,
     "check_results": null,

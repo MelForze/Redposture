@@ -24,7 +24,7 @@ from .http_pool import HTTPConnectionPool, activate_http_pool
 from .output import emit_line as emit_output_line
 from .output import format_scan_record
 from .postprocess import AsyncPostprocessWorker
-from .workflows import build_exporter_http_pool, build_scan_work_items, scan_max_inflight
+from .workflows import build_exporter_http_pool, iter_scan_work_items, scan_max_inflight, scan_work_item_count
 
 HttpGetDetails = Callable[..., dict[str, Any]]
 ScanTask = Callable[[str, int, list[dict[str, Any]], float, int], tuple[dict[str, Any], dict[str, Any] | None]]
@@ -315,9 +315,9 @@ def scan_exporter_presence(
     total_checks = 0
     total_found = 0
     found_by_host: dict[str, list[dict[str, Any]]] = {str(host): [] for host in hosts}
-    work_items = build_scan_work_items(hosts, ports)
     max_workers = max(1, workers)
     max_inflight = scan_max_inflight(max_workers)
+    work_item_count = scan_work_item_count(hosts, ports)
     scan_task = scan_task_fn or scan_presence_port_task
 
     out_fh: Any = None
@@ -353,11 +353,15 @@ def scan_exporter_presence(
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         out_fh = open(output_path, output_mode, encoding="utf-8")
     if out_fh is not None or logger is not None:
-        postprocess_worker = postprocess_worker_cls(_process_scan_side_effects, name="scan-postprocess")
+        postprocess_worker = postprocess_worker_cls(
+            _process_scan_side_effects,
+            name="scan-postprocess",
+            max_queue_size=max_inflight,
+        )
 
     try:
         progress = start_audit_progress(
-            "SCAN", len(work_items), enabled=show_progress, leave=progress_leave, owner=progress_owner
+            "SCAN", work_item_count, enabled=show_progress, leave=progress_leave, owner=progress_owner
         )
         try:
             pool = build_exporter_http_pool(max_workers, pool_cls)
@@ -373,7 +377,7 @@ def scan_exporter_presence(
                     except Exception as exc:
                         return build_scan_error_record(host, port, exc), None
 
-                for _item, result in scheduler.iter_completed(work_items, _scan_item):
+                for _item, result in scheduler.iter_completed(iter_scan_work_items(hosts, ports), _scan_item):
                     record, hit = result
                     total_checks += 1
                     if hit is not None:

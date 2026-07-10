@@ -211,9 +211,14 @@ def _make_normalized_key(
     fragment: str = "",
 ) -> str:
     if scheme:
-        netloc = host
+        # urlsplit() removes brackets from an IPv6 hostname. Add them back
+        # before building a URL key, otherwise ``host:port`` is ambiguous and
+        # distinct IPv6 targets can collapse during de-duplication.
+        netloc = f"[{host}]" if ":" in host and not host.startswith("[") else host
         if port is not None:
             netloc = f"{host}:{int(port)}"
+            if ":" in host and not host.startswith("["):
+                netloc = f"[{host}]:{int(port)}"
         return urlunsplit((scheme, netloc, path or "", query or "", fragment or ""))
     if port is not None:
         return f"{host}:{int(port)}"
