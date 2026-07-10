@@ -7,6 +7,7 @@ import struct
 import pytest
 
 from redposture_core import stage_kafka as kafka
+from redposture_core.clients import kafka as kafka_client
 from redposture_core.modules.kafka import actions as kafka_actions
 from redposture_core.modules.kafka import stage as kafka_stage_pkg
 from redposture_core.stage_kafka import _parse_apiversions_response, _parse_metadata_response
@@ -1646,6 +1647,68 @@ def test_sasl_fallback_collects_and_renders_acl_markers(monkeypatch: pytest.Monk
     ]
     assert "[+] user:pass (create:true) (delete:false) (topics:1)" in kafka._format_record(record, "txt")
     assert kafka._format_topics_detail_records(record, "txt")[-1].endswith("raw-keycloak (read:true)")
+
+
+def test_cluster_acl_probe_retries_with_sasl_first_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    sockets = iter((_DummySocket(), _DummySocket()))
+    session_modes: list[bool] = []
+    debug_messages: list[str] = []
+
+    monkeypatch.setattr(
+        kafka_client,
+        "open_kafka_socket",
+        lambda *_args, **_kwargs: (next(sockets), "tls"),
+    )
+
+    def fake_auth(_sock, correlation, _username, _password, *, sasl_first=False):
+        session_modes.append(sasl_first)
+        if not sasl_first:
+            return False, correlation + 1, "ApiVersions requires SASL"
+        return True, correlation + 2, None
+
+    monkeypatch.setattr(kafka_client, "_authenticate_or_probe", fake_auth)
+    monkeypatch.setattr(kafka_client, "_probe_create_topic_permission", lambda _sock, corr: (True, corr + 1))
+    monkeypatch.setattr(kafka_client, "_probe_delete_topic_permission", lambda _sock, corr: (False, corr + 1))
+    monkeypatch.setattr(kafka_client, "_probe_topic_read_permission", lambda _sock, corr, _topic: (True, corr + 1))
+
+    result = kafka_client._probe_kafka_acls(
+        "10.14.0.26",
+        9093,
+        1.0,
+        ["raw-keycloak"],
+        username="user",
+        password="pass",
+        use_tls=True,
+        debug_emit=debug_messages.append,
+    )
+
+    assert session_modes == [False, True]
+    assert result == {
+        "cluster": {"create": True, "delete": False},
+        "topics": {"raw-keycloak": {"read": True, "write": None}},
+    }
+    assert any("SASL-first" in message for message in debug_messages)
+
+
+def test_cluster_create_acl_probe_uses_broker_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[dict[str, object]] = []
+
+    def fake_send(_sock, **kwargs):
+        requests.append(kwargs)
+        return struct.pack(">iii", 7, 0, 1) + _kstr("probe") + struct.pack(">h", 0) + struct.pack(">h", -1)
+
+    monkeypatch.setattr(kafka_client, "_send_kafka_request", fake_send)
+
+    allowed, next_correlation = kafka_client._probe_create_topic_permission(_DummySocket(), 7)
+
+    assert allowed is True
+    assert next_correlation == 8
+    body = requests[0]["body"]
+    assert isinstance(body, bytes)
+    name_size = struct.unpack(">h", body[4:6])[0]
+    defaults_offset = 6 + name_size
+    assert struct.unpack(">i", body[defaults_offset : defaults_offset + 4])[0] == -1
+    assert struct.unpack(">h", body[defaults_offset + 4 : defaults_offset + 6])[0] == -1
 
 
 class _KafkaContextSocket(_DummySocket):

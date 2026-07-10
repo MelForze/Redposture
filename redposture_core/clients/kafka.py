@@ -1031,14 +1031,29 @@ def _authenticate_or_probe(
     correlation: int,
     username: str | None,
     password: str | None,
+    *,
+    sasl_first: bool = False,
 ) -> tuple[bool, int, str | None]:
-    """Bootstrap a Kafka session on `sock`: always start with ApiVersions
-    (many brokers require it as the opening exchange even on SASL_SSL —
-    skipping it caused the ACL probe to silently fail on real Confluent
-    deployments), then SASL PLAIN when credentials are provided.
+    """Bootstrap a Kafka session on ``sock``.
+
+    The normal path starts with ApiVersions (many brokers require it as the
+    opening exchange even on SASL_SSL), then uses SASL PLAIN when credentials
+    are provided. ``sasl_first`` is the compatibility retry for brokers that
+    reject ApiVersions until the SASL handshake completes.
 
     Returns `(ok, next_correlation_id, error)`.
     """
+    if sasl_first:
+        if username is None or password is None:
+            return False, correlation, "SASL authentication requires credentials"
+        hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
+        if not hs_ok:
+            return False, correlation, hs_error or "SASL handshake failed"
+        auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
+        if not auth_ok:
+            return False, correlation, auth_error or "authentication failed"
+        return True, correlation, None
+
     is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
     correlation += 1
     if not is_kafka:
@@ -1366,8 +1381,11 @@ def _probe_create_topic_permission(
     body = (
         struct.pack(">i", 1)  # topics count
         + _encode_kafka_string(probe_name)
-        + struct.pack(">i", 1)  # num_partitions
-        + struct.pack(">h", 1)  # replication_factor
+        # -1 selects the broker defaults. A fixed replication factor of one
+        # can fail validation on a multi-broker cluster before the authorizer
+        # evaluates Create, leaving a false "unknown" ACL marker.
+        + struct.pack(">i", -1)  # num_partitions (broker default)
+        + struct.pack(">h", -1)  # replication_factor (broker default)
         + struct.pack(">i", 0)  # replica_assignments count
         + struct.pack(">i", 0)  # configs count
         + struct.pack(">i", 5000)  # timeout_ms
@@ -1514,35 +1532,56 @@ def _probe_kafka_acls(
         "cluster": {"create": None, "delete": None},
         "topics": {topic: {"read": None, "write": None} for topic in topics},
     }
+
     # Broad exception net around the whole probe flow. Best-effort probing
     # must never sink the parent audit — degrade to `None` markers instead.
-    try:
-        sock, _transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
-    except BaseException as exc:  # noqa: BLE001
-        _log(f"open_kafka_socket failed: {exc.__class__.__name__}: {exc}")
-        return empty
-    try:
-        with sock:
-            correlation = 1
-            ok, correlation, session_error = _authenticate_or_probe(sock, correlation, username, password)
-            if not ok:
-                _log(f"authenticate_or_probe rejected: {session_error!r}")
-                return empty
-            cluster_perms: dict[str, bool | None] = {"create": None, "delete": None}
-            if probe_cluster:
-                cluster_perms["create"], correlation = _probe_create_topic_permission(sock, correlation)
-                cluster_perms["delete"], correlation = _probe_delete_topic_permission(sock, correlation)
-            topic_perms: dict[str, dict[str, bool | None]] = {}
-            for topic in topics:
-                read_result, correlation = _probe_topic_read_permission(sock, correlation, topic)
-                write_result: bool | None = None
-                if probe_write:
-                    write_result, correlation = _probe_topic_write_permission(sock, correlation, topic)
-                topic_perms[topic] = {"read": read_result, "write": write_result}
-            return {"cluster": cluster_perms, "topics": topic_perms}
-    except BaseException as exc:  # noqa: BLE001
-        _log(f"probe session raised: {exc.__class__.__name__}: {exc}")
-        return empty
+    def _probe_session(*, sasl_first: bool) -> dict[str, Any] | None:
+        try:
+            sock, _transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
+        except BaseException as exc:  # noqa: BLE001
+            _log(f"open_kafka_socket failed: {exc.__class__.__name__}: {exc}")
+            return None
+        try:
+            with sock:
+                correlation = 1
+                ok, correlation, session_error = _authenticate_or_probe(
+                    sock,
+                    correlation,
+                    username,
+                    password,
+                    sasl_first=sasl_first,
+                )
+                if not ok:
+                    _log(f"authenticate_or_probe rejected: {session_error!r}")
+                    return None
+                cluster_perms: dict[str, bool | None] = {"create": None, "delete": None}
+                if probe_cluster:
+                    cluster_perms["create"], correlation = _probe_create_topic_permission(sock, correlation)
+                    cluster_perms["delete"], correlation = _probe_delete_topic_permission(sock, correlation)
+                topic_perms: dict[str, dict[str, bool | None]] = {}
+                for topic in topics:
+                    read_result, correlation = _probe_topic_read_permission(sock, correlation, topic)
+                    write_result: bool | None = None
+                    if probe_write:
+                        write_result, correlation = _probe_topic_write_permission(sock, correlation, topic)
+                    topic_perms[topic] = {"read": read_result, "write": write_result}
+                return {"cluster": cluster_perms, "topics": topic_perms}
+        except BaseException as exc:  # noqa: BLE001
+            _log(f"probe session raised: {exc.__class__.__name__}: {exc}")
+            return None
+
+    result = _probe_session(sasl_first=False)
+    if result is not None:
+        return result
+    # A few SASL listeners reject ApiVersions until after the SASL handshake.
+    # The main audit already reached this helper only after authenticating via
+    # the SASL fallback, so retry on a fresh socket with that ordering.
+    if username is not None and password is not None:
+        _log("retrying ACL probe with a SASL-first session")
+        result = _probe_session(sasl_first=True)
+        if result is not None:
+            return result
+    return empty
 
 
 # Deprecated: kept as a thin wrapper for backward-compat with older callers /
