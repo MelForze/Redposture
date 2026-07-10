@@ -7,6 +7,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+DEFAULT_POSTPROCESS_QUEUE_SIZE = 512
+
 
 class AsyncPostprocessWorker:
     """Single-writer worker for file/logger/index side effects.
@@ -16,9 +18,18 @@ class AsyncPostprocessWorker:
     and error propagation that scanner/collect previously duplicated locally.
     """
 
-    def __init__(self, handler: Callable[[Any], None], *, name: str = "postprocess") -> None:
+    def __init__(
+        self,
+        handler: Callable[[Any], None],
+        *,
+        name: str = "postprocess",
+        max_queue_size: int = DEFAULT_POSTPROCESS_QUEUE_SIZE,
+    ) -> None:
         self._handler = handler
-        self._queue: queue.Queue[Any] = queue.Queue()
+        # A single writer can be slower than network workers. Bounding the
+        # queue makes producers apply backpressure instead of retaining every
+        # rendered record in memory during large scans.
+        self._queue: queue.Queue[Any] = queue.Queue(maxsize=max(1, int(max_queue_size)))
         self._stop = object()
         self._errors: list[BaseException] = []
         self._errors_lock = threading.Lock()
@@ -69,4 +80,4 @@ class AsyncPostprocessWorker:
                 self._queue.task_done()
 
 
-__all__ = ["AsyncPostprocessWorker"]
+__all__ = ["AsyncPostprocessWorker", "DEFAULT_POSTPROCESS_QUEUE_SIZE"]

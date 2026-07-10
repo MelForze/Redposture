@@ -3,25 +3,61 @@
     "auth_db": "admin",
     "auth_required": true,
     "capabilities": {
-      "can_list_collections": null,
-      "can_list_databases": false,
+      "can_list_collections": true,
+      "can_list_databases": true,
       "can_list_indexes": null,
-      "can_read_documents": null,
+      "can_read_documents": true,
       "can_run_command": null
     },
     "collection_targets": [],
-    "collections": [],
+    "collections": [
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "documents": 3
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "documents": 3
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "documents": 5
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "documents": 4
+      }
+    ],
+    "credential_attempts": [
+      {
+        "error": null,
+        "ok": true,
+        "password": "root",
+        "token": null,
+        "username": "root"
+      }
+    ],
     "database": null,
-    "database_count": null,
-    "database_names": null,
-    "defcreds_enabled": false,
+    "database_count": 5,
+    "database_names": [
+      "admin",
+      "billing",
+      "config",
+      "local",
+      "redposture"
+    ],
+    "defcreds_enabled": true,
     "document_selector": null,
     "documents": [],
     "dump_documents": false,
     "dump_limit": null,
     "dump_safety_limit": null,
-    "effective_username": null,
-    "error": "authentication required",
+    "effective_username": "root",
+    "error": null,
     "hello": {
       "isWritablePrimary": true,
       "maxBsonObjectSize": 16777216,
@@ -41,16 +77,16 @@
     "nosql_command_result": null,
     "port": 27018,
     "projection": null,
-    "provided_credentials": false,
-    "provided_password": null,
-    "provided_username": null,
+    "provided_credentials": true,
+    "provided_password": "root",
+    "provided_username": "root",
     "query_documents": [],
     "query_error": null,
     "query_filter": null,
     "service": "mongodb",
-    "show_collections": false,
+    "show_collections": true,
     "show_collections_limit": null,
-    "show_databases": false,
+    "show_databases": true,
     "show_databases_limit": null,
     "show_indexes": false,
     "show_indexes_limit": null,
@@ -69,17 +105,17 @@
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "data"
       }
     ],
-    "status": "auth_required"
+    "status": "weak_default_creds"
   }
 ]

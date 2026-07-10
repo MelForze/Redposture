@@ -182,6 +182,8 @@ def collect_exporter_debug_data(
     plan_collect = plan_collect_fn or plan_collect_endpoints_for_target
     total = 0
     success = 0
+    max_workers = max(1, workers)
+    max_inflight = collect_max_inflight(max_workers, max_inflight_requests)
 
     out_fh: Any = None
     index_fh: Any = None
@@ -218,7 +220,11 @@ def collect_exporter_debug_data(
         os.makedirs(os.path.dirname(checkpoint_path) or ".", exist_ok=True)
         checkpoint_fh = open(checkpoint_path, checkpoint_mode, encoding="utf-8")
     if record_callback is not None or index_fh is not None or checkpoint_fh is not None:
-        postprocess_worker = postprocess_worker_cls(_process_collect_side_effects, name="collect-postprocess")
+        postprocess_worker = postprocess_worker_cls(
+            _process_collect_side_effects,
+            name="collect-postprocess",
+            max_queue_size=max_inflight,
+        )
 
     try:
         collect_targets = sort_collect_targets(
@@ -226,8 +232,6 @@ def collect_exporter_debug_data(
             dedupe_collect_targets(build_collect_targets(hosts, exporters, found_by_host)),
         )
 
-        max_workers = max(1, workers)
-        max_inflight = collect_max_inflight(max_workers, max_inflight_requests)
         completed_jobs = resume_completed_jobs or set()
         completed_by_target = completed_jobs_by_target(completed_jobs)
         skipped_jobs = 0

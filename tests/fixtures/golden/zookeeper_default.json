@@ -1,6 +1,73 @@
 [
   {
     "auth_error": null,
+    "auth_inference_source": "not_run",
+    "auth_probe_trace": [],
+    "auth_required": null,
+    "can_create_znode": null,
+    "can_delete_znode": null,
+    "connect_error": "connection refused (service is not listening on target port)",
+    "dump": true,
+    "dump_error": null,
+    "dump_limit": null,
+    "enum_error": null,
+    "error": "connection refused (service is not listening on target port)",
+    "host": "127.0.0.1",
+    "is_zookeeper": false,
+    "max_znodes": 2000,
+    "module": "zookeeper",
+    "port": 12181,
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_password": null,
+    "provided_username": null,
+    "query_error": null,
+    "query_znode": null,
+    "query_znode_dump": null,
+    "query_znode_dump_error": null,
+    "query_znode_value": null,
+    "service": "zookeeper",
+    "show_znodes": true,
+    "stage2_error": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "connection refused (service is not listening on target port)",
+        "result": "retry",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 2,
+        "error": "connection refused (service is not listening on target port)",
+        "result": "retry",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 3,
+        "error": "connection refused (service is not listening on target port)",
+        "result": "retry",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 4,
+        "error": "connection refused (service is not listening on target port)",
+        "result": "fail",
+        "stage_name": "detect_protocol"
+      }
+    ],
+    "status": "fail",
+    "znode_capability_error": null,
+    "znode_count": null,
+    "znode_count_attempt_timeouts": [],
+    "znode_count_partial": false,
+    "znode_count_unknown": false,
+    "znode_details": null,
+    "znode_values": null,
+    "znodes": null,
+    "znodes_truncated": false
+  },
+  {
+    "auth_error": null,
     "auth_inference_source": "root_ok",
     "auth_probe_trace": [
       "/:ok"

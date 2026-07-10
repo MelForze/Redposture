@@ -124,7 +124,7 @@
         "stage_name": "data"
       }
     ],
-    "status": "detected",
+    "status": "valid_credentials",
     "token_access": [
       {
         "access_level": 30,

@@ -1,53 +1,135 @@
 [
   {
-    "attempted_credentials": 0,
-    "auth_attempts": [],
-    "auth_required": null,
+    "attempted_credentials": [
+      {
+        "error": "",
+        "ok": true,
+        "password": "admin",
+        "source": "default",
+        "username": "admin"
+      }
+    ],
+    "attempted_credentials_count": 1,
+    "auth_attempts": [
+      {
+        "error": "",
+        "ok": true,
+        "password": "admin",
+        "source": "default",
+        "username": "admin"
+      }
+    ],
+    "auth_required": true,
     "check_results": null,
-    "check_urls": null,
-    "credentials_source": null,
-    "datasource_count": null,
-    "datasources": null,
-    "default_credentials": null,
+    "check_urls": [],
+    "credential_attempts": [
+      {
+        "error": null,
+        "ok": true,
+        "password": "admin",
+        "token": null,
+        "username": "admin"
+      }
+    ],
+    "credentials_source": "default",
+    "datasource_count": 11,
+    "datasources": [
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://blackbox-exporter:9115"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://exporter-lab:9116"
+      },
+      {
+        "access": "proxy",
+        "type": "elasticsearch",
+        "url": "https://elasticsearch.internal:9200"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://kafka-exporter:9308"
+      },
+      {
+        "access": "proxy",
+        "type": "loki",
+        "url": "http://loki.internal:3100"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://node-exporter:9100"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://postgres-exporter:9187"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "https://prometheus-prod.internal"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://proxmox-exporter:9221"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://redis-exporter:9121"
+      },
+      {
+        "access": "proxy",
+        "type": "tempo",
+        "url": "http://tempo.internal:3200"
+      }
+    ],
+    "default_credentials": true,
     "defcreds_enabled": true,
-    "effective_password": null,
-    "effective_username": null,
-    "error": "Connection reset by peer",
+    "effective_password": "admin",
+    "effective_username": "admin",
+    "error": null,
     "host": "127.0.0.1",
-    "is_grafana": false,
+    "is_grafana": true,
     "module": "grafana",
     "port": 3000,
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_username": null,
     "service": "grafana",
-    "show_datasources": false,
+    "show_datasources": true,
     "stages": [
       {
         "attempt": 1,
-        "error": "Connection reset by peer",
-        "result": "error",
+        "error": null,
+        "result": "ok",
         "stage_name": "detect_protocol"
       },
       {
         "attempt": 1,
-        "error": "Connection reset by peer",
-        "result": "error",
+        "error": null,
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "data"
       }
     ],
-    "status": "fail"
+    "status": "valid_credentials"
   }
 ]

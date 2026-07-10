@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from scripts import verify_postrun
 from scripts.verify_postrun import (
     _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS,
     _EXPECTED_LABELS,
@@ -13,6 +14,7 @@ from scripts.verify_postrun import (
     _PROGRESS_EXPECTED_TARGETS,
     _combined_run_output,
     _expected_labels_for_profile,
+    _golden_text_for_row,
     _infer_target_count_from_jsonl,
     _parse_status_file,
     _progress_counts_from_log,
@@ -136,6 +138,64 @@ def test_infer_target_count_from_jsonl_counts_unique_host_port_pairs() -> None:
         "not-json\n"
     )
     assert _infer_target_count_from_jsonl(text) == 2
+
+
+def test_golden_text_for_row_ignores_parallel_target_completion_order(tmp_path: Path) -> None:
+    artifact = tmp_path / "multi-port.jsonl"
+    row = {
+        "module": "registry",
+        "label": "registry_multi_instance_urls",
+        "expected_exit": "0",
+        "exit_code": "0",
+        "json_path": str(artifact),
+        "log_path": "-",
+    }
+    first = '{"host":"127.0.0.1","port":15010,"status":"open_no_auth"}\n'
+    second = '{"host":"127.0.0.1","port":15011,"status":"open_no_auth"}\n'
+
+    artifact.write_text(first + second, encoding="utf-8")
+    forward = _golden_text_for_row(row)
+    artifact.write_text(second + first, encoding="utf-8")
+    reverse = _golden_text_for_row(row)
+
+    assert forward == reverse
+    assert forward is not None
+    assert '"port": 15010' in forward
+    assert '"port": 15011' in forward
+
+
+def test_golden_snapshot_comparison_ignores_parallel_target_completion_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact = tmp_path / "multi-port.jsonl"
+    artifact.write_text(
+        '{"host":"127.0.0.1","port":15011,"status":"open_no_auth"}\n'
+        '{"host":"127.0.0.1","port":15010,"status":"open_no_auth"}\n',
+        encoding="utf-8",
+    )
+    golden_dir = tmp_path / "golden"
+    golden_dir.mkdir()
+    (golden_dir / "registry_multi_instance_urls.json").write_text(
+        "[\n"
+        '  {"host": "127.0.0.1", "port": 15010, "status": "open_no_auth"},\n'
+        '  {"host": "127.0.0.1", "port": 15011, "status": "open_no_auth"}\n'
+        "]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(verify_postrun, "_GOLDEN_DIR", golden_dir)
+
+    verify_postrun._validate_golden_snapshots(
+        [
+            {
+                "module": "registry",
+                "label": "registry_multi_instance_urls",
+                "expected_exit": "0",
+                "exit_code": "0",
+                "json_path": str(artifact),
+                "log_path": "-",
+            }
+        ]
+    )
 
 
 def test_validate_output_sanity_detects_single_target_regression(tmp_path: Path) -> None:

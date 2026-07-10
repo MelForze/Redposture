@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 from .http_pool import HTTP_POOL_MAX_IDLE_PER_HOST, HTTP_POOL_MAX_IDLE_TOTAL, HTTPConnectionPool
@@ -38,22 +39,50 @@ def canonical_scan_host_key(host: str) -> str:
     return raw.rstrip(".").lower()
 
 
-def build_scan_work_items(hosts: list[str], ports: list[int]) -> list[tuple[str, int]]:
-    items: list[tuple[str, int]] = []
-    seen: set[tuple[str, int]] = set()
+def _scan_hosts_and_ports(hosts: list[str], ports: list[int]) -> tuple[list[str], list[int]]:
+    """Return de-duplicated scan dimensions while preserving caller order."""
+
+    unique_hosts: list[str] = []
+    seen_hosts: set[str] = set()
     for host in hosts:
         host_display = str(host or "").strip()
         host_key = canonical_scan_host_key(host_display)
-        if not host_key:
+        if not host_key or host_key in seen_hosts:
             continue
-        for port in ports:
-            port_value = int(port)
-            item_key = (host_key, port_value)
-            if item_key in seen:
-                continue
-            seen.add(item_key)
-            items.append((host_display, port_value))
-    return items
+        seen_hosts.add(host_key)
+        unique_hosts.append(host_display)
+
+    unique_ports: list[int] = []
+    seen_ports: set[int] = set()
+    for port in ports:
+        port_value = int(port)
+        if port_value in seen_ports:
+            continue
+        seen_ports.add(port_value)
+        unique_ports.append(port_value)
+    return unique_hosts, unique_ports
+
+
+def iter_scan_work_items(hosts: list[str], ports: list[int]) -> Iterator[tuple[str, int]]:
+    """Yield unique host/port jobs lazily in the established scan order."""
+
+    unique_hosts, unique_ports = _scan_hosts_and_ports(hosts, ports)
+    for host_display in unique_hosts:
+        for port_value in unique_ports:
+            yield host_display, port_value
+
+
+def scan_work_item_count(hosts: list[str], ports: list[int]) -> int:
+    """Return the exact job count without materializing the host/port matrix."""
+
+    unique_hosts, unique_ports = _scan_hosts_and_ports(hosts, ports)
+    return len(unique_hosts) * len(unique_ports)
+
+
+def build_scan_work_items(hosts: list[str], ports: list[int]) -> list[tuple[str, int]]:
+    """Compatibility helper for callers that explicitly require a list."""
+
+    return list(iter_scan_work_items(hosts, ports))
 
 
 def collect_max_inflight(workers: int, max_inflight_requests: int | None = None) -> int:
@@ -144,6 +173,8 @@ __all__ = [
     "collect_max_inflight",
     "completed_jobs_by_target",
     "dedupe_collect_targets",
+    "iter_scan_work_items",
+    "scan_work_item_count",
     "scan_max_inflight",
     "should_preflight_collect",
     "sort_collect_targets",

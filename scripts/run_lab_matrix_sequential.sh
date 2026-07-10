@@ -134,16 +134,20 @@ wait_healthy_service() {
       elapsed=$((elapsed + 2))
       continue
     fi
-    local unhealthy
-    unhealthy="$(printf "%s" "${ps_output}" | grep -E "Restarting|unhealthy" || true)"
-    if [ -z "${unhealthy}" ]; then
+    # ``docker compose up --wait`` can return while an extended service is
+    # still ``(health: starting)``. Treat that as not ready: Oracle's init
+    # seed runs after the listener accepts TCP, so running cases at this point
+    # produces intermittent empty wallet/file results.
+    local not_ready
+    not_ready="$(printf "%s" "${ps_output}" | grep -E "Restarting|unhealthy|\(health: starting\)" || true)"
+    if [ -z "${not_ready}" ]; then
       return 0
     fi
     local blocking
-    blocking="$(printf "%s" "${unhealthy}" | grep -Ev 'redposture-lab-consul-acl|redposture-lab-consul-seed|redposture-lab-elastic-auth' || true)"
+    blocking="$(printf "%s" "${not_ready}" | grep -Ev 'redposture-lab-consul-acl|redposture-lab-consul-seed|redposture-lab-elastic-auth' || true)"
     if [ -z "${blocking}" ]; then
       echo "[warn] continuing with degraded non-blocking services for ${service}" >&2
-      printf "%s\n" "${unhealthy}" >&2
+      printf "%s\n" "${not_ready}" >&2
       return 0
     fi
     sleep 2

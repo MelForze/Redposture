@@ -56,3 +56,39 @@ def test_bounded_scheduler_iter_completed_returns_original_items() -> None:
     )
 
     assert sorted(completed) == [(("first", 1), 10), (("second", 2), 20)]
+
+
+def test_bounded_scheduler_iter_completed_does_not_materialize_source() -> None:
+    scheduler: BoundedScheduler[int, int] = BoundedScheduler(max_workers=2, max_inflight=2)
+    consumed: list[int] = []
+    both_workers_started = threading.Event()
+    release_workers = threading.Event()
+    worker_count = 0
+    lock = threading.Lock()
+
+    def source():
+        for value in range(10):
+            consumed.append(value)
+            yield value
+
+    def worker(value: int) -> int:
+        nonlocal worker_count
+        with lock:
+            worker_count += 1
+            if worker_count == 2:
+                both_workers_started.set()
+        release_workers.wait(timeout=2)
+        return value
+
+    iterator = scheduler.iter_completed(source(), worker)
+    result: list[tuple[int, int]] = []
+    thread = threading.Thread(target=lambda: result.append(next(iterator)))
+    thread.start()
+    assert both_workers_started.wait(timeout=1)
+    assert consumed == [0, 1]
+
+    release_workers.set()
+    thread.join(timeout=1)
+    assert not thread.is_alive()
+    assert result and result[0][0] in {0, 1}
+    iterator.close()
