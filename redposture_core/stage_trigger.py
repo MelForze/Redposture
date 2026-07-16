@@ -749,8 +749,8 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if args.retries < 0:
         console.error("--retries must be >= 0")
         return 2
-    if listen_seconds is not None and listen_seconds < 0:
-        console.error("--listen-seconds must be >= 0")
+    if listen_seconds is not None and listen_seconds <= 0:
+        console.error("--listen-seconds must be > 0")
         return 2
     if getattr(args, "check_credentials", False) and not getattr(args, "with_listen", False):
         console.error("--check-credentials requires --with-listen")

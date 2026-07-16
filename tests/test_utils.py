@@ -216,6 +216,24 @@ def test_build_scan_execution_groups_can_group_by_scheme_hint() -> None:
     ]
 
 
+def test_streaming_target_plan_applies_scheme_default_ports_without_changing_bare_hosts() -> None:
+    plan = stream_scan_target_specs(
+        "http://gitlab-http.local,https://gitlab-https.local,gitlab-bare.local",
+        policy=TargetParsePolicy(url_mode="preserve"),
+    ).with_scheme_default_ports({"http": 80, "https": 443})
+
+    assert plan.target_count == 3
+    assert plan.count_for_ports((80,)) == 3
+    assert plan.execution_ports((80,)) == (80, 443)
+    assert [
+        (spec.host, port) for port in plan.execution_ports((80,)) for spec in plan.iter_specs_for_port(port, (80,))
+    ] == [
+        ("gitlab-http.local", 80),
+        ("gitlab-bare.local", 80),
+        ("gitlab-https.local", 443),
+    ]
+
+
 def test_collect_scan_ports_deduplicates_and_expands_ranges() -> None:
     ports = collect_scan_ports("9100,9115,9200-9202,9115")
     assert ports == [9100, 9115, 9200, 9201, 9202]

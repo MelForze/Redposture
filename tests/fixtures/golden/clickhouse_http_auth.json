@@ -1,48 +1,57 @@
 [
   {
-    "admin_capability": null,
+    "admin_capability": true,
     "attempted_credentials": 1,
     "auth_attempts": [
       {
-        "error": "Code: 102. Unexpected packet from server 127.0.0.1:18123 (expected Hello or Exception, got Unknown packet)",
-        "ok": false,
+        "error": "",
+        "ok": true,
         "password": "default",
-        "source": "provided",
+        "source": "anonymous",
         "username": "default"
       }
     ],
-    "auth_required": null,
-    "credentials_source": null,
+    "auth_required": true,
+    "auth_transport_attempts": 1,
+    "credentials_source": "anonymous",
     "database": "default",
-    "database_count": null,
-    "database_names": null,
+    "database_count": 7,
+    "database_names": [
+      "INFORMATION_SCHEMA",
+      "billing",
+      "default",
+      "information_schema",
+      "secure",
+      "system",
+      "warehouse"
+    ],
     "default_credentials": false,
     "defcreds_enabled": false,
-    "effective_password": null,
-    "effective_username": null,
-    "error": "Code: 102. Unexpected packet from server 127.0.0.1:18123 (expected Hello or Exception, got Unknown packet)",
+    "effective_password": "default",
+    "effective_username": "default",
+    "error": null,
     "execute_attempted": false,
-    "execute_capability": null,
+    "execute_capability": true,
     "execute_command": null,
     "execute_error": null,
     "execute_ok": null,
     "execute_output": null,
     "host": "127.0.0.1",
-    "is_clickhouse": false,
+    "is_clickhouse": true,
     "module": "clickhouse",
     "port": 18123,
-    "protocol": "native",
+    "protocol": "http",
     "provided_credentials": true,
-    "provided_credentials_ok": false,
+    "provided_credentials_ok": true,
     "provided_password": "default",
     "provided_username": "default",
-    "read_capability": null,
+    "read_capability": true,
     "service": "clickhouse",
     "show_columns": false,
     "show_columns_limit": null,
-    "show_databases": false,
+    "show_databases": true,
     "show_databases_limit": null,
-    "show_tables": false,
+    "show_tables": true,
     "show_tables_limit": null,
     "sql_attempted": false,
     "sql_command": null,
@@ -52,36 +61,148 @@
     "stages": [
       {
         "attempt": 1,
-        "error": "Code: 102. Unexpected packet from server 127.0.0.1:18123 (expected Hello or Exception, got Unknown packet)",
-        "result": "error",
+        "error": null,
+        "result": "ok",
         "stage_name": "detect_protocol"
       },
       {
         "attempt": 1,
-        "error": "Code: 102. Unexpected packet from server 127.0.0.1:18123 (expected Hello or Exception, got Unknown packet)",
-        "result": "error",
+        "error": null,
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "data"
       }
     ],
-    "status": "fail",
+    "status": "valid_credentials",
     "table_columns": [],
     "table_columns_info": [],
-    "table_dump_enabled": false,
+    "table_dump_enabled": true,
     "table_dump_limit": null,
-    "table_dumps": [],
-    "table_names": null,
-    "table_targets": []
+    "table_dumps": [
+      {
+        "columns": [
+          "invoice_id",
+          "customer",
+          "amount",
+          "currency",
+          "issued_at",
+          "due_at",
+          "paid_at",
+          "status",
+          "payment_method",
+          "external_ref"
+        ],
+        "error": null,
+        "rows": [
+          "[1001, \"Acme Corp\", \"912.35\", \"EUR\", \"<ISO>\", \"<ISO>\", \"<ISO>\", \"paid\", \"wire\", \"inv_acme_2026_001\"]",
+          "[1002, \"Globex\", \"122.10\", \"EUR\", \"<ISO>\", \"<ISO>\", null, \"pending\", \"card\", \"inv_globex_2026_002\"]",
+          "[1003, \"Initech\", \"4400.00\", \"USD\", \"<ISO>\", \"<ISO>\", \"<ISO>\", \"paid\", \"ach\", \"inv_initech_2026_003\"]",
+          "[1004, \"Umbrella\", \"89.99\", \"USD\", \"<ISO>\", \"<ISO>\", null, \"overdue\", null, \"inv_umbrella_2026_004\"]"
+        ],
+        "table": "billing.invoices"
+      },
+      {
+        "columns": [
+          "attempt_id",
+          "invoice_id",
+          "provider",
+          "status",
+          "attempted_at",
+          "gateway_response",
+          "card_fingerprint"
+        ],
+        "error": null,
+        "rows": [
+          "[\"pay_1002_01\", 1002, \"stripe\", \"declined\", \"<ISO>\", \"insufficient_funds\", \"fp_7d2ae11\"]",
+          "[\"pay_1002_02\", 1002, \"stripe\", \"pending\", \"<ISO>\", \"processing\", \"fp_7d2ae11\"]",
+          "[\"pay_1004_01\", 1004, \"adyen\", \"error\", \"<ISO>\", \"3ds_required\", null]"
+        ],
+        "table": "billing.payment_attempts"
+      },
+      {
+        "columns": [
+          "ts",
+          "actor",
+          "source_ip",
+          "action",
+          "target_object",
+          "result",
+          "reason",
+          "secret_hint"
+        ],
+        "error": null,
+        "rows": [
+          "[\"<ISO>\", \"dba-oncall\", \"10.2.3.8\", \"grant_access\", \"user:etl_readonly\", \"ok\", null, \"role=readonly\"]",
+          "[\"<ISO>\", \"secops-bot\", \"10.2.8.77\", \"scan_config\", \"/etc/clickhouse-server/users.xml\", \"ok\", null, \"default_user=default\"]",
+          "[\"<ISO>\", \"svc-billing\", \"10.2.5.22\", \"sync_payments\", \"billing.gateway\", \"warn\", \"retry scheduled\", \"billing-api-key-2026\"]",
+          "[\"<ISO>\", \"svc-reporting\", \"10.2.1.15\", \"rotate_credentials\", \"kv/prod/reporting/clickhouse\", \"ok\", null, \"vault://prod/clickhouse/reporting\"]"
+        ],
+        "table": "secure.audit_log"
+      },
+      {
+        "columns": [
+          "secret_name",
+          "owner",
+          "env",
+          "backend",
+          "value_hint",
+          "last_rotated",
+          "expires_at"
+        ],
+        "error": null,
+        "rows": [
+          "[\"billing/gateway/api_key\", \"svc-billing\", \"prod\", \"vault\", \"billing-api-key-2026\", \"<ISO>\", \"<ISO>\"]",
+          "[\"etl/s3/access_key\", \"svc-etl\", \"stage\", \"aws-secrets-manager\", \"AKIA...REDACTED\", \"<ISO>\", \"<ISO>\"]",
+          "[\"clickhouse/reporting/password\", \"svc-reporting\", \"prod\", \"vault\", \"vault://prod/clickhouse/reporting#password\", \"<ISO>\", \"<ISO>\"]"
+        ],
+        "table": "secure.secrets_inventory"
+      },
+      {
+        "columns": [
+          "job_id",
+          "src_cluster",
+          "dst_cluster",
+          "table_name",
+          "rows_copied",
+          "duration_ms",
+          "status",
+          "started_at",
+          "finished_at",
+          "run_by"
+        ],
+        "error": null,
+        "rows": [
+          "[\"repl_orders_20260311_01\", \"eu-1-ch\", \"dr-eu-1-ch\", \"analytics.orders\", 12034, 14820, \"ok\", \"<ISO>\", \"<ISO>\", \"svc-etl\"]",
+          "[\"repl_sessions_20260311_02\", \"eu-1-ch\", \"dr-eu-1-ch\", \"analytics.sessions\", 984221, 90755, \"ok\", \"<ISO>\", \"<ISO>\", \"svc-etl\"]",
+          "[\"repl_audit_20260311_03\", \"secure-ch\", \"dr-secure-ch\", \"secure.audit_log\", 8831, 23110, \"warn\", \"<ISO>\", \"<ISO>\", \"svc-secops\"]"
+        ],
+        "table": "warehouse.replication_jobs"
+      }
+    ],
+    "table_names": [
+      "billing.invoices",
+      "billing.payment_attempts",
+      "secure.audit_log",
+      "secure.secrets_inventory",
+      "warehouse.replication_jobs"
+    ],
+    "table_targets": [
+      "billing.invoices",
+      "billing.payment_attempts",
+      "secure.audit_log",
+      "secure.secrets_inventory",
+      "warehouse.replication_jobs"
+    ]
   }
 ]

@@ -7,12 +7,13 @@
         "error": "",
         "ok": true,
         "password": "default",
-        "source": "provided",
+        "source": "anonymous",
         "username": "default"
       }
     ],
     "auth_required": true,
-    "credentials_source": "provided",
+    "auth_transport_attempts": 1,
+    "credentials_source": "anonymous",
     "database": "default",
     "database_count": 7,
     "database_names": [
@@ -28,7 +29,7 @@
     "defcreds_enabled": false,
     "effective_password": "default",
     "effective_username": "default",
-    "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
+    "error": null,
     "execute_attempted": true,
     "execute_capability": true,
     "execute_command": "id",

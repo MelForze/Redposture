@@ -1,55 +1,130 @@
 [
   {
     "auth_required": null,
-    "clone_dir": null,
-    "clone_requested": false,
-    "clone_results": [],
-    "clone_scope": null,
-    "error": "[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1082)",
+    "clone_dir": "<OUT_DIR>/gitlab_clones",
+    "clone_requested": true,
+    "clone_results": [
+      {
+        "dest": "<OUT_DIR>/gitlab_clones/127.0.0.1_18080/redposture-lab/public-api",
+        "error": null,
+        "project": "redposture-lab/public-api",
+        "project_id": 101,
+        "status": "cloned"
+      }
+    ],
+    "clone_scope": "token",
+    "error": null,
     "host": "127.0.0.1",
-    "https": true,
-    "is_gitlab": false,
-    "login_page": null,
+    "https": false,
+    "is_gitlab": true,
+    "login_page": true,
     "module": "gitlab",
     "open_endpoints": [],
     "port": 18080,
-    "project_filters": [],
-    "public_projects": [],
+    "project_filters": [
+      "redposture-lab/public-api"
+    ],
+    "public_projects": [
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
+        "id": 101,
+        "issues_enabled": true,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "redposture-lab/public-api",
+        "permissions": {
+          "group_access": {
+            "access_level": 40
+          },
+          "project_access": {
+            "access_level": 40
+          }
+        },
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
+        "wiki_enabled": true
+      }
+    ],
     "public_projects_error": null,
     "service": "gitlab",
     "stages": [
       {
         "attempt": 1,
-        "error": "[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1082)",
-        "result": "error",
+        "error": null,
+        "result": "ok",
         "stage_name": "detect_protocol"
       },
       {
         "attempt": 1,
-        "error": "[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1082)",
-        "result": "error",
+        "error": null,
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "data"
       }
     ],
-    "status": "fail",
-    "token_access": [],
-    "token_projects": [],
+    "status": "valid_credentials",
+    "token_access": [
+      {
+        "access_level": 40,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
+        "id": 101,
+        "issues_enabled": true,
+        "issues_error": null,
+        "issues_read": true,
+        "members_error": null,
+        "members_read": false,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "redposture-lab/public-api",
+        "repo_error": null,
+        "repo_read": true,
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
+        "wiki_enabled": true
+      }
+    ],
+    "token_projects": [
+      {
+        "archived": false,
+        "http_url_to_repo": "http://127.0.0.1:18080/redposture-lab/public-api.git",
+        "id": 101,
+        "issues_enabled": true,
+        "merge_requests_enabled": true,
+        "path_with_namespace": "redposture-lab/public-api",
+        "permissions": {
+          "group_access": {
+            "access_level": 40
+          },
+          "project_access": {
+            "access_level": 40
+          }
+        },
+        "snippets_enabled": true,
+        "visibility": "public",
+        "web_url": "http://127.0.0.1:18080/redposture-lab/public-api",
+        "wiki_enabled": true
+      }
+    ],
     "token_projects_error": null,
     "token_provided": true,
-    "token_user": null,
-    "token_valid": null,
-    "version": null
+    "token_user": {
+      "id": 2,
+      "state": "active",
+      "username": "analyst"
+    },
+    "token_valid": true,
+    "version": "17.8.1"
   }
 ]

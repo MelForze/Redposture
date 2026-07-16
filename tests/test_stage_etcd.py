@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_etcd as etcd
+from redposture_core.audit_models import AuditRecord
 from redposture_core.stage_etcd import (
     _audit_etcd_host,
     _body_indicates_auth_required,
@@ -24,7 +25,7 @@ from redposture_core.stage_etcd import (
     _major_version,
     _normalize_etcd_key,
 )
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 class _ConsoleCapture:
@@ -47,6 +48,9 @@ class _ConsoleCapture:
     def plain(self, message: str, color: str | None = None) -> None:
         _ = color
         self.messages.append(("plain", message))
+
+    def _paint(self, text: str, _color: str, _stream: object) -> str:
+        return text
 
     def render_tagged_payload_line(self, line: str, tag: str, payload_color: str | None = None) -> bool:
         _ = (line, tag, payload_color)
@@ -72,6 +76,31 @@ def _etcd_args(**overrides: object) -> argparse.Namespace:
     }
     data.update(overrides)
     return argparse.Namespace(**data)
+
+
+def _etcd_host_record(
+    kwargs: dict[str, object],
+    *,
+    status: str,
+    detected: bool,
+    error: str | None = None,
+) -> AuditRecord:
+    return AuditRecord(
+        host=str(kwargs["host"]),
+        port=int(kwargs["port"]),
+        service="etcd",
+        module="etcd",
+        status=status,
+        auth_required=status == "auth_required",
+        extra={
+            "is_etcd": detected,
+            "api_versions": "v3" if detected else None,
+            "error": error,
+            "show_keys": bool(kwargs.get("show_keys")),
+            "dump_keys": bool(kwargs.get("dump_keys")),
+            "query_key": kwargs.get("query_key"),
+        },
+    )
 
 
 def test_friendly_error_text_maps_common_network_errors() -> None:
@@ -907,19 +936,16 @@ def test_run_etcd_stage_debug_flow_uses_single_global_progress(monkeypatch: pyte
     calls: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        calls.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        kwargs["emit_line"]("ETCD\t127.0.0.1\t2379\t[*] etcd Database")
-        return (1, 1, 0, 0)
+        calls.append(dict(kwargs))
+        return _etcd_host_record(kwargs, status="fail", detected=False, error="connection refused")
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "etcd", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "etcd", fake_audit_targets)
     rc = etcd.run_etcd_stage(_etcd_args(debug=True), logger=object())
     assert rc == 0
     assert len(calls) == 2
-    assert calls[0]["show_progress"] is False
-    assert calls[0]["append_output"] is False
-    assert calls[1]["append_output"] is True
+    assert [call["port"] for call in calls] == [2379, 22379]
+    assert all(call["run_deep_checks"] is False for call in calls)
+    assert all(call["debug"] is True and callable(call["debug_emit"]) for call in calls)
     infos = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "info"]
     assert any("etcd audit started:" in msg for msg in infos)
 
@@ -945,13 +971,10 @@ def test_run_etcd_stage_verbose_multi_group_uses_single_global_progress(monkeypa
     calls: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        calls.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        kwargs["emit_line"]("ETCD\t127.0.0.1\t2379\t[*] etcd Database")
-        return (1, 1, 0, 0)
+        calls.append(dict(kwargs))
+        return _etcd_host_record(kwargs, status="fail", detected=False, error="connection refused")
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "etcd", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "etcd", fake_audit_targets)
 
     progress_totals: list[int] = []
     progress_advances: list[int] = []
@@ -968,15 +991,15 @@ def test_run_etcd_stage_verbose_multi_group_uses_single_global_progress(monkeypa
             return
 
     monkeypatch.setattr(
-        etcd,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
     )
 
     rc = etcd.run_etcd_stage(_etcd_args(show_keys=True), logger=object())
     assert rc == 0
     assert len(calls) == 2
-    assert [bool(call["show_progress"]) for call in calls] == [False, False]
+    assert [call["port"] for call in calls] == [2379, 22379]
+    assert all(call["run_deep_checks"] is False for call in calls)
     assert progress_totals == [2]
     assert progress_advances == [1, 1]
 
@@ -995,7 +1018,16 @@ def test_run_etcd_stage_suppresses_unreachable_summary_without_debug(monkeypatch
         "build_scan_execution_groups",
         lambda _specs, _ports, include_scheme_in_key=False: [SimpleNamespace(hosts=["127.0.0.1"], port=2379)],
     )
-    patch_runner_for_legacy_target_fake(monkeypatch, "etcd", lambda **_kwargs: (1, 0, 0, 1))
+    patch_module_host_stage_for_test(
+        monkeypatch,
+        "etcd",
+        lambda **kwargs: _etcd_host_record(
+            kwargs,
+            status="fail",
+            detected=False,
+            error="connection refused",
+        ),
+    )
     rc = etcd.run_etcd_stage(_etcd_args(), logger=object())
     assert rc == 0
     warns = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]

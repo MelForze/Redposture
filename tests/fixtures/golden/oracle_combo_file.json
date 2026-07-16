@@ -16,6 +16,13 @@
     "connect_sid": null,
     "credential_attempts": [
       {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "bad",
+        "token": null,
+        "username": "bad"
+      },
+      {
         "error": null,
         "ok": true,
         "password": "OracleLab!2026",

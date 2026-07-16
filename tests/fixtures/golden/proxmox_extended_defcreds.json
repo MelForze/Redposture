@@ -20,16 +20,21 @@
     ],
     "auth_method": "password",
     "auth_password": "admin",
-    "auth_required": null,
+    "auth_required": true,
     "auth_username": "root@pam",
     "cap_adduser": true,
     "cap_backup": true,
     "cap_modify": true,
     "cap_read": true,
-    "checked_endpoints": 2,
+    "checked_endpoints": 3,
     "credential_hits": 0,
     "discover_creds": false,
     "endpoint_results": [
+      {
+        "error": null,
+        "method": "GET",
+        "status": 200
+      },
       {
         "error": null,
         "method": "GET",
@@ -46,11 +51,14 @@
     "host": "127.0.0.1",
     "is_proxmox": true,
     "module": "proxmox",
-    "nodes": null,
+    "nodes": [
+      "pve-edge-01",
+      "pve-core-02"
+    ],
     "nodes_error": null,
     "port": 18006,
     "service": "proxmox",
-    "show_nodes": false,
+    "show_nodes": true,
     "show_users": false,
     "stages": [
       {
@@ -79,7 +87,7 @@
       }
     ],
     "status": "token_ok",
-    "successful_endpoints": 2,
+    "successful_endpoints": 3,
     "use_https": true,
     "users": null,
     "users_error": null

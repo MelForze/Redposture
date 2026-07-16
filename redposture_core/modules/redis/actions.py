@@ -6,14 +6,21 @@ import json
 import socket
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
+from ...audit_config import AuditConfig
+from ...audit_models import AuditRecord
 from ...clients import transport
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
+    dump_flag_enabled,
+    dump_flag_limit,
     limit_metadata,
     limit_sequence,
+    show_flag_enabled,
+    show_flag_limit,
 )
 from ...stage_runtime import (
     StageTelemetryBuilder,
@@ -373,6 +380,373 @@ def _dump_redis_key_value(sock: socket.socket, key: str) -> tuple[str, str | Non
     return f"<type:{key_type}>", None
 
 
+@dataclass
+class RedisAuditLifecycleState:
+    host: str
+    port: int
+    timeout: float
+    retries: int
+    debug: bool
+    debug_emit: Callable[[str], None] | None
+    started: float
+    sock: Any = None
+    is_redis: bool = False
+    auth_required: bool | None = None
+    status: str = "fail"
+    error: str | None = None
+    default_credentials: bool = False
+    default_credentials_attempted: bool = False
+    defcreds_enabled: bool = False
+    provided_credentials: bool = False
+    provided_username: str | None = None
+    provided_password: str | None = None
+    provided_credentials_ok: bool | None = None
+    show_keys: bool = False
+    show_keys_limit: int | None = None
+    dump_keys: bool = False
+    dump_keys_limit: int | None = None
+    query_key: str | None = None
+    key_count: int | None = None
+    keys: list[str] | None = None
+    key_values: list[str] | None = None
+    key_value_entries: list[dict[str, str | None]] | None = None
+    query_key_value: str | None = None
+    query_key_entry: dict[str, str | None] | None = None
+    active_username: str | None = None
+    active_password: str | None = None
+    active_source: str = "anonymous"
+    auth_attempts_used: int = 0
+    data_attempts_used: int = 0
+
+
+class _RedisAuthenticationRejected(Exception):
+    pass
+
+
+def _close_redis_lifecycle_socket(state: RedisAuditLifecycleState) -> None:
+    sock = state.sock
+    state.sock = None
+    close = getattr(sock, "close", None)
+    if callable(close):
+        try:
+            close()
+        except OSError:
+            pass
+
+
+def _open_redis_lifecycle_socket(state: RedisAuditLifecycleState) -> None:
+    state.sock = socket.create_connection((state.host, state.port), timeout=state.timeout)
+    state.sock.settimeout(state.timeout)
+
+
+def redis_lifecycle_state_factory(ctx: Any) -> RedisAuditLifecycleState:
+    cfg = AuditConfig.from_namespace(ctx.args)
+    return RedisAuditLifecycleState(
+        host=str(ctx.host),
+        port=int(ctx.port),
+        timeout=float(cfg.timeout),
+        retries=int(cfg.retries),
+        debug=bool(cfg.debug),
+        debug_emit=ctx.debug_emit,
+        started=time.monotonic(),
+        defcreds_enabled=bool(getattr(ctx.args, "defcreds", False)),
+    )
+
+
+def close_redis_lifecycle_state(state: Any) -> None:
+    if isinstance(state, RedisAuditLifecycleState):
+        _close_redis_lifecycle_socket(state)
+
+
+def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bool) -> AuditRecord:
+    elapsed_ms = int((time.monotonic() - state.started) * 1000)
+    payload: dict[str, Any] = {
+        "timestamp": utc_now_iso(),
+        "host": state.host,
+        "port": state.port,
+        "module": "redis",
+        "service": "redis",
+        "is_redis": state.is_redis,
+        "status": state.status,
+        "auth_required": state.auth_required,
+        "default_credentials": state.default_credentials,
+        "provided_credentials": state.provided_credentials,
+        "provided_username": state.provided_username,
+        "provided_password": state.provided_password if state.provided_credentials else None,
+        "provided_credentials_ok": state.provided_credentials_ok,
+        "defcreds_enabled": state.defcreds_enabled,
+        "default_credentials_attempted": state.default_credentials_attempted,
+        "show_keys": state.show_keys if include_data else False,
+        "show_keys_limit": state.show_keys_limit if include_data else None,
+        "dump_keys": state.dump_keys if include_data else False,
+        "query_key": state.query_key if include_data else None,
+        "key_count": state.key_count if include_data else None,
+        "keys": state.keys if include_data else None,
+        "key_values": state.key_values if include_data else None,
+        "key_value_entries": state.key_value_entries if include_data else None,
+        "query_key_value": state.query_key_value if include_data else None,
+        "query_key_entry": state.query_key_entry if include_data else None,
+        "elapsed_ms": elapsed_ms,
+        "error": state.error,
+    }
+    attempts = max(1, state.retries + 1)
+    telemetry = StageTelemetryBuilder(
+        host=state.host,
+        port=state.port,
+        attempts=attempts,
+        debug=state.debug,
+        debug_emit=state.debug_emit,
+    )
+    detect_result = "ok" if state.is_redis else "error"
+    telemetry.stage("detect_protocol", detect_result, state.error if detect_result == "error" else None, 0)
+    auth_result = (
+        "ok"
+        if state.status in _REDIS_DEEP_STATUSES.union({"auth_required"})
+        else ("error" if state.status == "fail" else "skip")
+    )
+    telemetry.stage(
+        "auth_inference_credentials",
+        auth_result,
+        state.error if auth_result == "error" else None,
+        0,
+    )
+    if include_data and state.status in _REDIS_DEEP_STATUSES:
+        telemetry.stage("access_capabilities", "ok", None, 0)
+        telemetry.stage("data", "error" if state.error else "ok", state.error, elapsed_ms)
+    else:
+        telemetry.stage("access_capabilities", "skip", "deep checks disabled", 0)
+        telemetry.stage("data", "skip", "deep checks disabled", 0)
+    payload = telemetry.attach(payload, status=state.status, total_ms=elapsed_ms)
+    payload["attempts"] = 1
+    payload["max_attempts"] = attempts
+    return AuditRecord.from_mapping(payload, module="redis", service="redis")
+
+
+def redis_detect_hook(ctx: Any) -> AuditRecord:
+    state = ctx.lifecycle_state
+    if not isinstance(state, RedisAuditLifecycleState):
+        raise TypeError("redis lifecycle state is missing")
+    attempts = max(1, state.retries + 1)
+    last_error: str | None = None
+    for attempt in range(attempts):
+        try:
+            _open_redis_lifecycle_socket(state)
+            ping_type, ping_value = _send_cmd(state.sock, "PING")
+            if ping_type == "simple" and str(ping_value).upper() == "PONG":
+                state.is_redis = True
+                state.auth_required = False
+                state.status = "open_no_auth"
+                state.error = None
+                return _redis_lifecycle_record(state, include_data=False)
+            if ping_type == "error" and _is_noauth_error(str(ping_value)):
+                state.is_redis = True
+                state.auth_required = True
+                state.status = "auth_required"
+                state.error = None
+                return _redis_lifecycle_record(state, include_data=False)
+            state.is_redis = ping_type == "error"
+            state.auth_required = None
+            state.status = "fail"
+            state.error = f"unexpected PING response: {ping_type} {ping_value}"
+            if not state.is_redis:
+                _close_redis_lifecycle_socket(state)
+            return _redis_lifecycle_record(state, include_data=False)
+        except (OSError, ValueError, ConnectionError) as exc:
+            last_error = str(exc)
+            _close_redis_lifecycle_socket(state)
+            if attempt < attempts - 1:
+                time.sleep(_retry_delay(attempt))
+    state.is_redis = False
+    state.auth_required = None
+    state.status = "fail"
+    state.error = last_error or "connection failed"
+    return _redis_lifecycle_record(state, include_data=False)
+
+
+def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
+    state = ctx.lifecycle_state
+    if not isinstance(state, RedisAuditLifecycleState):
+        raise TypeError("redis lifecycle state is missing")
+    if not state.is_redis or state.status == "fail":
+        return _redis_lifecycle_record(state, include_data=False)
+    if state.auth_required is False:
+        state.status = "open_no_auth"
+        state.error = None
+        state.active_username = None
+        state.active_password = None
+        state.active_source = "anonymous"
+        return _redis_lifecycle_record(state, include_data=False)
+
+    credential = ctx.credential
+    if credential.username is None and credential.password is None:
+        state.status = "auth_required"
+        return _redis_lifecycle_record(state, include_data=False)
+
+    attempts = max(1, state.retries + 1)
+    last_error: str | None = None
+    for attempt in range(attempts):
+        state.auth_attempts_used = attempt + 1
+        try:
+            if state.sock is None:
+                _open_redis_lifecycle_socket(state)
+            if credential.source == "default":
+                state.default_credentials_attempted = True
+                default_ok, default_error = _check_default_credentials(state.sock)
+                state.default_credentials = bool(default_ok)
+                if default_ok:
+                    state.status = "weak_default_creds"
+                    state.error = None
+                    state.active_username = credential.username
+                    state.active_password = credential.password
+                    state.active_source = "default"
+                else:
+                    state.status = "auth_required"
+                    state.error = default_error
+                return _redis_lifecycle_record(state, include_data=False)
+
+            state.provided_credentials = True
+            state.provided_username = credential.username
+            state.provided_password = credential.password
+            provided_ok, provided_error = _check_provided_credentials(
+                state.sock,
+                credential.username,
+                credential.password,
+            )
+            state.provided_credentials_ok = bool(provided_ok)
+            if provided_ok:
+                state.status = "valid_credentials"
+                state.error = None
+                state.active_username = credential.username
+                state.active_password = credential.password
+                state.active_source = credential.source
+            else:
+                state.status = "auth_required"
+                state.error = provided_error
+            return _redis_lifecycle_record(state, include_data=False)
+        except (OSError, ValueError, ConnectionError) as exc:
+            last_error = str(exc)
+            _close_redis_lifecycle_socket(state)
+            if attempt < attempts - 1:
+                time.sleep(_retry_delay(attempt))
+    state.status = "fail"
+    state.error = last_error or "authentication request failed"
+    return _redis_lifecycle_record(state, include_data=False)
+
+
+def _redis_reset_lifecycle_data(state: RedisAuditLifecycleState, args: Any) -> tuple[int, int]:
+    state.show_keys = show_flag_enabled(getattr(args, "show_keys", False))
+    state.show_keys_limit = show_flag_limit(getattr(args, "show_keys", False))
+    state.dump_keys = dump_flag_enabled(getattr(args, "dump", False))
+    state.dump_keys_limit = dump_flag_limit(getattr(args, "dump", False))
+    state.query_key = str(getattr(args, "key", None) or getattr(args, "query_key", None) or "").strip() or None
+    dump_batch = int(getattr(args, "dump_batch", 10000) or 10000)
+    dump_delay = int(getattr(args, "dump_delay", 20) or 0)
+    state.key_count = None
+    state.keys = None
+    state.key_values = None
+    state.key_value_entries = None
+    state.query_key_value = None
+    state.query_key_entry = None
+    return dump_batch, dump_delay
+
+
+def _redis_reauthenticate_lifecycle_state(state: RedisAuditLifecycleState) -> None:
+    if state.active_source == "anonymous":
+        return
+    ok: bool | None
+    error: str | None
+    if state.active_source == "default":
+        ok, error = _check_default_credentials(state.sock)
+    else:
+        ok, error = _check_provided_credentials(
+            state.sock,
+            state.active_username,
+            state.active_password,
+        )
+    if not ok:
+        raise _RedisAuthenticationRejected(error or "authentication rejected during data retry")
+
+
+def _redis_collect_lifecycle_data_once(
+    state: RedisAuditLifecycleState,
+    *,
+    dump_batch: int,
+    dump_delay: int,
+) -> None:
+    state.key_count, count_error = _count_redis_keys(state.sock)
+    if count_error:
+        state.error = count_error
+    if state.dump_keys:
+        dumped_entries, dump_error = _stream_dump_redis_keys(
+            state.sock,
+            batch=dump_batch,
+            delay_ms=dump_delay,
+            limit=state.dump_keys_limit,
+        )
+        if dump_error:
+            state.error = dump_error if state.error is None else f"{state.error}; {dump_error}"
+        state.key_value_entries = dumped_entries
+        state.key_values = [_redis_kv_entry_text(item) for item in dumped_entries]
+        state.keys = [str(entry.get("key") or "") for entry in dumped_entries]
+        if state.key_count is None:
+            state.key_count = len(dumped_entries)
+    elif state.show_keys:
+        state.keys, keys_error = _scan_redis_keys(state.sock, limit=state.show_keys_limit)
+        if keys_error:
+            state.error = keys_error if state.error is None else f"{state.error}; {keys_error}"
+        if state.key_count is None and isinstance(state.keys, list):
+            state.key_count = len(state.keys)
+
+    if state.query_key:
+        value_text, value_error = _dump_redis_key_value(state.sock, state.query_key)
+        if value_error:
+            state.error = value_error if state.error is None else f"{state.error}; {value_error}"
+        else:
+            state.query_key_entry = _redis_kv_entry(state.query_key, value_text)
+            state.query_key_value = _redis_kv_entry_text(state.query_key_entry)
+
+
+def redis_data_hook(ctx: Any, _auth_record: AuditRecord) -> AuditRecord:
+    state = ctx.lifecycle_state
+    if not isinstance(state, RedisAuditLifecycleState):
+        raise TypeError("redis lifecycle state is missing")
+    args = ctx.args
+    dump_batch, dump_delay = _redis_reset_lifecycle_data(state, args)
+
+    if state.status not in _REDIS_DEEP_STATUSES:
+        return _redis_lifecycle_record(state, include_data=False)
+
+    attempts = max(1, state.retries + 1)
+    last_error: str | None = None
+    for attempt in range(attempts):
+        state.data_attempts_used = attempt + 1
+        try:
+            if state.sock is None:
+                _open_redis_lifecycle_socket(state)
+                _redis_reauthenticate_lifecycle_state(state)
+            state.error = None
+            _redis_collect_lifecycle_data_once(
+                state,
+                dump_batch=dump_batch,
+                dump_delay=dump_delay,
+            )
+            return _redis_lifecycle_record(state, include_data=True)
+        except _RedisAuthenticationRejected as exc:
+            state.status = "auth_required"
+            state.error = str(exc)
+            break
+        except (OSError, ValueError, ConnectionError) as exc:
+            last_error = str(exc)
+            _close_redis_lifecycle_socket(state)
+            if attempt < attempts - 1:
+                time.sleep(_retry_delay(attempt))
+                _redis_reset_lifecycle_data(state, args)
+    if state.status in _REDIS_DEEP_STATUSES:
+        state.status = "fail"
+    state.error = state.error or last_error or "data request failed"
+    return _redis_lifecycle_record(state, include_data=True)
+
+
 def _audit_redis_host(
     host: str,
     port: int,
@@ -388,10 +762,30 @@ def _audit_redis_host(
     dump_keys_limit: int | None = None,
     dump_batch: int = 10000,
     dump_delay: int = 20,
+    credential_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
-    provided_credentials = password is not None
+    normalized_candidates: list[tuple[str | None, str | None]] = []
+    for candidate in credential_candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_username = candidate.get("username")
+        candidate_password = candidate.get("password")
+        if candidate_username is None and candidate_password is None:
+            continue
+        normalized_candidates.append(
+            (
+                str(candidate_username) if candidate_username is not None else None,
+                str(candidate_password) if candidate_password is not None else None,
+            )
+        )
+    if not normalized_candidates and (username is not None or password is not None):
+        normalized_candidates.append((username, password))
+
+    provided_credentials = bool(normalized_candidates)
+    provided_username = normalized_candidates[0][0] if normalized_candidates else username
+    provided_password = normalized_candidates[0][1] if normalized_candidates else password
 
     for attempt in range(attempts):
         started = time.monotonic()
@@ -420,7 +814,8 @@ def _audit_redis_host(
                         "auth_required": None,
                         "default_credentials": None,
                         "provided_credentials": provided_credentials,
-                        "provided_username": username,
+                        "provided_username": provided_username,
+                        "provided_password": provided_password if provided_credentials else None,
                         "provided_credentials_ok": None,
                         "defcreds_enabled": defcreds,
                         "show_keys": show_keys,
@@ -452,11 +847,20 @@ def _audit_redis_host(
                             auth_error = default_error
 
                     if not default_credentials:
-                        provided_credentials_ok, provided_error = _check_provided_credentials(sock, username, password)
-                        if provided_credentials_ok:
-                            auth_error = None
-                        elif provided_error:
-                            auth_error = provided_error or auth_error
+                        for candidate_username, candidate_password in normalized_candidates:
+                            candidate_ok, provided_error = _check_provided_credentials(
+                                sock,
+                                candidate_username,
+                                candidate_password,
+                            )
+                            provided_credentials_ok = bool(candidate_ok)
+                            provided_username = candidate_username
+                            provided_password = candidate_password
+                            if candidate_ok:
+                                auth_error = None
+                                break
+                            if provided_error:
+                                auth_error = provided_error or auth_error
 
                 key_count: int | None = None
                 keys: list[str] | None = None
@@ -519,8 +923,8 @@ def _audit_redis_host(
                     "auth_required": auth_required,
                     "default_credentials": default_credentials,
                     "provided_credentials": provided_credentials,
-                    "provided_username": username,
-                    "provided_password": password if provided_credentials else None,
+                    "provided_username": provided_username,
+                    "provided_password": provided_password if provided_credentials else None,
                     "provided_credentials_ok": provided_credentials_ok,
                     "defcreds_enabled": defcreds,
                     "default_credentials_attempted": default_credentials_attempted,
@@ -552,8 +956,8 @@ def _audit_redis_host(
         "auth_required": None,
         "default_credentials": None,
         "provided_credentials": provided_credentials,
-        "provided_username": username,
-        "provided_password": password if provided_credentials else None,
+        "provided_username": provided_username,
+        "provided_password": provided_password if provided_credentials else None,
         "provided_credentials_ok": None,
         "defcreds_enabled": defcreds,
         "default_credentials_attempted": False,
@@ -776,6 +1180,7 @@ def _call_audit_redis_host_with_stage_debug(
     dump_keys_limit: int | None = None,
     dump_batch: int = 10000,
     dump_delay: int = 20,
+    credential_candidates: list[dict[str, Any]] | None = None,
     *,
     run_deep_checks: bool,
     debug: bool,
@@ -797,6 +1202,7 @@ def _call_audit_redis_host_with_stage_debug(
         dump_keys_limit=dump_keys_limit if run_deep_checks else None,
         dump_batch=dump_batch,
         dump_delay=dump_delay,
+        credential_candidates=credential_candidates,
     )
 
     result: dict[str, Any] = dict(record)

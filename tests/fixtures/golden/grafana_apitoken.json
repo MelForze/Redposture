@@ -1,54 +1,79 @@
 [
   {
-    "attempted_credentials": [],
-    "attempted_credentials_count": 0,
-    "auth_attempts": [],
-    "auth_required": null,
-    "check_results": null,
-    "check_urls": null,
+    "attempted_credentials": [
+      {
+        "error": "invalid api token",
+        "ok": false,
+        "password": null,
+        "source": "provided",
+        "username": null
+      }
+    ],
+    "attempted_credentials_count": 1,
+    "auth_attempts": [
+      {
+        "error": "invalid api token",
+        "ok": false,
+        "password": null,
+        "source": "provided",
+        "username": null
+      }
+    ],
+    "auth_required": true,
+    "check_results": [],
+    "check_urls": [],
+    "credential_attempts": [
+      {
+        "error": "invalid api token",
+        "ok": false,
+        "password": null,
+        "token": null,
+        "username": null
+      }
+    ],
     "credentials_source": null,
     "datasource_count": null,
     "datasources": null,
-    "default_credentials": null,
+    "default_credentials": false,
     "defcreds_enabled": false,
     "effective_password": null,
     "effective_username": null,
-    "error": "Connection reset by peer",
+    "error": "authentication required",
     "host": "127.0.0.1",
-    "is_grafana": false,
+    "is_grafana": true,
     "module": "grafana",
     "port": 3000,
     "provided_credentials": true,
-    "provided_credentials_ok": null,
+    "provided_credentials_ok": false,
     "provided_username": null,
     "service": "grafana",
-    "show_datasources": false,
+    "show_datasources": true,
     "stages": [
       {
         "attempt": 1,
-        "error": "Connection reset by peer",
-        "result": "error",
+        "error": null,
+        "result": "ok",
         "stage_name": "detect_protocol"
       },
       {
         "attempt": 1,
-        "error": "Connection reset by peer",
-        "result": "error",
+        "error": null,
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": "authentication required",
+        "result": "error",
         "stage_name": "data"
       }
     ],
-    "status": "fail"
+    "status": "auth_required"
   }
 ]

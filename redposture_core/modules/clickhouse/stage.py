@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ...audit_config import AuditConfig
+from ...audit_models import AuditRecord
 from ...console import Console
+from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
+    AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
 )
@@ -16,23 +20,106 @@ from . import actions, policy, render
 
 _DEFAULT_PORT = 9000
 _DEFAULT_PORTS: tuple[int, ...] | None = (9000, 19000)
+_DEFAULT_HTTP_PORT = 8123
+_DEFAULT_HTTP_PORTS: tuple[int, ...] | None = (8123, 18123)
+_PRODUCTION_HOST_STAGE = actions.host_stage
+_PRODUCTION_AUDIT_HOST = actions._audit_clickhouse_host
 
 
 def build_clickhouse_plan(args: Any) -> AuditCommandPlan:
-    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    if _raw_protocol(args) == "http":
+        plan = build_basic_audit_plan(args, default_port=_DEFAULT_HTTP_PORT, default_ports=_DEFAULT_HTTP_PORTS)
+    else:
+        plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    if any(run.source == "file" for run in plan.credential_runs) or not bool(getattr(args, "defcreds", False)):
+        return plan
+    candidates = actions._build_credential_candidates(
+        getattr(args, "username", None),
+        getattr(args, "password", None),
+        True,
+    )
+    return replace(
+        plan,
+        credential_runs=tuple(
+            AuditCredentialRun(username=username, password=password, source=source)
+            for username, password, source in candidates
+        ),
+    )
 
 
 def _force_single_default_port(args: Any) -> None:
     if getattr(args, "port", None) is None and getattr(args, "ports", None) is None:
-        args.port = _DEFAULT_PORT
+        args.port = _DEFAULT_HTTP_PORT if _raw_protocol(args) == "http" else _DEFAULT_PORT
+
+
+def _build_clickhouse_host_stage_options(args: Any) -> dict[str, Any]:
+    table_targets = actions._normalize_table_targets(list(getattr(args, "tables", None) or []))
+    table_columns, columns_error = actions._normalize_column_names(list(getattr(args, "columns", None) or []))
+    if columns_error:
+        raise ValueError(columns_error)
+    return {
+        "database": str(getattr(args, "database", "default") or "default"),
+        "protocol": _raw_protocol(args),
+        "show_databases": show_flag_enabled(getattr(args, "show_databases", False)),
+        "show_tables": show_flag_enabled(getattr(args, "show_tables", False)),
+        "show_columns": show_flag_enabled(getattr(args, "show_columns", False)),
+        "table_targets": table_targets,
+        "table_columns": table_columns,
+        "dump_table_rows": dump_flag_enabled(getattr(args, "dump", False)),
+        "execute_command": str(getattr(args, "execute", "") or "").strip() or None,
+        "sql_command": str(getattr(args, "sql_cmd", "") or "").strip() or None,
+        "show_databases_limit": show_flag_limit(getattr(args, "show_databases", False)),
+        "show_tables_limit": show_flag_limit(getattr(args, "show_tables", False)),
+        "show_columns_limit": show_flag_limit(getattr(args, "show_columns", False)),
+        "port_protocols": None,
+        "dump_row_limit": dump_flag_limit(getattr(args, "dump", False)),
+    }
 
 
 def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
+    options = _build_clickhouse_host_stage_options(args)
+    resolved_host_stage = getattr(actions, _PRODUCTION_HOST_STAGE.__name__, _PRODUCTION_HOST_STAGE)
+    use_lifecycle_hooks = (
+        actions.host_stage is _PRODUCTION_HOST_STAGE
+        and resolved_host_stage is _PRODUCTION_HOST_STAGE
+        and actions._audit_clickhouse_host is _PRODUCTION_AUDIT_HOST
+    )
+
+    def _state_factory(_ctx: Any) -> actions.ClickHouseLifecycleState:
+        return actions.ClickHouseLifecycleState()
+
+    def _detect(ctx: Any) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            actions.detect_clickhouse(ctx, options),
+            module="clickhouse",
+            service="clickhouse",
+        )
+
+    def _auth(ctx: Any, record: Any) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            actions.authenticate_clickhouse(ctx, record, options),
+            module="clickhouse",
+            service="clickhouse",
+        )
+
+    def _data(ctx: Any, record: Any) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            actions.collect_clickhouse_data(ctx, record, options),
+            module="clickhouse",
+            service="clickhouse",
+        )
+
     return ModuleAuditSpec(
         module="clickhouse",
         label="CLICKHOUSE",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
+        host_stage_options=options,
+        detect=_detect if use_lifecycle_hooks else None,
+        auth=_auth if use_lifecycle_hooks else None,
+        data=_data if use_lifecycle_hooks else None,
+        lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
+        lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_clickhouse_line,
         # E3 opt-in: ClickHouse anon-open (default_user w/ empty password) is
@@ -44,6 +131,8 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
 def run_clickhouse_stage(args: Any, logger: Any) -> int:
     cfg = AuditConfig.from_namespace(args)
     console = Console(debug=cfg.debug)
+    if hasattr(console, "set_structured_output"):
+        console.set_structured_output(cfg.output_format == "json")
     actions._configure_clickhouse_loggers()
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
@@ -66,9 +155,12 @@ def run_clickhouse_stage(args: Any, logger: Any) -> int:
         console.error(str(exc))
         return 2
     _emit_debug_start(args, console, plan)
-    runner = AuditCommandRunner(args=args, spec=build_clickhouse_spec(args), logger=logger, console=console)
     try:
+        runner = AuditCommandRunner(args=args, spec=build_clickhouse_spec(args), logger=logger, console=console)
         runner.run_plan(plan)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
     except OSError as exc:
         console.error(f"failed to process clickhouse output: {exc}")
         return 2
@@ -319,5 +411,6 @@ def _emit_clickhouse_record(record: dict[str, Any], output_format: str) -> None:
 __all__ = [
     "build_clickhouse_plan",
     "build_clickhouse_spec",
+    "_build_clickhouse_host_stage_options",
     "run_clickhouse_stage",
 ]

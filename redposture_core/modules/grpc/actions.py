@@ -8,6 +8,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from google.protobuf import descriptor_pb2
@@ -68,6 +69,19 @@ from ...utils import (
 
 # Connection-error classification + framed reads are shared via the transport layer.
 _is_connection_refused_error = transport.is_connection_refused
+
+
+@dataclass
+class GrpcLifecycleState:
+    detect_result: dict[str, Any] | None = None
+    deep_records: dict[tuple[str | None, str | None, str | None, str], dict[str, Any]] = field(default_factory=dict)
+
+
+def _grpc_lifecycle_key(ctx: Any) -> tuple[str | None, str | None, str | None, str]:
+    credential = ctx.credential
+    return credential.username, credential.password, credential.token, str(credential.source or "anonymous")
+
+
 _is_connection_refused_fail_record = transport.is_connection_refused_fail_record
 _is_connection_timeout_error = transport.is_connection_timeout
 
@@ -530,6 +544,7 @@ def _audit_grpc_host(
     invoke_path: str | None = None,
     invoke_request_json: dict[str, Any] | None = None,
     metadata: list[tuple[str, str]] | None = None,
+    _lifecycle_detect_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     provided_credentials = bool(token or (username is not None and password is not None))
@@ -544,28 +559,32 @@ def _audit_grpc_host(
     data_duration_ms = 0
     stage_attempts_used = 1
 
-    detect_result: dict[str, Any] = {}
+    detect_result: dict[str, Any] = dict(_lifecycle_detect_result or {})
 
-    for attempt in range(attempts):
-        stage_attempts_used = attempt + 1
-        detect_started = time.monotonic()
-        detect_result = _detect_grpc_target(
-            host,
-            port,
-            timeout=timeout,
-            preferred_scheme=preferred_scheme,
-        )
-        detect_duration_ms = int((time.monotonic() - detect_started) * 1000)
+    if _lifecycle_detect_result is None:
+        for attempt in range(attempts):
+            stage_attempts_used = attempt + 1
+            detect_started = time.monotonic()
+            detect_result = _detect_grpc_target(
+                host,
+                port,
+                timeout=timeout,
+                preferred_scheme=preferred_scheme,
+            )
+            detect_duration_ms = int((time.monotonic() - detect_started) * 1000)
+            detect_probe_trace = list(detect_result.get("detect_probe_trace") or [])
+
+            if detect_result.get("status") == "fail":
+                last_error = str(detect_result.get("detect_error") or "connection failed")
+                if attempt >= attempts - 1 or not _is_retryable_stage_error(last_error):
+                    break
+                time.sleep(_retry_delay(attempt))
+                continue
+
+            break
+    else:
         detect_probe_trace = list(detect_result.get("detect_probe_trace") or [])
-
-        if detect_result.get("status") == "fail":
-            last_error = str(detect_result.get("detect_error") or "connection failed")
-            if attempt >= attempts - 1 or not _is_retryable_stage_error(last_error):
-                break
-            time.sleep(_retry_delay(attempt))
-            continue
-
-        break
+        last_error = str(detect_result.get("detect_error") or "") or None
 
     if detect_result.get("status") == "fail":
         return {
@@ -1371,6 +1390,91 @@ def _call_audit_grpc_host_with_stage_debug(
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
     return merge_stage_records(detect_record, deep_record)
+
+
+def _grpc_lifecycle_audit(
+    ctx: Any,
+    options: dict[str, Any],
+    *,
+    run_deep_checks: bool,
+) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, GrpcLifecycleState) or state.detect_result is None:
+        raise TypeError("grpc lifecycle state is unavailable")
+    credential = ctx.credential
+    record = _audit_grpc_host(
+        str(ctx.host),
+        int(ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        int(getattr(ctx.args, "retries", 0) or 0),
+        token=credential.token,
+        username=credential.username,
+        password=credential.password,
+        defcreds=False,
+        preferred_scheme=(str(ctx.target.scheme) if ctx.target is not None and ctx.target.scheme else None),
+        run_deep_checks=run_deep_checks,
+        schema_descriptor_bytes=list(options["schema_descriptor_bytes"]),
+        invoke_path=options["invoke_path"],
+        invoke_request_json=options["invoke_request_json"],
+        metadata=list(options["metadata"]),
+        _lifecycle_detect_result=state.detect_result,
+    )
+    if credential.source == "default":
+        record["defcreds_used"] = True
+        auth_used = record.get("auth_used")
+        if isinstance(auth_used, dict):
+            auth_used["source"] = "defcreds"
+    return record
+
+
+def detect_grpc(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, GrpcLifecycleState):
+        raise TypeError("grpc lifecycle state is unavailable")
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    for attempt in range(attempts):
+        result = _detect_grpc_target(
+            str(ctx.host),
+            int(ctx.port),
+            timeout=float(getattr(ctx.args, "timeout", 5.0)),
+            preferred_scheme=(str(ctx.target.scheme) if ctx.target is not None and ctx.target.scheme else None),
+        )
+        state.detect_result = dict(result)
+        error = str(result.get("detect_error") or "")
+        if result.get("status") != "fail" or attempt >= attempts - 1 or not _is_retryable_stage_error(error):
+            break
+        time.sleep(_retry_delay(attempt))
+    anonymous_ctx = type("_AnonymousGrpcContext", (), {})()
+    anonymous_ctx.args = ctx.args
+    anonymous_ctx.host = ctx.host
+    anonymous_ctx.port = ctx.port
+    anonymous_ctx.target = ctx.target
+    anonymous_ctx.lifecycle_state = state
+    anonymous_ctx.credential = type(
+        "_AnonymousCredential",
+        (),
+        {"username": None, "password": None, "token": None, "source": "anonymous"},
+    )()
+    return _grpc_lifecycle_audit(anonymous_ctx, options, run_deep_checks=False)
+
+
+def authenticate_grpc(ctx: Any, _detect_record: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, GrpcLifecycleState):
+        raise TypeError("grpc lifecycle state is unavailable")
+    record = _grpc_lifecycle_audit(ctx, options, run_deep_checks=True)
+    state.deep_records[_grpc_lifecycle_key(ctx)] = record
+    return record
+
+
+def collect_grpc_data(ctx: Any, _record: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, GrpcLifecycleState):
+        raise TypeError("grpc lifecycle state is unavailable")
+    cached = state.deep_records.get(_grpc_lifecycle_key(ctx))
+    if cached is not None:
+        return cached
+    return _grpc_lifecycle_audit(ctx, options, run_deep_checks=True)
 
 
 # Typed runner boundary -----------------------------------------------------

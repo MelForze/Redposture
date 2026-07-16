@@ -41,40 +41,69 @@ if [ ! -d "${LAB_DIR}/services" ]; then
   exit 2
 fi
 
-# P3-G: pre-run port cleanup. Stops any docker container or host process occupying a lab
-# port before the matrix starts. Without this, a leftover container/process (e.g. user-side
-# `grafana` on :3000 from another project) silently makes the lab service refuse to bind,
-# and the matrix audits whatever was already on that port -- producing confusing "service
-# is not <module>" failures that look like a regression in the audit code.
-LAB_PORTS=(
-  3000 5432 6379 9000 9090 9100 9115 9121 9187 9216 9290 9308
-  15000 15432 15433 16379 17777 18123 19000 19090 19100 19102 19104 19113 19114 19115
-  9854 19117 19121 19128 19131 19150 19182 19187 19219 19221 19290 19308 19399 19419
-  19854 29854
-  19121 22379 22380 23790 23791 23792 23793 25432 25433 25434 25435 25439 26380 26381
-  26382 26383 26380 26443 26444 26445 26446 26447 27017 27018 28006 29115 31521 31522
-  31523 31524 8123 8500 8501 8502 8503 8504 2379 5672 9092 9181 9200 1521 6443 12181
-  19181 19281 22181 22182 22183 22184 29181 39181 9876 9877 9878 9879
+MATRIX_SERVICES=(
+  exporters registry grafana gitlab consul kubeapi postgres mongodb oracle docker
+  clickhouse redis etcd qdrant elastic grpc kafka zookeeper keeper proxmox proxy-isolated
 )
-echo "== pre-run: ensuring lab ports are free =="
-freed=0
-for port in $(printf "%s\n" "${LAB_PORTS[@]}" | sort -un); do
-  # Stop any docker container publishing that port (most common cause)
-  cids=$(docker ps -q --filter "publish=${port}" 2>/dev/null || true)
-  if [ -n "${cids}" ]; then
-    for cid in ${cids}; do
-      name=$(docker inspect -f '{{.Name}}' "${cid}" 2>/dev/null | sed 's|^/||')
-      # Don't touch redposture lab containers themselves (they get started/stopped per service block)
-      case "${name}" in
-        redposture-lab-*) continue ;;
-      esac
-      echo "  port ${port}: stopping container ${name} (cid=${cid:0:12})"
-      docker rm -f "${cid}" >/dev/null 2>&1 || true
-      freed=$((freed + 1))
-    done
+READINESS_ALLOWED_COMPLETED=(
+  redposture-lab-registry-seed
+  redposture-lab-clickhouse-auth-seed
+  redposture-lab-clickhouse-open-seed
+  redposture-lab-redis-seed
+  redposture-lab-etcd-auth-seed
+  redposture-lab-etcd-seed
+  redposture-lab-keeper-tls-certs
+)
+
+collect_lab_ports() {
+  local service
+  for service in "${MATRIX_SERVICES[@]}"; do
+    local compose_json
+    if ! compose_json="$(compose_service "${service}" config --format json)"; then
+      echo "[error] failed to resolve published ports for lab service ${service}" >&2
+      return 2
+    fi
+    printf "%s" "${compose_json}" | "${PYTHON_BIN}" "${ROOT_DIR}/scripts/compose_published_ports.py"
+  done | sort -un
+}
+
+preflight_lab_environment() {
+  echo "== pre-run: cleaning redposture lab stacks =="
+  local service
+  for service in "${MATRIX_SERVICES[@]}"; do
+    compose_service "${service}" down -v >/dev/null 2>&1 || true
+  done
+
+  echo "== pre-run: verifying lab ports are free =="
+  local lab_ports
+  if ! lab_ports="$(collect_lab_ports)"; then
+    return 2
   fi
-done
-echo "== pre-run: freed ${freed} occupant(s) =="
+  if [ -z "${lab_ports}" ]; then
+    echo "[error] resolved lab port set is empty" >&2
+    return 2
+  fi
+  local conflicts=0
+  local port
+  for port in ${lab_ports}; do
+    local cids
+    cids="$(docker ps -q --filter "publish=${port}" 2>/dev/null || true)"
+    if [ -z "${cids}" ]; then
+      continue
+    fi
+    local cid
+    for cid in ${cids}; do
+      local name
+      name="$(docker inspect -f '{{.Name}}' "${cid}" 2>/dev/null | sed 's|^/||')"
+      echo "[error] lab port conflict: port=${port} container=${cid:0:12} name=${name:-unknown}" >&2
+      conflicts=$((conflicts + 1))
+    done
+  done
+  if [ "${conflicts}" -ne 0 ]; then
+    echo "[error] refusing to remove ${conflicts} external port occupant(s); stop or reconfigure them first" >&2
+    return 2
+  fi
+}
 
 is_extended_matrix() {
   [ "${MATRIX_PROFILE}" = "extended" ]
@@ -122,7 +151,7 @@ wait_healthy_service() {
   while [ "${elapsed}" -lt "${timeout}" ]; do
     local ps_output
     set +e
-    ps_output="$(compose_service "${service}" ps 2>&1)"
+    ps_output="$(compose_service "${service}" ps --all 2>&1)"
     local ps_rc=$?
     set -e
     if [ "${ps_rc}" -ne 0 ]; then
@@ -135,22 +164,47 @@ wait_healthy_service() {
       elapsed=$((elapsed + 2))
       continue
     fi
-    # ``docker compose up --wait`` can return while an extended service is
-    # still ``(health: starting)``. Treat that as not ready: Oracle's init
-    # seed runs after the listener accepts TCP, so running cases at this point
-    # produces intermittent empty wallet/file results.
-    local not_ready
-    not_ready="$(printf "%s" "${ps_output}" | grep -E "Restarting|unhealthy|\(health: starting\)" || true)"
-    if [ -z "${not_ready}" ]; then
+    local container_ids
+    container_ids="$(compose_service "${service}" ps --all -q 2>/dev/null || true)"
+    if [ -z "${container_ids}" ]; then
+      sleep 2
+      elapsed=$((elapsed + 2))
+      continue
+    fi
+    local inspect_json
+    set +e
+    inspect_json="$(docker inspect ${container_ids} 2>&1)"
+    local inspect_rc=$?
+    set -e
+    if [ "${inspect_rc}" -ne 0 ]; then
+      sleep 2
+      elapsed=$((elapsed + 2))
+      continue
+    fi
+    local readiness_output
+    local readiness_args=()
+    local completed_name
+    for completed_name in "${READINESS_ALLOWED_COMPLETED[@]}"; do
+      readiness_args+=(--allow-completed "${completed_name}")
+    done
+    set +e
+    readiness_output="$(
+      printf "%s" "${inspect_json}" \
+        | "${PYTHON_BIN}" "${ROOT_DIR}/scripts/check_compose_readiness.py" "${readiness_args[@]}"
+    )"
+    local readiness_rc=$?
+    set -e
+    if [ "${readiness_rc}" -eq 0 ]; then
       return 0
     fi
-    local blocking
-    blocking="$(printf "%s" "${not_ready}" | grep -Ev 'redposture-lab-consul-acl|redposture-lab-consul-seed|redposture-lab-elastic-auth' || true)"
-    if [ -z "${blocking}" ]; then
-      echo "[warn] continuing with degraded non-blocking services for ${service}" >&2
-      printf "%s\n" "${not_ready}" >&2
-      return 0
+    # A transiently unhealthy dependency can make the first ``compose up
+    # --wait`` return before Compose ever starts a dependent container. Once
+    # the dependency recovers, re-issuing detached up starts only that deferred
+    # work; the positive inspect gate below still decides readiness.
+    if printf "%s\n" "${readiness_output}" | grep -q "status=created"; then
+      compose_service "${service}" up -d --no-build >/dev/null 2>&1 || true
     fi
+    printf "%s\n" "${readiness_output}" >&2
     sleep 2
     elapsed=$((elapsed + 2))
   done
@@ -161,17 +215,26 @@ wait_healthy_service() {
 
 start_service() {
   local service="$1"
+  local timeout=180
+  if [ "${service}" = "registry" ]; then
+    timeout=900
+  fi
   echo
   echo "== service:${service} up =="
   CURRENT_SERVICE="${service}"
+  local started_at="${SECONDS}"
   set +e
-  compose_service "${service}" up -d --build --wait --wait-timeout 120
+  compose_service "${service}" up -d --build --wait --wait-timeout "${timeout}"
   local compose_rc=$?
   set -e
   if [ "${compose_rc}" -ne 0 ]; then
     echo "[warn] compose up for ${service} returned ${compose_rc}; continuing with health gate" >&2
   fi
-  wait_healthy_service "${service}"
+  local remaining=$((timeout - (SECONDS - started_at)))
+  if [ "${remaining}" -lt 1 ]; then
+    remaining=1
+  fi
+  wait_healthy_service "${service}" "${remaining}"
 }
 
 stop_service() {
@@ -407,11 +470,11 @@ run_grafana_cases() {
   run_case grafana grafana_apitoken 0 grafana -t 127.0.0.1 --port 3000 --apitoken glsa-fake-token-2026 --show-datasources
   run_case grafana grafana_url_http 0 grafana -t "http://127.0.0.1:3000/login?next=%2F" --defcreds --show-datasources
   run_case grafana grafana_url_https_reject 2 grafana -t "https://127.0.0.1:3000/login"
-  run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --defcreds --ssrf-target "http://127.0.0.1:19115/probe?module=http_2xx" --show-datasources
+  run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --defcreds --ssrf-target "http://grafana-2:3000/api/health" --show-datasources
   run_case grafana grafana_multi_instance_urls 0 grafana -t "http://127.0.0.1:3000/login,http://127.0.0.1:13001/login,http://127.0.0.1:13002/login,http://127.0.0.1:13003/login,http://127.0.0.1:13004/login" --defcreds
   run_text_case grafana grafana_debug_smoke 0 grafana -t 127.0.0.1 --defcreds --debug
   if is_extended_matrix; then
-    run_case grafana grafana_extended_auth_ssrf_controls 0 grafana -t 127.0.0.1 --port 3000 -u admin -p prom-operator --show-datasource --ssrf-target 127.0.0.1 --ssrf-port 19115 --ssrf-path /probe?module=http_2xx
+    run_case grafana grafana_extended_auth_ssrf_controls 0 grafana -t 127.0.0.1 --port 3000 -u admin -p admin --show-datasource --ssrf-target grafana-2 --ssrf-port 3000 --ssrf-path /api/health
     run_case grafana grafana_extended_ports_flag 0 grafana -t 127.0.0.1 --ports 3000 --defcreds
     run_case grafana fuzz_grafana_invalid_target 2 grafana -t "not://valid" --show-datasource
     run_case grafana fuzz_grafana_huge_port 2 grafana -t 127.0.0.1 --port 99999 --defcreds
@@ -425,7 +488,7 @@ run_gitlab_cases() {
   run_case gitlab gitlab_multi_instance_urls 0 gitlab -t "http://127.0.0.1:18080/users/sign_in,http://127.0.0.1:18081/users/sign_in,http://127.0.0.1:18082/users/sign_in,http://127.0.0.1:18083/users/sign_in,http://127.0.0.1:18084/users/sign_in"
   run_text_case gitlab gitlab_debug_smoke 0 gitlab -t 127.0.0.1 --port 18080 --debug
   if is_extended_matrix; then
-    run_case gitlab gitlab_extended_token_project_clone 0 gitlab -t 127.0.0.1 --port 18080 --https --token glpat-redposture-lab-analyst-2026 --project redposture-lab/public-api --clone --clone-dir "${OUT_DIR}/gitlab_clones"
+    run_case gitlab gitlab_extended_token_project_clone 0 gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-analyst-2026 --project redposture-lab/public-api --clone --clone-dir "${OUT_DIR}/gitlab_clones"
     run_case gitlab gitlab_extended_ports_flag 0 gitlab -t 127.0.0.1 --ports 18080
     run_case gitlab fuzz_gitlab_invalid_port 2 gitlab -t 127.0.0.1 --port 99999
     run_case gitlab fuzz_gitlab_zero_timeout 2 gitlab -t 127.0.0.1 --timeout 0
@@ -450,8 +513,8 @@ run_consul_cases() {
   run_text_case consul consul_debug_smoke 0 consul -t 127.0.0.1 --port 8500 --debug
   if is_extended_matrix; then
     run_case consul consul_extended_ports_basic_auth 0 consul -t 127.0.0.1 --ports 8500 -u matrix -p "" --keys
-    run_case consul consul_extended_inventory_filters 0 consul -t 127.0.0.1 --port 8500 --keys --services --agents --checks --nodes --key redposture/kafka/sasl_password --service svc-redposture-api --agent redposture-lab-consul --node redposture-lab-consul --dump 3
-    run_case consul consul_extended_ssrf_probe 0 consul -t 127.0.0.1 --port 8500 --ssrf-target 127.0.0.1 --ssrf-port 19100 --ssrf-path /metrics --checks
+    run_case consul consul_extended_inventory_filters 0 consul -t 127.0.0.1 --port 8500 --keys --services --agents --checks --nodes --key redposture/kafka/sasl_password --service redposture-api --agent redposture-lab-consul --node redposture-lab-consul --dump 3
+    run_case consul consul_extended_ssrf_probe 0 consul -t 127.0.0.1 --port 8500 --ssrf-target consul --ssrf-port 8500 --ssrf-path /v1/status/leader --checks
     run_case consul fuzz_consul_zero_workers 2 consul -t 127.0.0.1 --workers 0 --keys
     run_case consul fuzz_consul_negative_dump 2 consul -t 127.0.0.1 --port 8500 --keys --dump -1
   fi
@@ -650,9 +713,35 @@ run_qdrant_cases() {
   run_case qdrant qdrant_multi_instance_urls 0 qdrant -t "http://127.0.0.1:6333/collections,http://127.0.0.1:26333/collections,http://127.0.0.1:26334/collections,http://127.0.0.1:26335/collections,http://127.0.0.1:26336/collections" --collections --dump
   run_text_case qdrant qdrant_debug_smoke 0 qdrant -t 127.0.0.1 --collections --debug
   if is_extended_matrix; then
+    local snapshot_json
+    local snapshot_name
+    local snapshot_path
+    snapshot_json="$(
+      curl -fsS -X POST "http://127.0.0.1:6333/collections/demo_vectors/snapshots?wait=true"
+    )" || {
+      echo "[error] failed to create Qdrant snapshot for SSRF callback case" >&2
+      return 1
+    }
+    snapshot_name="$(
+      printf "%s" "${snapshot_json}" \
+        | "${PYTHON_BIN}" -c 'import json,sys; print(str(json.load(sys.stdin).get("result", {}).get("name", "")))'
+    )"
+    if [ -z "${snapshot_name}" ] || [[ "${snapshot_name}" != *.snapshot ]]; then
+      echo "[error] Qdrant snapshot response did not contain a valid snapshot name" >&2
+      return 1
+    fi
+    mkdir -p "${OUT_DIR}/qdrant_ssrf"
+    snapshot_path="${OUT_DIR}/qdrant_ssrf/${snapshot_name}"
+    if ! curl -fsS \
+      "http://127.0.0.1:6333/collections/demo_vectors/snapshots/${snapshot_name}" \
+      -o "${snapshot_path}"; then
+      echo "[error] failed to download Qdrant snapshot for SSRF callback case" >&2
+      return 1
+    fi
     run_case qdrant qdrant_extended_collection_dump_count 0 qdrant -t 127.0.0.1 --port 6333 --api-key matrix-key --collection demo_vectors --collections --dump 3
     run_case qdrant qdrant_extended_ports_flag 0 qdrant -t 127.0.0.1 --ports 6333 --collections
-    run_case qdrant qdrant_extended_ssrf_probe 0 qdrant -t 127.0.0.1 --port 6333 --collection demo_vectors --listen --ssrf-target http://127.0.0.1:19115/probe --ssrf-port 19115 --ssrf-path /probe?module=http_2xx
+    REDPOSTURE_QDRANT_SSRF_RESPONSE_FILE="${snapshot_path}" \
+      run_case qdrant qdrant_extended_ssrf_probe 0 qdrant -t 127.0.0.1 --port 6333 --collection demo_vectors --listen --ssrf-target host.docker.internal --ssrf-port 19115 --ssrf-path "/${snapshot_name}"
     run_case qdrant fuzz_qdrant_zero_timeout 2 qdrant -t 127.0.0.1 --timeout 0 --collections
     run_case qdrant fuzz_qdrant_invalid_port 2 qdrant -t 127.0.0.1 --port -1 --collections
   fi
@@ -688,7 +777,7 @@ run_grpc_cases() {
   run_case grpc grpc_openapi_export 0 grpc -t 127.0.0.1 --port 50051 --openapi "${OUT_DIR}/json/grpc_openapi.json"
   run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071
   if is_extended_matrix; then
-    run_case grpc grpc_extended_metadata_invoke 0 grpc -t 127.0.0.1 --port 50051 --meta "x-redposture-matrix: extended" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+    run_case grpc grpc_extended_metadata_invoke 0 grpc -t 127.0.0.1 --port 50051 --meta "x-redposture-matrix=extended" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
     run_case grpc grpc_extended_basic_empty_password 0 grpc -t 127.0.0.1 --port 50061 -u grpcuser -p "" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
     run_case grpc fuzz_grpc_invalid_port 2 grpc -t 127.0.0.1 --port -1 --invoke /grpc.health.v1.Health/Check
     run_case grpc fuzz_grpc_zero_workers 2 grpc -t 127.0.0.1 --workers 0
@@ -761,7 +850,7 @@ run_proxmox_cases() {
   if is_extended_matrix; then
     run_case proxmox proxmox_extended_ports_flag 0 proxmox -t 127.0.0.1 --ports 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
     run_case proxmox proxmox_extended_defcreds 0 proxmox -t 127.0.0.1 --port 18006 --insecure --defcreds --nodes
-    run_case proxmox proxmox_extended_defcreds_empty_password 0 proxmox -t 127.0.0.1 --port 18006 --insecure --no-https -u root@pam -p "" --nodes --users
+    run_case proxmox proxmox_extended_defcreds_empty_password 0 proxmox -t 127.0.0.1 --port 18006 --insecure -u root@pam -p "" --nodes --users
     run_case proxmox proxmox_extended_add_user_mock 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --add-user rp-matrix@pve --users
     run_case proxmox fuzz_proxmox_negative_workers 2 proxmox -t 127.0.0.1 --workers -1 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
     run_case proxmox fuzz_proxmox_invalid_port 2 proxmox -t 127.0.0.1 --port -1 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes
@@ -790,6 +879,7 @@ run_service_block() {
 }
 
 set -e
+preflight_lab_environment
 printf "module\tlabel\texpected_exit\texit_code\tjson_path\tlog_path\n" > "${STATUS_FILE}"
 
 if is_extended_matrix; then

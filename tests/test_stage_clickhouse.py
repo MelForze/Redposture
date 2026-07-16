@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_clickhouse as clickhouse_stage
+from redposture_core.cli_args import parse_args
 from redposture_core.modules.clickhouse import policy as clickhouse_policy
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from redposture_core.stage_runtime import AuditCommandRunner
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 class _DummyClient:
@@ -1104,23 +1106,22 @@ def test_run_clickhouse_stage_processes_all_ports_without_short_circuit(
 ) -> None:
     monkeypatch.setattr(clickhouse_stage, "_configure_clickhouse_loggers", lambda: None)
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: object())
-    monkeypatch.setattr(clickhouse_stage, "collect_scan_ports", lambda _ports: [9000, 9001, 9002])
-    monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda _targets: ["127.0.0.1"])
-    monkeypatch.setattr(
-        clickhouse_stage,
-        "_resolve_port_protocols",
-        lambda _proto, _port, _parsed: [(9000, "native"), (9001, "native"), (9002, "native")],
-    )
 
     called_ports: list[int] = []
 
-    def fake_audit_clickhouse_targets(*_args, **kwargs):
-        called_ports.append(int(kwargs["port"]))
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (1, 0, 0, 0, 0, 0)
+    def fake_host_stage(**kwargs):
+        if not bool(kwargs["run_deep_checks"]):
+            called_ports.append(int(kwargs["port"]))
+        return {
+            "host": kwargs["host"],
+            "port": kwargs["port"],
+            "is_clickhouse": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "protocol": kwargs["protocol"],
+        }
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "clickhouse", fake_audit_clickhouse_targets)
+    patch_module_host_stage_for_test(monkeypatch, "clickhouse", fake_host_stage)
 
     args = SimpleNamespace(
         debug=False,
@@ -1162,23 +1163,43 @@ def test_run_clickhouse_stage_multi_port_verbose_uses_single_global_progress(
 ) -> None:
     monkeypatch.setattr(clickhouse_stage, "_configure_clickhouse_loggers", lambda: None)
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: object())
-    monkeypatch.setattr(clickhouse_stage, "collect_scan_ports", lambda _ports: [9000, 9001, 9002])
-    monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda _targets: ["127.0.0.1"])
+
+    class _FakeProgress:
+        instances: list[_FakeProgress] = []
+
+        def __init__(self, _label: str, total: int, **_kwargs) -> None:
+            self.total = int(total)
+            self.added: list[int] = []
+            self.advances: list[int] = []
+            self.closed = False
+            type(self).instances.append(self)
+
+        def add_total(self, amount: int) -> None:
+            self.added.append(int(amount))
+
+        def advance(self, amount: int = 1) -> None:
+            self.advances.append(int(amount))
+
+        def close(self) -> None:
+            self.closed = True
+
     monkeypatch.setattr(
-        clickhouse_stage,
-        "_resolve_port_protocols",
-        lambda _proto, _port, _parsed: [(9000, "native"), (9001, "native"), (9002, "native")],
+        "redposture_core.stage_runtime.start_command_progress",
+        lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
     )
 
-    show_progress_flags: list[bool] = []
+    def fake_host_stage(**kwargs):
+        authenticated = kwargs["username"] is not None
+        return {
+            "host": kwargs["host"],
+            "port": kwargs["port"],
+            "is_clickhouse": True,
+            "status": "valid_credentials" if authenticated else "auth_required",
+            "auth_required": not authenticated,
+            "protocol": kwargs["protocol"],
+        }
 
-    def fake_audit_clickhouse_targets(*_args, **kwargs):
-        show_progress_flags.append(bool(kwargs["show_progress"]))
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (1, 0, 0, 1, 0, 0)
-
-    patch_runner_for_legacy_target_fake(monkeypatch, "clickhouse", fake_audit_clickhouse_targets)
+    patch_module_host_stage_for_test(monkeypatch, "clickhouse", fake_host_stage)
 
     args = SimpleNamespace(
         debug=False,
@@ -1212,7 +1233,12 @@ def test_run_clickhouse_stage_multi_port_verbose_uses_single_global_progress(
 
     rc = clickhouse_stage.run_clickhouse_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
-    assert show_progress_flags == [False, False, False]
+    assert len(_FakeProgress.instances) == 1
+    progress = _FakeProgress.instances[0]
+    assert progress.total == 3
+    assert progress.added == [3]
+    assert progress.advances == [1, 1, 1, 1, 1, 1]
+    assert progress.closed is True
 
 
 def test_audit_clickhouse_targets_emits_two_pass_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1234,11 +1260,15 @@ def test_audit_clickhouse_targets_emits_two_pass_debug_markers(monkeypatch: pyte
         dump_table_rows: bool,
         execute_command: str | None,
         sql_command: str | None,
+        show_databases_limit: int | None = None,
+        show_tables_limit: int | None = None,
+        show_columns_limit: int | None = None,
         *,
         port_protocols: list[tuple[int, str]] | None,
         run_deep_checks: bool,
         debug: bool,
         debug_emit,
+        dump_row_limit: int | None = None,
     ) -> dict[str, object]:
         _ = (
             port,
@@ -1260,6 +1290,10 @@ def test_audit_clickhouse_targets_emits_two_pass_debug_markers(monkeypatch: pyte
             port_protocols,
             debug,
             debug_emit,
+            show_databases_limit,
+            show_tables_limit,
+            show_columns_limit,
+            dump_row_limit,
         )
         return {
             "timestamp": "2026-03-27T00:00:00Z",
@@ -1501,3 +1535,346 @@ def test_render_colored_clickhouse_line_smoke() -> None:
     )
     assert rendered is True
     assert painter.lines and "auth required:False" in painter.lines[0]
+
+
+def _empty_clickhouse_action_result() -> dict[str, object]:
+    return {
+        "database_names": ["default"],
+        "database_count": 1,
+        "table_names": None,
+        "table_targets": [],
+        "table_columns_info": [],
+        "table_dumps": [],
+        "sql_attempted": False,
+        "sql_ok": None,
+        "sql_output": None,
+        "sql_error": None,
+        "execute_attempted": False,
+        "execute_ok": None,
+        "execute_output": None,
+        "execute_error": None,
+        "read_capability": True,
+        "execute_capability": False,
+        "admin_capability": False,
+        "capability_error": None,
+    }
+
+
+def test_clickhouse_lifecycle_reuses_classification_and_authenticated_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, str, str]] = []
+
+    def fake_detect(_protocol, _host, _port, _timeout, username, password, *, database="default"):
+        events.append(("detect", username, password))
+        assert database == "default"
+        return _session(username=username, password=password), None
+
+    def fake_auth(_protocol, _host, _port, _timeout, username, password, database):
+        events.append(("auth", username, password))
+        return _session(username=username, password=password, database=database), None
+
+    action_calls = 0
+
+    def fake_actions(_session_obj, **_kwargs):
+        nonlocal action_calls
+        action_calls += 1
+        return _empty_clickhouse_action_result()
+
+    monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_detect)
+    monkeypatch.setattr(clickhouse_stage, "_open_operational_session", fake_auth)
+    monkeypatch.setattr(clickhouse_stage, "_run_clickhouse_actions_on_session", fake_actions)
+    monkeypatch.setattr(clickhouse_stage, "_close_client", lambda *_args: None)
+
+    args = parse_args(
+        [
+            "clickhouse",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "9000",
+            "-u",
+            "admin",
+            "-p",
+            "secret",
+            "--format",
+            "json",
+        ]
+    )
+    runner = AuditCommandRunner(
+        args=args, spec=clickhouse_stage.build_clickhouse_spec(args), emit_line=lambda _line: None
+    )
+    result = runner.run_plan(clickhouse_stage.build_clickhouse_plan(args))
+
+    assert events == [("detect", "default", ""), ("auth", "admin", "secret")]
+    assert action_calls == 1
+    assert result.records[0]["status"] == "valid_credentials"
+
+
+def test_clickhouse_lifecycle_tries_credential_file_pairs_after_one_anonymous_detect(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    credentials = tmp_path / "clickhouse.creds"
+    credentials.write_text("bad:bad\ngood:good\n", encoding="utf-8")
+    events: list[tuple[str, str, str]] = []
+
+    def fake_detect(_protocol, _host, _port, _timeout, username, password, *, database="default"):
+        events.append(("detect", username, password))
+        return None, "Code: 516. Authentication failed"
+
+    def fake_auth(_protocol, _host, _port, _timeout, username, password, database):
+        events.append(("auth", username, password))
+        if username == "good":
+            return _session(username=username, password=password, database=database), None
+        return None, "Code: 516. Authentication failed"
+
+    action_calls = 0
+
+    def fake_actions(_session_obj, **_kwargs):
+        nonlocal action_calls
+        action_calls += 1
+        return _empty_clickhouse_action_result()
+
+    monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_detect)
+    monkeypatch.setattr(clickhouse_stage, "_open_operational_session", fake_auth)
+    monkeypatch.setattr(clickhouse_stage, "_run_clickhouse_actions_on_session", fake_actions)
+    monkeypatch.setattr(clickhouse_stage, "_close_client", lambda *_args: None)
+
+    args = parse_args(
+        [
+            "clickhouse",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "9000",
+            "-u",
+            str(credentials),
+            "--format",
+            "json",
+        ]
+    )
+    plan = clickhouse_stage.build_clickhouse_plan(args)
+    runner = AuditCommandRunner(
+        args=args, spec=clickhouse_stage.build_clickhouse_spec(args), emit_line=lambda _line: None
+    )
+    result = runner.run_plan(plan)
+
+    assert [run.source for run in plan.credential_runs] == ["file", "file"]
+    assert events == [
+        ("detect", "default", ""),
+        ("auth", "bad", "bad"),
+        ("auth", "good", "good"),
+    ]
+    assert action_calls == 1
+    assert result.records[0]["status"] == "valid_credentials"
+
+
+def test_clickhouse_defcreds_plan_preserves_provided_then_default_order() -> None:
+    args = parse_args(
+        [
+            "clickhouse",
+            "-t",
+            "127.0.0.1",
+            "-u",
+            "app",
+            "-p",
+            "secret",
+            "--defcreds",
+        ]
+    )
+    plan = clickhouse_stage.build_clickhouse_plan(args)
+    assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
+        ("app", "secret", "provided"),
+        ("default", "", "default"),
+        ("default", "default", "default"),
+    ]
+
+
+def test_clickhouse_lifecycle_accepts_first_successful_default_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_pairs: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "_connect_and_probe",
+        lambda *_args, **_kwargs: (None, "Code: 516. Authentication failed"),
+    )
+
+    def fake_auth(_protocol, _host, _port, _timeout, username, password, database):
+        auth_pairs.append((username, password))
+        if (username, password) == ("default", ""):
+            return _session(username=username, password=password, database=database), None
+        return None, "Code: 516. Authentication failed"
+
+    action_calls = 0
+
+    def fake_actions(_session_obj, **_kwargs):
+        nonlocal action_calls
+        action_calls += 1
+        return _empty_clickhouse_action_result()
+
+    monkeypatch.setattr(clickhouse_stage, "_open_operational_session", fake_auth)
+    monkeypatch.setattr(clickhouse_stage, "_run_clickhouse_actions_on_session", fake_actions)
+    monkeypatch.setattr(clickhouse_stage, "_close_client", lambda *_args: None)
+
+    args = parse_args(["clickhouse", "-t", "127.0.0.1", "--port", "9000", "--defcreds", "--format", "json"])
+    plan = clickhouse_stage.build_clickhouse_plan(args)
+    runner = AuditCommandRunner(
+        args=args, spec=clickhouse_stage.build_clickhouse_spec(args), emit_line=lambda _line: None
+    )
+    result = runner.run_plan(plan)
+
+    assert auth_pairs == [("default", "")]
+    assert action_calls == 1
+    assert result.records[0]["status"] == "weak_default_creds"
+
+
+def test_clickhouse_auth_retries_transient_failure_without_repeating_detect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detect_calls = 0
+    auth_calls = 0
+    action_calls = 0
+
+    def fake_detect(*_args, **_kwargs):
+        nonlocal detect_calls
+        detect_calls += 1
+        return None, "Code: 516. Authentication failed"
+
+    def fake_auth(_protocol, _host, _port, _timeout, username, password, database):
+        nonlocal auth_calls
+        auth_calls += 1
+        if auth_calls == 1:
+            return None, "connection timeout"
+        return _session(username=username, password=password, database=database), None
+
+    def fake_actions(_session_obj, **_kwargs):
+        nonlocal action_calls
+        action_calls += 1
+        return _empty_clickhouse_action_result()
+
+    monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_detect)
+    monkeypatch.setattr(clickhouse_stage, "_open_operational_session", fake_auth)
+    monkeypatch.setattr(clickhouse_stage, "_run_clickhouse_actions_on_session", fake_actions)
+    monkeypatch.setattr(clickhouse_stage, "_close_client", lambda *_args: None)
+    monkeypatch.setattr(clickhouse_stage.time, "sleep", lambda _delay: None)
+
+    args = parse_args(
+        [
+            "clickhouse",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "9000",
+            "-u",
+            "admin",
+            "-p",
+            "secret",
+            "--retries",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    runner = AuditCommandRunner(
+        args=args, spec=clickhouse_stage.build_clickhouse_spec(args), emit_line=lambda _line: None
+    )
+    result = runner.run_plan(clickhouse_stage.build_clickhouse_plan(args))
+
+    assert detect_calls == 1
+    assert auth_calls == 2
+    assert action_calls == 1
+    assert result.records[0]["status"] == "valid_credentials"
+    assert result.records[0]["auth_transport_attempts"] == 2
+
+
+def test_clickhouse_definitive_auth_rejection_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_calls = 0
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "_connect_and_probe",
+        lambda *_args, **_kwargs: (None, "Code: 516. Authentication failed"),
+    )
+
+    def fake_auth(*_args, **_kwargs):
+        nonlocal auth_calls
+        auth_calls += 1
+        return None, "Code: 516. Authentication failed"
+
+    monkeypatch.setattr(clickhouse_stage, "_open_operational_session", fake_auth)
+
+    args = parse_args(
+        [
+            "clickhouse",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "9000",
+            "-u",
+            "admin",
+            "-p",
+            "bad",
+            "--retries",
+            "3",
+            "--format",
+            "json",
+        ]
+    )
+    runner = AuditCommandRunner(
+        args=args, spec=clickhouse_stage.build_clickhouse_spec(args), emit_line=lambda _line: None
+    )
+    result = runner.run_plan(clickhouse_stage.build_clickhouse_plan(args))
+
+    assert auth_calls == 1
+    assert result.records[0]["status"] == "auth_required"
+    assert result.records[0]["provided_credentials_ok"] is False
+
+
+def test_clickhouse_transient_auth_exhaustion_is_not_reported_as_rejected_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_calls = 0
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "_connect_and_probe",
+        lambda *_args, **_kwargs: (None, "Code: 516. Authentication failed"),
+    )
+
+    def fake_auth(*_args, **_kwargs):
+        nonlocal auth_calls
+        auth_calls += 1
+        return None, "connection timeout"
+
+    monkeypatch.setattr(clickhouse_stage, "_open_operational_session", fake_auth)
+    monkeypatch.setattr(clickhouse_stage.time, "sleep", lambda _delay: None)
+
+    args = parse_args(
+        [
+            "clickhouse",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "9000",
+            "-u",
+            "admin",
+            "-p",
+            "secret",
+            "--retries",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    runner = AuditCommandRunner(
+        args=args, spec=clickhouse_stage.build_clickhouse_spec(args), emit_line=lambda _line: None
+    )
+    result = runner.run_plan(clickhouse_stage.build_clickhouse_plan(args))
+
+    assert auth_calls == 3
+    assert result.records[0]["status"] == "fail"
+    assert result.records[0]["provided_credentials_ok"] is None
+    assert result.records[0]["is_clickhouse"] is True

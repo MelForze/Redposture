@@ -27,9 +27,13 @@ def configure_gitlab_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=80,
+        default=None,
         metavar="port",
-        help="GitLab HTTP port spec: single port, list/range, or file (examples: 80, 80,443,8080, ./ports.txt).",
+        help=(
+            "GitLab port spec: single port, list/range, or file "
+            "(examples: 80, 80,443,8080, ./ports.txt). "
+            "When omitted, HTTP uses 80 and HTTPS uses 443."
+        ),
     )
     add_multi_ports_flag(common)
     common.add_argument(

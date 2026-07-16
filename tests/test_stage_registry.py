@@ -9,8 +9,11 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_registry as registry
+from redposture_core.audit_models import AuditRecord
+from redposture_core.cli_args import parse_args
 from redposture_core.console import Console
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from redposture_core.stage_runtime import AuditCommandRunner
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 def test_human_bytes_and_path_helpers() -> None:
@@ -1067,6 +1070,9 @@ class _RegistryConsoleCapture:
         _ = color
         self.messages.append(("plain", message))
 
+    def _paint(self, text: str, _color: str, _stream: object) -> str:
+        return text
+
     def render_tagged_payload_line(self, line: str, tag: str, payload_color: str | None = None) -> bool:
         _ = (line, tag, payload_color)
         return False
@@ -1107,6 +1113,42 @@ def _registry_args(**overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**data)
 
 
+def _registry_host_record(
+    kwargs: dict[str, object],
+    *,
+    status: str,
+    detected: bool,
+    error: str | None = None,
+) -> AuditRecord:
+    return AuditRecord(
+        host=str(kwargs["host"]),
+        port=int(kwargs["port"]),
+        service="registry",
+        module="registry",
+        status=status,
+        auth_required=status == "auth_required",
+        extra={
+            "is_registry": detected,
+            "error": error,
+            "token_provided": kwargs.get("token") is not None,
+            "provided_username": kwargs.get("username"),
+            "provided_password": kwargs.get("password"),
+            "show_images": bool(kwargs.get("show_images")),
+            "show_tags": bool(kwargs.get("show_tags")),
+            "repository": kwargs.get("repository"),
+            "tag": kwargs.get("tag"),
+            "metadata": bool(kwargs.get("metadata")),
+            "harbor": bool(kwargs.get("harbor")),
+            "gitlab": bool(kwargs.get("gitlab")),
+            "nexus": bool(kwargs.get("nexus")),
+            "assets": bool(kwargs.get("assets")),
+            "inspect": bool(kwargs.get("inspect")),
+            "image": kwargs.get("image"),
+            "download": bool(kwargs.get("download")),
+        },
+    )
+
+
 def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     # `_http_request` now runs a one-time HTTP/HTTPS scheme probe that also goes
     # through urllib.request.urlopen. Preseed the resolver cache so the test
@@ -1116,23 +1158,23 @@ def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, 
 
     _SCHEME_CACHE[("registry.local", 5000)] = "http"
 
-    def make_http_error() -> urllib.error.HTTPError:
-        return urllib.error.HTTPError(
-            "http://registry.local/v2/",
-            401,
-            "Unauthorized",
-            {"WWW-Authenticate": "Bearer realm=token"},
-            io.BytesIO(b'{"errors":[{"code":"UNAUTHORIZED"}]}'),
-        )
+    http_error = urllib.error.HTTPError(
+        "http://registry.local/v2/",
+        401,
+        "Unauthorized",
+        {"WWW-Authenticate": "Bearer realm=token"},
+        io.BytesIO(b'{"errors":[{"code":"UNAUTHORIZED"}]}'),
+    )
 
     def raise_http_error(*_args, **_kwargs):
-        raise make_http_error()
+        raise http_error
 
     monkeypatch.setattr(registry.urllib.request, "urlopen", raise_http_error)
     status, body, headers, error = registry._http_request("registry.local", 5000, "GET", "/v2/", 1.0, headers={})
     assert status == 401 and error is None
     assert b"UNAUTHORIZED" in body
     assert headers.get("www-authenticate", "").startswith("Bearer")
+    http_error.close()
 
     def raise_url_error(*_args, **_kwargs):
         raise urllib.error.URLError(TimeoutError("timed out"))
@@ -1235,16 +1277,16 @@ def test_run_registry_stage_debug_and_unreachable_summary(monkeypatch: pytest.Mo
     captured_kwargs: list[dict[str, object]] = []
 
     def fake_audit_registry_targets(**kwargs):
-        captured_kwargs.append(kwargs)
-        # total=1, open=0, valid=0, auth=0, not_registry=0, fail=1
-        return 1, 0, 0, 0, 0, 1
+        captured_kwargs.append(dict(kwargs))
+        return _registry_host_record(kwargs, status="fail", detected=False, error="connection refused")
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "registry", fake_audit_registry_targets)
+    patch_module_host_stage_for_test(monkeypatch, "registry", fake_audit_registry_targets)
     rc = registry.run_registry_stage(_registry_args(debug=True, docker=True, images=True), logger=object())
     assert rc == 0
     assert len(captured_kwargs) == 2
     assert captured_kwargs[0]["port"] == 15000
     assert captured_kwargs[1]["port"] == 15010
+    assert all(call["run_deep_checks"] is False for call in captured_kwargs)
     messages = _RegistryConsoleCapture.instances[-1].messages
     assert any(level == "info" and "registry audit started" in msg for level, msg in messages)
 
@@ -2107,6 +2149,7 @@ def test_http_request_url_and_render_colored_registry_line_branches(monkeypatch:
     assert status2 == 401 and error2 is None
     assert b"unauthorized" in body2
     assert "www-authenticate" in headers2
+    http_error.close()
 
     monkeypatch.setattr(
         registry.urllib.request,
@@ -2186,7 +2229,13 @@ def test_run_registry_stage_debug_file_output_logs_mode(monkeypatch: pytest.Monk
         "build_scan_execution_groups",
         lambda *_a, **_k: [SimpleNamespace(hosts=["127.0.0.1"], port=5000, scheme_hint=None)],
     )
-    patch_runner_for_legacy_target_fake(monkeypatch, "registry", lambda **_k: (1, 1, 0, 0, 0, 0))
+    captured: list[dict[str, object]] = []
+
+    def fake_host_stage(**kwargs):
+        captured.append(dict(kwargs))
+        return _registry_host_record(kwargs, status="open_no_auth", detected=True)
+
+    patch_module_host_stage_for_test(monkeypatch, "registry", fake_host_stage)
 
     out_file = tmp_path / "registry-out.jsonl"
     rc = registry.run_registry_stage(
@@ -2214,6 +2263,13 @@ def test_run_registry_stage_debug_file_output_logs_mode(monkeypatch: pytest.Monk
     assert rc == 0
     infos = [msg for level, msg in _RegistryConsoleCapture.instances[-1].messages if level == "info"]
     assert any("registry audit started" in msg and "format=json" in msg and "output=" in msg for msg in infos)
+    assert captured[-1]["run_deep_checks"] is True
+    assert captured[-1]["token"] == "tok"
+    assert captured[-1]["show_images"] is True
+    assert captured[-1]["show_tags"] is True
+    assert captured[-1]["repository"] == "repo/app"
+    assert captured[-1]["metadata"] is True
+    assert len(out_file.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_format_detail_records_branch_matrix_errors_and_download_variants() -> None:
@@ -2326,26 +2382,329 @@ def test_run_registry_stage_multi_port_uses_single_global_progress(monkeypatch: 
             self.closed = True
 
     monkeypatch.setattr(
-        registry,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
     )
     captured: list[dict[str, object]] = []
 
     def fake_audit(**kwargs):
-        captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (len(kwargs["hosts"]), 1, 0, 0, 0, 0)
+        captured.append(dict(kwargs))
+        return _registry_host_record(kwargs, status="fail", detected=False, error="connection refused")
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "registry", fake_audit)
+    patch_module_host_stage_for_test(monkeypatch, "registry", fake_audit)
 
     rc = registry.run_registry_stage(_registry_args(), logger=object())
     assert rc == 0
     assert len(captured) == 2
-    assert all(call["show_progress"] is False for call in captured)
+    assert [call["port"] for call in captured] == [5000, 5001]
+    assert all(call["run_deep_checks"] is False for call in captured)
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
     assert progress.total == 2
     assert progress.advances == [1, 1]
     assert progress.closed is True
+
+
+def test_registry_lifecycle_sends_no_auth_on_classification_and_reuses_selected_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    credentials = tmp_path / "registry.creds"
+    credentials.write_text("bad:bad\ngood:good\n", encoding="utf-8")
+    probe_authorizations: list[str | None] = []
+    catalog_authorizations: list[str | None] = []
+
+    def fake_request(_host, _port, _method, path, _timeout, *, headers=None, body=None):
+        _ = body
+        assert path == "/v2/"
+        authorization = (headers or {}).get("Authorization")
+        probe_authorizations.append(authorization)
+        if authorization is None:
+            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
+        if authorization == registry._auth_headers("good", "good", None)["Authorization"]:
+            return 200, b"{}", {"docker-distribution-api-version": "registry/2.0"}, None
+        return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
+
+    def fake_catalog(_host, _port, _timeout, *, headers):
+        catalog_authorizations.append(headers.get("Authorization"))
+        return [], None
+
+    monkeypatch.setattr(registry, "_http_request", fake_request)
+    monkeypatch.setattr(registry, "_fetch_registry_catalog", fake_catalog)
+    monkeypatch.setattr(registry, "_fetch_gitlab_info", lambda *_args, **_kwargs: (None, "not gitlab"))
+    monkeypatch.setattr(registry, "_fetch_harbor_info", lambda *_args, **_kwargs: (None, "not harbor"))
+    monkeypatch.setattr(registry, "_fetch_nexus_info", lambda *_args, **_kwargs: (None, "not nexus"))
+
+    args = parse_args(
+        [
+            "registry",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "5000",
+            "-u",
+            str(credentials),
+            "--format",
+            "json",
+        ]
+    )
+    args._registry_console = Console()
+    plan = registry.build_registry_plan(args)
+    runner = AuditCommandRunner(args=args, spec=registry.build_registry_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(plan)
+
+    assert probe_authorizations == [
+        None,
+        registry._auth_headers("bad", "bad", None)["Authorization"],
+        registry._auth_headers("good", "good", None)["Authorization"],
+    ]
+    assert catalog_authorizations == [registry._auth_headers("good", "good", None)["Authorization"]]
+    assert result.records[0]["status"] == "valid_credentials"
+    assert [stage["stage_name"] for stage in result.records[0]["stages"]] == [
+        "detect_protocol",
+        "auth_inference_credentials",
+        "access_capabilities",
+        "data",
+    ]
+    assert result.records[0]["stage_attempts"] == {
+        "detect_protocol": 1,
+        "auth_inference_credentials": 1,
+        "access_capabilities": 1,
+        "data": 1,
+    }
+
+
+def test_registry_anonymous_open_lifecycle_emits_all_canonical_stages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_authorizations: list[str | None] = []
+
+    def fake_request(_host, _port, _method, path, _timeout, *, headers=None, body=None):
+        _ = body
+        assert path == "/v2/"
+        probe_authorizations.append((headers or {}).get("Authorization"))
+        return 200, b"{}", {"docker-distribution-api-version": "registry/2.0"}, None
+
+    monkeypatch.setattr(registry, "_http_request", fake_request)
+    monkeypatch.setattr(registry, "_fetch_registry_catalog", lambda *_args, **_kwargs: ([], None))
+    monkeypatch.setattr(registry, "_fetch_gitlab_info", lambda *_args, **_kwargs: (None, "not gitlab"))
+    monkeypatch.setattr(registry, "_fetch_harbor_info", lambda *_args, **_kwargs: (None, "not harbor"))
+    monkeypatch.setattr(registry, "_fetch_nexus_info", lambda *_args, **_kwargs: (None, "not nexus"))
+
+    args = parse_args(["registry", "-t", "127.0.0.1", "--port", "5000", "--format", "json"])
+    args._registry_console = Console()
+    runner = AuditCommandRunner(args=args, spec=registry.build_registry_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(registry.build_registry_plan(args))
+
+    assert probe_authorizations == [None]
+    assert result.records[0]["status"] == "open_no_auth"
+    assert [stage["stage_name"] for stage in result.records[0]["stages"]] == [
+        "detect_protocol",
+        "auth_inference_credentials",
+        "access_capabilities",
+        "data",
+    ]
+
+
+def test_registry_auth_retries_transient_failure_without_repeating_anonymous_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_authorizations: list[str | None] = []
+    authenticated_attempts = 0
+
+    def fake_request(_host, _port, _method, path, _timeout, *, headers=None, body=None):
+        nonlocal authenticated_attempts
+        _ = body
+        assert path == "/v2/"
+        authorization = (headers or {}).get("Authorization")
+        probe_authorizations.append(authorization)
+        if authorization is None:
+            return 401, b"unauthorized", {"www-authenticate": "Basic"}, None
+        authenticated_attempts += 1
+        if authenticated_attempts == 1:
+            return 0, b"", {}, "connection timeout"
+        return 200, b"{}", {"docker-distribution-api-version": "registry/2.0"}, None
+
+    monkeypatch.setattr(registry, "_http_request", fake_request)
+    monkeypatch.setattr(registry, "_fetch_registry_catalog", lambda *_args, **_kwargs: ([], None))
+    monkeypatch.setattr(registry, "_fetch_gitlab_info", lambda *_args, **_kwargs: (None, "not gitlab"))
+    monkeypatch.setattr(registry, "_fetch_harbor_info", lambda *_args, **_kwargs: (None, "not harbor"))
+    monkeypatch.setattr(registry, "_fetch_nexus_info", lambda *_args, **_kwargs: (None, "not nexus"))
+    monkeypatch.setattr(registry.time, "sleep", lambda _delay: None)
+
+    args = parse_args(
+        [
+            "registry",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "5000",
+            "-u",
+            "admin",
+            "-p",
+            "secret",
+            "--retries",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    args._registry_console = Console()
+    runner = AuditCommandRunner(args=args, spec=registry.build_registry_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(registry.build_registry_plan(args))
+
+    assert probe_authorizations == [
+        None,
+        registry._auth_headers("admin", "secret", None)["Authorization"],
+        registry._auth_headers("admin", "secret", None)["Authorization"],
+    ]
+    assert result.records[0]["status"] == "valid_credentials"
+    assert result.records[0]["auth_transport_attempts"] == 2
+    assert result.records[0]["stage_attempts"]["auth_inference_credentials"] == 2
+    assert result.records[0]["stages"][1]["attempt"] == 2
+
+
+def test_registry_definitive_auth_rejection_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authenticated_attempts = 0
+
+    def fake_request(_host, _port, _method, _path, _timeout, *, headers=None, body=None):
+        nonlocal authenticated_attempts
+        _ = body
+        if not (headers or {}).get("Authorization"):
+            return 401, b"unauthorized", {"www-authenticate": "Basic"}, None
+        authenticated_attempts += 1
+        return 401, b"unauthorized", {"www-authenticate": "Basic"}, None
+
+    monkeypatch.setattr(registry, "_http_request", fake_request)
+
+    args = parse_args(
+        [
+            "registry",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "5000",
+            "-u",
+            "admin",
+            "-p",
+            "bad",
+            "--retries",
+            "3",
+            "--format",
+            "json",
+        ]
+    )
+    args._registry_console = Console()
+    runner = AuditCommandRunner(args=args, spec=registry.build_registry_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(registry.build_registry_plan(args))
+
+    assert authenticated_attempts == 1
+    assert result.records[0]["status"] == "auth_required"
+    assert result.records[0]["provided_credentials_ok"] is False
+
+
+def test_registry_transient_auth_exhaustion_is_not_reported_as_rejected_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anonymous_probes = 0
+    authenticated_attempts = 0
+
+    def fake_request(_host, _port, _method, _path, _timeout, *, headers=None, body=None):
+        nonlocal anonymous_probes, authenticated_attempts
+        _ = body
+        if not (headers or {}).get("Authorization"):
+            anonymous_probes += 1
+            return 401, b"unauthorized", {"www-authenticate": "Basic"}, None
+        authenticated_attempts += 1
+        return 0, b"", {}, "connection timeout"
+
+    monkeypatch.setattr(registry, "_http_request", fake_request)
+    monkeypatch.setattr(registry.time, "sleep", lambda _delay: None)
+
+    args = parse_args(
+        [
+            "registry",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "5000",
+            "-u",
+            "admin",
+            "-p",
+            "secret",
+            "--retries",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    args._registry_console = Console()
+    runner = AuditCommandRunner(args=args, spec=registry.build_registry_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(registry.build_registry_plan(args))
+
+    assert anonymous_probes == 1
+    assert authenticated_attempts == 3
+    assert result.records[0]["status"] == "fail"
+    assert result.records[0]["provided_credentials_ok"] is None
+    assert result.records[0]["is_registry"] is True
+
+
+def test_registry_data_retries_transient_result_without_reprobing_v2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_calls = 0
+    core_calls = 0
+
+    def fake_request(_host, _port, _method, _path, _timeout, *, headers=None, body=None):
+        nonlocal probe_calls
+        _ = body
+        probe_calls += 1
+        if not (headers or {}).get("Authorization"):
+            return 401, b"unauthorized", {"www-authenticate": "Basic"}, None
+        return 200, b"{}", {"docker-distribution-api-version": "registry/2.0"}, None
+
+    def fake_core(host, port, _timeout, retries, **_kwargs):
+        nonlocal core_calls
+        core_calls += 1
+        assert retries == 0
+        return {
+            "host": host,
+            "port": port,
+            "is_registry": True,
+            "status": "valid_credentials",
+            "auth_required": True,
+            "images_error": "connection timeout" if core_calls == 1 else None,
+            "error": None,
+        }
+
+    monkeypatch.setattr(registry, "_http_request", fake_request)
+    monkeypatch.setattr(registry, "_audit_registry_host_core", fake_core)
+    monkeypatch.setattr(registry.time, "sleep", lambda _delay: None)
+
+    args = parse_args(
+        [
+            "registry",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "5000",
+            "-u",
+            "admin",
+            "-p",
+            "secret",
+            "--retries",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    args._registry_console = Console()
+    runner = AuditCommandRunner(args=args, spec=registry.build_registry_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(registry.build_registry_plan(args))
+
+    assert probe_calls == 2
+    assert core_calls == 2
+    assert result.records[0]["data_transport_attempts"] == 2
+    assert result.records[0]["status"] == "valid_credentials"

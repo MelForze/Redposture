@@ -114,7 +114,10 @@ def configure_postgres_parser(
         action="append",
         default=None,
         metavar="name",
-        help="Target table (schema.table or table). Can be used multiple times or with comma-separated values.",
+        help=(
+            "Target table (schema.table or table). Used alone, shows the selected table with its row count. "
+            "Can be used multiple times or with comma-separated values."
+        ),
     )
     discovery.add_argument(
         "--show-columns",

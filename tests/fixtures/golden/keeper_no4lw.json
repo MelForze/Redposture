@@ -1,0 +1,123 @@
+[
+  {
+    "auth_error": null,
+    "auth_inference_source": "root_ok",
+    "auth_probe_trace": [
+      "/:ok"
+    ],
+    "auth_required": false,
+    "can_create_znode": true,
+    "can_delete_znode": true,
+    "connect_error": null,
+    "credential_verdict": "unverified_anonymous",
+    "defcreds_enabled": false,
+    "dump": true,
+    "dump_error": null,
+    "dump_limit": 10,
+    "enum_error": null,
+    "error": null,
+    "fingerprint_confidence": "unconfirmed",
+    "fingerprint_errors": {},
+    "host": "127.0.0.1",
+    "is_keeper": null,
+    "is_zookeeper": true,
+    "is_zookeeper_compatible": true,
+    "max_znodes": 2000,
+    "module": "keeper",
+    "port": 39181,
+    "protocol": "zookeeper",
+    "provided_credentials": true,
+    "provided_credentials_ok": null,
+    "provided_password": "lab",
+    "provided_username": "lab",
+    "query_error": null,
+    "query_znode": "/keeper/api_version",
+    "query_znode_dump": "2",
+    "query_znode_dump_error": null,
+    "query_znode_value": "/keeper/api_version (children:0,bytes:1)",
+    "quorum_status": "unknown",
+    "raft": {
+      "commit_lag": null,
+      "first_log_idx": null,
+      "first_log_term": null,
+      "followers": null,
+      "last_committed_idx": null,
+      "last_log_idx": null,
+      "last_log_term": null,
+      "last_snapshot_idx": null,
+      "leader_committed_log_idx": null,
+      "log_dir_size": null,
+      "peer_state": null,
+      "pending_syncs": null,
+      "snapshot_dir_size": null,
+      "synced_followers": null,
+      "target_committed_log_idx": null
+    },
+    "read_only": null,
+    "server_state": null,
+    "service": "zookeeper-compatible",
+    "show_znodes": true,
+    "stage2_error": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "transport": "plaintext",
+    "version": null,
+    "znode_capability_error": null,
+    "znode_count": 3,
+    "znode_count_attempt_timeouts": [],
+    "znode_count_partial": false,
+    "znode_count_unknown": false,
+    "znode_details": [
+      {
+        "bytes": 0,
+        "children": 2,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 1,
+        "children": 0,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 1,
+        "children": 0,
+        "error": null,
+        "state": "readable"
+      }
+    ],
+    "znode_values": null,
+    "znodes": [
+      "/keeper",
+      "/keeper/api_version",
+      "/keeper/feature_flags"
+    ],
+    "znodes_truncated": false
+  }
+]

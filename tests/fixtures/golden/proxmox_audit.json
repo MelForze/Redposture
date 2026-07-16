@@ -9,16 +9,26 @@
     "auth_attempts": [],
     "auth_method": "pveapitoken",
     "auth_password": null,
-    "auth_required": null,
+    "auth_required": true,
     "auth_username": null,
     "cap_adduser": false,
     "cap_backup": false,
     "cap_modify": false,
     "cap_read": true,
-    "checked_endpoints": 2,
+    "checked_endpoints": 4,
     "credential_hits": 0,
     "discover_creds": false,
     "endpoint_results": [
+      {
+        "error": null,
+        "method": "GET",
+        "status": 200
+      },
+      {
+        "error": null,
+        "method": "GET",
+        "status": 200
+      },
       {
         "error": null,
         "method": "GET",
@@ -35,12 +45,15 @@
     "host": "127.0.0.1",
     "is_proxmox": true,
     "module": "proxmox",
-    "nodes": null,
+    "nodes": [
+      "pve-edge-01",
+      "pve-core-02"
+    ],
     "nodes_error": null,
     "port": 18006,
     "service": "proxmox",
-    "show_nodes": false,
-    "show_users": false,
+    "show_nodes": true,
+    "show_users": true,
     "stages": [
       {
         "attempt": 1,
@@ -68,9 +81,14 @@
       }
     ],
     "status": "token_ok",
-    "successful_endpoints": 2,
+    "successful_endpoints": 4,
     "use_https": true,
-    "users": null,
+    "users": [
+      "root@pam",
+      "audit@pve",
+      "backup@pve",
+      "terraform@pve"
+    ],
     "users_error": null
   }
 ]

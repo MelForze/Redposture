@@ -99,9 +99,22 @@ def _reset_color_cache() -> None:
 
 
 class Console:
-    def __init__(self, debug: bool = False, *, no_color: bool | None = None) -> None:
+    def __init__(
+        self,
+        debug: bool = False,
+        *,
+        no_color: bool | None = None,
+        structured_output: bool = False,
+    ) -> None:
         self.debug_enabled = debug
         self._no_color = _FORCE_NO_COLOR if no_color is None else bool(no_color)
+        self.structured_output = bool(structured_output)
+
+    def set_structured_output(self, enabled: bool) -> None:
+        self.structured_output = bool(enabled)
+
+    def _diagnostic_stream(self) -> TextIO:
+        return sys.stderr if self.structured_output else sys.stdout
 
     def _use_color(self, stream: TextIO) -> bool:
         if self._no_color:
@@ -161,13 +174,13 @@ class Console:
         return True
 
     def info(self, message: str) -> None:
-        self._line("[*]", message, "blue", sys.stdout)
+        self._line("[*]", message, "blue", self._diagnostic_stream())
 
     def success(self, message: str) -> None:
-        self._line("[+]", message, "green", sys.stdout)
+        self._line("[+]", message, "green", self._diagnostic_stream())
 
     def warn(self, message: str) -> None:
-        self._line("[-]", message, "yellow", sys.stdout)
+        self._line("[-]", message, "yellow", self._diagnostic_stream())
 
     def error(self, message: str) -> None:
         self._line("[!]", message, "red", sys.stderr)
@@ -175,4 +188,4 @@ class Console:
     def debug(self, message: str) -> None:
         if not self.debug_enabled:
             return
-        self._line("[d]", message, "magenta", sys.stdout)
+        self._line("[d]", message, "magenta", self._diagnostic_stream())

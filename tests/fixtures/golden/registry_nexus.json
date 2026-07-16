@@ -1,12 +1,13 @@
 [
   {
-    "assets": false,
-    "auth_required": null,
+    "assets": true,
+    "auth_required": false,
+    "data_transport_attempts": 1,
     "debug": false,
     "docker": false,
     "download": false,
     "download_result": null,
-    "error": "Connection reset by peer",
+    "error": null,
     "gitlab": false,
     "gitlab_error": null,
     "gitlab_info": null,
@@ -20,27 +21,176 @@
     "harbor_repositories": null,
     "host": "127.0.0.1",
     "image": null,
-    "image_count": null,
+    "image_count": 0,
     "images": null,
     "images_error": null,
     "inspect": false,
     "inspection_error": null,
     "inspections": null,
-    "is_gitlab": null,
-    "is_harbor": null,
-    "is_nexus": null,
-    "is_registry": false,
+    "is_gitlab": false,
+    "is_harbor": false,
+    "is_nexus": true,
+    "is_registry": true,
     "metadata": false,
     "metadata_result": null,
     "module": "registry",
-    "nexus": false,
-    "nexus_assets": null,
+    "nexus": true,
+    "nexus_assets": [
+      {
+        "checksums": {
+          "md5": "1caa30b470158e6c25f63fb80f3fb267",
+          "sha1": "4b2b4d2eebb3e95db71a39688c4eb0a28eda8437",
+          "sha256": "<DOCKER_ID>",
+          "sha512": "bdbd09dd5d10178ceaa4e23d082d7f9c1bcded2e948b62681d4e55d30713725b8562e0f97680ed0d4914afb8b7ba54d2ccbf25a123b2f9559a79b3d3056145f8"
+        },
+        "component_name": "/builds/2026.02/release-metadata.json",
+        "component_version": null,
+        "download_url": "http://127.0.0.1:15004/repository/raw-internal/builds/2026.02/release-metadata.json"
+      },
+      {
+        "checksums": {
+          "md5": "7074feebb61ff732ad9b83e3208e2700",
+          "sha1": "35886c8d39c43c57a0ae504943ac81f10d4cc05c",
+          "sha256": "<DOCKER_ID>",
+          "sha512": "044fed9ff334e13788360a46c44b47a772007b3bb3cf0eae4ce1e8349767019dae4717d54e3dbafe08c4523d08eb696b0891bae3e24ee1f03c8587d700f7dde1"
+        },
+        "component_name": "/backups/postgres/pg_dump_manifest.txt",
+        "component_version": null,
+        "download_url": "http://127.0.0.1:15004/repository/raw-internal/backups/postgres/pg_dump_manifest.txt"
+      },
+      {
+        "checksums": {
+          "md5": "9acc9bf1ff92055887d4da7026cb8809",
+          "sha1": "e2912d53e6a96bc56b53a331ad977dfb80cb45db",
+          "sha256": "<DOCKER_ID>",
+          "sha512": "20760e5139e812b0b3a25f5537a39152f4cfa5744a7bcd4e742e654811e809495995925a3f0ccda5bb57e7aea1b275cbb74fbb1cf37ce46cef9adcafd6dd4873"
+        },
+        "component_name": "/prometheus/remote-write-targets.yaml",
+        "component_version": null,
+        "download_url": "http://127.0.0.1:15004/repository/raw-observability/prometheus/remote-write-targets.yaml"
+      },
+      {
+        "checksums": {
+          "md5": "260b905aa467c609878077d41a641c20",
+          "sha1": "a7031151638db84a37790227dc699f47b72d4ef0",
+          "sha256": "<DOCKER_ID>",
+          "sha512": "13443ba07bfbeb37db17170010fadd84c9aa6a39ebcecbaeb0a09c6d594f6fb8f0cc843a2ab669b4c2efa6701a43d7f67c09d306b8924df2883f43e69ef36a68"
+        },
+        "component_name": "/grafana/provisioning/datasources.json",
+        "component_version": null,
+        "download_url": "http://127.0.0.1:15004/repository/raw-observability/grafana/provisioning/datasources.json"
+      },
+      {
+        "checksums": {
+          "md5": "a8748ecb552842696627edbe92f3c627",
+          "sha1": "2ae9bad4c53898afe171838d6c134584f63640d8",
+          "sha256": "<DOCKER_ID>",
+          "sha512": "6a541be8210a0fc9365c528c2cb452a8bd3c5f92dc1fcaac75040b1d24c47a07ea23f5fac161706532b099be769d1c16f385390ac0ee832ca9ddfe1b2d6bbf9b"
+        },
+        "component_name": "/artifacts/sbom/redposture-api-2.6.0.spdx.json",
+        "component_version": null,
+        "download_url": "http://127.0.0.1:15004/repository/raw-security/artifacts/sbom/redposture-api-2.6.0.spdx.json"
+      },
+      {
+        "checksums": {
+          "md5": "5caf4699df4576d031c7f98fbac83881",
+          "sha1": "12166cda86d29823a64831d92392c03cc0ef64f9",
+          "sha256": "<DOCKER_ID>",
+          "sha512": "203d56728cd9055b7c5395390154f37a4c7582329db619c56b32b5297db777b9826170b6242425d143af1993b8cd618b664e4741e65378a8fc853185b921cc23"
+        },
+        "component_name": "/reports/trivy/container-scan.txt",
+        "component_version": null,
+        "download_url": "http://127.0.0.1:15004/repository/raw-security/reports/trivy/container-scan.txt"
+      }
+    ],
     "nexus_error": null,
-    "nexus_info": null,
-    "nexus_repositories": null,
-    "nexus_repository_details": null,
+    "nexus_info": {},
+    "nexus_repositories": [
+      "maven-central (format=maven2, type=proxy, url=http://127.0.0.1:15004/repository/maven-central)",
+      "maven-public (format=maven2, type=group, url=http://127.0.0.1:15004/repository/maven-public)",
+      "maven-releases (format=maven2, type=hosted, url=http://127.0.0.1:15004/repository/maven-releases)",
+      "maven-snapshots (format=maven2, type=hosted, url=http://127.0.0.1:15004/repository/maven-snapshots)",
+      "nuget-group (format=nuget, type=group, url=http://127.0.0.1:15004/repository/nuget-group)",
+      "nuget-hosted (format=nuget, type=hosted, url=http://127.0.0.1:15004/repository/nuget-hosted)",
+      "nuget.org-proxy (format=nuget, type=proxy, url=http://127.0.0.1:15004/repository/nuget.org-proxy)",
+      "raw-internal (format=raw, type=hosted, url=http://127.0.0.1:15004/repository/raw-internal)",
+      "raw-observability (format=raw, type=hosted, url=http://127.0.0.1:15004/repository/raw-observability)",
+      "raw-security (format=raw, type=hosted, url=http://127.0.0.1:15004/repository/raw-security)"
+    ],
+    "nexus_repository_details": [
+      {
+        "components": 0,
+        "format": "maven2",
+        "online": null,
+        "type": "proxy",
+        "url": "http://127.0.0.1:15004/repository/maven-central"
+      },
+      {
+        "components": 0,
+        "format": "maven2",
+        "online": null,
+        "type": "group",
+        "url": "http://127.0.0.1:15004/repository/maven-public"
+      },
+      {
+        "components": 0,
+        "format": "maven2",
+        "online": null,
+        "type": "hosted",
+        "url": "http://127.0.0.1:15004/repository/maven-releases"
+      },
+      {
+        "components": 0,
+        "format": "maven2",
+        "online": null,
+        "type": "hosted",
+        "url": "http://127.0.0.1:15004/repository/maven-snapshots"
+      },
+      {
+        "components": 0,
+        "format": "nuget",
+        "online": null,
+        "type": "group",
+        "url": "http://127.0.0.1:15004/repository/nuget-group"
+      },
+      {
+        "components": 0,
+        "format": "nuget",
+        "online": null,
+        "type": "hosted",
+        "url": "http://127.0.0.1:15004/repository/nuget-hosted"
+      },
+      {
+        "components": 0,
+        "format": "nuget",
+        "online": null,
+        "type": "proxy",
+        "url": "http://127.0.0.1:15004/repository/nuget.org-proxy"
+      },
+      {
+        "components": 2,
+        "format": "raw",
+        "online": null,
+        "type": "hosted",
+        "url": "http://127.0.0.1:15004/repository/raw-internal"
+      },
+      {
+        "components": 2,
+        "format": "raw",
+        "online": null,
+        "type": "hosted",
+        "url": "http://127.0.0.1:15004/repository/raw-observability"
+      },
+      {
+        "components": 2,
+        "format": "raw",
+        "online": null,
+        "type": "hosted",
+        "url": "http://127.0.0.1:15004/repository/raw-security"
+      }
+    ],
     "port": 15004,
-    "probe_status": null,
+    "probe_status": 404,
     "provided_credentials": false,
     "provided_password": null,
     "provided_username": null,
@@ -52,30 +202,30 @@
     "stages": [
       {
         "attempt": 1,
-        "error": "Connection reset by peer",
-        "result": "fail",
+        "error": null,
+        "result": "ok",
         "stage_name": "detect_protocol"
       },
       {
-        "attempt": 2,
-        "error": "Connection reset by peer",
-        "result": "fail",
-        "stage_name": "detect_protocol"
+        "attempt": 1,
+        "error": null,
+        "result": "open_no_auth",
+        "stage_name": "auth_inference_credentials"
       },
       {
-        "attempt": 3,
-        "error": "Connection reset by peer",
-        "result": "fail",
-        "stage_name": "detect_protocol"
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
       },
       {
-        "attempt": 4,
-        "error": "Connection reset by peer",
-        "result": "fail",
-        "stage_name": "detect_protocol"
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
       }
     ],
-    "status": "fail",
+    "status": "open_no_auth",
     "tag": null,
     "token_provided": false
   }

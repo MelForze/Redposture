@@ -10,11 +10,84 @@
     "can_manage_security": true,
     "can_read": true,
     "can_write": true,
-    "cat_endpoints": null,
-    "cat_plugins": null,
+    "cat_endpoints": [
+      "/_cat/aliases",
+      "/_cat/aliases/",
+      "/_cat/allocation",
+      "/_cat/count",
+      "/_cat/count/",
+      "/_cat/fielddata",
+      "/_cat/fielddata/",
+      "/_cat/health",
+      "/_cat/indices",
+      "/_cat/indices/",
+      "/_cat/master",
+      "/_cat/ml/anomaly_detectors/",
+      "/_cat/ml/data_frame/analytics",
+      "/_cat/ml/data_frame/analytics/",
+      "/_cat/ml/datafeeds",
+      "/_cat/ml/datafeeds/",
+      "/_cat/ml/trained_models",
+      "/_cat/ml/trained_models/",
+      "/_cat/nodeattrs",
+      "/_cat/nodes",
+      "/_cat/pending_tasks",
+      "/_cat/plugins",
+      "/_cat/recovery",
+      "/_cat/recovery/",
+      "/_cat/repositories",
+      "/_cat/segments",
+      "/_cat/segments/",
+      "/_cat/shards",
+      "/_cat/shards/",
+      "/_cat/snapshots/",
+      "/_cat/tasks",
+      "/_cat/templates",
+      "/_cat/thread_pool",
+      "/_cat/thread_pool/",
+      "/_cat/transforms",
+      "/_cat/transforms/",
+      "/_ingest/pipeline",
+      "/_remote/info"
+    ],
+    "cat_plugins": [],
     "cluster_error": null,
-    "cluster_health": null,
-    "cluster_nodes": null,
+    "cluster_health": {
+      "active_primary_shards": 4,
+      "active_shards": 4,
+      "active_shards_percent_as_number": 100.0,
+      "cluster_name": "redposture-elastic-auth",
+      "delayed_unassigned_shards": 0,
+      "initializing_shards": 0,
+      "number_of_data_nodes": 1,
+      "number_of_in_flight_fetch": 0,
+      "number_of_nodes": 1,
+      "number_of_pending_tasks": 0,
+      "relocating_shards": 0,
+      "status": "green",
+      "task_max_waiting_in_queue_millis": 0,
+      "timed_out": false,
+      "unassigned_shards": 0
+    },
+    "cluster_nodes": [
+      {
+        "roles": [
+          "data",
+          "data_cold",
+          "data_content",
+          "data_frozen",
+          "data_hot",
+          "data_warm",
+          "ingest",
+          "master",
+          "ml",
+          "remote_cluster_client",
+          "transform"
+        ]
+      }
+    ],
+    "credentials_source": "provided",
+    "defcreds_enabled": false,
     "detect_confidence": "high",
     "detect_probe_trace": [
       {
@@ -203,14 +276,231 @@
       }
     ],
     "effective_username": "elastic",
-    "endpoint_diagnostics": null,
+    "endpoint_diagnostics": [
+      {
+        "endpoint": "/_cat?help",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/allocation",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/component_templates/_cat/ml/anomaly_detectors",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/count",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/count/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/health",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/master",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/anomaly_detectors/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodeattrs",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodes",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/pending_tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/plugins",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/repositories",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/snapshots/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/templates",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_ingest/pipeline",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_remote/info",
+        "error": null,
+        "status": 200
+      }
+    ],
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
     "insecure_effective": false,
     "is_elastic": true,
     "misconfig_error": null,
-    "misconfig_findings": null,
+    "misconfig_findings": [
+      {
+        "key": "network.host",
+        "reason": "service is bound to all interfaces",
+        "value": "0.0.0.0"
+      },
+      {
+        "key": "xpack.security.http.ssl.enabled",
+        "reason": "http tls is disabled",
+        "value": "false"
+      }
+    ],
     "module": "elastic",
     "plugins_error": null,
     "port": 19201,
@@ -221,10 +511,10 @@
     "rights_error": null,
     "scheme": "http",
     "service": "elastic",
-    "show_cluster": false,
-    "show_endpoints": false,
-    "show_plugins": false,
-    "show_users": false,
+    "show_cluster": true,
+    "show_endpoints": true,
+    "show_plugins": true,
+    "show_users": true,
     "stages": [
       {
         "attempt": 1,
@@ -235,25 +525,79 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "valid_credentials",
+        "result": "auth_required",
         "stage_name": "auth_inference_credentials"
-      },
-      {
-        "attempt": 1,
-        "error": null,
-        "result": "ok",
-        "stage_name": "access_capabilities"
-      },
-      {
-        "attempt": 1,
-        "error": null,
-        "result": "ok",
-        "stage_name": "data"
       }
     ],
     "status": "valid_credentials",
     "tls_auto_plain": true,
-    "users": null,
+    "users": [
+      {
+        "enabled": true,
+        "full_name": "",
+        "roles": [
+          "apm_system"
+        ],
+        "username": "apm_system"
+      },
+      {
+        "enabled": true,
+        "full_name": "",
+        "roles": [
+          "beats_system"
+        ],
+        "username": "beats_system"
+      },
+      {
+        "enabled": true,
+        "full_name": "",
+        "roles": [
+          "superuser"
+        ],
+        "username": "elastic"
+      },
+      {
+        "enabled": true,
+        "full_name": "",
+        "roles": [
+          "kibana_system"
+        ],
+        "username": "kibana"
+      },
+      {
+        "enabled": true,
+        "full_name": "",
+        "roles": [
+          "kibana_system"
+        ],
+        "username": "kibana_system"
+      },
+      {
+        "enabled": true,
+        "full_name": "",
+        "roles": [
+          "logstash_system"
+        ],
+        "username": "logstash_system"
+      },
+      {
+        "enabled": true,
+        "full_name": "RedPosture Observer",
+        "roles": [
+          "redposture_observer"
+        ],
+        "username": "observer"
+      },
+      {
+        "enabled": true,
+        "full_name": "",
+        "roles": [
+          "remote_monitoring_collector",
+          "remote_monitoring_agent"
+        ],
+        "username": "remote_monitoring_user"
+      }
+    ],
     "users_error": null
   }
 ]

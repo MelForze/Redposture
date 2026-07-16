@@ -5,11 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 from ...audit_config import AuditConfig
+from ...audit_models import AuditRecord
 from ...console import Console
+from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
     AuditCredentialRun,
+    AuditHookContext,
     ModuleAuditSpec,
     build_basic_audit_plan,
     has_username_password_credential_file,
@@ -31,18 +34,68 @@ _DEFAULT_PORT = 9092
 # `transport_mode` field on the audit record, rendered as `(transport:tls)`
 # in text output — same convention as docker/grpc/oracle.
 _DEFAULT_PORTS: tuple[int, ...] | None = (9092, 9093, 19092, 19093, 29092, 29093)
+_PRODUCTION_HOST_STAGE = actions.host_stage
+_PRODUCTION_AUDIT_HOST = actions._audit_kafka_host
 
 
 def build_kafka_plan(args: Any) -> AuditCommandPlan:
     return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
 
 
+def _build_kafka_lifecycle_options(args: Any) -> dict[str, Any]:
+    dump = dump_flag_enabled(getattr(args, "dump", False))
+    dump_limit = dump_flag_limit(getattr(args, "dump", False))
+    explicit_max = getattr(args, "max_messages", None)
+    max_messages = int(explicit_max if explicit_max is not None else dump_limit if dump_limit is not None else 10)
+    return {
+        "show_topics": show_flag_enabled(getattr(args, "show_topics", False)),
+        "show_topics_limit": show_flag_limit(getattr(args, "show_topics", False)),
+        "query_topic": str(getattr(args, "topic", None) or getattr(args, "query_topic", None) or "").strip() or None,
+        "dump": dump,
+        "max_messages": max_messages,
+        "max_messages_explicit": explicit_max is not None or dump_limit is not None,
+        "probe_write": bool(getattr(args, "probe_write", False)),
+    }
+
+
 def build_kafka_spec(args: Any) -> ModuleAuditSpec:
+    options = _build_kafka_lifecycle_options(args)
+    resolved_host_stage = getattr(actions, _PRODUCTION_HOST_STAGE.__name__, _PRODUCTION_HOST_STAGE)
+    use_lifecycle_hooks = (
+        actions.host_stage is _PRODUCTION_HOST_STAGE
+        and resolved_host_stage is _PRODUCTION_HOST_STAGE
+        and actions._audit_kafka_host is _PRODUCTION_AUDIT_HOST
+    )
+
+    def _state_factory(_ctx: AuditHookContext) -> actions.KafkaLifecycleState:
+        return actions.KafkaLifecycleState()
+
+    def _detect(ctx: AuditHookContext) -> AuditRecord:
+        return AuditRecord.from_mapping(actions.detect_kafka(ctx, options), module="kafka", service="kafka")
+
+    def _auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            actions.authenticate_kafka(ctx, record, options),
+            module="kafka",
+            service="kafka",
+        )
+
+    def _data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            actions.collect_kafka_data(ctx, record, options),
+            module="kafka",
+            service="kafka",
+        )
+
     return ModuleAuditSpec(
         module="kafka",
         label="KAFKA",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
+        detect=_detect if use_lifecycle_hooks else None,
+        auth=_auth if use_lifecycle_hooks else None,
+        data=_data if use_lifecycle_hooks else None,
+        lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_kafka_line,
     )
@@ -51,14 +104,27 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
 def run_kafka_stage(args: Any, logger: Any) -> int:
     cfg = AuditConfig.from_namespace(args)
     console = Console(debug=cfg.debug)
+    if hasattr(console, "set_structured_output"):
+        console.set_structured_output(cfg.output_format == "json")
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
     if not has_username_password_credential_file(args) and not (
         getattr(args, "username", None) is not None and getattr(args, "password", None) is None
     ):
+        provided_pair = (getattr(args, "username", None), getattr(args, "password", None))
         args._audit_credential_runs = tuple(
-            AuditCredentialRun(username=user, password=password, source="default" if user else "anonymous")
+            AuditCredentialRun(
+                username=user,
+                password=password,
+                source=(
+                    "provided"
+                    if (user, password) == provided_pair and provided_pair[0] is not None
+                    else "default"
+                    if user is not None
+                    else "anonymous"
+                ),
+            )
             for user, password in actions._build_credential_runs(
                 getattr(args, "username", None), getattr(args, "password", None), bool(getattr(args, "defcreds", False))
             )

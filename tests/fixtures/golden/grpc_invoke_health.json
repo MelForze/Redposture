@@ -61,7 +61,6 @@
         ]
       }
     ],
-    "detect_confidence": "high",
     "detect_probe_trace": [
       {
         "error": null,
@@ -106,7 +105,9 @@
       "grpc_status_name": "OK",
       "input_type": "grpc.health.v1.HealthCheckRequest",
       "output_type": "grpc.health.v1.HealthCheckResponse",
-      "request": {},
+      "request": {
+        "service": ""
+      },
       "response": {
         "status": "SERVING"
       },

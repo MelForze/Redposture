@@ -61,7 +61,6 @@
         ]
       }
     ],
-    "detect_confidence": "high",
     "detect_probe_trace": [
       {
         "error": null,
@@ -237,7 +236,6 @@
         ]
       }
     ],
-    "detect_confidence": "high",
     "detect_probe_trace": [
       {
         "error": null,
@@ -413,7 +411,6 @@
         ]
       }
     ],
-    "detect_confidence": "high",
     "detect_probe_trace": [
       {
         "error": null,
@@ -589,7 +586,6 @@
         ]
       }
     ],
-    "detect_confidence": "high",
     "detect_probe_trace": [
       {
         "error": null,
@@ -765,7 +761,6 @@
         ]
       }
     ],
-    "detect_confidence": "high",
     "detect_probe_trace": [
       {
         "error": null,

@@ -1,0 +1,350 @@
+[
+  {
+    "auth_db": "admin",
+    "auth_required": false,
+    "capabilities": {
+      "can_list_collections": true,
+      "can_list_databases": true,
+      "can_list_indexes": true,
+      "can_read_documents": true,
+      "can_run_command": null
+    },
+    "collection_targets": [],
+    "collections": [
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "documents": 4
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "documents": 5
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "documents": 3
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "documents": 3
+      }
+    ],
+    "database": null,
+    "database_count": 5,
+    "database_names": [
+      "admin",
+      "billing",
+      "config",
+      "local",
+      "redposture"
+    ],
+    "defcreds_enabled": false,
+    "document_selector": null,
+    "documents": [
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "document": {
+          "_id": 1,
+          "details": "user=admin method=password",
+          "event_type": "login_success",
+          "source_ip": "10.10.10.21"
+        }
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "document": {
+          "_id": 2,
+          "details": "user=readonly reason=bad_password",
+          "event_type": "login_failed",
+          "source_ip": "10.10.10.22"
+        }
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "document": {
+          "_id": 3,
+          "details": "collection=demo_accounts docs=5",
+          "event_type": "export",
+          "source_ip": "10.10.10.23"
+        }
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "document": {
+          "_id": 4,
+          "details": "service=grafana token=gfa_demo_token_123",
+          "event_type": "api_token_created",
+          "source_ip": "10.10.44.19"
+        }
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "document": {
+          "_id": 1,
+          "active": true,
+          "password": "admin",
+          "role": "admin",
+          "username": "admin"
+        }
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "document": {
+          "_id": 2,
+          "active": true,
+          "password": "readonly",
+          "role": "viewer",
+          "username": "readonly"
+        }
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "document": {
+          "_id": 3,
+          "active": true,
+          "password": "service123",
+          "role": "service",
+          "username": "service"
+        }
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "document": {
+          "_id": 4,
+          "active": true,
+          "password": "reporting2026",
+          "role": "analyst",
+          "username": "reporting"
+        }
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "document": {
+          "_id": 5,
+          "active": true,
+          "password": "auto-runner-2026",
+          "role": "service",
+          "username": "automation"
+        }
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "document": {
+          "_id": "inv-2026-0001",
+          "amount_cents": 125000,
+          "currency": "USD",
+          "customer_id": "cust-1001",
+          "status": "paid"
+        }
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "document": {
+          "_id": "inv-2026-0002",
+          "amount_cents": 39200,
+          "currency": "USD",
+          "customer_id": "cust-1002",
+          "status": "overdue"
+        }
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "document": {
+          "_id": "inv-2026-0003",
+          "amount_cents": 87500,
+          "currency": "EUR",
+          "customer_id": "cust-1003",
+          "status": "paid"
+        }
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "document": {
+          "_id": 1,
+          "service_name": "grafana",
+          "token": "gfa_demo_token_123"
+        }
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "document": {
+          "_id": 2,
+          "service_name": "ci",
+          "token": "ci_demo_token_456"
+        }
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "document": {
+          "_id": 3,
+          "service_name": "prometheus",
+          "token": "prom_rw_token_789"
+        }
+      }
+    ],
+    "dump_documents": true,
+    "dump_limit": 20,
+    "dump_safety_limit": null,
+    "effective_username": null,
+    "error": null,
+    "hello": {
+      "isWritablePrimary": true,
+      "maxBsonObjectSize": 16777216,
+      "maxMessageSizeBytes": 48000000,
+      "maxWriteBatchSize": 100000,
+      "ok": 1.0,
+      "readOnly": false
+    },
+    "host": "127.0.0.1",
+    "index_filter": null,
+    "indexes": [
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "index": {
+          "key": {
+            "_id": 1
+          },
+          "v": 2
+        }
+      },
+      {
+        "collection": "audit_events",
+        "database": "redposture",
+        "index": {
+          "key": {
+            "event_type": 1
+          },
+          "v": 2
+        }
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "index": {
+          "key": {
+            "_id": 1
+          },
+          "v": 2
+        }
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "index": {
+          "key": {
+            "username": 1
+          },
+          "unique": true,
+          "v": 2
+        }
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "index": {
+          "key": {
+            "_id": 1
+          },
+          "v": 2
+        }
+      },
+      {
+        "collection": "invoices",
+        "database": "billing",
+        "index": {
+          "key": {
+            "customer_id": 1
+          },
+          "v": 2
+        }
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "index": {
+          "key": {
+            "_id": 1
+          },
+          "v": 2
+        }
+      },
+      {
+        "collection": "service_tokens",
+        "database": "redposture",
+        "index": {
+          "key": {
+            "service_name": 1
+          },
+          "v": 2
+        }
+      }
+    ],
+    "is_mongodb": true,
+    "module": "mongodb",
+    "nosql_command": null,
+    "nosql_command_database": null,
+    "nosql_command_error": null,
+    "nosql_command_result": null,
+    "port": 27017,
+    "projection": null,
+    "provided_credentials": false,
+    "provided_password": null,
+    "provided_username": null,
+    "query_documents": [],
+    "query_error": null,
+    "query_filter": null,
+    "service": "mongodb",
+    "show_collections": true,
+    "show_collections_limit": null,
+    "show_databases": true,
+    "show_databases_limit": null,
+    "show_indexes": true,
+    "show_indexes_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth"
+  }
+]

@@ -11,6 +11,7 @@ import time
 import urllib.error
 import urllib.parse
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig
@@ -42,6 +43,14 @@ _PUBLIC_ENDPOINT_PATHS: tuple[str, ...] = (
 _DEFAULT_CLONE_DIR = "./gitlab_clones"
 _MAX_PER_PAGE = 100
 _GIT_CLONE_TIMEOUT_SECONDS = 300
+
+
+@dataclass
+class GitLabLifecycleState:
+    token_valid: bool | None = None
+    token_user: dict[str, Any] | None = None
+    token_error: str | None = None
+    deep_record: dict[str, Any] | None = None
 
 
 def _clip(text: str, width: int = 72) -> str:
@@ -1123,6 +1132,259 @@ def _call_audit_gitlab_host_with_stage_debug(
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
     return merge_stage_records(detect_record, deep_record)
+
+
+def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    target_scheme = str(ctx.target.scheme or "").lower() if ctx.target is not None else ""
+    use_https = (
+        target_scheme == "https" if target_scheme in {"http", "https"} else bool(getattr(ctx.args, "https", False))
+    )
+    last_error: str | None = None
+    for attempt in range(attempts):
+        started = time.monotonic()
+        login_status, login_payload, _login_headers, login_error = _http_request(
+            str(ctx.host),
+            int(ctx.port),
+            "GET",
+            "/users/sign_in",
+            float(getattr(ctx.args, "timeout", 5.0)),
+            use_https=use_https,
+        )
+        version_status, version_payload, _version_headers, version_error = _http_request(
+            str(ctx.host),
+            int(ctx.port),
+            "GET",
+            "/api/v4/version",
+            float(getattr(ctx.args, "timeout", 5.0)),
+            use_https=use_https,
+        )
+        login_page = (
+            login_error is None
+            and login_status == 200
+            and _detect_login_page(login_payload.decode("utf-8", errors="replace"))
+        )
+        version: str | None = None
+        if version_error is None and version_status == 200:
+            try:
+                payload = _json_loads_bytes(version_payload)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                version = str(payload.get("version") or "").strip() or None
+        if login_page or version is not None:
+            return {
+                "timestamp": utc_now_iso(),
+                "host": str(ctx.host),
+                "port": int(ctx.port),
+                "https": use_https,
+                "is_gitlab": True,
+                "status": "detected",
+                "login_page": login_page,
+                "version": version,
+                "open_endpoints": [],
+                "public_projects": [],
+                "public_projects_error": None,
+                "project_filters": list(options["project_filters"]),
+                "token_provided": False,
+                "token_valid": None,
+                "token_user": None,
+                "token_projects": [],
+                "token_projects_error": None,
+                "token_access": [],
+                "clone_requested": bool(options["clone"]),
+                "clone_scope": None,
+                "clone_dir": options["clone_dir"] if options["clone"] else None,
+                "clone_results": [],
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "error": None,
+            }
+        last_error = login_error or version_error
+        if last_error is None:
+            return {
+                "timestamp": utc_now_iso(),
+                "host": str(ctx.host),
+                "port": int(ctx.port),
+                "https": use_https,
+                "is_gitlab": False,
+                "status": "not_gitlab",
+                "login_page": False,
+                "version": None,
+                "error": None,
+            }
+        if attempt < attempts - 1:
+            time.sleep(_retry_delay(attempt))
+    return {
+        "timestamp": utc_now_iso(),
+        "host": str(ctx.host),
+        "port": int(ctx.port),
+        "https": use_https,
+        "is_gitlab": False,
+        "status": "fail",
+        "login_page": None,
+        "version": None,
+        "error": _friendly_error_text(last_error or "connection failed"),
+    }
+
+
+def authenticate_gitlab(ctx: Any, detect_record: Any, _options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, GitLabLifecycleState):
+        raise TypeError("gitlab lifecycle state is unavailable")
+    record = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
+    token = str(ctx.credential.token or "").strip()
+    if not token:
+        return record
+    status, payload, _headers, error = _api_get_json(
+        str(ctx.host),
+        int(ctx.port),
+        "/api/v4/user",
+        float(getattr(ctx.args, "timeout", 5.0)),
+        use_https=bool(record.get("https")),
+        token=token,
+    )
+    state.token_valid = error is None and status == 200 and isinstance(payload, dict)
+    state.token_user = payload if state.token_valid and isinstance(payload, dict) else None
+    state.token_error = error or (None if state.token_valid else "invalid token or insufficient API access")
+    record.update(
+        {
+            "timestamp": utc_now_iso(),
+            "status": "valid_credentials" if state.token_valid else "invalid_credentials",
+            "token_provided": True,
+            "token_valid": state.token_valid,
+            "token_user": state.token_user,
+            "token_projects_error": state.token_error if not state.token_valid else None,
+        }
+    )
+    return record
+
+
+def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, GitLabLifecycleState):
+        raise TypeError("gitlab lifecycle state is unavailable")
+    if state.deep_record is not None:
+        return state.deep_record
+    record = dict(source_record.to_dict() if hasattr(source_record, "to_dict") else source_record)
+    host, port = str(ctx.host), int(ctx.port)
+    timeout = float(getattr(ctx.args, "timeout", 5.0))
+    use_https = bool(record.get("https"))
+    token = str(ctx.credential.token or "").strip() or None
+    project_filters = list(options["project_filters"])
+    open_endpoints: list[dict[str, Any]] = []
+    if not token and record.get("version"):
+        open_endpoints.append({"path": "/api/v4/version", "status": 200})
+    if not token:
+        for path in _PUBLIC_ENDPOINT_PATHS[1:]:
+            status, _payload, _headers, error = _http_request(host, port, "GET", path, timeout, use_https=use_https)
+            if error is None and status < 400:
+                open_endpoints.append({"path": path, "status": status})
+    public_all, public_error = _paginate_projects(
+        host,
+        port,
+        timeout,
+        use_https=use_https,
+        token=None,
+        public_only=True,
+    )
+    public_projects = (
+        [item for item in public_all if _project_matches_filters(item, project_filters)]
+        if isinstance(public_all, list)
+        else []
+    )
+    if isinstance(public_all, list) and not token:
+        open_endpoints.append({"path": "/api/v4/projects?visibility=public", "status": 200})
+
+    token_projects: list[dict[str, Any]] = []
+    token_access: list[dict[str, Any]] = []
+    token_projects_error = state.token_error
+    if state.token_valid and token:
+        token_all, token_projects_error = _paginate_projects(
+            host,
+            port,
+            timeout,
+            use_https=use_https,
+            token=token,
+            public_only=False,
+        )
+        if isinstance(token_all, list):
+            token_projects = [item for item in token_all if _project_matches_filters(item, project_filters)]
+            scheduler = BoundedScheduler[dict[str, Any], dict[str, Any]](
+                max_workers=max(1, min(int(getattr(ctx.args, "workers", 1) or 1), 20)),
+                max_inflight=max(1, min(int(getattr(ctx.args, "workers", 1) or 1), 20)) * 4,
+            )
+            for _project, access in scheduler.iter_completed(
+                token_projects,
+                lambda project: _probe_project_capabilities(
+                    host,
+                    port,
+                    timeout,
+                    use_https=use_https,
+                    token=token,
+                    project=project,
+                ),
+            ):
+                token_access.append(access)
+            token_access.sort(key=lambda item: str(item.get("path_with_namespace") or ""))
+
+    clone_results: list[dict[str, Any]] = []
+    clone_scope: str | None = None
+    if options["clone"]:
+        clone_scope = "token" if state.token_valid else "public"
+        clone_candidates = list(token_projects if state.token_valid else public_projects)
+        if project_filters and not clone_candidates:
+            for ref in project_filters:
+                fetched, fetch_error = _fetch_project_by_ref(
+                    host,
+                    port,
+                    timeout,
+                    use_https=use_https,
+                    token=token if state.token_valid else None,
+                    project_ref=ref,
+                )
+                if fetched is not None and _project_matches_filters(fetched, project_filters):
+                    clone_candidates.append(fetched)
+                else:
+                    clone_results.append(
+                        {
+                            "project": ref,
+                            "project_id": None,
+                            "status": "failed",
+                            "dest": None,
+                            "error": fetch_error or "project lookup failed",
+                        }
+                    )
+        deduped: dict[str, dict[str, Any]] = {}
+        for project in clone_candidates:
+            deduped.setdefault(str(project.get("id") or _project_path(project)), project)
+        for project in sorted(deduped.values(), key=_project_path):
+            clone_results.append(
+                _clone_project(
+                    project,
+                    host,
+                    port,
+                    use_https=use_https,
+                    token=token if state.token_valid else None,
+                    clone_dir=str(options["clone_dir"]),
+                )
+            )
+    record.update(
+        {
+            "open_endpoints": open_endpoints,
+            "public_projects": public_projects,
+            "public_projects_error": public_error,
+            "project_filters": project_filters,
+            "token_projects": token_projects,
+            "token_projects_error": token_projects_error,
+            "token_access": token_access,
+            "clone_requested": bool(options["clone"]),
+            "clone_scope": clone_scope,
+            "clone_dir": options["clone_dir"] if options["clone"] else None,
+            "clone_results": clone_results,
+        }
+    )
+    state.deep_record = record
+    return record
 
 
 # Typed runner boundary -----------------------------------------------------

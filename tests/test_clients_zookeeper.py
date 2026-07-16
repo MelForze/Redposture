@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
 import pytest
 
 import redposture_core.clients.zookeeper as zk
@@ -145,3 +150,104 @@ def test_parallel_znode_enumeration_non_ok_statuses(monkeypatch: pytest.MonkeyPa
     assert meta["/missing"]["error"] == "not found"
     assert meta["/denied"]["error"] == "Access Denied"
     assert error == "getChildren failed for /bad: OPERATIONTIMEOUT"
+
+
+def test_parallel_znode_enumeration_unexpected_worker_error_cancels_without_hanging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blocked_worker_started = threading.Event()
+    release_blocked_worker = threading.Event()
+
+    class UnexpectedErrorClient:
+        def __init__(self, *_args) -> None:
+            return None
+
+        def connect(self) -> None:
+            return None
+
+        def get_children2(self, parent: str):
+            if parent == "/":
+                return ["blocked", "boom"], zk._ZK_ERR_OK, {}
+            if parent == "/blocked":
+                blocked_worker_started.set()
+                release_blocked_worker.wait(timeout=5.0)
+                return [], zk._ZK_ERR_OK, {}
+            assert parent == "/boom"
+            assert blocked_worker_started.wait(timeout=1.0)
+            raise RuntimeError("unexpected worker crash")
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(zk, "_ZkClient", UnexpectedErrorClient)
+    results: list[tuple[list[str], int, bool, dict[str, dict[str, object]], str | None]] = []
+
+    def _enumerate() -> None:
+        results.append(
+            zk._enumerate_znodes_parallel(
+                host="zk.internal",
+                port=2181,
+                timeout=1.0,
+                max_znodes=10,
+                enum_workers=2,
+            )
+        )
+
+    enumeration_thread = threading.Thread(target=_enumerate, daemon=True)
+    enumeration_thread.start()
+    try:
+        enumeration_thread.join(timeout=2.0)
+        assert not enumeration_thread.is_alive(), "parallel enumeration did not stop after a fatal worker error"
+    finally:
+        release_blocked_worker.set()
+        enumeration_thread.join(timeout=0.5)
+
+    assert results
+    nodes, total, truncated, _meta, error = results[0]
+    assert nodes == ["/blocked", "/boom"]
+    assert total == 2
+    assert truncated is False
+    assert error == "getChildren failed for /boom: unexpected worker crash"
+
+
+def test_parallel_znode_enumeration_unexpected_worker_error_subprocess_deadline() -> None:
+    repository_root = Path(__file__).resolve().parents[1]
+    script = """
+import redposture_core.clients.zookeeper as zk
+
+class UnexpectedErrorClient:
+    def __init__(self, *_args):
+        pass
+
+    def connect(self):
+        pass
+
+    def get_children2(self, parent):
+        if parent == "/":
+            return ["boom"], zk._ZK_ERR_OK, {}
+        raise RuntimeError("unexpected worker crash")
+
+    def close(self):
+        pass
+
+zk._ZkClient = UnexpectedErrorClient
+result = zk._enumerate_znodes_parallel(
+    host="zk.internal",
+    port=2181,
+    timeout=1.0,
+    max_znodes=10,
+    enum_workers=2,
+)
+assert result[1] == 1, result
+assert result[-1] == "getChildren failed for /boom: unexpected worker crash", result
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repository_root,
+        capture_output=True,
+        text=True,
+        timeout=2.0,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr or completed.stdout

@@ -120,13 +120,29 @@ def _run_command(args: Any, logger: AttemptLogger) -> int:
     return 2
 
 
+def _paths_refer_to_same_file(first: str, second: str) -> bool:
+    first_path = os.path.normcase(os.path.realpath(os.path.abspath(os.path.expanduser(first))))
+    second_path = os.path.normcase(os.path.realpath(os.path.abspath(os.path.expanduser(second))))
+    if first_path == second_path:
+        return True
+    try:
+        return os.path.samefile(first_path, second_path)
+    except (FileNotFoundError, OSError):
+        return False
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    log_path = str(getattr(args, "log", "") or "").strip()
+    output_path = str(getattr(args, "output", "") or "").strip()
+    if log_path and output_path and _paths_refer_to_same_file(output_path, log_path):
+        print("[error] --output/--save and --log must refer to different files", file=sys.stderr)
+        return 2
+
     set_console_no_color(bool(getattr(args, "no_color", False)))
     logger = AttemptLogger()
     progress_owner = CommandProgressOwner(enabled=True)
     args._progress_owner = progress_owner
-    log_path = str(getattr(args, "log", "") or "").strip()
     raw_proxy = str(getattr(args, "proxy", "") or "").strip()
 
     # F4 fix: open the --log tee BEFORE parsing --proxy so that a proxy-parse

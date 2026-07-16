@@ -1,6 +1,15 @@
 [
   {
-    "attempted_credentials": 1,
+    "attempted_credentials": [
+      {
+        "error": "",
+        "ok": true,
+        "password": "admin",
+        "source": "default",
+        "username": "admin"
+      }
+    ],
+    "attempted_credentials_count": 1,
     "auth_attempts": [
       {
         "error": "",
@@ -10,9 +19,18 @@
         "username": "admin"
       }
     ],
-    "auth_required": true,
-    "check_results": null,
+    "auth_required": false,
+    "check_results": [],
     "check_urls": [],
+    "credential_attempts": [
+      {
+        "error": null,
+        "ok": true,
+        "password": "admin",
+        "token": null,
+        "username": "admin"
+      }
+    ],
     "credentials_source": "default",
     "datasource_count": 11,
     "datasources": [
@@ -83,7 +101,7 @@
     "port": 3000,
     "provided_credentials": false,
     "provided_credentials_ok": null,
-    "provided_username": null,
+    "provided_username": "admin",
     "service": "grafana",
     "show_datasources": false,
     "stages": [

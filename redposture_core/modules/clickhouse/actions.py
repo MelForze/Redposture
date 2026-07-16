@@ -7,8 +7,8 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -67,6 +67,33 @@ class _ChSession:
     username: str
     password: str
     database: str
+
+
+@dataclass
+class ClickHouseLifecycleState:
+    """Per-target sessions shared across detect/auth/data hooks."""
+
+    anonymous_session: _ChSession | None = None
+    credential_sessions: dict[tuple[str | None, str | None, str], _ChSession] = field(default_factory=dict)
+    selected_protocol: str | None = None
+    auth_required: bool | None = None
+
+    def take_session(self, username: str | None, password: str | None, source: str) -> _ChSession | None:
+        return self.credential_sessions.pop((username, password, source), None)
+
+    def close(self) -> None:
+        sessions = list(self.credential_sessions.values())
+        self.credential_sessions.clear()
+        if self.anonymous_session is not None:
+            sessions.append(self.anonymous_session)
+            self.anonymous_session = None
+        seen: set[int] = set()
+        for session in sessions:
+            marker = id(session.client)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            _close_client(session.protocol, session.client)
 
 
 def _configure_clickhouse_loggers() -> None:
@@ -802,6 +829,502 @@ def _protocol_attempt_order(protocol: str) -> tuple[str, ...]:
     return ("native",)
 
 
+def _run_clickhouse_actions_on_session(
+    operation_session: _ChSession,
+    *,
+    database: str,
+    show_tables: bool,
+    show_columns: bool,
+    table_targets: list[str],
+    table_columns: list[str],
+    dump_table_rows: bool,
+    dump_row_limit: int | None,
+    execute_command: str | None,
+    sql_command: str | None,
+) -> dict[str, Any]:
+    (
+        read_capability,
+        execute_capability,
+        admin_capability,
+        database_count,
+        database_names,
+        capability_error,
+    ) = _collect_capabilities(operation_session)
+
+    table_names: list[str] | None = None
+    table_columns_info: list[dict[str, Any]] = []
+    table_dumps: list[dict[str, Any]] = []
+    sql_attempted = False
+    sql_ok: bool | None = None
+    sql_output: list[str] | None = None
+    sql_error: str | None = None
+    execute_attempted = False
+    execute_ok: bool | None = None
+    execute_output: list[str] | None = None
+    execute_error: str | None = None
+
+    if show_tables or (dump_table_rows and not table_targets):
+        table_names, table_names_error = _query_readable_tables(operation_session)
+        if table_names_error and not capability_error:
+            capability_error = table_names_error
+
+    normalized_targets: list[str] = []
+    normalized_target_pairs: list[tuple[str, str]] = []
+    if table_targets:
+        for raw_target in table_targets:
+            db_name, table_name = _split_table_name(raw_target, database)
+            if db_name is None or table_name is None:
+                table_columns_info.append(
+                    {
+                        "table": raw_target,
+                        "columns": [],
+                        "error": f"invalid table name: {raw_target}",
+                    }
+                )
+                continue
+            normalized_target_pairs.append((db_name, table_name))
+            normalized_targets.append(f"{db_name}.{table_name}")
+    elif dump_table_rows and isinstance(table_names, list):
+        for table_name_full in table_names:
+            db_name, table_name = _split_table_name(table_name_full, database)
+            if db_name is None or table_name is None:
+                continue
+            normalized_target_pairs.append((db_name, table_name))
+            normalized_targets.append(f"{db_name}.{table_name}")
+
+    if show_columns:
+        for db_name, table_name in normalized_target_pairs:
+            columns, columns_error = _query_table_columns(
+                operation_session,
+                db_name,
+                table_name,
+                only_columns=table_columns,
+            )
+            table_columns_info.append(
+                {
+                    "table": f"{db_name}.{table_name}",
+                    "columns": columns or [],
+                    "error": columns_error,
+                }
+            )
+
+    if dump_table_rows:
+        for db_name, table_name in normalized_target_pairs:
+            dump_columns: list[str] | None = []
+            dump_columns_error: str | None = None
+            if table_columns:
+                dump_columns = [str(column) for column in table_columns]
+            else:
+                dump_columns, dump_columns_error = _query_table_columns(
+                    operation_session,
+                    db_name,
+                    table_name,
+                    only_columns=None,
+                )
+            rows, dump_error = _query_table_rows(
+                operation_session,
+                db_name,
+                table_name,
+                columns=table_columns,
+                max_rows=dump_row_limit if dump_row_limit is not None else _CH_MAX_DUMP_ROWS,
+            )
+            combined_dump_error = dump_error
+            if dump_columns_error:
+                if combined_dump_error:
+                    combined_dump_error = f"{combined_dump_error}; columns: {dump_columns_error}"
+                else:
+                    combined_dump_error = f"columns: {dump_columns_error}"
+            table_dumps.append(
+                {
+                    "table": f"{db_name}.{table_name}",
+                    "columns": dump_columns or [],
+                    "rows": rows or [],
+                    "error": combined_dump_error,
+                }
+            )
+
+    if sql_command:
+        sql_attempted = True
+        sql_output, sql_error = _run_sql_query(operation_session, sql_command)
+        sql_ok = sql_error is None
+
+    if execute_command:
+        execute_attempted = True
+        if execute_capability is False:
+            execute_ok = False
+            execute_output = []
+            execute_error = "insufficient privileges for OS command execution"
+        else:
+            execute_output, execute_error = _run_execute_command(operation_session, execute_command)
+            execute_ok = execute_error is None
+
+    resolved_targets = list(table_targets)
+    if not resolved_targets and normalized_targets:
+        resolved_targets = normalized_targets
+
+    return {
+        "database_names": database_names,
+        "database_count": database_count,
+        "table_names": table_names,
+        "table_targets": resolved_targets,
+        "table_columns_info": table_columns_info,
+        "table_dumps": table_dumps,
+        "sql_attempted": sql_attempted,
+        "sql_ok": sql_ok,
+        "sql_output": sql_output,
+        "sql_error": sql_error,
+        "execute_attempted": execute_attempted,
+        "execute_ok": execute_ok,
+        "execute_output": execute_output,
+        "execute_error": execute_error,
+        "read_capability": read_capability,
+        "execute_capability": execute_capability,
+        "admin_capability": admin_capability,
+        "capability_error": capability_error,
+    }
+
+
+def _clickhouse_lifecycle_payload(
+    ctx: Any,
+    options: Mapping[str, Any],
+    *,
+    protocol: str,
+    status: str,
+    auth_required: bool | None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    credential = ctx.credential
+    provided = credential.username is not None or credential.password is not None
+    return {
+        "timestamp": utc_now_iso(),
+        "host": str(ctx.host),
+        "port": int(ctx.port),
+        "protocol": protocol,
+        "is_clickhouse": status != "fail",
+        "status": status,
+        "auth_required": auth_required,
+        "database": str(options["database"]),
+        "provided_credentials": provided,
+        "provided_username": credential.username,
+        "provided_password": credential.password if provided else None,
+        "provided_credentials_ok": None,
+        "defcreds_enabled": credential.source == "default",
+        "default_credentials": False,
+        "attempted_credentials": 0,
+        "credentials_source": None,
+        "effective_username": None,
+        "effective_password": None,
+        "auth_attempts": [],
+        "show_databases": bool(options["show_databases"]),
+        "database_names": None,
+        "database_count": None,
+        "show_tables": bool(options["show_tables"]),
+        "table_names": None,
+        "show_columns": bool(options["show_columns"]),
+        "table_targets": list(options["table_targets"]),
+        "table_columns": list(options["table_columns"]),
+        "table_columns_info": [],
+        "table_dump_enabled": bool(options["dump_table_rows"]),
+        "table_dump_limit": options["dump_row_limit"],
+        "table_dumps": [],
+        "execute_command": options["execute_command"],
+        "execute_attempted": False,
+        "execute_ok": None,
+        "execute_output": None,
+        "execute_error": None,
+        "sql_command": options["sql_command"],
+        "sql_attempted": False,
+        "sql_ok": None,
+        "sql_output": None,
+        "sql_error": None,
+        "read_capability": None,
+        "execute_capability": None,
+        "admin_capability": None,
+        "show_databases_limit": options["show_databases_limit"],
+        "show_tables_limit": options["show_tables_limit"],
+        "show_columns_limit": options["show_columns_limit"],
+        "attempts": 1,
+        "max_attempts": max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1),
+        "stages": [],
+        "stage_durations_ms": {},
+        "stage_attempts": {},
+        "stage_failed_at": None,
+        "debug_events": [],
+        "debug_events_streamed": False,
+        "error": error,
+    }
+
+
+def _record_payload(record: Any) -> dict[str, Any]:
+    if hasattr(record, "to_dict"):
+        return dict(record.to_dict())
+    return dict(record)
+
+
+def detect_clickhouse(
+    ctx: Any,
+    options: Mapping[str, Any],
+) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, ClickHouseLifecycleState):
+        raise TypeError("clickhouse lifecycle state is unavailable")
+
+    last_error: str | None = None
+    protocols = _protocol_attempt_order(str(options["protocol"]))
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    for attempt in range(attempts):
+        for protocol in protocols:
+            session, error = _connect_and_probe(
+                protocol,
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                "default",
+                "",
+                database="default",
+            )
+            if session is not None:
+                state.anonymous_session = session
+                state.selected_protocol = protocol
+                state.auth_required = False
+                return _clickhouse_lifecycle_payload(
+                    ctx,
+                    options,
+                    protocol=protocol,
+                    status="open_no_auth",
+                    auth_required=False,
+                )
+            last_error = error or last_error
+            if _is_auth_error(error):
+                state.selected_protocol = protocol
+                state.auth_required = True
+                return _clickhouse_lifecycle_payload(
+                    ctx,
+                    options,
+                    protocol=protocol,
+                    status="auth_required",
+                    auth_required=True,
+                    error=None,
+                )
+            if _looks_like_clickhouse_error(error):
+                state.selected_protocol = protocol
+                state.auth_required = None
+                return _clickhouse_lifecycle_payload(
+                    ctx,
+                    options,
+                    protocol=protocol,
+                    status="detected",
+                    auth_required=None,
+                    error=error,
+                )
+        if attempt < attempts - 1:
+            time.sleep(_retry_delay(attempt))
+
+    return _clickhouse_lifecycle_payload(
+        ctx,
+        options,
+        protocol=state.selected_protocol or str(options["protocol"]),
+        status="fail",
+        auth_required=None,
+        error=last_error or "connection failed",
+    )
+
+
+def authenticate_clickhouse(
+    ctx: Any,
+    detect_record: Any,
+    options: Mapping[str, Any],
+) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, ClickHouseLifecycleState):
+        raise TypeError("clickhouse lifecycle state is unavailable")
+    payload = _record_payload(detect_record)
+    credential = ctx.credential
+    if credential.username is None and credential.password is None:
+        return payload
+
+    username = credential.username or "default"
+    password = credential.password or ""
+    source = str(credential.source or "provided")
+    protocol = state.selected_protocol or str(options["protocol"])
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    session: _ChSession | None = None
+    error: str | None = None
+    transport_attempts = 0
+    definitive_rejection = False
+    for attempt in range(attempts):
+        transport_attempts += 1
+        session, error = _open_operational_session(
+            protocol,
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            username,
+            password,
+            str(options["database"]),
+        )
+        if session is not None:
+            break
+        if _is_auth_error(error):
+            definitive_rejection = True
+            break
+        error_text = str(error or "").lower()
+        retryable = bool(
+            _is_timeout_error(error)
+            or _is_connection_refused_error(error)
+            or any(
+                marker in error_text
+                for marker in (
+                    "connection reset",
+                    "connection closed",
+                    "broken pipe",
+                    "unexpected eof",
+                    "temporarily unavailable",
+                )
+            )
+        )
+        if not retryable or attempt >= attempts - 1:
+            break
+        time.sleep(_retry_delay(attempt))
+    ok = session is not None
+    if session is not None:
+        state.credential_sessions[(credential.username, credential.password, source)] = session
+    detect_status = str(payload.get("status") or "")
+    if ok:
+        status = "weak_default_creds" if source == "default" else "valid_credentials"
+    elif definitive_rejection and detect_status == "open_no_auth":
+        status = "invalid_credentials_anonymous"
+    elif not definitive_rejection:
+        status = "fail"
+    else:
+        status = "auth_required"
+
+    payload.update(
+        {
+            "timestamp": utc_now_iso(),
+            "status": status,
+            "is_clickhouse": True,
+            "auth_required": state.auth_required,
+            "provided_credentials": source != "default",
+            "provided_username": credential.username,
+            "provided_password": credential.password if source != "default" else None,
+            "provided_credentials_ok": (
+                True if ok and source != "default" else False if definitive_rejection and source != "default" else None
+            ),
+            "defcreds_enabled": source == "default",
+            "default_credentials": bool(ok and source == "default"),
+            "attempted_credentials": 1,
+            "auth_transport_attempts": transport_attempts,
+            "credentials_source": source if ok else None,
+            "effective_username": username if ok else None,
+            "effective_password": password if ok else None,
+            "auth_attempts": [
+                {
+                    "username": username,
+                    "password": password,
+                    "source": source,
+                    "ok": ok,
+                    "error": str(error or ""),
+                }
+            ],
+            "error": None if ok or status == "invalid_credentials_anonymous" else error,
+        }
+    )
+    return payload
+
+
+def collect_clickhouse_data(
+    ctx: Any,
+    record: Any,
+    options: Mapping[str, Any],
+) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, ClickHouseLifecycleState):
+        raise TypeError("clickhouse lifecycle state is unavailable")
+    payload = _record_payload(record)
+    credential = ctx.credential
+    source = str(credential.source or "provided")
+    session = state.take_session(credential.username, credential.password, source)
+    if session is None and str(payload.get("status") or "") in {"open_no_auth", "invalid_credentials_anonymous"}:
+        session = state.anonymous_session
+        state.anonymous_session = None
+    if session is None:
+        return payload
+    desired_database = str(options["database"])
+    if session.database != desired_database:
+        _close_client(session.protocol, session.client)
+        session, database_error = _open_operational_session(
+            state.selected_protocol or str(options["protocol"]),
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            session.username,
+            session.password,
+            desired_database,
+        )
+        if session is None:
+            payload["error"] = database_error or f"failed to open database {desired_database}"
+            return payload
+
+    started = time.monotonic()
+    try:
+        action_result = _run_clickhouse_actions_on_session(
+            session,
+            database=str(options["database"]),
+            show_tables=bool(options["show_tables"]),
+            show_columns=bool(options["show_columns"]),
+            table_targets=list(options["table_targets"]),
+            table_columns=list(options["table_columns"]),
+            dump_table_rows=bool(options["dump_table_rows"]),
+            dump_row_limit=options["dump_row_limit"],
+            execute_command=options["execute_command"],
+            sql_command=options["sql_command"],
+        )
+    finally:
+        _close_client(session.protocol, session.client)
+
+    database_names = action_result["database_names"]
+    table_names = action_result["table_names"]
+    if isinstance(options["show_databases_limit"], int) and isinstance(database_names, list):
+        database_names = limit_sequence(database_names, int(options["show_databases_limit"]))
+    if isinstance(options["show_tables_limit"], int) and isinstance(table_names, list):
+        table_names = limit_sequence(table_names, int(options["show_tables_limit"]))
+    errors = [
+        str(value).strip()
+        for value in (
+            action_result["capability_error"],
+            action_result["execute_error"],
+            action_result["sql_error"],
+        )
+        if str(value or "").strip()
+    ]
+    payload.update(
+        {
+            "protocol": session.protocol,
+            "database_names": database_names,
+            "database_count": action_result["database_count"],
+            "table_names": table_names,
+            "table_targets": action_result["table_targets"],
+            "table_columns_info": action_result["table_columns_info"],
+            "table_dumps": action_result["table_dumps"],
+            "sql_attempted": action_result["sql_attempted"],
+            "sql_ok": action_result["sql_ok"],
+            "sql_output": action_result["sql_output"],
+            "sql_error": action_result["sql_error"],
+            "execute_attempted": action_result["execute_attempted"],
+            "execute_ok": action_result["execute_ok"],
+            "execute_output": action_result["execute_output"],
+            "execute_error": action_result["execute_error"],
+            "read_capability": action_result["read_capability"],
+            "execute_capability": action_result["execute_capability"],
+            "admin_capability": action_result["admin_capability"],
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "error": "; ".join(dict.fromkeys(errors)) if errors else None,
+        }
+    )
+    return payload
+
+
 def _audit_clickhouse_host_on_protocol(
     host: str,
     port: int,
@@ -839,12 +1362,12 @@ def _audit_clickhouse_host_on_protocol(
         effective_password: str | None = None
         credentials_source: str | None = None
         default_credentials = False
+        selected_credential_session: _ChSession | None = None
 
         anon_session, anon_error = _connect_and_probe(protocol, host, port, timeout, "default", "", database="default")
         if anon_session is not None:
             anonymous_ok = True
             auth_required = False
-            _close_client(protocol, anon_session.client)
         else:
             last_error = anon_error or last_error
             if _is_auth_error(anon_error):
@@ -885,166 +1408,82 @@ def _audit_clickhouse_host_on_protocol(
                 effective_username = cand_user
                 effective_password = cand_pass
                 credentials_source = source
+                selected_credential_session = cred_session
             if ok and source == "default":
                 default_credentials = True
             if source == "provided" and ok:
                 provided_credentials_ok = True
-            if cred_session is not None:
+            if cred_session is not None and cred_session is not selected_credential_session:
                 _close_client(protocol, cred_session.client)
 
-        operation_username = effective_username if effective_username is not None else "default"
-        operation_password = effective_password if effective_password is not None else ""
-        operation_session: _ChSession | None = None
+        operation_session = selected_credential_session
         operation_session_error: str | None = None
 
-        if effective_username is not None:
+        if operation_session is not None and database != "default":
+            _close_client(protocol, operation_session.client)
             operation_session, operation_session_error = _open_operational_session(
                 protocol,
                 host,
                 port,
                 timeout,
-                operation_username,
-                operation_password,
-                database,
-            )
-        elif anonymous_ok:
-            operation_session, operation_session_error = _open_operational_session(
-                protocol,
-                host,
-                port,
-                timeout,
-                "default",
-                "",
+                effective_username or "default",
+                effective_password or "",
                 database,
             )
 
-        database_names: list[str] | None = None
-        database_count: int | None = None
-        table_names: list[str] | None = None
-        table_columns_info: list[dict[str, Any]] = []
-        table_dumps: list[dict[str, Any]] = []
-        sql_attempted = False
-        sql_ok: bool | None = None
-        sql_output: list[str] | None = None
-        sql_error: str | None = None
-        execute_attempted = False
-        execute_ok: bool | None = None
-        execute_output: list[str] | None = None
-        execute_error: str | None = None
+        if operation_session is None and anonymous_ok and effective_username is None:
+            if database == "default":
+                operation_session = anon_session
+            else:
+                if anon_session is not None:
+                    _close_client(protocol, anon_session.client)
+                    anon_session = None
+                operation_session, operation_session_error = _open_operational_session(
+                    protocol,
+                    host,
+                    port,
+                    timeout,
+                    "default",
+                    "",
+                    database,
+                )
+        elif anon_session is not None:
+            _close_client(protocol, anon_session.client)
+            anon_session = None
 
-        read_capability: bool | None = None
-        execute_capability: bool | None = None
-        admin_capability: bool | None = None
-        capability_error: str | None = None
-
+        action_result: dict[str, Any] = {
+            "database_names": None,
+            "database_count": None,
+            "table_names": None,
+            "table_targets": list(table_targets),
+            "table_columns_info": [],
+            "table_dumps": [],
+            "sql_attempted": False,
+            "sql_ok": None,
+            "sql_output": None,
+            "sql_error": None,
+            "execute_attempted": False,
+            "execute_ok": None,
+            "execute_output": None,
+            "execute_error": None,
+            "read_capability": None,
+            "execute_capability": None,
+            "admin_capability": None,
+            "capability_error": None,
+        }
         if operation_session is not None:
-            (
-                read_capability,
-                execute_capability,
-                admin_capability,
-                database_count,
-                database_names,
-                capability_error,
-            ) = _collect_capabilities(operation_session)
-
-            if show_tables or (dump_table_rows and not table_targets):
-                table_names, table_names_error = _query_readable_tables(operation_session)
-                if table_names_error and not capability_error:
-                    capability_error = table_names_error
-
-            normalized_targets: list[str] = []
-            normalized_target_pairs: list[tuple[str, str]] = []
-            if table_targets:
-                for raw_target in table_targets:
-                    db_name, table_name = _split_table_name(raw_target, database)
-                    if db_name is None or table_name is None:
-                        table_columns_info.append(
-                            {
-                                "table": raw_target,
-                                "columns": [],
-                                "error": f"invalid table name: {raw_target}",
-                            }
-                        )
-                        continue
-                    normalized_target_pairs.append((db_name, table_name))
-                    normalized_targets.append(f"{db_name}.{table_name}")
-            elif dump_table_rows and isinstance(table_names, list):
-                for table_name_full in table_names:
-                    db_name, table_name = _split_table_name(table_name_full, database)
-                    if db_name is None or table_name is None:
-                        continue
-                    normalized_target_pairs.append((db_name, table_name))
-                    normalized_targets.append(f"{db_name}.{table_name}")
-
-            if show_columns:
-                for db_name, table_name in normalized_target_pairs:
-                    columns, columns_error = _query_table_columns(
-                        operation_session,
-                        db_name,
-                        table_name,
-                        only_columns=table_columns,
-                    )
-                    table_columns_info.append(
-                        {
-                            "table": f"{db_name}.{table_name}",
-                            "columns": columns or [],
-                            "error": columns_error,
-                        }
-                    )
-
-            if dump_table_rows:
-                for db_name, table_name in normalized_target_pairs:
-                    dump_columns: list[str] | None = []
-                    dump_columns_error: str | None = None
-                    if table_columns:
-                        dump_columns = [str(column) for column in table_columns]
-                    else:
-                        dump_columns, dump_columns_error = _query_table_columns(
-                            operation_session,
-                            db_name,
-                            table_name,
-                            only_columns=None,
-                        )
-                    rows, dump_error = _query_table_rows(
-                        operation_session,
-                        db_name,
-                        table_name,
-                        columns=table_columns,
-                        max_rows=dump_row_limit if dump_row_limit is not None else _CH_MAX_DUMP_ROWS,
-                    )
-                    combined_dump_error = dump_error
-                    if dump_columns_error:
-                        if combined_dump_error:
-                            combined_dump_error = f"{combined_dump_error}; columns: {dump_columns_error}"
-                        else:
-                            combined_dump_error = f"columns: {dump_columns_error}"
-                    table_dumps.append(
-                        {
-                            "table": f"{db_name}.{table_name}",
-                            "columns": dump_columns or [],
-                            "rows": rows or [],
-                            "error": combined_dump_error,
-                        }
-                    )
-
-            if sql_command:
-                sql_attempted = True
-                sql_output, sql_error = _run_sql_query(operation_session, sql_command)
-                sql_ok = sql_error is None
-
-            if execute_command:
-                execute_attempted = True
-                if execute_capability is False:
-                    execute_ok = False
-                    execute_output = []
-                    execute_error = "insufficient privileges for OS command execution"
-                else:
-                    execute_output, execute_error = _run_execute_command(operation_session, execute_command)
-                    execute_ok = execute_error is None
-
-            if not table_targets and normalized_targets:
-                table_targets = normalized_targets
-
+            action_result = _run_clickhouse_actions_on_session(
+                operation_session,
+                database=database,
+                show_tables=show_tables,
+                show_columns=show_columns,
+                table_targets=list(table_targets),
+                table_columns=list(table_columns),
+                dump_table_rows=dump_table_rows,
+                dump_row_limit=dump_row_limit,
+                execute_command=execute_command,
+                sql_command=sql_command,
+            )
             _close_client(protocol, operation_session.client)
 
         if effective_username is not None:
@@ -1059,7 +1498,13 @@ def _audit_clickhouse_host_on_protocol(
             status = "fail"
 
         errors: list[str] = []
-        for err in (last_error, capability_error, operation_session_error, execute_error, sql_error):
+        for err in (
+            last_error,
+            action_result["capability_error"],
+            operation_session_error,
+            action_result["execute_error"],
+            action_result["sql_error"],
+        ):
             if not err:
                 continue
             clean = str(err).strip()
@@ -1087,30 +1532,30 @@ def _audit_clickhouse_host_on_protocol(
             "effective_password": effective_password,
             "auth_attempts": auth_attempts,
             "show_databases": show_databases,
-            "database_names": database_names,
-            "database_count": database_count,
+            "database_names": action_result["database_names"],
+            "database_count": action_result["database_count"],
             "show_tables": show_tables,
-            "table_names": table_names,
+            "table_names": action_result["table_names"],
             "show_columns": show_columns,
-            "table_targets": list(table_targets),
+            "table_targets": action_result["table_targets"],
             "table_columns": list(table_columns),
-            "table_columns_info": table_columns_info,
+            "table_columns_info": action_result["table_columns_info"],
             "table_dump_enabled": dump_table_rows,
             "table_dump_limit": dump_row_limit,
-            "table_dumps": table_dumps,
+            "table_dumps": action_result["table_dumps"],
             "execute_command": execute_command,
-            "execute_attempted": execute_attempted,
-            "execute_ok": execute_ok,
-            "execute_output": execute_output,
-            "execute_error": execute_error,
+            "execute_attempted": action_result["execute_attempted"],
+            "execute_ok": action_result["execute_ok"],
+            "execute_output": action_result["execute_output"],
+            "execute_error": action_result["execute_error"],
             "sql_command": sql_command,
-            "sql_attempted": sql_attempted,
-            "sql_ok": sql_ok,
-            "sql_output": sql_output,
-            "sql_error": sql_error,
-            "read_capability": read_capability,
-            "execute_capability": execute_capability,
-            "admin_capability": admin_capability,
+            "sql_attempted": action_result["sql_attempted"],
+            "sql_ok": action_result["sql_ok"],
+            "sql_output": action_result["sql_output"],
+            "sql_error": action_result["sql_error"],
+            "read_capability": action_result["read_capability"],
+            "execute_capability": action_result["execute_capability"],
+            "admin_capability": action_result["admin_capability"],
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": "; ".join(errors) if errors else None,
         }

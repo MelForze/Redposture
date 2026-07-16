@@ -1,0 +1,94 @@
+[
+  {
+    "auth_flow": "sasl_fallback",
+    "auth_required": true,
+    "cluster_permissions": {
+      "create": true,
+      "delete": true
+    },
+    "credential_attempts": [
+      {
+        "error": null,
+        "ok": true,
+        "password": "admin",
+        "token": null,
+        "username": "admin"
+      }
+    ],
+    "defcreds_enabled": false,
+    "dump": true,
+    "dump_error": null,
+    "dump_errors": {},
+    "dump_results": {
+      "tls.orders": [
+        "<KAFKA_OFFSET> {\"order_id\":\"tls-4001\",\"status\":\"queued\",\"tenant\":\"tls\"}",
+        "<KAFKA_OFFSET> {\"order_id\":\"tls-4002\",\"status\":\"processed\",\"tenant\":\"tls\"}"
+      ]
+    },
+    "dump_topics": [
+      "tls.orders"
+    ],
+    "effective_username": "admin",
+    "error": null,
+    "host": "127.0.0.1",
+    "is_kafka": true,
+    "max_messages": 3,
+    "max_messages_explicit": true,
+    "module": "kafka",
+    "port": 29093,
+    "provided_credentials": true,
+    "provided_credentials_ok": true,
+    "provided_password": "admin",
+    "provided_username": "admin",
+    "query_topic": "tls.orders",
+    "query_topic_value": "tls.orders (partitions:2)",
+    "service": "kafka",
+    "show_topics": true,
+    "show_topics_limit": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "weak_default_creds",
+    "topic_count": 2,
+    "topic_messages": [
+      "<KAFKA_OFFSET> {\"order_id\":\"tls-4001\",\"status\":\"queued\",\"tenant\":\"tls\"}",
+      "<KAFKA_OFFSET> {\"order_id\":\"tls-4002\",\"status\":\"processed\",\"tenant\":\"tls\"}"
+    ],
+    "topic_permissions": {
+      "tls.orders": {
+        "read": true,
+        "write": null
+      }
+    },
+    "topic_read_error": null,
+    "topics": [
+      "tls.audit",
+      "tls.orders"
+    ],
+    "transport": "tls",
+    "transport_mode": "tls"
+  }
+]

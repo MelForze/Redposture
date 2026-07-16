@@ -1608,7 +1608,7 @@ def _pg_collect_database_artifacts(
     raw_table_names: list[str] | None = None
     table_names: list[str] | None = None
 
-    if show_tables or show_row_counts or (dump_table_rows and not table_targets):
+    if show_tables or (show_row_counts and not table_targets) or (dump_table_rows and not table_targets):
         raw_table_names, table_error = _pg_query_readable_tables(sock)
         query_error = _merge_query_error(query_error, table_error)
         if show_tables and isinstance(raw_table_names, list):
@@ -1625,7 +1625,7 @@ def _pg_collect_database_artifacts(
     table_columns_map: dict[str, list[str]] = {}
     row_count_targets: list[str] = table_targets if table_targets else (raw_table_names or [])
 
-    should_collect_table_columns = bool(table_targets) and (show_columns or not dump_table_rows)
+    should_collect_table_columns = bool(table_targets) and bool(show_columns)
     if should_collect_table_columns:
         for table_name in table_targets:
             columns_table, columns_rows, columns_error = _pg_query_table_columns(
@@ -1795,8 +1795,9 @@ def _audit_postgres_host(
     last_error: str | None = None
     show_tables_requested = bool(show_tables)
     show_row_counts_requested = bool(show_row_counts)
+    implicit_table_summary = bool(table_targets) and not show_columns and not dump_table_rows
     effective_show_tables = show_tables_requested or show_row_counts_requested
-    effective_show_row_counts = show_row_counts_requested or show_tables_requested
+    effective_show_row_counts = show_row_counts_requested or show_tables_requested or implicit_table_summary
 
     provided_credentials = (password is not None or username is not None) and not defcreds
     if provided_credentials:
@@ -2032,7 +2033,7 @@ def _audit_postgres_host(
                     "database_count": database_count,
                     "show_tables": effective_show_tables,
                     "show_tables_limit": show_tables_limit,
-                    "show_row_counts": show_row_counts_requested,
+                    "show_row_counts": show_row_counts_requested or implicit_table_summary,
                     "show_columns": show_columns,
                     "show_columns_limit": show_columns_limit,
                     "table_names": table_names,
@@ -2105,7 +2106,7 @@ def _audit_postgres_host(
                 "database_names": None,
                 "database_count": None,
                 "show_tables": effective_show_tables,
-                "show_row_counts": show_row_counts_requested,
+                "show_row_counts": show_row_counts_requested or implicit_table_summary,
                 "show_columns": show_columns,
                 "table_names": None,
                 "table_targets": table_targets,
@@ -2165,7 +2166,7 @@ def _audit_postgres_host(
         "database_count": None,
         "show_tables": effective_show_tables,
         "show_tables_limit": show_tables_limit,
-        "show_row_counts": show_row_counts_requested,
+        "show_row_counts": show_row_counts_requested or implicit_table_summary,
         "show_columns": show_columns,
         "show_columns_limit": show_columns_limit,
         "table_names": None,
@@ -2358,6 +2359,9 @@ def _format_databases_detail_records(record: dict[str, Any], output_format: str)
 
 
 def _format_table_columns_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if not record.get("show_columns"):
+        return []
+
     table_columns_info = record.get("table_columns_info")
     if not isinstance(table_columns_info, list) or not table_columns_info:
         return []
@@ -2453,7 +2457,8 @@ def _format_table_row_count_detail_records(record: dict[str, Any], output_format
         return lines
 
     prefix = _nxc_prefix(record)
-    lines = [f"{prefix} [*] Table Rows"]
+    selected_table_summary = bool(record.get("table_targets")) and not record.get("show_tables")
+    lines = [f"{prefix} [*] Table" if selected_table_summary else f"{prefix} [*] Table Rows"]
     for item in table_row_counts:
         if not isinstance(item, dict):
             continue
@@ -2464,7 +2469,8 @@ def _format_table_row_count_detail_records(record: dict[str, Any], output_format
             continue
         row_count = item.get("row_count")
         row_count_text = str(row_count) if isinstance(row_count, int) else "unknown"
-        lines.append(f"{prefix} {table_name} (rows:{row_count_text})")
+        row_label = "Rows" if selected_table_summary else "rows"
+        lines.append(f"{prefix} {table_name} ({row_label}:{row_count_text})")
     return lines
 
 

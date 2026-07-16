@@ -19,6 +19,7 @@ from redposture_core.clients.zookeeper import (
 from redposture_core.modules.keeper import actions, policy, render
 from redposture_core.modules.keeper.stage import build_keeper_plan, build_keeper_spec
 from redposture_core.modules.keeper.types import KeeperFingerprintCache
+from redposture_core.stage_runtime import AuditCommandRunner, AuditCredentialRun, AuditHookContext
 
 
 def _patch_four_letter(monkeypatch: pytest.MonkeyPatch, responses: dict[str, str]) -> None:
@@ -314,3 +315,322 @@ def test_keeper_policy_and_stage_contract() -> None:
     console = Console()
     assert policy.validate_args(invalid, console) == 2
     assert "TLS options" in console.errors[0]
+
+
+def test_keeper_lifecycle_classifies_anonymously_before_credentials_and_runs_deep_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    credentials = tmp_path / "keeper.creds"
+    credentials.write_text("bad:bad\ngood:good\n", encoding="utf-8")
+    events: list[str] = []
+
+    class FakeClient:
+        selected_transport = "plaintext"
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.username: str | None = None
+
+        def connect(self) -> None:
+            events.append("connect")
+
+        def get_children2(self, _path: str):
+            if self.username == "good":
+                events.append("auth_root")
+                return [], 0, {}
+            events.append("anonymous_root")
+            return [], -102, {}
+
+        def auth_digest(self, username: str, _password: str):
+            self.username = username
+            events.append(f"auth:{username}")
+            if username == "good":
+                return True, None
+            return False, "authentication failed"
+
+        def close(self) -> None:
+            return
+
+    def fake_fingerprint(*_args, **_kwargs):
+        events.append("fingerprint")
+        return ZkImplementationFingerprint(
+            "clickhouse-keeper",
+            True,
+            "confirmed",
+            version="v26.4",
+            server_state="standalone",
+            read_only=False,
+            connections=1,
+            quorum_status="healthy",
+        )
+
+    action_calls = 0
+
+    def fake_capabilities(*_args, **_kwargs):
+        nonlocal action_calls
+        action_calls += 1
+        events.append("actions")
+        return True, True, None
+
+    monkeypatch.setattr(actions.zookeeper_actions, "_ZkClient", FakeClient)
+    monkeypatch.setattr(actions, "fingerprint_zookeeper_implementation", fake_fingerprint)
+    monkeypatch.setattr(
+        actions.zookeeper_actions,
+        "_infer_auth_required_from_anonymous_probes",
+        lambda *_args, **_kwargs: (True, "root_noauth", ["/:noauth"]),
+    )
+    monkeypatch.setattr(actions.zookeeper_actions, "_probe_znode_create_delete", fake_capabilities)
+    monkeypatch.setattr(
+        actions.zookeeper_actions,
+        "_enumerate_znodes",
+        lambda *_args, **_kwargs: (["/clickhouse"], 1, False, {"/clickhouse": {}}, None),
+    )
+
+    args = parse_args(
+        [
+            "keeper",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "9181",
+            "-u",
+            str(credentials),
+            "--show-znodes",
+            "--format",
+            "json",
+        ]
+    )
+    args.keeper_probe_cache = KeeperFingerprintCache()
+    plan = build_keeper_plan(args)
+    runner = AuditCommandRunner(args=args, spec=build_keeper_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(plan)
+
+    assert events == [
+        "connect",
+        "anonymous_root",
+        "fingerprint",
+        "connect",
+        "auth:bad",
+        "connect",
+        "auth:good",
+        "auth_root",
+        "actions",
+    ]
+    assert action_calls == 1
+    assert result.records[0]["is_keeper"] is True
+    assert result.records[0]["status"] == "valid_credentials"
+
+
+def test_keeper_auth_retries_transient_connect_and_reuses_successful_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fingerprinted = False
+    detect_connects = 0
+    auth_connects = 0
+    auth_calls = 0
+    action_calls = 0
+
+    class FakeClient:
+        selected_transport = "plaintext"
+
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.authenticated = False
+
+        def connect(self) -> None:
+            nonlocal detect_connects, auth_connects
+            if not fingerprinted:
+                detect_connects += 1
+                return
+            auth_connects += 1
+            if auth_connects == 1:
+                raise TimeoutError("timed out")
+
+        def auth_digest(self, _username: str, _password: str):
+            nonlocal auth_calls
+            auth_calls += 1
+            self.authenticated = True
+            return True, None
+
+        def get_children2(self, _path: str):
+            return ([], 0, {}) if self.authenticated else ([], -102, {})
+
+        def close(self) -> None:
+            return
+
+    def fake_fingerprint(*_args, **_kwargs):
+        nonlocal fingerprinted
+        fingerprinted = True
+        return ZkImplementationFingerprint("clickhouse-keeper", True, "confirmed")
+
+    def fake_capabilities(*_args, **_kwargs):
+        nonlocal action_calls
+        action_calls += 1
+        return True, True, None
+
+    monkeypatch.setattr(actions.zookeeper_actions, "_ZkClient", FakeClient)
+    monkeypatch.setattr(actions, "fingerprint_zookeeper_implementation", fake_fingerprint)
+    monkeypatch.setattr(
+        actions.zookeeper_actions,
+        "_infer_auth_required_from_anonymous_probes",
+        lambda *_args, **_kwargs: (True, "root_noauth", ["/:noauth"]),
+    )
+    monkeypatch.setattr(actions.zookeeper_actions, "_probe_znode_create_delete", fake_capabilities)
+    monkeypatch.setattr(
+        actions.zookeeper_actions,
+        "_enumerate_znodes",
+        lambda *_args, **_kwargs: ([], 0, False, {}, None),
+    )
+    monkeypatch.setattr(actions.zookeeper_actions.time, "sleep", lambda _delay: None)
+
+    args = parse_args(
+        [
+            "keeper",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "9181",
+            "-u",
+            "good",
+            "-p",
+            "good",
+            "--retries",
+            "2",
+            "--format",
+            "json",
+        ]
+    )
+    args.keeper_probe_cache = KeeperFingerprintCache()
+    runner = AuditCommandRunner(args=args, spec=build_keeper_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(build_keeper_plan(args))
+
+    assert detect_connects == 1
+    assert auth_connects == 2
+    assert auth_calls == 1
+    assert action_calls == 1
+    assert result.records[0]["status"] == "valid_credentials"
+
+
+def _keeper_lifecycle_options() -> dict[str, object]:
+    return {
+        "show_znodes": True,
+        "dump": False,
+        "dump_limit": None,
+        "query_znode": None,
+        "max_znodes": 100,
+        "keeper_probe_cache": KeeperFingerprintCache(),
+    }
+
+
+def test_keeper_apache_negative_control_has_exact_terminal_stage_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    detect_calls = 0
+    fingerprint_calls = 0
+    state = actions.KeeperLifecycleState(requested_config=ZkTransportConfig(mode="auto"))
+
+    def fake_detect(ctx, _options):
+        nonlocal detect_calls
+        detect_calls += 1
+        ctx.lifecycle_state.selected_transport_config = ZkTransportConfig(mode="plaintext")
+        return {
+            "host": "127.0.0.1",
+            "port": 2181,
+            "is_zookeeper": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "stages": [],
+            "stage_durations_ms": {},
+            "stage_attempts": {},
+        }
+
+    def fake_fingerprint(*_args, **_kwargs):
+        nonlocal fingerprint_calls
+        fingerprint_calls += 1
+        return ZkImplementationFingerprint("apache-zookeeper", False, "rejected")
+
+    monkeypatch.setattr(actions.zookeeper_actions, "detect_zookeeper", fake_detect)
+    monkeypatch.setattr(actions, "fingerprint_zookeeper_implementation", fake_fingerprint)
+    ctx = AuditHookContext(
+        lifecycle_state=state,
+        args=SimpleNamespace(timeout=0.1, retries=2),
+        host="127.0.0.1",
+        port=2181,
+        credential=AuditCredentialRun(source="anonymous"),
+        logger=None,
+    )
+
+    record = actions.detect_keeper(ctx, _keeper_lifecycle_options())
+
+    assert detect_calls == 1
+    assert fingerprint_calls == 1
+    assert record["status"] == "not_keeper"
+    assert record["is_keeper"] is False
+    assert [stage["stage_name"] for stage in record["stages"]] == [
+        "detect_protocol",
+        "auth_inference_credentials",
+    ]
+    assert [stage["result"] for stage in record["stages"]] == ["ok", "ok"]
+    assert [stage["error"] for stage in record["stages"]] == [None, None]
+    assert record["stage_failed_at"] is None
+    assert record["stage_durations_ms"] == {
+        "detect_protocol": 0,
+        "auth_inference_credentials": 0,
+    }
+    assert record["stage_attempts"] == {
+        "detect_protocol": 1,
+        "auth_inference_credentials": 1,
+    }
+
+
+def test_keeper_failed_detect_preserves_zookeeper_retry_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    retry_error = "connection refused (service is not listening on target port)"
+    stages = [
+        {
+            "stage_name": "detect_protocol",
+            "attempt": attempt,
+            "duration_ms": attempt,
+            "result": "retry" if attempt < 3 else "fail",
+            "error": retry_error,
+        }
+        for attempt in range(1, 4)
+    ]
+    monkeypatch.setattr(
+        actions.zookeeper_actions,
+        "detect_zookeeper",
+        lambda *_args, **_kwargs: {
+            "host": "127.0.0.1",
+            "port": 9181,
+            "is_zookeeper": False,
+            "status": "fail",
+            "auth_required": None,
+            "error": retry_error,
+            "connect_error": retry_error,
+            "attempts": 3,
+            "max_attempts": 3,
+            "stages": stages,
+            "stage_failed_at": "detect_protocol",
+            "stage_durations_ms": {"detect_protocol": 6},
+            "stage_attempts": {"detect_protocol": 3},
+            "debug_events": [],
+            "debug_events_streamed": False,
+        },
+    )
+    ctx = AuditHookContext(
+        lifecycle_state=actions.KeeperLifecycleState(requested_config=ZkTransportConfig(mode="auto")),
+        args=SimpleNamespace(timeout=0.1, retries=2),
+        host="127.0.0.1",
+        port=9181,
+        credential=AuditCredentialRun(source="anonymous"),
+        logger=None,
+    )
+
+    record = actions.detect_keeper(ctx, _keeper_lifecycle_options())
+
+    assert record["status"] == "fail"
+    assert record["stages"] == stages
+    assert record["stage_failed_at"] == "detect_protocol"
+    assert record["stage_durations_ms"] == {"detect_protocol": 6}
+    assert record["stage_attempts"] == {"detect_protocol": 3}
+    assert record["attempts"] == 3
+    assert record["max_attempts"] == 3
+    assert record["connect_error"] == retry_error

@@ -273,5 +273,51 @@
       "redposture.service_tokens",
       "redposture.web_sessions"
     ]
+  },
+  {
+    "auth_database": "postgres",
+    "auth_required": null,
+    "database": "postgres",
+    "defcreds_enabled": false,
+    "effective_username": "postgres",
+    "error": "[Errno 61] Connection refused",
+    "host": "127.0.0.1",
+    "is_postgres": false,
+    "module": "postgres",
+    "port": 15432,
+    "provided_credentials": false,
+    "service": "postgres",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "[Errno 61] Connection refused",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      }
+    ],
+    "status": "fail"
+  },
+  {
+    "auth_database": "postgres",
+    "auth_required": null,
+    "database": "postgres",
+    "defcreds_enabled": false,
+    "effective_username": "postgres",
+    "error": "[Errno 61] Connection refused",
+    "host": "127.0.0.1",
+    "is_postgres": false,
+    "module": "postgres",
+    "port": 6432,
+    "provided_credentials": false,
+    "service": "postgres",
+    "stages": [
+      {
+        "attempt": 1,
+        "error": "[Errno 61] Connection refused",
+        "result": "error",
+        "stage_name": "detect_protocol"
+      }
+    ],
+    "status": "fail"
   }
 ]

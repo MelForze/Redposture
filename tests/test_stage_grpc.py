@@ -19,7 +19,7 @@ from redposture_core.stage_grpc import (
     _retry_delay,
     run_grpc_stage,
 )
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 def test_grpc_frame_roundtrip_and_truncation() -> None:
@@ -259,13 +259,18 @@ def test_audit_grpc_targets_two_pass_gate(monkeypatch: pytest.MonkeyPatch) -> No
 def test_run_grpc_stage_respects_token_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[dict[str, object]] = []
 
-    def fake_audit(**kwargs):
+    def fake_host_stage(**kwargs):
         captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (1, 0, 0, 1, 0, 0)
+        authenticated = kwargs["token"] is not None
+        return {
+            "host": kwargs["host"],
+            "port": kwargs["port"],
+            "is_grpc": True,
+            "status": "valid_credentials" if authenticated else "auth_required",
+            "auth_required": not authenticated,
+        }
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "grpc", fake_audit)
+    patch_module_host_stage_for_test(monkeypatch, "grpc", fake_host_stage)
 
     args = SimpleNamespace(
         debug=False,
@@ -296,9 +301,12 @@ def test_run_grpc_stage_respects_token_precedence(monkeypatch: pytest.MonkeyPatc
 
     assert rc == 0
     assert captured
-    assert captured[0]["token"] == "tok"
+    assert captured[0]["token"] is None
     assert captured[0]["username"] is None
     assert captured[0]["password"] is None
+    authenticated_calls = [call for call in captured if call["token"] == "tok"]
+    assert authenticated_calls
+    assert all(call["username"] is None and call["password"] is None for call in authenticated_calls)
 
 
 def test_run_grpc_stage_rejects_missing_targets() -> None:
@@ -330,6 +338,104 @@ def test_run_grpc_stage_rejects_missing_targets() -> None:
     assert rc == 2
 
 
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    [
+        ({"invoke": "pkg.Service/Method"}, "--invoke must use /package.Service/Method"),
+        ({"data": '{"service":""}'}, "--data requires --invoke"),
+        ({"meta": ["x-lab=1"]}, "--meta requires --invoke"),
+        ({"invoke": "/pkg.Service/Method", "meta": ["bad key=value"]}, "invalid metadata key"),
+        ({"proto_path": ["proto"]}, "--proto-path requires --proto"),
+    ],
+)
+def test_run_grpc_stage_rejects_action_input_before_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    overrides: dict[str, object],
+    expected_error: str,
+) -> None:
+    args_data: dict[str, object] = {
+        "debug": False,
+        "timeout": 1.0,
+        "retries": 0,
+        "workers": 1,
+        "token": None,
+        "username": None,
+        "password": None,
+        "defcreds": False,
+        "port": 50051,
+        "ports": "",
+        "targets": "127.0.0.1",
+        "hosts": None,
+        "hosts_file": None,
+        "invoke": None,
+        "data": None,
+        "meta": None,
+        "proto": None,
+        "proto_path": None,
+        "protoset": None,
+        "openapi": None,
+        "output": None,
+        "output_format": "txt",
+    }
+    args_data.update(overrides)
+    monkeypatch.setattr(
+        "redposture_core.modules.grpc.stage.AuditCommandRunner.run_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("runner/network must not start")),
+    )
+
+    rc = run_grpc_stage(
+        SimpleNamespace(**args_data),
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert expected_error in captured.out + captured.err
+
+
+def test_run_grpc_stage_rejects_missing_data_file_before_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path,
+) -> None:
+    missing_file = tmp_path / "missing.json"
+    args = SimpleNamespace(
+        debug=False,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        token=None,
+        username=None,
+        password=None,
+        defcreds=False,
+        port=50051,
+        ports="",
+        targets="127.0.0.1",
+        hosts=None,
+        hosts_file=None,
+        invoke="/pkg.Service/Method",
+        data=f"@{missing_file}",
+        meta=None,
+        proto=None,
+        proto_path=None,
+        protoset=None,
+        openapi=None,
+        output=None,
+        output_format="txt",
+    )
+    monkeypatch.setattr(
+        "redposture_core.modules.grpc.stage.AuditCommandRunner.run_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("runner/network must not start")),
+    )
+
+    rc = run_grpc_stage(args, logger=SimpleNamespace(log=lambda *_args, **_kwargs: None))
+
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert str(missing_file) in captured.out + captured.err
+
+
 def test_run_grpc_stage_prints_non_marker_lines_in_non_debug(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyConsole:
         instances: list[DummyConsole] = []
@@ -351,14 +457,24 @@ def test_run_grpc_stage_prints_non_marker_lines_in_non_debug(monkeypatch: pytest
         def info(self, _message: str) -> None:
             return None
 
-    def fake_audit(**kwargs):
-        emit = kwargs["emit_line"]
-        emit("GRPC    \t127.0.0.1\t50051\t service=grpc.health.v1.Health")
-        return (1, 1, 0, 0, 0, 0)
+    def fake_host_stage(**kwargs):
+        return {
+            "host": kwargs["host"],
+            "port": kwargs["port"],
+            "is_grpc": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "reflection_enabled": True,
+            "services": ["grpc.health.v1.Health"],
+            "methods": [],
+            "descriptors": [],
+            "health_supported": True,
+            "health_checks": [],
+        }
 
     monkeypatch.setattr(grpc_stage, "Console", DummyConsole)
     monkeypatch.setattr(grpc_stage, "_render_colored_grpc_line", lambda _console, _line: False)
-    patch_runner_for_legacy_target_fake(monkeypatch, "grpc", fake_audit)
+    patch_module_host_stage_for_test(monkeypatch, "grpc", fake_host_stage)
 
     args = SimpleNamespace(
         debug=False,

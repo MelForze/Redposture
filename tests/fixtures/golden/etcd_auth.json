@@ -1,17 +1,41 @@
 [
   {
+    "api_auth_required": {
+      "v2": false,
+      "v3": true
+    },
     "api_versions": "v2,v3",
-    "auth_required": true,
+    "auth_required": false,
     "defcreds_enabled": false,
-    "dump_keys": false,
+    "dump_keys": true,
+    "effective_password": null,
     "effective_username": null,
     "error": null,
     "host": "127.0.0.1",
     "is_etcd": true,
-    "key_count": null,
-    "key_value_entries": null,
-    "key_values": null,
-    "keys": null,
+    "key_count": 2,
+    "key_count_error": null,
+    "key_count_state": "known",
+    "key_value_entries": [
+      {
+        "error": null,
+        "key": "/secure/bootstrap",
+        "value": "1"
+      },
+      {
+        "error": null,
+        "key": "/secure/proxmox/token",
+        "value": "pve-redposture-token-2026"
+      }
+    ],
+    "key_values": [
+      "/secure/bootstrap:1",
+      "/secure/proxmox/token:pve-redposture-token-2026"
+    ],
+    "keys": [
+      "/secure/bootstrap",
+      "/secure/proxmox/token"
+    ],
     "module": "etcd",
     "port": 22379,
     "provided_credentials": false,
@@ -22,7 +46,7 @@
     "query_key_entry": null,
     "query_key_value": null,
     "service": "etcd",
-    "show_keys": false,
+    "show_keys": true,
     "show_keys_limit": null,
     "stages": [
       {
@@ -39,17 +63,17 @@
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "data"
       }
     ],
-    "status": "auth_required"
+    "status": "open_no_auth"
   }
 ]

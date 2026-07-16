@@ -61,7 +61,6 @@
         ]
       }
     ],
-    "detect_confidence": "high",
     "detect_probe_trace": [
       {
         "error": null,
@@ -105,8 +104,16 @@
       "grpc_status": 0,
       "grpc_status_name": "OK",
       "input_type": "grpc.health.v1.HealthCheckRequest",
+      "metadata": [
+        {
+          "key": "x-redposture-matrix",
+          "value": "extended"
+        }
+      ],
       "output_type": "grpc.health.v1.HealthCheckResponse",
-      "request": {},
+      "request": {
+        "service": ""
+      },
       "response": {
         "status": "SERVING"
       },

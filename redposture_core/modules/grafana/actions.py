@@ -8,7 +8,9 @@ import json
 import time
 import urllib.error
 import urllib.parse
+import uuid
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
@@ -32,6 +34,16 @@ _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _GRAFANA_DEEP_STATUSES = {"open_no_auth", "invalid_credentials_anonymous", "valid_credentials"}
+
+
+@dataclass
+class GrafanaLifecycleState:
+    auth_attempts: list[dict[str, Any]] = field(default_factory=list)
+    auth_header: str | None = None
+    credentials_source: str | None = None
+    effective_username: str | None = None
+    effective_password: str | None = None
+    deep_record: dict[str, Any] | None = None
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -463,7 +475,7 @@ def _run_temp_prometheus_check(
         return result
     datasource_url, upstream_path = split_target
 
-    temp_name = f"redposture-egress-{int(time.time() * 1000)}"
+    temp_name = f"redposture-egress-{uuid.uuid4().hex}"
     create_payload = {
         "name": temp_name,
         "type": "prometheus",
@@ -496,8 +508,8 @@ def _run_temp_prometheus_check(
         detail = _safe_excerpt(create_body) if create_body else f"status {create_status}"
         result["create_error"] = f"create failed: {detail}"
         return result
-    if datasource_id is None:
-        result["create_error"] = "create succeeded but datasource id is missing in response"
+    if datasource_id is None and not datasource_uid:
+        result["create_error"] = "create succeeded but datasource id/uid is missing in response"
         return result
 
     result["create_ok"] = True
@@ -507,7 +519,17 @@ def _run_temp_prometheus_check(
         probe_headers["Authorization"] = auth_header
     probe_started = time.monotonic()
     try:
-        proxy_path = f"/api/datasources/proxy/{int(datasource_id)}{upstream_path}"
+        # Grafana 13 removed the legacy numeric datasource proxy route and
+        # returns a local 404 before contacting the configured upstream. The
+        # UID route is supported by current Grafana releases and keeps the
+        # probe on the real server-side datasource path. Retain the numeric
+        # fallback for older responses that do not include a UID.
+        if datasource_uid:
+            encoded_uid = urllib.parse.quote(datasource_uid, safe="")
+            proxy_path = f"/api/datasources/proxy/uid/{encoded_uid}{upstream_path}"
+        else:
+            assert datasource_id is not None
+            proxy_path = f"/api/datasources/proxy/{int(datasource_id)}{upstream_path}"
         result["probe_proxy_path"] = proxy_path
         probe_status, probe_body, _ = _http_request(
             host,
@@ -1175,6 +1197,191 @@ def _call_audit_grafana_host_with_stage_debug(
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
     return merge_stage_records(detect_record, deep_record)
+
+
+def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    last_error: str | None = None
+    for attempt in range(attempts):
+        started = time.monotonic()
+        try:
+            health_status, health_body, _health_headers = _http_request(
+                str(ctx.host), int(ctx.port), "/api/health", float(getattr(ctx.args, "timeout", 5.0))
+            )
+            is_grafana, version = _looks_like_grafana_health(health_status, health_body)
+            if not is_grafana or health_status in {401, 403}:
+                login_status, login_body, login_headers = _http_request(
+                    str(ctx.host), int(ctx.port), "/login", float(getattr(ctx.args, "timeout", 5.0))
+                )
+                is_grafana = is_grafana or _looks_like_grafana_login(login_status, login_body, login_headers)
+            if not is_grafana:
+                return {
+                    "timestamp": utc_now_iso(),
+                    "host": str(ctx.host),
+                    "port": int(ctx.port),
+                    "is_grafana": False,
+                    "status": "not_grafana",
+                    "auth_required": None,
+                    "server_version": version,
+                    "provided_credentials": False,
+                    "attempted_credentials": [],
+                    "attempted_credentials_count": 0,
+                    "credential_attempts": [],
+                    "auth_attempts": [],
+                    "show_datasources": bool(options["show_datasources"]),
+                    "check_urls": list(options["check_urls"]),
+                    "check_results": None,
+                    "error": "service is not grafana",
+                }
+            return {
+                "timestamp": utc_now_iso(),
+                "host": str(ctx.host),
+                "port": int(ctx.port),
+                "is_grafana": True,
+                "status": "open_no_auth" if health_status == 200 else "auth_required",
+                "auth_required": False if health_status == 200 else True if health_status in {401, 403} else None,
+                "server_version": version,
+                "provided_credentials": False,
+                "provided_username": None,
+                "provided_credentials_ok": None,
+                "default_credentials": False,
+                "defcreds_enabled": False,
+                "attempted_credentials": [],
+                "attempted_credentials_count": 0,
+                "credential_attempts": [],
+                "credentials_source": None,
+                "effective_username": None,
+                "effective_password": None,
+                "datasource_count": None,
+                "datasources": None,
+                "auth_attempts": [],
+                "show_datasources": bool(options["show_datasources"]),
+                "check_urls": list(options["check_urls"]),
+                "check_results": None,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "error": None,
+            }
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+            last_error = _friendly_error_from_exception(exc)
+            if attempt >= attempts - 1:
+                break
+            time.sleep(_retry_delay(attempt))
+    return {
+        "timestamp": utc_now_iso(),
+        "host": str(ctx.host),
+        "port": int(ctx.port),
+        "is_grafana": False,
+        "status": "fail",
+        "auth_required": None,
+        "server_version": None,
+        "provided_credentials": False,
+        "attempted_credentials": [],
+        "attempted_credentials_count": 0,
+        "credential_attempts": [],
+        "auth_attempts": [],
+        "show_datasources": bool(options["show_datasources"]),
+        "check_urls": list(options["check_urls"]),
+        "check_results": None,
+        "error": last_error or "connection failed",
+    }
+
+
+def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, GrafanaLifecycleState):
+        raise TypeError("grafana lifecycle state is unavailable")
+    record = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
+    credential = ctx.credential
+    token = str(credential.token or "").strip() or None
+    username = credential.username
+    password = credential.password
+    source = str(credential.source or "provided")
+    if source == "anonymous" and (token is not None or username is not None or password is not None):
+        source = "provided"
+    if token is None and username is None and password is None:
+        return record
+    if token is not None:
+        ok, error = _verify_apitoken(str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), token)
+        attempt = {"username": None, "password": None, "source": source, "ok": bool(ok), "error": error or ""}
+        auth_header = f"Bearer {token}"
+    else:
+        effective_user = (username or "admin").strip() or "admin"
+        effective_password = password or ""
+        ok, error = _verify_credentials(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            effective_user,
+            effective_password,
+        )
+        attempt = {
+            "username": effective_user,
+            "password": effective_password,
+            "source": source,
+            "ok": bool(ok),
+            "error": error or "",
+        }
+        auth_header = _auth_header(effective_user, effective_password)
+        username, password = effective_user, effective_password
+    state.auth_attempts.append(attempt)
+    if ok:
+        state.auth_header = auth_header
+        state.credentials_source = source
+        state.effective_username = username
+        state.effective_password = password
+    anonymous_open = record.get("auth_required") is False
+    status = "valid_credentials" if ok else "invalid_credentials_anonymous" if anonymous_open else "auth_required"
+    record.update(
+        {
+            "timestamp": utc_now_iso(),
+            "status": status,
+            "provided_credentials": source != "default",
+            "provided_username": username,
+            "provided_credentials_ok": bool(ok) if source != "default" else None,
+            "default_credentials": bool(ok and source == "default"),
+            "defcreds_enabled": source == "default",
+            "attempted_credentials": list(state.auth_attempts),
+            "attempted_credentials_count": len(state.auth_attempts),
+            "credential_attempts": list(state.auth_attempts),
+            "auth_attempts": list(state.auth_attempts),
+            "credentials_source": source if ok else None,
+            "effective_username": username if ok else None,
+            "effective_password": password if ok else None,
+            "error": None if ok or anonymous_open else error,
+        }
+    )
+    return record
+
+
+def collect_grafana_data(ctx: Any, source_record: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, GrafanaLifecycleState):
+        raise TypeError("grafana lifecycle state is unavailable")
+    if state.deep_record is not None:
+        return state.deep_record
+    record = dict(source_record.to_dict() if hasattr(source_record, "to_dict") else source_record)
+    timeout = float(getattr(ctx.args, "timeout", 5.0))
+    datasources, datasource_error, datasource_status = _fetch_datasources(
+        str(ctx.host),
+        int(ctx.port),
+        timeout,
+        auth_header=state.auth_header,
+    )
+    if datasource_status in {401, 403} and state.auth_header is None:
+        record["auth_required"] = True
+        record["status"] = "auth_required"
+    record["datasources"] = datasources
+    record["datasource_count"] = len(datasources) if isinstance(datasources, list) else None
+    record["show_datasources"] = bool(options["show_datasources"])
+    record["check_results"] = [
+        _run_temp_prometheus_check(str(ctx.host), int(ctx.port), timeout, state.auth_header, target_url)
+        for target_url in options["check_urls"]
+    ]
+    record["check_urls"] = list(options["check_urls"])
+    if datasource_error:
+        record["error"] = datasource_error
+    state.deep_record = record
+    return record
 
 
 # Typed runner boundary -----------------------------------------------------

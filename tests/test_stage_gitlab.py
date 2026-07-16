@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_gitlab as gitlab
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from tests.stage_runtime_helpers import run_module_targets_for_test
 
 
 def test_normalize_path_and_base_url_helpers() -> None:
@@ -456,18 +456,21 @@ def test_http_and_api_helpers_cover_success_error_and_invalid_json(monkeypatch: 
     status, payload, headers, error = gitlab._http_request("127.0.0.1", 8080, "GET", "/api", 1.0, use_https=False)
     assert (status, payload, headers, error) == (200, b'{"ok":1}', {"x-next-page": "2"}, None)
 
+    http_error = urllib.error.HTTPError(
+        "http://127.0.0.1:8080/api",
+        404,
+        "not found",
+        {"X-Test": "1"},
+        io.BytesIO(b'{"message":"missing"}'),
+    )
+
     def _raise_http_error(*_args: object, **_kwargs: object) -> object:
-        raise urllib.error.HTTPError(
-            "http://127.0.0.1:8080/api",
-            404,
-            "not found",
-            {"X-Test": "1"},
-            io.BytesIO(b'{"message":"missing"}'),
-        )
+        raise http_error
 
     monkeypatch.setattr(urllib.request, "urlopen", _raise_http_error)
     status, payload, headers, error = gitlab._http_request("127.0.0.1", 8080, "GET", "/api", 1.0, use_https=False)
     assert (status, payload, headers, error) == (404, b'{"message":"missing"}', {"x-test": "1"}, None)
+    http_error.close()
 
     monkeypatch.setattr(
         urllib.request,
@@ -797,14 +800,9 @@ def test_audit_gitlab_targets_and_run_stage_paths(
     )
     assert any("--timeout must be > 0" in msg for msg in fake_console.errors)
 
-    monkeypatch.setattr(gitlab, "collect_scan_ports", lambda *_args, **_kwargs: [8080])
     monkeypatch.setattr(
-        gitlab,
-        "collect_scan_target_specs",
-        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
-    )
-    patch_runner_for_legacy_target_fake(
-        monkeypatch, "gitlab", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed"))
+        "redposture_core.stage_runtime.AuditCommandRunner.run_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed")),
     )
     fake_console.errors.clear()
     assert (

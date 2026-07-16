@@ -150,7 +150,14 @@ def test_main_parses_proxy_for_proxmox_through_shared_proxy_context(monkeypatch:
 
 def test_main_tees_output_and_runs_command_on_success(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     log_path = tmp_path / "run.log"
-    args = SimpleNamespace(command=COMMAND_GRAFANA, log=str(log_path), proxy="", debug=False, no_color=False)
+    args = SimpleNamespace(
+        command=COMMAND_GRAFANA,
+        output=str(tmp_path / "results.jsonl"),
+        log=str(log_path),
+        proxy="",
+        debug=False,
+        no_color=False,
+    )
     calls: list[str] = []
 
     monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
@@ -184,6 +191,72 @@ def test_main_returns_error_when_log_file_cannot_be_opened(
 
     assert cli.main(["grafana", "-t", "127.0.0.1"]) == 2
     assert "failed to open --log file '/tmp/redposture.log': permission denied" in capsys.readouterr().err
+
+
+def test_main_rejects_identical_output_and_log_without_modifying_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    capsys,
+) -> None:
+    shared = tmp_path / "shared.jsonl"
+    shared.write_text("preserve-me\n", encoding="utf-8")
+    args = SimpleNamespace(
+        command=COMMAND_GRAFANA,
+        output=str(shared),
+        log=str(shared),
+        proxy="",
+        debug=False,
+        no_color=False,
+    )
+    monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
+    monkeypatch.setattr(cli, "_run_command", lambda *_args, **_kwargs: pytest.fail("command must not run"))
+
+    assert cli.main(["grafana", "-t", "127.0.0.1"]) == 2
+    assert "--output/--save and --log must refer to different files" in capsys.readouterr().err
+    assert shared.read_text(encoding="utf-8") == "preserve-me\n"
+
+
+def test_main_rejects_relative_absolute_output_log_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    shared = tmp_path / "shared.jsonl"
+    shared.write_text("preserve-me\n", encoding="utf-8")
+    args = SimpleNamespace(
+        command=COMMAND_GRAFANA,
+        output="shared.jsonl",
+        log=str(shared),
+        proxy="",
+        debug=False,
+        no_color=False,
+    )
+    monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
+
+    assert cli.main(["grafana", "-t", "127.0.0.1"]) == 2
+    assert shared.read_text(encoding="utf-8") == "preserve-me\n"
+
+
+def test_main_rejects_symlinked_output_log_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    shared = tmp_path / "shared.jsonl"
+    alias = tmp_path / "alias.log"
+    shared.write_text("preserve-me\n", encoding="utf-8")
+    alias.symlink_to(shared)
+    args = SimpleNamespace(
+        command=COMMAND_GRAFANA,
+        output=str(shared),
+        log=str(alias),
+        proxy="",
+        debug=False,
+        no_color=False,
+    )
+    monkeypatch.setattr(cli, "parse_args", lambda _argv=None: args)
+
+    assert cli.main(["grafana", "-t", "127.0.0.1"]) == 2
+    assert shared.read_text(encoding="utf-8") == "preserve-me\n"
 
 
 def test_main_applies_and_resets_no_color_setting(monkeypatch: pytest.MonkeyPatch) -> None:

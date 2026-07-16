@@ -9,12 +9,39 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_qdrant as qdrant
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from redposture_core.audit_models import AuditRecord
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 def test_inline_and_json_compact_helpers() -> None:
     assert qdrant._normalize_inline_text("a\n  b\t c") == "a b c"
     assert qdrant._json_compact({"a": 1, "b": 2}) == '{"a":1,"b":2}'
+
+
+def _qdrant_host_record(
+    kwargs: dict[str, object],
+    *,
+    status: str,
+    detected: bool,
+    error: str | None = None,
+) -> AuditRecord:
+    return AuditRecord(
+        host=str(kwargs["host"]),
+        port=int(kwargs["port"]),
+        service="qdrant",
+        module="qdrant",
+        status=status,
+        auth_required=status == "auth_required",
+        extra={
+            "is_qdrant": detected,
+            "error": error,
+            "collections_count": 1 if detected else None,
+            "show_collections": bool(kwargs.get("show_collections")),
+            "dump_requested": bool(kwargs.get("dump_requested")),
+            "collection_name": kwargs.get("collection_name"),
+            "ssrf_urls": kwargs.get("ssrf_urls"),
+        },
+    )
 
 
 def test_clip_retry_and_timeout_fail_record_helpers() -> None:
@@ -499,18 +526,21 @@ def test_http_json_request_handles_success_http_error_and_transport(monkeypatch:
     status, payload, error = qdrant._http_json_request("127.0.0.1", 6333, "GET", "/", 1.0)
     assert (status, payload, error) == (200, "plain text", None)
 
+    http_error = urllib.error.HTTPError(
+        "http://127.0.0.1:6333/",
+        403,
+        "forbidden",
+        {},
+        io.BytesIO(b'{"error":"forbidden"}'),
+    )
+
     def _raise_http_error(*_args: object, **_kwargs: object) -> object:
-        raise urllib.error.HTTPError(
-            "http://127.0.0.1:6333/",
-            403,
-            "forbidden",
-            {},
-            io.BytesIO(b'{"error":"forbidden"}'),
-        )
+        raise http_error
 
     monkeypatch.setattr(urllib.request, "urlopen", _raise_http_error)
     status, payload, error = qdrant._http_json_request("127.0.0.1", 6333, "GET", "/", 1.0)
     assert (status, payload, error) == (403, {"error": "forbidden"}, None)
+    http_error.close()
 
     monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError()))
     status, payload, error = qdrant._http_json_request("127.0.0.1", 6333, "GET", "/", 1.0)
@@ -656,6 +686,79 @@ def test_qdrant_ssrf_capture_listener_records_requests(monkeypatch: pytest.Monke
     assert server.stopped is True
     assert server.closed is True
     assert listener["thread"].joined is True
+
+
+def test_qdrant_ssrf_capture_listener_loads_snapshot_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    response_file = tmp_path / "demo.snapshot"
+    response_file.write_bytes(b"qdrant-snapshot-bytes")
+    monkeypatch.setenv("REDPOSTURE_QDRANT_SSRF_RESPONSE_FILE", str(response_file))
+
+    class _FakeServer:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            self.server_address = ("127.0.0.1", 19000)
+
+        def serve_forever(self) -> None:
+            return
+
+    class _FakeThread:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def start(self) -> None:
+            return
+
+    monkeypatch.setattr(qdrant, "_QdrantSsrfCaptureServer", _FakeServer)
+    monkeypatch.setattr(qdrant.threading, "Thread", _FakeThread)
+
+    listener = qdrant._start_qdrant_ssrf_capture_listener(19000)
+
+    assert listener["started"] is True
+    assert listener["response_file_configured"] is True
+    assert listener["server"].capture_response_body == b"qdrant-snapshot-bytes"
+    assert listener["server"].capture_response_content_type == "application/octet-stream"
+
+
+def test_qdrant_host_stage_attaches_capture_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        qdrant,
+        "_audit_qdrant_host",
+        lambda *_args, **_kwargs: {
+            "host": "127.0.0.1",
+            "port": 6333,
+            "is_qdrant": True,
+            "status": "open_no_auth",
+            "ssrf_results": [{"ok": True, "status": 200}],
+            "error": None,
+        },
+    )
+    capture = {
+        "started": True,
+        "hits": [{"method": "GET", "path": "/demo.snapshot"}],
+        "lock": None,
+    }
+
+    record = qdrant._call_audit_qdrant_host_with_stage_debug(
+        "127.0.0.1",
+        6333,
+        1.0,
+        0,
+        api_key=None,
+        show_collections=False,
+        dump_requested=False,
+        collection_name="demo_vectors",
+        ssrf_urls=["http://host.docker.internal:19115/demo.snapshot"],
+        run_deep_checks=True,
+        debug=False,
+        debug_emit=None,
+        ssrf_capture=capture,
+    )
+
+    assert record["ssrf_listener_started"] is True
+    assert record["ssrf_hit_count"] == 1
+    assert record["ssrf_hits"] == [{"method": "GET", "path": "/demo.snapshot"}]
 
 
 def test_qdrant_ssrf_capture_handler_handles_common_http_methods() -> None:
@@ -1091,11 +1194,13 @@ def test_run_qdrant_stage_ssrf_listener_flow(monkeypatch: pytest.MonkeyPatch) ->
         "_normalize_ssrf_urls",
         lambda *_args, **_kwargs: ["http://127.0.0.1:18080/debug/vars"],
     )
-    patch_runner_for_legacy_target_fake(
-        monkeypatch,
-        "qdrant",
-        lambda *_args, **_kwargs: (1, 1, 0, 0, 0),
-    )
+    bound_calls: list[dict[str, object]] = []
+
+    def fake_host_stage(**kwargs):
+        bound_calls.append(dict(kwargs))
+        return _qdrant_host_record(kwargs, status="open_no_auth", detected=True)
+
+    patch_module_host_stage_for_test(monkeypatch, "qdrant", fake_host_stage)
     monkeypatch.setattr(
         qdrant,
         "_start_qdrant_ssrf_capture_listener",
@@ -1146,6 +1251,10 @@ def test_run_qdrant_stage_ssrf_listener_flow(monkeypatch: pytest.MonkeyPatch) ->
     assert not fake_console.errors
     assert any("local SSRF listener started" in item for item in fake_console.infos)
     assert any("qdrant audit complete:" in item for item in fake_console.infos)
+    assert [(call["run_deep_checks"], call["api_key"]) for call in bound_calls] == [
+        (False, None),
+        (True, None),
+    ]
 
 
 def test_run_qdrant_stage_multi_instance_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1194,13 +1303,10 @@ def test_run_qdrant_stage_multi_instance_uses_single_global_progress(monkeypatch
     calls: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        calls.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        kwargs["emit_line"]("QDRANT\t127.0.0.1\t6333\t[*] Qdrant Service")
-        return (1, 1, 0, 0, 0)
+        calls.append(dict(kwargs))
+        return _qdrant_host_record(kwargs, status="fail", detected=False, error="connection refused")
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "qdrant", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "qdrant", fake_audit_targets)
 
     args = SimpleNamespace(
         debug=False,
@@ -1226,7 +1332,9 @@ def test_run_qdrant_stage_multi_instance_uses_single_global_progress(monkeypatch
     rc = qdrant.run_qdrant_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
     assert not fake_console.errors
-    assert [bool(call["show_progress"]) for call in calls] == [False, False, False]
+    assert [call["port"] for call in calls] == [6333, 26333, 26334]
+    assert all(call["run_deep_checks"] is False for call in calls)
+    assert all(call["show_collections"] is True for call in calls)
 
 
 def test_run_qdrant_stage_ssrf_url_parse_errors(monkeypatch: pytest.MonkeyPatch) -> None:

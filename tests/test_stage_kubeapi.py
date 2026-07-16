@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_kubeapi as kube
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 def test_tls_verify_error_detection() -> None:
@@ -38,6 +38,9 @@ class _ConsoleCapture:
     def plain(self, message: str, color: str | None = None) -> None:
         _ = color
         self.messages.append(("plain", message))
+
+    def _paint(self, text: str, _color: str, _stream) -> str:
+        return text
 
     def render_tagged_payload_line(self, line: str, tag: str, payload_color: str | None = None) -> bool:
         _ = (line, tag, payload_color)
@@ -788,80 +791,74 @@ def test_run_kubeapi_stage_validation_errors(
 def test_run_kubeapi_stage_warns_on_token_override_and_all_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kube, "Console", _ConsoleCapture)
-    monkeypatch.setattr(kube, "collect_scan_ports", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        kube,
-        "collect_scan_target_specs",
-        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
-    )
     captured: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):
+    def fake_host_stage(**kwargs):
         captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return 1, 0, 1
+        authenticated = kwargs["token"] is not None
+        return {
+            "host": kwargs["host"],
+            "port": kwargs["port"],
+            "is_kubeapi": True,
+            "status": "valid_credentials" if authenticated else "auth_required",
+            "auth_required": not authenticated,
+        }
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "kubeapi", fake_host_stage)
     rc = kube.run_kubeapi_stage(
         _kube_args(token="tok", username="alice", password="secret"),
         logger=object(),
     )
     assert rc == 0
-    assert captured and captured[0]["username"] is None and captured[0]["password"] is None
+    assert captured and captured[0]["token"] is None
+    authenticated_calls = [call for call in captured if call["token"] == "tok"]
+    assert authenticated_calls
+    assert all(call["username"] is None and call["password"] is None for call in authenticated_calls)
     warnings = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
     assert any("--token is set; Basic auth credentials are ignored" in msg for msg in warnings)
     assert not any("all kubeapi targets are unreachable" in msg for msg in warnings)
 
 
-def test_run_kubeapi_stage_debug_flow_passes_logger_and_append_output(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_kubeapi_stage_debug_flow_passes_actions_to_each_port(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kube, "Console", _ConsoleCapture)
-    monkeypatch.setattr(kube, "collect_scan_ports", lambda *_args, **_kwargs: [16443, 26443])
-    monkeypatch.setattr(
-        kube,
-        "collect_scan_target_specs",
-        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
-    )
 
     captured: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):
+    def fake_host_stage(**kwargs):
         captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        kwargs["emit_line"]("KUBEAPI\t127.0.0.1\t16443\t[*] Kubernetes API")
-        return 1, 1, 0
+        return {
+            "host": kwargs["host"],
+            "port": kwargs["port"],
+            "is_kubeapi": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+        }
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "kubeapi", fake_host_stage)
     rc = kube.run_kubeapi_stage(
-        _kube_args(debug=True, output="kube.json", output_format="json", namespaces=True, pod="api", exec_command="id"),
+        _kube_args(
+            debug=True,
+            output=str(tmp_path / "kube.json"),
+            output_format="json",
+            ports="16443,26443",
+            namespaces=True,
+            pod="api",
+            exec_command="id",
+        ),
         logger=object(),
     )
     assert rc == 0
-    assert len(captured) == 2
-    assert captured[0]["append_output"] is False
-    assert captured[1]["append_output"] is True
-    assert captured[0]["logger"] is not None
+    deep_calls = [call for call in captured if call["run_deep_checks"] is True]
+    assert {call["port"] for call in deep_calls} == {16443, 26443}
+    assert all(call["show_namespaces"] is True for call in deep_calls)
+    assert all(call["exec_pod"] == "api" and call["exec_command"] == "id" for call in deep_calls)
+    assert all(callable(call["debug_emit"]) for call in deep_calls)
 
 
 def test_run_kubeapi_stage_multi_group_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kube, "Console", _ConsoleCapture)
-    monkeypatch.setattr(kube, "collect_scan_ports", lambda *_args, **_kwargs: [16443, 26443])
-    monkeypatch.setattr(
-        kube,
-        "collect_scan_target_specs",
-        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme="", explicit_port=None)],
-    )
-    monkeypatch.setattr(
-        kube,
-        "build_scan_execution_groups",
-        lambda *_args, **_kwargs: [
-            SimpleNamespace(hosts=["127.0.0.1"], port=16443, scheme_hint=None),
-            SimpleNamespace(hosts=["127.0.0.1"], port=26443, scheme_hint=None),
-        ],
-    )
 
     class _FakeProgress:
         instances: list[_FakeProgress] = []
@@ -869,9 +866,13 @@ def test_run_kubeapi_stage_multi_group_uses_single_global_progress(monkeypatch: 
         def __init__(self, _label: str, total: int, *, enabled: bool = True, leave: bool = True) -> None:
             _ = (enabled, leave)
             self.total = total
+            self.added: list[int] = []
             self.advances: list[int] = []
             self.closed = False
             type(self).instances.append(self)
+
+        def add_total(self, step: int) -> None:
+            self.added.append(int(step))
 
         def advance(self, step: int = 1) -> None:
             self.advances.append(int(step))
@@ -880,53 +881,54 @@ def test_run_kubeapi_stage_multi_group_uses_single_global_progress(monkeypatch: 
             self.closed = True
 
     monkeypatch.setattr(
-        kube,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
     )
 
     captured: list[dict[str, object]] = []
 
-    def fake_audit_targets(**kwargs):
+    def fake_host_stage(**kwargs):
         captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (len(kwargs["hosts"]), 1, 0)
+        return {
+            "host": kwargs["host"],
+            "port": kwargs["port"],
+            "is_kubeapi": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+        }
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
-    rc = kube.run_kubeapi_stage(_kube_args(), logger=object())
+    patch_module_host_stage_for_test(monkeypatch, "kubeapi", fake_host_stage)
+    rc = kube.run_kubeapi_stage(_kube_args(ports="16443,26443"), logger=object())
     assert rc == 0
-    assert len(captured) == 2
-    assert all(call["show_progress"] is False for call in captured)
+    assert {call["port"] for call in captured if call["run_deep_checks"] is False} == {16443, 26443}
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
     assert progress.total == 2
-    assert progress.advances == [1, 1]
+    assert progress.added == [2]
+    assert progress.advances == [1, 1, 1, 1]
     assert progress.closed is True
 
 
-def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kube, "Console", _ConsoleCapture)
-    monkeypatch.setattr(kube, "collect_scan_ports", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(
-        kube,
-        "collect_scan_target_specs",
-        lambda targets: (
-            [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)]
-            if "hosts.txt" not in str(targets)
-            else [
-                SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None),
-                SimpleNamespace(host="127.0.0.2", scheme=None, explicit_port=None),
-            ]
-        ),
-    )
 
-    def fake_audit_targets(**kwargs):
-        kwargs["emit_line"]("KUBEAPI\t127.0.0.1\t16443\tpayload only")
-        return 1, 1, 0
+    def fake_host_stage(**kwargs):
+        return {
+            "host": kwargs["host"],
+            "port": kwargs["port"],
+            "is_kubeapi": True,
+            "status": "open_no_auth",
+            "auth_required": False,
+            "version": "v1.31.6",
+            "namespaces": ["default"],
+            "pods": [],
+            "secrets": [],
+        }
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "kubeapi", fake_host_stage)
+    hosts_file = tmp_path / "hosts.txt"
+    hosts_file.write_text("127.0.0.1\n127.0.0.2\n", encoding="utf-8")
     rc = kube.run_kubeapi_stage(
         _kube_args(
             debug=True,
@@ -935,18 +937,19 @@ def test_run_kubeapi_stage_txt_emit_line_and_error_path(monkeypatch: pytest.Monk
             pod="api",
             exec_command="id",
             targets=None,
-            hosts_file="hosts.txt",
+            hosts_file=str(hosts_file),
         ),
         logger=object(),
     )
     assert rc == 0
     plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
     infos = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "info"]
-    assert any("payload only" in msg for msg in plains)
+    assert any("Kubernetes API" in msg for msg in plains)
     assert any("auth=none format=txt" in msg for msg in infos)
 
-    patch_runner_for_legacy_target_fake(
-        monkeypatch, "kubeapi", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+    monkeypatch.setattr(
+        "redposture_core.stage_runtime.AuditCommandRunner.run_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
     rc = kube.run_kubeapi_stage(_kube_args(output="kube.json"), logger=object())
     assert rc == 2
@@ -1671,14 +1674,19 @@ def test_kube_run_stage_and_audit_output_branches(monkeypatch: pytest.MonkeyPatc
         ],
     )
 
-    emitted: list[str] = []
+    calls: list[dict[str, object]] = []
 
-    def fake_audit(**kwargs):
-        kwargs["emit_line"]("KUBEAPI\t127.0.0.1\t16443\tpayload-line")
-        emitted.append("called")
-        return 1, 0, 1
+    def fake_host_stage(**kwargs):
+        calls.append(kwargs)
+        return {
+            "host": kwargs["host"],
+            "port": kwargs["port"],
+            "is_kubeapi": True,
+            "status": "valid_credentials" if kwargs["token"] else "auth_required",
+            "auth_required": kwargs["token"] is None,
+        }
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "kubeapi", fake_audit)
+    patch_module_host_stage_for_test(monkeypatch, "kubeapi", fake_host_stage)
     args = _kube_args(
         debug=True, output=str(tmp_path / "kube.jsonl"), output_format="json", token="tok", username="u", password="p"
     )
@@ -1687,10 +1695,11 @@ def test_kube_run_stage_and_audit_output_branches(monkeypatch: pytest.MonkeyPatc
     console = _Console.instances[-1]
     assert any("--token is set; Basic auth credentials are ignored" in msg for msg in console.warns)
     assert any("format=json output=" in msg for msg in console.infos)
-    assert emitted == ["called"]
+    assert any(call["run_deep_checks"] is True and call["token"] == "tok" for call in calls)
 
-    patch_runner_for_legacy_target_fake(
-        monkeypatch, "kubeapi", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+    monkeypatch.setattr(
+        "redposture_core.stage_runtime.AuditCommandRunner.run_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
     rc = kube.run_kubeapi_stage(args, logger=SimpleNamespace(log=lambda *a, **k: None))
     assert rc == 2

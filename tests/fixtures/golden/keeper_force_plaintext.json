@@ -1,0 +1,139 @@
+[
+  {
+    "auth_error": null,
+    "auth_inference_source": "root_ok",
+    "auth_probe_trace": [
+      "/:ok"
+    ],
+    "auth_required": false,
+    "can_create_znode": true,
+    "can_delete_znode": true,
+    "connect_error": null,
+    "credential_verdict": null,
+    "defcreds_enabled": false,
+    "dump": false,
+    "dump_error": null,
+    "dump_limit": null,
+    "enum_error": null,
+    "error": null,
+    "fingerprint_confidence": "confirmed",
+    "fingerprint_errors": {},
+    "host": "127.0.0.1",
+    "is_keeper": true,
+    "is_zookeeper": true,
+    "is_zookeeper_compatible": true,
+    "max_znodes": 2000,
+    "module": "keeper",
+    "port": 9181,
+    "protocol": "zookeeper",
+    "provided_credentials": false,
+    "provided_credentials_ok": null,
+    "provided_password": null,
+    "provided_username": null,
+    "query_error": null,
+    "query_znode": null,
+    "query_znode_dump": null,
+    "query_znode_dump_error": null,
+    "query_znode_value": null,
+    "read_only": false,
+    "service": "clickhouse-keeper",
+    "show_znodes": true,
+    "stage2_error": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "open_no_auth",
+    "transport": "plaintext",
+    "version": "v24.8.14.39-stable-502d03925cf2c9c6629ed5c1b2d16b5de46e4362",
+    "znode_capability_error": null,
+    "znode_count": 8,
+    "znode_count_attempt_timeouts": [],
+    "znode_count_partial": false,
+    "znode_count_unknown": false,
+    "znode_details": [
+      {
+        "bytes": 18,
+        "children": 1,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 10,
+        "children": 0,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 2,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 1,
+        "children": 0,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 1,
+        "children": 0,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 29,
+        "children": 1,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 22,
+        "children": 1,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 18,
+        "children": 0,
+        "error": null,
+        "state": "readable"
+      }
+    ],
+    "znode_values": null,
+    "znodes": [
+      "/clickhouse",
+      "/clickhouse/tables",
+      "/keeper",
+      "/keeper/api_version",
+      "/keeper/feature_flags",
+      "/redposture",
+      "/redposture/app",
+      "/redposture/app/api_key"
+    ],
+    "znodes_truncated": false
+  }
+]

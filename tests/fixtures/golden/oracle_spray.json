@@ -16,6 +16,20 @@
     "connect_sid": null,
     "credential_attempts": [
       {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "wrong",
+        "token": null,
+        "username": "redposture"
+      },
+      {
+        "error": "invalid credentials",
+        "ok": false,
+        "password": "wrong",
+        "token": null,
+        "username": "limited"
+      },
+      {
         "error": null,
         "ok": true,
         "password": "OracleLab!2026",

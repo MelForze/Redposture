@@ -361,6 +361,8 @@ def test_descriptor_pool_invoke_and_openapi_generation(monkeypatch) -> None:
 
     assert invoke_result["status"] == "ok"
     assert invoke_result["response"] == {"status": "SERVING"}
+    assert invoke_result["request"] == {"service": "grpc.health.v1.Health"}
+    assert invoke_result["metadata"] == [{"key": "x-test", "value": "1"}]
     assert seen["authorization"] == "Bearer token"
     assert seen["metadata"] == [("x-test", "1")]
 
@@ -565,6 +567,8 @@ def test_grpc_web_call_success_and_helpers(monkeypatch, tmp_path) -> None:
         grpc_client._parse_json_payload_source("[1]")
     with pytest.raises(ValueError, match="key=value"):
         grpc_client._parse_metadata_items(["broken"])
+    with pytest.raises(ValueError, match="invalid metadata key"):
+        grpc_client._parse_metadata_items(["bad key=value"])
     with pytest.raises(ValueError, match="pseudo headers"):
         grpc_client._parse_metadata_items([":path=/x"])
     with pytest.raises(ValueError, match="reserved header"):

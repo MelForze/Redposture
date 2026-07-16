@@ -1,6 +1,11 @@
 [
   {
     "auth_required": false,
+    "cluster_permissions": {
+      "create": true,
+      "delete": true
+    },
+    "defcreds_enabled": false,
     "dump": true,
     "dump_error": null,
     "dump_errors": {},
@@ -14,10 +19,12 @@
     "dump_topics": [
       "orders"
     ],
+    "effective_username": null,
     "error": null,
     "host": "127.0.0.1",
     "is_kafka": true,
     "max_messages": 3,
+    "max_messages_explicit": true,
     "module": "kafka",
     "port": 9092,
     "provided_credentials": false,
@@ -62,6 +69,12 @@
       "<KAFKA_OFFSET> {\"order_id\":\"ord-1002\",\"status\":\"paid\",\"amount\":149.00}",
       "<KAFKA_OFFSET> {\"order_id\":\"ord-1003\",\"status\":\"refunded\",\"amount\":49.00}"
     ],
+    "topic_permissions": {
+      "orders": {
+        "read": true,
+        "write": null
+      }
+    },
     "topic_read_error": null,
     "topics": [
       "audit.logs",
@@ -69,6 +82,8 @@
       "orders",
       "payments.events",
       "security.alerts"
-    ]
+    ],
+    "transport": "plaintext",
+    "transport_mode": "plaintext"
   }
 ]

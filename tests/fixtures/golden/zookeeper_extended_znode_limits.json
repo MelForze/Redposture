@@ -9,6 +9,8 @@
     "can_create_znode": true,
     "can_delete_znode": true,
     "connect_error": null,
+    "credential_verdict": null,
+    "defcreds_enabled": false,
     "dump": true,
     "dump_error": null,
     "dump_limit": 3,
@@ -16,7 +18,7 @@
     "error": null,
     "host": "127.0.0.1",
     "is_zookeeper": true,
-    "max_znodes": 10,
+    "max_znodes": 5,
     "module": "zookeeper",
     "port": 2181,
     "provided_credentials": false,
@@ -63,81 +65,7 @@
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
-    "znode_details": [
-      {
-        "bytes": 18,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 11,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 31,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 7,
-        "children": 4,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 33,
-        "children": 2,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 60,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 3,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 22,
-        "children": 4,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 46,
-        "children": 3,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 34,
-        "children": 1,
-        "error": null,
-        "state": "readable"
-      }
-    ],
     "znode_values": null,
-    "znodes": [
-      "/brokers",
-      "/brokers/ids",
-      "/config",
-      "/config/services",
-      "/observability",
-      "/observability/remote_write_url",
-      "/observability/scrape_interval",
-      "/redposture",
-      "/redposture/app",
-      "/redposture/cache"
-    ],
     "znodes_truncated": true
   }
 ]
