@@ -109,15 +109,10 @@ def test_fix_a1_zk_post_auth_noauth_when_anon_was_ok_marks_creds_invalid(
     assert record["provided_credentials_ok"] is False
 
 
-def test_fix_a1d3_zk_ambiguous_noauth_pair_disambiguated_by_zookeeper_probe(
+def test_zk_noauth_after_digest_does_not_become_valid_via_control_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A1 + D3: anon=NOAUTH + post-auth=NOAUTH is ambiguous. D3 disambiguates
-    by probing `/zookeeper` (world-readable on default ZK).
-
-    Sub-scenario 1: `/zookeeper` returns OK → auth applied to a low-privilege
-    principal that just has no ACL on `/`. provided_credentials_ok=True.
-    """
+    """A digest frame plus an unrelated open path does not prove credentials."""
 
     def _get_children_zookeeper_ok(path):
         if path == "/zookeeper":
@@ -137,7 +132,7 @@ def test_fix_a1d3_zk_ambiguous_noauth_pair_disambiguated_by_zookeeper_probe(
         username="admin",
         password="admin",
     )
-    assert record["provided_credentials_ok"] is True
+    assert record["provided_credentials_ok"] is False
 
 
 def test_fix_a1d3_zk_ambiguous_noauth_pair_creds_rejected_when_zookeeper_also_denies(
@@ -166,12 +161,10 @@ def test_fix_a1d3_zk_ambiguous_noauth_pair_creds_rejected_when_zookeeper_also_de
     assert record["provided_credentials_ok"] is False
 
 
-def test_fix_a2_zk_open_target_with_valid_creds_reports_valid(
+def test_zk_open_target_with_digest_frame_reports_unverified(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A2: open ZK where both anon and auth return OK. Old code set
-    `provided_credentials_ok = anonymous_root_err != OK` → False, mislabelling
-    valid creds as invalid."""
+    """Open anonymous access cannot validate an arbitrary digest secret."""
 
     record = _run_zk(
         monkeypatch,
@@ -179,28 +172,26 @@ def test_fix_a2_zk_open_target_with_valid_creds_reports_valid(
         username="admin",
         password="admin",
     )
-    assert record["status"] == "valid_credentials"
-    assert record["provided_credentials_ok"] is True
+    assert record["status"] == "open_no_auth"
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unverified_anonymous"
 
 
-def test_fix_a3_zk_all_124_probes_stays_inconclusive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A3: consistent -124 across anonymous probes must NOT get promoted to
-    auth_required=True."""
+def test_zk_124_is_server_policy_auth_required(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def _get_children(_p):
         return None, -124, None
 
     record = _run_zk(monkeypatch, lambda *_a, **_kw: _ZkFake(_get_children))
-    assert record["auth_required"] is None
-    assert record["auth_inference_source"] == "probe_retryable_124_inconclusive"
+    assert record["status"] == "auth_required"
+    assert record["auth_required"] is True
+    assert record["auth_inference_source"] == "session_closed_requires_auth"
 
 
-def test_fix_a5_zk_enum_failure_does_not_pad_from_root_children(
+def test_zk_digest_frame_followed_by_124_is_not_valid_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A5 (via A4-fallback): when auth succeeded but root query returned -124,
-    total_count must not silently equal the pre-auth root_children count.
-    znode_count_unknown must be set instead."""
+    """A successful digest frame cannot override a protected operation failure."""
 
     # First call is the anon root read: fine. Second call is post-auth root: -124.
     state = {"n": 0}
@@ -227,17 +218,15 @@ def test_fix_a5_zk_enum_failure_does_not_pad_from_root_children(
         password="admin",
         show_znodes=True,
     )
-    assert record["provided_credentials_ok"] is True
-    assert record["znode_count_unknown"] is True
-    # Must NOT have been padded from the pre-auth root_children.
-    assert record["znode_count"] != 2
+    assert record["status"] == "auth_required"
+    assert record["provided_credentials_ok"] is False
+    assert record["znode_count"] is None
 
 
-def test_fix_a6_zk_query_znode_retries_on_transient_124(
+def test_zk_query_znode_124_is_not_retried_as_transient(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A6: `--query-znode` on -124 must retry once instead of surfacing the
-    transient error directly."""
+    """SESSIONCLOSEDREQUIRESASLAUTH is a policy result, not a transient error."""
     from redposture_core.modules.zookeeper.actions import _audit_zookeeper_host
 
     call_counts = {"/": 0, "/target": 0}
@@ -258,7 +247,7 @@ def test_fix_a6_zk_query_znode_retries_on_transient_124(
             if path == "/":
                 return ["target"], 0, {"data_length": 0, "num_children": 1}
             if path == "/target":
-                # First call -124 (transient), second call OK.
+                # A second call would be incorrect because the session is closed.
                 if call_counts["/target"] == 1:
                     return None, -124, None
                 return [], 0, {"data_length": 0, "num_children": 0}
@@ -272,9 +261,6 @@ def test_fix_a6_zk_query_znode_retries_on_transient_124(
         "redposture_core.stage_zookeeper._enumerate_znodes",
         lambda *_a, **_kw: (["/target"], 1, False, {}, None),
     )
-    # Speed up retry sleep to 0.
-    monkeypatch.setattr("redposture_core.stage_zookeeper._retry_delay", lambda _i: 0.0)
-
     record = _audit_zookeeper_host(
         host="127.0.0.1",
         port=2181,
@@ -287,9 +273,9 @@ def test_fix_a6_zk_query_znode_retries_on_transient_124(
         query_znode="/target",
         max_znodes=100,
     )
-    assert call_counts["/target"] >= 2  # retry actually happened
-    assert record["query_znode_value"], "query_znode_value should be populated after retry"
-    assert "err_-124" not in str(record["query_znode_value"]).lower()
+    assert call_counts["/target"] == 1
+    assert "SESSIONCLOSEDREQUIRESASLAUTH" in str(record["query_znode_value"])
+    assert "-124" not in str(record["query_znode_value"])
 
 
 # ============================================================================

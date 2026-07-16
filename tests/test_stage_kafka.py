@@ -1750,7 +1750,7 @@ def test_kafka_format_detail_records_additional_empty_and_json_branches() -> Non
     assert detect_json["detected"] is True
     assert detect_json["auth_required"] is None
 
-    assert "(topics:-)" in kafka._with_optional_topics({"topic_count": "many"}, "KAFKA h 9092 [+] ok")
+    assert "(topics:unknown)" in kafka._with_optional_topics({"topic_count": "many"}, "KAFKA h 9092 [+] ok")
 
     limited_record = {
         "timestamp": "ts",

@@ -25,7 +25,7 @@ Use it only on systems you own or are explicitly authorized to assess.
 ## Features
 
 - Exporter workflows: discover, collect, and trigger Prometheus-style exporters and debug endpoints.
-- Service audit modules: `registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `kubeapi`, `postgres`, `mongodb`, `docker`, `oracle`, `clickhouse`, `redis`, `etcd`, `qdrant`, `elastic`, `grpc`, `kafka`, `zookeeper`.
+- Service audit modules: `registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `kubeapi`, `postgres`, `mongodb`, `docker`, `oracle`, `clickhouse`, `redis`, `etcd`, `qdrant`, `elastic`, `grpc`, `kafka`, `zookeeper`, `keeper`.
 - Multi-target and multi-port scans from comma-separated values, CIDR/ranges where supported, or target files.
 - Authentication checks with explicit credentials, default-credential checks where implemented, and credential-file workflows in supported modules.
 - Optional data enumeration and bounded dumps for data-store modules.
@@ -80,6 +80,7 @@ elastic     Elasticsearch exposure, auth, cluster/user endpoints, discovery
 grpc        gRPC transport/auth/reflection/health/invoke/OpenAPI
 kafka       Kafka auth, topic visibility, bounded message dumps
 zookeeper   ZooKeeper auth and znode visibility
+keeper      ClickHouse Keeper fingerprint, Raft health, TLS, auth, and znodes
 ```
 
 Use command help for the complete, current flag list:
@@ -212,7 +213,7 @@ redposture clickhouse -t 127.0.0.1 --show-databases --show-tables 20
 redposture clickhouse -t 127.0.0.1 -u default -p default --table secure.secrets_inventory --dump 5
 ```
 
-Redis, etcd, Qdrant, Kafka, ZooKeeper:
+Redis, etcd, Qdrant, Kafka, ZooKeeper, and ClickHouse Keeper:
 
 ```bash
 redposture redis -t 127.0.0.1 --show-keys 20 --dump 10
@@ -220,6 +221,33 @@ redposture etcd -t 127.0.0.1 --show-keys 20 --dump 10
 redposture qdrant -t 127.0.0.1 --collections --dump 10
 redposture kafka -t 127.0.0.1 --show-topics --dump 10
 redposture zookeeper -t 127.0.0.1 --show-znodes 20 --dump 10
+redposture keeper -t 127.0.0.1 --show-znodes 20 --dump 10
+```
+
+### ClickHouse Keeper audit and focused lab
+
+`keeper` speaks the ZooKeeper wire protocol but identifies ClickHouse Keeper separately. It reports the selected plaintext/TLS transport, Keeper version and role, read-only state, connections and latency, plus available Raft signals such as follower sync, commit lag, log/snapshot indices and storage size. A binary-compatible service with disabled or ambiguous four-letter diagnostics remains `zookeeper-compatible` with an unconfirmed fingerprint; an explicit Apache ZooKeeper fingerprint is rejected before deep checks.
+
+Start the focused lab (three-node Keeper cluster, TLS standalone, a Keeper with diagnostic four-letter commands disabled, seeded znodes, and an Apache ZooKeeper negative control):
+
+```bash
+docker compose -f lab/services/keeper/docker-compose.yml up -d --wait
+docker compose -f lab/services/keeper/docker-compose.yml ps
+```
+
+Run high-signal plaintext, TLS, unconfirmed-fallback, and negative-control audits:
+
+```bash
+redposture keeper -t 127.0.0.1 --port 9181,19181,29181 --show-znodes 20 --dump 20 --enum-workers 3 -d -f json
+redposture keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10 -d -f json
+redposture keeper -t 127.0.0.1 --port 39181 --show-znodes 10 --dump 10 -znode /keeper/api_version -f json
+redposture keeper -t 127.0.0.1 --port 12181 --show-znodes 5 -d -f json
+```
+
+Remove containers, network, certificates, snapshots, and Raft logs:
+
+```bash
+docker compose -f lab/services/keeper/docker-compose.yml down -v --remove-orphans
 ```
 
 Elasticsearch and gRPC:

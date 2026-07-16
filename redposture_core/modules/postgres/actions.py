@@ -17,7 +17,13 @@ from typing import Any
 
 from ...clients import transport
 from ...console import Console
-from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import (
+    BooleanColorRule,
+    CountColorRule,
+    format_count_value,
+    render_colored_marker_line,
+    render_tagged_detail_line,
+)
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -62,17 +68,21 @@ class _PgAuditError(Exception):
         auth_required: bool | None = None,
         auth_method: str | None = None,
         sqlstate: str | None = None,
+        failure_phase: str | None = None,
+        error_kind: str | None = None,
     ) -> None:
         super().__init__(message)
         self.detected = detected
         self.auth_required = auth_required
         self.auth_method = auth_method
         self.sqlstate = sqlstate
+        self.failure_phase = failure_phase
+        self.error_kind = error_kind
 
 
 @dataclass
 class _PgSession:
-    auth_required: bool
+    auth_required: bool | None
     auth_method: str | None
     server_version: str | None
 
@@ -416,7 +426,7 @@ def _pg_startup_and_auth(sock: socket.socket, username: str, password: str | Non
 
     detected = False
     authenticated = False
-    auth_required = False
+    auth_required: bool | None = None
     auth_method: str | None = None
     server_version: str | None = None
     scram_state: _ScramState | None = None
@@ -434,6 +444,8 @@ def _pg_startup_and_auth(sock: socket.socket, username: str, password: str | Non
 
             if auth_code == 0:
                 authenticated = True
+                if auth_required is None:
+                    auth_required = False
                 continue
 
             if auth_code == 3:
@@ -541,23 +553,31 @@ def _pg_startup_and_auth(sock: socket.socket, username: str, password: str | Non
         if message_type == b"E":
             detected = True
             sqlstate, message = _pg_parse_error(payload)
-            auth_hint = auth_required
-            if sqlstate in {"28P01", "28000"}:
-                auth_hint = True
-            if "password authentication failed" in message.lower():
-                auth_hint = True
+            normalized_message = message.lower()
+            is_auth_failure = sqlstate in {"28P01", "28000"} or "password authentication failed" in normalized_message
+            auth_hint = True if is_auth_failure else None
+            if is_auth_failure:
+                error_kind = "authentication_failed"
+            elif "no authentication method is found" in normalized_message:
+                error_kind = "auth_configuration_error"
+            else:
+                error_kind = "startup_rejected"
             raise _PgAuditError(
                 message,
                 detected=True,
                 auth_required=auth_hint,
                 auth_method=auth_method,
                 sqlstate=sqlstate,
+                failure_phase="startup",
+                error_kind=error_kind,
             )
 
         if message_type == b"Z":
             detected = True
             if not authenticated:
                 authenticated = True
+            if auth_required is None:
+                auth_required = False
             return _PgSession(auth_required=auth_required, auth_method=auth_method, server_version=server_version)
 
         raise _PgAuditError(f"unexpected handshake message: {message_type!r}", detected=detected)
@@ -2057,6 +2077,12 @@ def _audit_postgres_host(
         except _PgAuditError as exc:
             target_database = str(database or "").strip() or None
             startup_database = target_database or "postgres"
+            if exc.detected and exc.auth_required is True:
+                status = "auth_required"
+            elif exc.detected:
+                status = "unknown_auth"
+            else:
+                status = "fail"
             return {
                 "timestamp": utc_now_iso(),
                 "host": host,
@@ -2064,9 +2090,12 @@ def _audit_postgres_host(
                 "database": target_database or startup_database,
                 "auth_database": startup_database,
                 "is_postgres": bool(exc.detected),
-                "status": "auth_required" if exc.detected and exc.auth_required else "fail",
-                "auth_required": exc.auth_required,
+                "status": status,
+                "auth_required": True if status == "auth_required" else None,
                 "auth_method": exc.auth_method,
+                "sqlstate": exc.sqlstate,
+                "failure_phase": exc.failure_phase or ("startup" if exc.detected else "connect"),
+                "error_kind": exc.error_kind or ("startup_rejected" if exc.detected else "connection_error"),
                 "provided_credentials": provided_credentials,
                 "provided_username": username,
                 "provided_password": password if provided_credentials else None,
@@ -2187,12 +2216,10 @@ def _caps_suffix(record: dict[str, Any]) -> str:
     superuser_text = "True" if superuser is True else "False" if superuser is False else "unknown"
     execute_text = "True" if can_execute_commands is True else "False" if can_execute_commands is False else "unknown"
     read_tables_text = "True" if can_read_tables is True else "False" if can_read_tables is False else "unknown"
-    if isinstance(database_count, int):
-        databases_text = str(database_count)
-    elif isinstance(database_names, list):
-        databases_text = str(len(database_names))
-    else:
-        databases_text = "-"
+    resolved_database_count = database_count if isinstance(database_count, int) else None
+    if resolved_database_count is None and isinstance(database_names, list):
+        resolved_database_count = len(database_names)
+    databases_text = format_count_value(resolved_database_count)
 
     return " ".join(
         (
@@ -2770,6 +2797,15 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         else:
             return f"{prefix} [-] authentication required"
 
+    if status == "unknown_auth":
+        label = (
+            "authentication unavailable"
+            if record.get("error_kind") == "auth_configuration_error"
+            else "startup rejected"
+        )
+        line = f"{prefix} [!] {label}"
+        return f"{line} err={err}" if err != "-" else line
+
     fail_line = f"{prefix} [!] connection failed"
     return f"{fail_line} err={err}" if err != "-" else fail_line
 
@@ -2905,8 +2941,16 @@ def _call_audit_postgres_host_with_stage_debug(
     detect_error = str(result.get("error") or "") if detect_result == "error" else None
     telemetry.stage(_STAGE_DETECT_PROTOCOL, detect_result, detect_error, 0)
 
-    auth_result = "ok" if is_postgres and status in _POSTGRES_DEEP_STATUSES.union({"auth_required"}) else detect_result
-    telemetry.stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
+    auth_error: str | None
+    if is_postgres and status == "unknown_auth":
+        auth_result = "partial"
+        auth_error = str(result.get("error") or "startup rejected")
+    else:
+        auth_result = (
+            "ok" if is_postgres and status in _POSTGRES_DEEP_STATUSES.union({"auth_required"}) else detect_result
+        )
+        auth_error = detect_error if auth_result == "error" else None
+    telemetry.stage(_STAGE_AUTH_INFERENCE, auth_result, auth_error, 0)
 
     if run_deep_checks and status in _POSTGRES_DEEP_STATUSES:
         telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
@@ -2918,8 +2962,9 @@ def _call_audit_postgres_host_with_stage_debug(
             elapsed_ms,
         )
     else:
-        telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "skip", "deep checks disabled", 0)
-        telemetry.stage(_STAGE_DATA, "skip", "deep checks disabled", 0)
+        skip_reason = "startup rejected" if status == "unknown_auth" else "deep checks disabled"
+        telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "skip", skip_reason, 0)
+        telemetry.stage(_STAGE_DATA, "skip", skip_reason, 0)
 
     stage_durations_ms = {
         str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in telemetry.stages

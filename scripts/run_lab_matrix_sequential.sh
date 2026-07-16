@@ -31,7 +31,7 @@ else
   PYTHON_BIN="python3"
 fi
 
-EXPORTER_PORTS="7777,9100,9102,9104,9113,9114,9116,9117,9119,9121,9127,9128,9131,9150,9182,9187,9216,9221,9256,9290,9308,9342,9349,9399,9419,9427,19101,19119,17777,19100,19102,19104,19113,19114,19115,19117,19121,19128,19131,19150,19182,19187,19219,19221,19290,19308,19399,19419"
+EXPORTER_PORTS="7777,9100,9102,9104,9113,9114,9116,9117,9119,9121,9127,9128,9131,9150,9182,9187,9216,9221,9256,9290,9308,9342,9349,9399,9419,9427,9854,19101,19119,19854,29854,17777,19100,19102,19104,19113,19114,19115,19117,19121,19128,19131,19150,19182,19187,19219,19221,19290,19308,19399,19419"
 
 mkdir -p "${OUT_DIR}/logs" "${OUT_DIR}/json"
 
@@ -49,11 +49,12 @@ fi
 LAB_PORTS=(
   3000 5432 6379 9000 9090 9100 9115 9121 9187 9216 9290 9308
   15000 15432 15433 16379 17777 18123 19000 19090 19100 19102 19104 19113 19114 19115
-  19117 19121 19128 19131 19150 19182 19187 19219 19221 19290 19308 19399 19419
+  9854 19117 19121 19128 19131 19150 19182 19187 19219 19221 19290 19308 19399 19419
+  19854 29854
   19121 22379 22380 23790 23791 23792 23793 25432 25433 25434 25435 25439 26380 26381
   26382 26383 26380 26443 26444 26445 26446 26447 27017 27018 28006 29115 31521 31522
-  31523 31524 8123 8500 8501 8502 8503 8504 2379 5672 9092 9200 1521 6443 22181 22182
-  22183 22184 9876 9877 9878 9879
+  31523 31524 8123 8500 8501 8502 8503 8504 2379 5672 9092 9181 9200 1521 6443 12181
+  19181 19281 22181 22182 22183 22184 29181 39181 9876 9877 9878 9879
 )
 echo "== pre-run: ensuring lab ports are free =="
 freed=0
@@ -284,6 +285,7 @@ run_negative_cli_cases() {
   run_raw_case grpc fuzz_grpc_missing_targets 2 grpc
   run_raw_case kafka fuzz_kafka_missing_targets 2 kafka --show-topics
   run_raw_case zookeeper fuzz_zookeeper_missing_targets 2 zookeeper --show-znodes
+  run_raw_case keeper fuzz_keeper_missing_targets 2 keeper --show-znodes
   run_raw_case proxmox fuzz_proxmox_missing_targets 2 proxmox --pveapitoken "monitor@pve!audit=token"
 
   run_raw_case registry fuzz_registry_username_without_password 2 registry -t 127.0.0.1 -u admin --docker --images
@@ -354,6 +356,9 @@ run_negative_cli_cases() {
 
   run_raw_case zookeeper fuzz_zookeeper_zero_max_znodes 2 zookeeper -t 127.0.0.1 --max-znodes 0
   run_raw_case zookeeper fuzz_zookeeper_zero_enum_workers 2 zookeeper -t 127.0.0.1 --enum-workers 0
+  run_raw_case keeper fuzz_keeper_incomplete_mtls 2 keeper -t 127.0.0.1 --tls-cert client.pem
+  run_raw_case keeper fuzz_keeper_tls_conflict 2 keeper -t 127.0.0.1 --tls --no-tls
+  run_raw_case keeper fuzz_keeper_tls_options_plaintext 2 keeper -t 127.0.0.1 --no-tls --ca-file ca.pem --tls-cert client.pem --tls-key client.key
 }
 
 run_exporters_cases() {
@@ -735,6 +740,18 @@ run_zookeeper_cases() {
   fi
 }
 
+run_keeper_cases() {
+  run_case keeper keeper_cluster 0 keeper -t 127.0.0.1 --ports "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3
+  run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
+  run_case keeper keeper_no4lw 0 keeper -t 127.0.0.1 --port 39181 -u lab -p lab --show-znodes 10 --dump 10 -znode /keeper/api_version
+  run_case keeper keeper_apache_control 0 keeper -t 127.0.0.1 --port 12181 --show-znodes 5
+  if is_extended_matrix; then
+    run_text_case keeper keeper_debug_smoke 0 keeper -t 127.0.0.1 --port 9181 --debug
+    run_case keeper keeper_force_plaintext 0 keeper -t 127.0.0.1 --port 9181 --no-tls --show-znodes 5
+    run_case keeper keeper_force_tls 0 keeper -t 127.0.0.1 --port 19281 --tls --insecure --show-znodes 5
+  fi
+}
+
 run_proxmox_cases() {
   run_case proxmox proxmox_audit 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
   run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover-creds --nodes --users
@@ -797,6 +814,7 @@ run_service_block elastic run_elastic_cases
 run_service_block grpc run_grpc_cases
 run_service_block kafka run_kafka_cases
 run_service_block zookeeper run_zookeeper_cases
+run_service_block keeper run_keeper_cases
 run_service_block proxmox run_proxmox_cases
 if is_extended_matrix; then
   run_service_block proxy-isolated run_proxy_isolated_cases

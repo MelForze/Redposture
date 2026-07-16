@@ -7,10 +7,19 @@ import threading
 import time
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from ...clients import transport
 from ...clients.zookeeper import (
+    _ZK_ERR_AUTHFAILED,
+    _ZK_ERR_NOAUTH,
+    _ZK_ERR_NONODE,
+    _ZK_ERR_OK,
+    _ZK_ERR_REQUEST_TIMEOUT,
+    _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH,
+    _ZK_ERR_THROTTLED_OP,
+    ZkTransportConfig,
     _decode_zk_buffer,
     _decode_zk_string,
     _encode_acl_world_anyone_all,
@@ -32,7 +41,13 @@ from ...clients.zookeeper import (
     _znode_detail_entry,
 )
 from ...console import Console
-from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import (
+    BooleanColorRule,
+    CountColorRule,
+    format_count_value,
+    render_colored_marker_line,
+    render_tagged_detail_line,
+)
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
@@ -73,17 +88,11 @@ _ZK_OP_GET_DATA = 4
 _ZK_OP_GET_CHILDREN2 = 12
 _ZK_OP_CLOSE_SESSION = -11
 _ZK_OP_AUTH = 100
-_ZK_ERR_OK = 0
-_ZK_ERR_NONODE = -101
-_ZK_ERR_NOAUTH = -102
-_ZK_ERR_RETRYABLE_ROOT_QUERY = -124
-_ZK_ERR_NODEEXISTS = -110
 _ZK_MAX_FRAME = 64 * 1024 * 1024
 _ZK_SYSTEM_PREFIX = "/zookeeper"
 _ZK_ACL_ALL_PERMS = 0x1F
 _ZK_CREATE_EPHEMERAL = 1
 _UNEXPECTED_EOF_PREFIX = "unexpected eof"
-_ROOT_QUERY_ERR_124_PREFIX = "root query failed: err_-124"
 _ZK_AUTH_XID = -4
 _ZK_ENUM_PROGRESS_INTERVAL_SECONDS = 2.0
 
@@ -124,22 +133,26 @@ def _is_unexpected_eof_error(value: Any) -> bool:
     return bool(text) and text.startswith(_UNEXPECTED_EOF_PREFIX)
 
 
-def _is_root_query_err_124_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return bool(text) and text.startswith(_ROOT_QUERY_ERR_124_PREFIX)
-
-
 def _is_remote_closed_connection_error(value: Any) -> bool:
     text = str(value or "").strip().lower()
     return "remote end closed connection without response" in text
 
 
 def _is_retryable_stage_error(value: Any) -> bool:
+    text = str(value or "").strip().upper()
     return (
         _is_connection_timeout_error(value)
         or _is_unexpected_eof_error(value)
         or _is_remote_closed_connection_error(value)
-        or _is_root_query_err_124_error(value)
+        or any(
+            name in text
+            for name in (
+                "CONNECTIONLOSS",
+                "OPERATIONTIMEOUT",
+                _zk_error_name(_ZK_ERR_REQUEST_TIMEOUT),
+                _zk_error_name(_ZK_ERR_THROTTLED_OP),
+            )
+        )
     )
 
 
@@ -157,15 +170,24 @@ def _normalize_auth_probe_result(err_code: int) -> tuple[str, str]:
         return "noauth", "noauth"
     if err_code == _ZK_ERR_OK:
         return "ok", "ok"
-    if err_code == _ZK_ERR_RETRYABLE_ROOT_QUERY:
-        return "retryable_auth_hint", "err_-124"
+    if err_code == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH:
+        return "auth_required", "sessionclosedrequiresaslauth"
     if err_code == _ZK_ERR_NONODE:
         return "neutral", "nonode"
     return "error", _zk_error_name(err_code).lower()
 
 
-def _run_anonymous_auth_probe(host: str, port: int, timeout: float, path: str) -> tuple[int | None, str | None]:
-    probe_client = _ZkClient(host, port, timeout)
+def _run_anonymous_auth_probe(
+    host: str,
+    port: int,
+    timeout: float,
+    path: str,
+    transport_config: ZkTransportConfig | None = None,
+) -> tuple[int | None, str | None]:
+    if transport_config is None:
+        probe_client = _ZkClient(host, port, timeout)
+    else:
+        probe_client = _ZkClient(host, port, timeout, transport_config=transport_config)
     try:
         probe_client.connect()
         _children, probe_err, _stat = probe_client.get_children2(path)
@@ -177,12 +199,19 @@ def _run_anonymous_auth_probe(host: str, port: int, timeout: float, path: str) -
 
 
 def _infer_auth_required_from_anonymous_probes(
-    host: str, port: int, timeout: float, root_err: int, query_znode: str | None
+    host: str,
+    port: int,
+    timeout: float,
+    root_err: int,
+    query_znode: str | None,
+    transport_config: ZkTransportConfig | None = None,
 ) -> tuple[bool | None, str, list[str]]:
     root_state, root_code = _normalize_auth_probe_result(root_err)
     trace = [f"/:{root_code}"]
     if root_state == "noauth":
         return True, "root_noauth", trace
+    if root_state == "auth_required":
+        return True, "session_closed_requires_auth", trace
     if root_state == "ok":
         return False, "root_ok", trace
 
@@ -191,37 +220,31 @@ def _infer_auth_required_from_anonymous_probes(
         probe_paths.append(query_znode)
 
     saw_ok = False
-    saw_retryable_auth_hint = root_state == "retryable_auth_hint"
-    probe_count = 1
-    retryable_count = 1 if root_state == "retryable_auth_hint" else 0
     for probe_path in probe_paths:
-        probe_err, probe_exc = _run_anonymous_auth_probe(host, port, timeout, probe_path)
+        probe_err, probe_exc = _run_anonymous_auth_probe(
+            host,
+            port,
+            timeout,
+            probe_path,
+            transport_config=transport_config,
+        )
         if probe_exc:
             trace.append(f"{probe_path}:error:{probe_exc}")
             continue
         if probe_err is None:
             trace.append(f"{probe_path}:error:unknown")
             continue
-        probe_count += 1
         probe_state, probe_code = _normalize_auth_probe_result(probe_err)
         trace.append(f"{probe_path}:{probe_code}")
         if probe_state == "noauth":
             return True, "probe_noauth", trace
+        if probe_state == "auth_required":
+            return True, "probe_session_closed_requires_auth", trace
         if probe_state == "ok":
             saw_ok = True
-        if probe_state == "retryable_auth_hint":
-            saw_retryable_auth_hint = True
-            retryable_count += 1
 
     if saw_ok:
         return False, "probe_ok", trace
-    if saw_retryable_auth_hint and retryable_count == probe_count and retryable_count >= 2:
-        # A3 fix: the previous version promoted "every anonymous probe returned -124"
-        # to auth_required=True, but -124 is documented as a transient/retryable
-        # marker. During leader election or brief server load every probe legitimately
-        # returns -124 without auth being enabled. Return None (inconclusive) so
-        # callers do not silently label an open cluster as auth-required.
-        return None, "probe_retryable_124_inconclusive", trace
     return None, "inconclusive", trace
 
 
@@ -330,7 +353,11 @@ def _audit_zookeeper_host(
     run_deep_checks: bool = True,
     enum_workers: int = 3,
     dump_limit: int | None = None,
+    transport_config: ZkTransportConfig | None = None,
 ) -> dict[str, Any]:
+    expose_transport = transport_config is not None
+    requested_transport_config = transport_config or ZkTransportConfig()
+    last_selected_transport: str | None = None
     normalized_username = str(username).strip() if username is not None else None
     if normalized_username == "":
         normalized_username = None
@@ -339,7 +366,6 @@ def _audit_zookeeper_host(
         normalized_password = None
 
     base_attempts = max(1, retries + 1)
-    bonus_retry_for_root_query_124 = False
     last_error: str | None = None
     provided_credentials = normalized_username is not None and normalized_password is not None
     debug_events: list[str] = []
@@ -361,6 +387,11 @@ def _audit_zookeeper_host(
     last_dump_error: str | None = None
     last_attempts = 0
     last_max_attempts = base_attempts
+
+    def _new_client(config: ZkTransportConfig) -> _ZkClient:
+        if expose_transport:
+            return _ZkClient(host, port, timeout, transport_config=config)
+        return _ZkClient(host, port, timeout)
 
     def _debug(message: str) -> None:
         nonlocal debug_events_streamed
@@ -487,6 +518,7 @@ def _audit_zookeeper_host(
         stage_fail_at: str | None = None,
         stage_duration_totals_ms: dict[str, int] | None = None,
         stage_attempt_totals: dict[str, int] | None = None,
+        credential_verdict: str | None = None,
     ) -> dict[str, Any]:
         resolved_stage_durations = dict(stage_duration_totals_ms or stage_durations_ms)
         resolved_stage_attempts = dict(stage_attempt_totals or stage_attempts)
@@ -498,7 +530,7 @@ def _audit_zookeeper_host(
                 stage_duration_totals=resolved_stage_durations,
                 stage_attempt_totals=resolved_stage_attempts,
             )
-        return {
+        record = {
             "timestamp": utc_now_iso(),
             "host": host,
             "port": port,
@@ -509,6 +541,10 @@ def _audit_zookeeper_host(
             "provided_username": normalized_username,
             "provided_password": normalized_password if provided_credentials else None,
             "provided_credentials_ok": provided_credentials_ok,
+            "credential_verdict": credential_verdict
+            or (
+                "valid" if provided_credentials_ok is True else "rejected" if provided_credentials_ok is False else None
+            ),
             "show_znodes": show_znodes,
             "dump": dump,
             "dump_limit": dump_limit,
@@ -551,9 +587,12 @@ def _audit_zookeeper_host(
             "debug_events_streamed": bool(debug_events_streamed),
             "error": error,
         }
+        if expose_transport:
+            record["transport"] = last_selected_transport
+        return record
 
-    for attempt in range(base_attempts + 1):
-        max_attempts = base_attempts + (1 if bonus_retry_for_root_query_124 else 0)
+    for attempt in range(base_attempts):
+        max_attempts = base_attempts
         last_max_attempts = max_attempts
         if attempt >= max_attempts:
             break
@@ -570,14 +609,25 @@ def _audit_zookeeper_host(
         enum_error_detail: str | None = None
         query_error_detail: str | None = None
         dump_error_detail: str | None = None
-        root_retryable_after_auth = False
-
         _debug(f"attempt={attempt + 1}/{max_attempts} start timeout={timeout}s")
         stage1_started = time.monotonic()
-        client = _ZkClient(host, port, timeout)
+        client = _new_client(requested_transport_config)
+        clients_to_close = [client]
         try:
             connect_started = time.monotonic()
             client.connect()
+            selected_transport = getattr(client, "selected_transport", None)
+            if selected_transport not in {"plaintext", "tls"}:
+                selected_transport = (
+                    requested_transport_config.mode
+                    if requested_transport_config.mode in {"plaintext", "tls"}
+                    else "plaintext"
+                )
+            last_selected_transport = str(selected_transport)
+            selected_transport_config = replace(
+                requested_transport_config,
+                mode=selected_transport,
+            )
             connect_ms = int((time.monotonic() - connect_started) * 1000)
             last_connect_ms = connect_ms
             _debug(f"connect ok connect_ms={connect_ms}")
@@ -586,29 +636,9 @@ def _audit_zookeeper_host(
             invalid_provided_credentials = False
             auth_applied_ok: bool | None = None
             auth_error: str | None = None
+            credential_verdict: str | None = None
             root_children, root_err, _ = client.get_children2("/")
             anonymous_root_err = root_err
-
-            if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and not bonus_retry_for_root_query_124:
-                bonus_retry_for_root_query_124 = True
-                last_error = f"root query failed: {_zk_error_name(root_err)}"
-                _stage_trace(
-                    _STAGE_DETECT_PROTOCOL,
-                    attempt=attempt + 1,
-                    started_at=stage1_started,
-                    result="retry",
-                    error=last_error,
-                )
-                delay = _retry_delay(attempt)
-                _debug_retry_decision(
-                    _STAGE_DETECT_PROTOCOL,
-                    attempt=attempt + 1,
-                    max_attempts=max_attempts,
-                    delay_s=delay,
-                    reason=last_error,
-                )
-                time.sleep(delay)
-                continue
 
             _stage_trace(
                 _STAGE_DETECT_PROTOCOL,
@@ -619,67 +649,65 @@ def _audit_zookeeper_host(
             )
 
             stage2_started = time.monotonic()
-            inferred_auth_required, auth_inference_source, auth_probe_trace = (
-                _infer_auth_required_from_anonymous_probes(host, port, timeout, anonymous_root_err, query_znode)
-            )
+            if expose_transport:
+                inferred_auth_required, auth_inference_source, auth_probe_trace = (
+                    _infer_auth_required_from_anonymous_probes(
+                        host,
+                        port,
+                        timeout,
+                        anonymous_root_err,
+                        query_znode,
+                        transport_config=selected_transport_config,
+                    )
+                )
+            else:
+                inferred_auth_required, auth_inference_source, auth_probe_trace = (
+                    _infer_auth_required_from_anonymous_probes(
+                        host,
+                        port,
+                        timeout,
+                        anonymous_root_err,
+                        query_znode,
+                    )
+                )
 
             if provided_credentials and normalized_username is not None and normalized_password is not None:
                 auth_started = time.monotonic()
-                auth_applied_ok, auth_error = client.auth_digest(normalized_username, normalized_password)
+                authenticated_client = _new_client(selected_transport_config)
+                clients_to_close.append(authenticated_client)
+                authenticated_client.connect()
+                auth_applied_ok, auth_error = authenticated_client.auth_digest(normalized_username, normalized_password)
                 auth_ms = int((time.monotonic() - auth_started) * 1000)
                 last_auth_ms = auth_ms
                 if auth_applied_ok:
-                    root_children, root_err, _ = client.get_children2("/")
-                    # A2 fix: if auth succeeded and post-auth root read works, credentials
-                    # are valid — regardless of whether anon also succeeded. The old code
-                    # (`anonymous_root_err != _ZK_ERR_OK`) mislabeled valid creds against
-                    # an open ZK as invalid because both reads returned OK.
-                    if root_err == _ZK_ERR_OK:
+                    authenticated_children, authenticated_root_err, _ = authenticated_client.get_children2("/")
+                    if (
+                        anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH}
+                        and authenticated_root_err == _ZK_ERR_OK
+                    ):
                         provided_credentials_ok = True
-                    # A1 fix: anon was OK but post-auth returns NOAUTH — the ONLY way this
-                    # happens is that the credentials silently didn't authenticate (server
-                    # accepted the digest frame but the associated principal has no
-                    # rights). Mark them invalid explicitly so the outer branch promotes
-                    # to invalid_credentials; the old fall-through left provided_credentials_ok
-                    # at None and bad creds silently passed as open_no_auth.
-                    elif root_err == _ZK_ERR_NOAUTH and anonymous_root_err == _ZK_ERR_OK:
-                        provided_credentials_ok = False
-                    # D3 fix: the old elif ("anonymous_root_err in {NOAUTH,-124}" →
-                    # True) confidently declared creds valid whenever anon was
-                    # gated. But if post-auth STILL returns NOAUTH, we can't tell
-                    # "auth applied to a low-privilege principal" from "auth data
-                    # was silently rejected". Try a control probe against
-                    # `/zookeeper` (a system znode that is world-readable on
-                    # every default ZK deployment); OK → auth is valid, only ACL
-                    # restricts /. NOAUTH → auth was silently rejected.
-                    elif root_err == _ZK_ERR_NOAUTH and anonymous_root_err in {
+                        credential_verdict = "valid"
+                        client = authenticated_client
+                        root_children = authenticated_children
+                        root_err = authenticated_root_err
+                    elif anonymous_root_err == _ZK_ERR_OK and authenticated_root_err == _ZK_ERR_OK:
+                        # A successful digest frame only adds an identity to the session.
+                        # It does not prove that the supplied secret grants any protected access.
+                        provided_credentials_ok = None
+                        credential_verdict = "unverified_anonymous"
+                    elif authenticated_root_err in {
                         _ZK_ERR_NOAUTH,
-                        _ZK_ERR_RETRYABLE_ROOT_QUERY,
+                        _ZK_ERR_AUTHFAILED,
+                        _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH,
                     }:
-                        _sysprobe, sys_err, _ = client.get_children2("/zookeeper")
-                        if sys_err == _ZK_ERR_OK:
-                            provided_credentials_ok = True
-                        elif sys_err == _ZK_ERR_NOAUTH:
-                            provided_credentials_ok = False
-                        else:
-                            provided_credentials_ok = None  # truly inconclusive
-                    elif anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_RETRYABLE_ROOT_QUERY}:
-                        # Digest auth succeeded, but root listing may still be ACL-restricted.
-                        provided_credentials_ok = True
-                    if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and provided_credentials_ok is True:
-                        # Auth worked but the root query hit a transient -124. Mark the
-                        # record so downstream renderers show `znodes:unknown` (see the
-                        # A5 fix on the enum-fallback padding below), and keep the
-                        # downstream flow moving without pretending we know the count.
-                        # The A5 fix below guarantees total_count stays at 0 (→ unknown)
-                        # rather than getting padded from the pre-auth root_children.
-                        root_retryable_after_auth = True
-                        query_error_detail = _zk_error_name(root_err)
-                        last_query_error = query_error_detail
-                        root_children = root_children or []
-                        root_err = _ZK_ERR_OK
+                        provided_credentials_ok = False
+                        credential_verdict = "rejected"
+                    else:
+                        provided_credentials_ok = None
+                        credential_verdict = "unverified"
                 else:
                     provided_credentials_ok = False
+                    credential_verdict = "rejected"
                 if not auth_applied_ok and not auth_error:
                     auth_error = "authentication failed"
                 auth_error_detail = auth_error
@@ -850,9 +878,14 @@ def _audit_zookeeper_host(
                     dump_error=dump_error_detail,
                     attempts=attempt + 1,
                     max_attempts=max_attempts,
+                    credential_verdict=credential_verdict,
                 )
 
-            if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and inferred_auth_required is True and not provided_credentials:
+            if (
+                root_err == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH
+                and inferred_auth_required is True
+                and not provided_credentials
+            ):
                 query_error_detail = _zk_error_name(root_err)
                 last_query_error = query_error_detail
                 _stage_trace(
@@ -860,7 +893,7 @@ def _audit_zookeeper_host(
                     attempt=attempt + 1,
                     started_at=stage2_started,
                     result="auth_required",
-                    error=f"root query failed: {_zk_error_name(root_err)}",
+                    error="authentication required by server policy",
                 )
                 _debug(
                     f"attempt={attempt + 1}/{max_attempts} result=auth_required root_err={query_error_detail} "
@@ -900,29 +933,6 @@ def _audit_zookeeper_host(
                     attempts=attempt + 1,
                     max_attempts=max_attempts,
                 )
-
-            if root_err == _ZK_ERR_RETRYABLE_ROOT_QUERY and not bonus_retry_for_root_query_124:
-                bonus_retry_for_root_query_124 = True
-                last_error = f"root query failed: {_zk_error_name(root_err)}"
-                delay = _retry_delay(attempt)
-                query_error_detail = _zk_error_name(root_err)
-                last_query_error = query_error_detail
-                _stage_trace(
-                    _STAGE_AUTH_INFERENCE,
-                    attempt=attempt + 1,
-                    started_at=stage2_started,
-                    result="retry",
-                    error=last_error,
-                )
-                _debug_retry_decision(
-                    _STAGE_AUTH_INFERENCE,
-                    attempt=attempt + 1,
-                    max_attempts=max_attempts,
-                    delay_s=delay,
-                    reason=last_error,
-                )
-                time.sleep(delay)
-                continue
 
             if root_err != _ZK_ERR_OK:
                 query_error_detail = _zk_error_name(root_err)
@@ -970,6 +980,7 @@ def _audit_zookeeper_host(
                     dump_error=dump_error_detail,
                     attempts=attempt + 1,
                     max_attempts=max_attempts,
+                    credential_verdict=credential_verdict,
                 )
 
             stage2_result = "ok"
@@ -1032,6 +1043,7 @@ def _audit_zookeeper_host(
                     dump_error=dump_error_detail,
                     attempts=attempt + 1,
                     max_attempts=max_attempts,
+                    credential_verdict=credential_verdict,
                 )
 
             noauth_detail_text = "Access Denied"
@@ -1123,18 +1135,30 @@ def _audit_zookeeper_host(
                 progress_hook = _progress
 
             try:
+                enum_kwargs: dict[str, Any] = {
+                    "collect_paths": collect_znode_paths,
+                    "enum_workers": enum_workers,
+                    "auth_username": enum_auth_username,
+                    "auth_password": enum_auth_password,
+                }
+                if expose_transport:
+                    enum_kwargs["transport_config"] = selected_transport_config
                 listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
                     client,
                     max_znodes,
                     progress_hook,
-                    collect_paths=collect_znode_paths,
-                    enum_workers=enum_workers,
-                    auth_username=enum_auth_username,
-                    auth_password=enum_auth_password,
+                    **enum_kwargs,
                 )
             except TypeError as exc:
                 if not is_signature_compat_typeerror(
-                    exc, expected_keywords={"collect_paths", "enum_workers", "auth_username", "auth_password"}
+                    exc,
+                    expected_keywords={
+                        "collect_paths",
+                        "enum_workers",
+                        "auth_username",
+                        "auth_password",
+                        "transport_config",
+                    },
                 ):
                     raise
                 # Backward-safe for patched tests/helpers that may expose legacy signatures.
@@ -1204,12 +1228,6 @@ def _audit_zookeeper_host(
             query_znode_dump_error: str | None = None
             if query_znode:
                 q_children, q_err, q_stat = client.get_children2(query_znode)
-                # A6 fix: -124 on the target znode is a retryable transient — retry
-                # once with a small delay before recording the error, mirroring the
-                # bonus retry that already exists for the '/' root query.
-                if q_err == _ZK_ERR_RETRYABLE_ROOT_QUERY:
-                    time.sleep(_retry_delay(0))
-                    q_children, q_err, q_stat = client.get_children2(query_znode)
                 if q_err == _ZK_ERR_NONODE:
                     query_znode_value = f"{query_znode}:<not found>"
                     query_error_detail = "NONODE"
@@ -1294,14 +1312,8 @@ def _audit_zookeeper_host(
                 error=stage4_error_value,
             )
 
-            # A5 fix: do NOT fall back to the pre-auth root_children count when
-            # the audit is already in the "-124 after auth" fallback (A4). Prior to
-            # this the padding produced `valid_credentials, znodes:1` records for
-            # servers where the actual enumeration never succeeded, hiding a
-            # transient sync failure. znode_count_unknown flag on the record
-            # ensures the renderer shows "znodes:unknown" for that case.
             root_count = len(root_children or [])
-            if total_count == 0 and root_count > 0 and not root_retryable_after_auth:
+            if total_count == 0 and root_count > 0:
                 total_count = root_count
 
             auth_required_value = inferred_auth_required
@@ -1352,13 +1364,7 @@ def _audit_zookeeper_host(
                 dump_error=dump_error_detail,
                 attempts=attempt + 1,
                 max_attempts=max_attempts,
-                znode_count_unknown=bool(root_retryable_after_auth and total_count == 0),
-                znode_count_partial=bool(root_retryable_after_auth and total_count > 0),
-                stage2_error=(
-                    f"root query failed: {_zk_error_name(_ZK_ERR_RETRYABLE_ROOT_QUERY)}"
-                    if root_retryable_after_auth
-                    else None
-                ),
+                credential_verdict=credential_verdict,
             )
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             last_error = _friendly_error_from_exception(exc)
@@ -1368,7 +1374,7 @@ def _audit_zookeeper_host(
             last_auth_ms = auth_ms
             last_enumerate_ms = enumerate_ms
             last_dump_ms = dump_ms
-            max_attempts = base_attempts + (1 if bonus_retry_for_root_query_124 else 0)
+            max_attempts = base_attempts
             stage_result = "retry" if attempt < max_attempts - 1 else "fail"
             _stage_trace(
                 _STAGE_DETECT_PROTOCOL,
@@ -1389,7 +1395,8 @@ def _audit_zookeeper_host(
             )
             time.sleep(delay)
         finally:
-            client.close()
+            for close_client in clients_to_close:
+                close_client.close()
 
     _debug(f"final fail attempts={last_attempts}/{last_max_attempts} error={last_error or 'connection failed'}")
     return _record(
@@ -1429,17 +1436,19 @@ def _audit_zookeeper_host(
 def _nxc_prefix(record: dict[str, Any]) -> str:
     host = _clip(str(record.get("host") or "-"), 64)
     port = str(record.get("port") or "-")
-    return f"{'ZOOKEEPER':<12}\t{host}\t{port}\t"
+    tag = "KEEPER" if str(record.get("module") or "").lower() == "keeper" else "ZOOKEEPER"
+    return f"{tag:<12}\t{host}\t{port}\t"
+
+
+def _record_service(record: dict[str, Any]) -> str:
+    return str(record.get("service") or ("keeper" if record.get("module") == "keeper" else "zookeeper"))
 
 
 def _with_optional_znodes(record: dict[str, Any], message: str) -> str:
-    if bool(record.get("znode_count_unknown")):
-        suffix = "unknown partial" if bool(record.get("znode_count_partial")) else "unknown"
-        return f"{message} (znodes:{suffix})"
-    znode_count = record.get("znode_count")
-    if not isinstance(znode_count, int):
-        return f"{message} (znodes:-)"
-    return f"{message} (znodes:{znode_count})"
+    state = "partial" if bool(record.get("znode_count_partial")) else None
+    if bool(record.get("znode_count_unknown")) and state is None:
+        state = "unknown"
+    return f"{message} (znodes:{format_count_value(record.get('znode_count'), state=state)})"
 
 
 def _merge_stage2_record(
@@ -1564,6 +1573,14 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
         "True" if auth_required_value is True else "False" if auth_required_value is False else "unknown"
     )
 
+    is_keeper_module = str(record.get("module") or "").lower() == "keeper"
+    keeper_match = record.get("is_keeper")
+    detected = (
+        bool(record.get("is_zookeeper_compatible")) and keeper_match is not False
+        if is_keeper_module
+        else bool(record.get("is_zookeeper"))
+    )
+
     if output_format == "json":
         return json.dumps(
             {
@@ -1571,8 +1588,8 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "type": "detect",
                 "host": record.get("host"),
                 "port": record.get("port"),
-                "service": "zookeeper",
-                "detected": bool(record.get("is_zookeeper")),
+                "service": _record_service(record),
+                "detected": detected,
                 "auth_required": auth_required_value,
                 "auth_inference_source": record.get("auth_inference_source"),
                 "auth_probe_trace": record.get("auth_probe_trace") or [],
@@ -1580,7 +1597,18 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
             ensure_ascii=False,
         )
 
+    if is_keeper_module and keeper_match is False:
+        return ""
     prefix = _nxc_prefix(record)
+    if is_keeper_module:
+        transport = str(record.get("transport") or "unknown")
+        if keeper_match is True:
+            version = str(record.get("version") or "unknown")
+            return f"{prefix} [*] ClickHouse Keeper version:{version}"
+        return (
+            f"{prefix} [!] ZooKeeper-compatible service "
+            f"(Keeper not confirmed, transport:{transport}, auth required:{auth_required_text})"
+        )
     return f"{prefix} [*] ZooKeeper Service (auth required:{auth_required_text})"
 
 
@@ -1588,12 +1616,21 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
         return json.dumps(record, ensure_ascii=False)
 
+    if str(record.get("module") or "").lower() == "keeper" and record.get("is_keeper") is False:
+        return ""
+
     status = str(record.get("status") or "fail")
     prefix = _nxc_prefix(record)
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        return _with_optional_znodes(record, f"{prefix} [+] anonymous access {_znode_caps_suffix(record)}")
+        credential_suffix = (
+            " (credentials:unverified)" if record.get("credential_verdict") == "unverified_anonymous" else ""
+        )
+        return _with_optional_znodes(
+            record,
+            f"{prefix} [+] anonymous access {_znode_caps_suffix(record)}{credential_suffix}",
+        )
 
     if status == "invalid_credentials_anonymous":
         return f"{prefix} [-] {_credentials_label(record)}"
@@ -1604,6 +1641,11 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if status == "auth_required":
         if record.get("provided_credentials"):
             return f"{prefix} [-] {_credentials_label(record)}"
+        if record.get("auth_inference_source") in {
+            "session_closed_requires_auth",
+            "probe_session_closed_requires_auth",
+        }:
+            return f"{prefix} [-] authentication required by server policy"
         return f"{prefix} [-] authentication required"
 
     if status == "fail" and record.get("provided_credentials") and err.lower().startswith("authentication failed"):
@@ -1693,7 +1735,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
                     {
                         "timestamp": record.get("timestamp"),
                         "type": "znodes_list",
-                        "service": "zookeeper",
+                        "service": _record_service(record),
                         "host": record.get("host"),
                         "port": record.get("port"),
                         "znode_count": record.get("znode_count"),
@@ -1712,7 +1754,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
                     {
                         "timestamp": record.get("timestamp"),
                         "type": "znode_detail",
-                        "service": "zookeeper",
+                        "service": _record_service(record),
                         "host": record.get("host"),
                         "port": record.get("port"),
                         "znode": query_znode,
@@ -1727,7 +1769,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
                     {
                         "timestamp": record.get("timestamp"),
                         "type": "znode_dump",
-                        "service": "zookeeper",
+                        "service": _record_service(record),
                         "host": record.get("host"),
                         "port": record.get("port"),
                         "znode": query_znode,
@@ -1743,7 +1785,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
                     {
                         "timestamp": record.get("timestamp"),
                         "type": "znodes_dump",
-                        "service": "zookeeper",
+                        "service": _record_service(record),
                         "host": record.get("host"),
                         "port": record.get("port"),
                         "znode_count": record.get("znode_count"),
@@ -1804,16 +1846,24 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
 
 
 def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
+    tag = "KEEPER" if line.startswith("KEEPER") else "ZOOKEEPER"
     if render_colored_marker_line(
         console,
         line,
-        tag="ZOOKEEPER",
+        tag=tag,
         booleans=(BooleanColorRule("create"), BooleanColorRule("delete")),
         counts=(CountColorRule("znodes", "red"),),
     ):
         return True
-    if line.startswith("ZOOKEEPER") and "\t" in line:
-        return render_tagged_detail_line(console, line, tag="ZOOKEEPER", default_color="orange")
+    if line.startswith(tag) and "\t" in line:
+        return render_tagged_detail_line(
+            console,
+            line,
+            tag=tag,
+            default_color="orange",
+            count_pattern_color="white",
+            strip_paren_wrappers=False,
+        )
     return False
 
 

@@ -164,6 +164,7 @@ def test_global_progress_policy_is_independent_from_output_destination() -> None
         "mongodb",
         "clickhouse",
         "zookeeper",
+        "keeper",
         "elastic",
         "grafana",
         "grpc",

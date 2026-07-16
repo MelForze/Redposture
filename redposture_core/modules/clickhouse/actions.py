@@ -15,7 +15,13 @@ from uuid import UUID
 
 from ...clients import transport
 from ...console import Console
-from ...rendering import BooleanColorRule, CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import (
+    BooleanColorRule,
+    CountColorRule,
+    format_count_value,
+    render_colored_marker_line,
+    render_tagged_detail_line,
+)
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -1292,11 +1298,10 @@ def _caps_suffix(record: dict[str, Any]) -> str:
     execute_text = _bool_text(record.get("execute_capability"))
     admin_text = _bool_text(record.get("admin_capability"))
     db_count = record.get("database_count")
-    if isinstance(db_count, int):
-        db_count_text = str(db_count)
-    else:
+    if not isinstance(db_count, int):
         db_names = record.get("database_names")
-        db_count_text = str(len(db_names)) if isinstance(db_names, list) else "-"
+        db_count = len(db_names) if isinstance(db_names, list) else None
+    db_count_text = format_count_value(db_count)
     return f"(read:{read_text}) (execute:{execute_text}) (admin:{admin_text}) (DBs:{db_count_text})"
 
 

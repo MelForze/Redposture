@@ -12,6 +12,7 @@ from redposture_core.stage_gitlab import _render_colored_gitlab_line
 from redposture_core.stage_grafana import _render_colored_grafana_line
 from redposture_core.stage_grpc import _render_colored_grpc_line
 from redposture_core.stage_kafka import _render_colored_kafka_line
+from redposture_core.stage_keeper import _render_colored_keeper_line
 from redposture_core.stage_kubeapi import _render_colored_kubeapi_line
 from redposture_core.stage_postgres import _render_colored_postgres_line
 from redposture_core.stage_proxmox import _render_colored_proxmox_line
@@ -144,6 +145,27 @@ def test_render_colored_zookeeper_colors_znodes_red() -> None:
     line = "ZOOKEEPER\t127.0.0.1\t2181\t [+] anonymous access (znodes:4)"
     assert _render_colored_zookeeper_line(console, line) is True
     assert _contains_paint(console.paint_calls, "(znodes:4)", "red")
+
+
+@pytest.mark.parametrize(
+    ("renderer", "tag", "port"),
+    [
+        (_render_colored_zookeeper_line, "ZOOKEEPER", 2181),
+        (_render_colored_keeper_line, "KEEPER", 9181),
+    ],
+)
+def test_zookeeper_compatible_detail_metadata_is_white(
+    renderer: _Renderer,
+    tag: str,
+    port: int,
+) -> None:
+    console = _RecordingConsole()
+    metadata = "(children:0,bytes:18)"
+    line = f"{tag}\t127.0.0.1\t{port}\t /clickhouse {metadata}"
+
+    assert renderer(console, line) is True
+    assert (metadata, "white") in console.paint_calls
+    assert any("/clickhouse" in text and color == "orange" for text, color in console.paint_calls)
 
 
 def test_render_colored_postgres_colors_caps_and_dbs() -> None:

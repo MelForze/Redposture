@@ -10,7 +10,7 @@ from typing import Any
 
 from ...clients import transport
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -579,10 +579,7 @@ def _nxc_prefix(record: dict[str, Any]) -> str:
 
 
 def _with_optional_keys(record: dict[str, Any], message: str) -> str:
-    key_count = record.get("key_count")
-    if not isinstance(key_count, int):
-        return f"{message} (keys:-)"
-    return f"{message} (keys:{key_count})"
+    return f"{message} (keys:{format_count_value(record.get('key_count'))})"
 
 
 def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> list[str]:

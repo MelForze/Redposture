@@ -17,7 +17,7 @@ from .exporters.trigger import scan_exporters_and_trigger
 from .listener_runtime import parse_services, start_listeners_for_trigger, stop_started_listeners
 from .logger import AttemptLogger
 from .profiles import load_profiles
-from .rendering import colorize_spans
+from .rendering import colorize_spans, format_count_value
 from .servers import RunningServer
 from .stage_runtime import start_command_progress
 from .utils import collect_scan_ports, collect_scan_target_specs, normalize_ip_literal, normalize_scan_host, utc_now_iso
@@ -477,7 +477,7 @@ def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogg
             err = str(record.get("error") or "").strip()
             if status in {"valid_credentials", "open_no_auth", "weak_default_creds"}:
                 key_count = record.get("key_count")
-                keys_part = f" (keys:{key_count})" if isinstance(key_count, int) else " (keys:-)"
+                keys_part = f" (keys:{format_count_value(key_count)})"
                 if status == "valid_credentials":
                     body = f"{cred_display}{keys_part}"
                 elif status == "weak_default_creds":

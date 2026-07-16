@@ -41,7 +41,13 @@ from ...clients.kafka import (
     open_kafka_socket,
 )
 from ...console import Console
-from ...rendering import CountColorRule, LiteralColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import (
+    CountColorRule,
+    LiteralColorRule,
+    format_count_value,
+    render_colored_marker_line,
+    render_tagged_detail_line,
+)
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -842,11 +848,7 @@ def _with_optional_topics(record: dict[str, Any], message: str) -> str:
     # to-right, and topics — the noisiest number — sits at the end.
     parts = [message]
     parts.extend(_cluster_permission_markers(record))
-    topic_count = record.get("topic_count")
-    if isinstance(topic_count, int):
-        parts.append(f"(topics:{topic_count})")
-    else:
-        parts.append("(topics:-)")
+    parts.append(f"(topics:{format_count_value(record.get('topic_count'))})")
     return " ".join(parts)
 
 
