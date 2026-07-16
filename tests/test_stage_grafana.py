@@ -27,7 +27,7 @@ from redposture_core.stage_grafana import (
     _verify_credentials,
     run_grafana_stage,
 )
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 def test_normalize_check_urls_builds_cartesian_product_for_targets_and_ports() -> None:
@@ -228,7 +228,7 @@ def test_run_temp_prometheus_check_success_and_failure(monkeypatch: pytest.Monke
     assert result["probe_ok"] is False
     assert result["probe_status"] == 502
     assert result["cleanup_ok"] is True
-    assert ("GET", "/api/datasources/proxy/12/debug/vars?x=1") in calls
+    assert ("GET", "/api/datasources/proxy/uid/uid-12/debug/vars?x=1") in calls
 
     invalid = _run_temp_prometheus_check("127.0.0.1", 3000, 1.0, None, "://bad")
     assert invalid["create_ok"] is False
@@ -712,8 +712,10 @@ def test_audit_grafana_targets_and_run_stage_paths(
         password: str | None,
         defcreds: bool,
         check_urls: list[str] | None,
+        *,
+        apitoken: str | None = None,
     ) -> dict[str, object]:
-        _ = (port, timeout, retries, username, password, defcreds, check_urls)
+        _ = (port, timeout, retries, username, password, defcreds, check_urls, apitoken)
         if host == "127.0.0.1":
             return {
                 "timestamp": "2026-03-27T00:00:00Z",
@@ -814,6 +816,9 @@ def test_audit_grafana_targets_and_run_stage_paths(
             _ = color
             return
 
+        def _paint(self, text: str, _color: str, _stream) -> str:
+            return text
+
         def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
@@ -857,15 +862,8 @@ def test_audit_grafana_targets_and_run_stage_paths(
     )
     assert any("--password is required when --username is set" in msg for msg in fake_console.errors)
 
-    monkeypatch.setattr(grafana_stage, "collect_scan_ports", lambda *_args, **_kwargs: [3000])
     monkeypatch.setattr(
-        grafana_stage,
-        "collect_scan_target_specs",
-        lambda *_args, **_kwargs: [SimpleNamespace(host="127.0.0.1", scheme=None, explicit_port=None)],
-    )
-    patch_runner_for_legacy_target_fake(
-        monkeypatch,
-        "grafana",
+        "redposture_core.stage_runtime.AuditCommandRunner.run_plan",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed")),
     )
     fake_console.errors.clear()
@@ -963,41 +961,28 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
             _ = color
             return
 
+        def _paint(self, text: str, _color: str, _stream) -> str:
+            return text
+
         def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
     fake_console = _FakeConsole()
     monkeypatch.setattr(grafana_stage, "Console", lambda debug=False: fake_console)
 
-    monkeypatch.setattr(grafana_stage, "collect_scan_ports", lambda *_args, **_kwargs: [3000])
-    monkeypatch.setattr(
-        grafana_stage,
-        "collect_scan_target_specs",
-        lambda *_args, **_kwargs: [
-            SimpleNamespace(host="host-a", scheme="http", explicit_port=3100),
-            SimpleNamespace(host="host-b", scheme="http", explicit_port=3200),
-            SimpleNamespace(host="host-c", scheme="http", explicit_port=3200),
-        ],
-    )
-    monkeypatch.setattr(
-        grafana_stage,
-        "build_scan_execution_groups",
-        lambda *_args, **_kwargs: [
-            SimpleNamespace(hosts=["host-a"], port=3100),
-            SimpleNamespace(hosts=["host-b", "host-c"], port=3200),
-        ],
-    )
+    calls: list[dict[str, object]] = []
 
-    seen_show_progress: list[bool] = []
+    def fake_host_stage(**kwargs):
+        calls.append(kwargs)
+        return {
+            "host": kwargs["host"],
+            "port": kwargs["port"],
+            "is_grafana": True,
+            "status": "auth_required",
+            "auth_required": True,
+        }
 
-    def _fake_audit_grafana_targets(*_args: object, **kwargs: object) -> tuple[int, int, int, int, int]:
-        seen_show_progress.append(bool(kwargs.get("show_progress")))
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        hosts = list(kwargs.get("hosts") or [])
-        return len(hosts), 0, 0, len(hosts), 0
-
-    patch_runner_for_legacy_target_fake(monkeypatch, "grafana", _fake_audit_grafana_targets)
+    patch_module_host_stage_for_test(monkeypatch, "grafana", fake_host_stage)
 
     created_totals: list[int] = []
     advanced_steps: list[int] = []
@@ -1016,6 +1001,9 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
             _ = (enabled, stream, leave)
             created_totals.append(total)
 
+        def add_total(self, step: int) -> None:
+            created_totals.append(int(step))
+
         def advance(self, step: int = 1) -> None:
             advanced_steps.append(step)
 
@@ -1024,8 +1012,7 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
             closed_count += 1
 
     monkeypatch.setattr(
-        grafana_stage,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
     )
 
@@ -1038,7 +1025,7 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
         defcreds=False,
         port=3000,
         ports=None,
-        targets="host-a,host-b,host-c",
+        targets="http://host-a:3100,http://host-b:3200,http://host-c:3200",
         hosts=None,
         hosts_file=None,
         ssrf_target=None,
@@ -1053,9 +1040,13 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
 
     assert rc == 0
     assert fake_console.errors == []
-    assert seen_show_progress == [False, False, False]
-    assert created_totals == [3]
-    assert advanced_steps == [1, 1, 1]
+    assert {(call["host"], call["port"]) for call in calls} == {
+        ("host-a", 3100),
+        ("host-b", 3200),
+        ("host-c", 3200),
+    }
+    assert created_totals == [3, 3]
+    assert advanced_steps == [1, 1, 1, 1, 1, 1]
     assert closed_count == 1
 
 

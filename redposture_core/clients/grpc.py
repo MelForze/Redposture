@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from google.protobuf import descriptor_pb2, descriptor_pool, json_format, message_factory
+from google.protobuf.message import DecodeError
 from h2.connection import H2Connection
 from h2.events import DataReceived, ResponseReceived, StreamEnded, StreamReset, TrailersReceived
 
@@ -24,6 +25,7 @@ from redposture_core.utils import utc_now_iso
 _GRPC_AUTH_CODES = {7, 16}
 _GRPC_OK = 0
 _GRPC_UNIMPLEMENTED = 12
+_GRPC_METADATA_KEY_RE = re.compile(r"[0-9a-z!#$%&'*+\-.^_`|~]+", re.ASCII)
 
 
 def _friendly_error_text(value: str) -> str:
@@ -839,7 +841,10 @@ def _descriptor_bytes_to_pool(descriptor_bytes: list[bytes]) -> tuple[descriptor
 def _descriptor_bytes_from_protoset(path: str) -> list[bytes]:
     payload = Path(path).read_bytes()
     descriptor_set = descriptor_pb2.FileDescriptorSet()
-    descriptor_set.ParseFromString(payload)
+    try:
+        descriptor_set.ParseFromString(payload)
+    except DecodeError as exc:
+        raise ValueError(f"invalid protoset {path!r}: {exc}") from exc
     return [fd.SerializeToString() for fd in descriptor_set.file]
 
 
@@ -924,6 +929,8 @@ def _parse_metadata_items(values: list[str] | None) -> list[tuple[str, str]]:
             raise ValueError("--meta must use key=value")
         if key.startswith(":"):
             raise ValueError("--meta cannot set HTTP/2 pseudo headers")
+        if _GRPC_METADATA_KEY_RE.fullmatch(key) is None:
+            raise ValueError(f"--meta contains invalid metadata key {key!r}")
         if key in {"content-type", "te", "user-agent", "authorization"}:
             raise ValueError(f"--meta cannot override reserved header {key}")
         result.append((key, value))
@@ -976,6 +983,8 @@ def _invoke_unary_method(
             "elapsed_ms": None,
         }
     )
+    if metadata:
+        result["metadata"] = [{"key": key, "value": value} for key, value in metadata]
     try:
         pool, pool_errors = _descriptor_bytes_to_pool(descriptor_bytes)
         if pool_errors:

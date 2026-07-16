@@ -13,6 +13,7 @@ import time
 import urllib.error
 import urllib.parse
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig
@@ -35,6 +36,22 @@ _STAGE_DETECT_PROTOCOL = "detect_protocol"
 _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
+
+
+@dataclass
+class KubeApiLifecycleState:
+    use_https: bool = True
+    insecure: bool = False
+    tls_auto_insecure: bool = False
+    ca_file: str | None = None
+    anonymous_namespaces: list[str] | None = None
+    access_namespaces: list[str] | None = None
+    token: str | None = None
+    username: str | None = None
+    password: str | None = None
+    deep_record: dict[str, Any] | None = None
+
+
 _THREAD_LOCAL_DEBUG_EMIT = threading.local()
 
 
@@ -1841,6 +1858,266 @@ def _render_colored_kubeapi_line(console: Console, line: str) -> bool:
     if line.startswith(_KUBE_TAG) and "\t" in line:
         return render_tagged_detail_line(console, line, tag=_KUBE_TAG, default_color="orange")
     return False
+
+
+def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, KubeApiLifecycleState):
+        raise TypeError("kubeapi lifecycle state is unavailable")
+    target_scheme = str(ctx.target.scheme or "").lower() if ctx.target is not None else ""
+    state.use_https = (
+        target_scheme == "https" if target_scheme in {"http", "https"} else bool(getattr(ctx.args, "https", True))
+    )
+    state.insecure = bool(getattr(ctx.args, "insecure", False))
+    state.ca_file = getattr(ctx.args, "ca_file", None) or getattr(ctx.args, "tls_ca", None)
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    last_error: str | None = None
+    for attempt in range(attempts):
+        started = time.monotonic()
+        version_status, version_payload, _headers, version_error = _api_get_json(
+            str(ctx.host),
+            int(ctx.port),
+            "/version",
+            float(getattr(ctx.args, "timeout", 5.0)),
+            use_https=state.use_https,
+            insecure=state.insecure,
+            ca_file=state.ca_file,
+        )
+        api_status, api_payload, _headers, api_error = _api_get_json(
+            str(ctx.host),
+            int(ctx.port),
+            "/api",
+            float(getattr(ctx.args, "timeout", 5.0)),
+            use_https=state.use_https,
+            insecure=state.insecure,
+            ca_file=state.ca_file,
+        )
+        if (
+            state.use_https
+            and not state.insecure
+            and (_is_tls_verify_error(version_error) or _is_tls_verify_error(api_error))
+        ):
+            state.insecure = True
+            state.tls_auto_insecure = True
+            version_status, version_payload, _headers, version_error = _api_get_json(
+                str(ctx.host),
+                int(ctx.port),
+                "/version",
+                float(getattr(ctx.args, "timeout", 5.0)),
+                use_https=True,
+                insecure=True,
+                ca_file=state.ca_file,
+            )
+            api_status, api_payload, _headers, api_error = _api_get_json(
+                str(ctx.host),
+                int(ctx.port),
+                "/api",
+                float(getattr(ctx.args, "timeout", 5.0)),
+                use_https=True,
+                insecure=True,
+                ca_file=state.ca_file,
+            )
+        version = _kube_version_text(version_payload)
+        is_kubeapi = (
+            bool(version) or _looks_like_kube_api_payload(api_payload) or _looks_like_kube_api_payload(version_payload)
+        )
+        if not is_kubeapi:
+            last_error = version_error or api_error
+            if last_error and attempt < attempts - 1:
+                time.sleep(_retry_delay(attempt))
+                continue
+            return {
+                "timestamp": utc_now_iso(),
+                "host": str(ctx.host),
+                "port": int(ctx.port),
+                "https": state.use_https,
+                "insecure_effective": state.insecure,
+                "tls_auto_insecure": state.tls_auto_insecure,
+                "is_kubeapi": False,
+                "status": "fail" if last_error else "not_kubeapi",
+                "version": version,
+                "auth_required": None,
+                "error": last_error,
+            }
+        namespaces, ns_status, ns_error = _list_namespaces(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            use_https=state.use_https,
+            insecure=state.insecure,
+            ca_file=state.ca_file,
+        )
+        state.anonymous_namespaces = namespaces
+        state.access_namespaces = namespaces
+        auth_required = False if namespaces is not None else True if ns_status in {401, 403} else None
+        return {
+            "timestamp": utc_now_iso(),
+            "host": str(ctx.host),
+            "port": int(ctx.port),
+            "https": state.use_https,
+            "insecure_effective": state.insecure,
+            "tls_auto_insecure": state.tls_auto_insecure,
+            "is_kubeapi": True,
+            "status": "open_no_auth" if auth_required is False else "auth_required" if auth_required else "detected",
+            "version": version,
+            "auth_required": auth_required,
+            "auth_mode": "none",
+            "auth_valid": None,
+            "auth_error": None,
+            "namespace_filters": list(options["namespace_filters"]),
+            "show_namespaces": bool(options["show_namespaces"]),
+            "show_pods": bool(options["show_pods"]),
+            "show_secrets": bool(options["show_secrets"]),
+            "exec_pod": options["exec_pod"],
+            "exec_command": options["exec_command"],
+            "exec_result": None,
+            "namespaces": [],
+            "pods": [],
+            "secrets": [],
+            "namespaces_error": ns_error,
+            "pods_error": None,
+            "secrets_error": None,
+            "can_list_namespaces": True if namespaces is not None else False if ns_status in {401, 403} else None,
+            "can_list_pods": None,
+            "can_list_secrets": None,
+            "can_exec_pod": None,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "error": None,
+        }
+    raise AssertionError("unreachable")
+
+
+def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, KubeApiLifecycleState):
+        raise TypeError("kubeapi lifecycle state is unavailable")
+    record = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
+    credential = ctx.credential
+    if credential.token is None and credential.username is None and credential.password is None:
+        return record
+    namespaces, status, error = _list_namespaces(
+        str(ctx.host),
+        int(ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        use_https=state.use_https,
+        insecure=state.insecure,
+        ca_file=state.ca_file,
+        token=credential.token,
+        username=credential.username,
+        password=credential.password,
+    )
+    ok = namespaces is not None
+    anonymous_open = state.anonymous_namespaces is not None
+    if ok:
+        state.access_namespaces = namespaces
+        state.token, state.username, state.password = credential.token, credential.username, credential.password
+    record.update(
+        {
+            "timestamp": utc_now_iso(),
+            "status": "auth_valid" if ok else "invalid_credentials_anonymous" if anonymous_open else "auth_failed",
+            "auth_mode": "token" if credential.token else "basic",
+            "auth_valid": bool(ok),
+            "auth_error": None if ok else error or f"authentication failed status={status}",
+            "namespaces_error": None if ok else error,
+            "can_list_namespaces": bool(ok) or anonymous_open,
+        }
+    )
+    return record
+
+
+def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, KubeApiLifecycleState):
+        raise TypeError("kubeapi lifecycle state is unavailable")
+    if state.deep_record is not None:
+        return state.deep_record
+    record = dict(source_record.to_dict() if hasattr(source_record, "to_dict") else source_record)
+    token, username, password = state.token, state.username, state.password
+    if str(record.get("status") or "") == "invalid_credentials_anonymous":
+        token = username = password = None
+        state.access_namespaces = state.anonymous_namespaces
+    namespaces_out = list(state.access_namespaces or []) if options["show_namespaces"] else []
+    pods_out: list[dict[str, Any]] = []
+    secrets_out: list[dict[str, Any]] = []
+    pods_error: str | None = None
+    secrets_error: str | None = None
+    if options["show_pods"] or (options["exec_pod"] and not options["namespace_filters"]):
+        pods, pods_error = _list_pods(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            use_https=state.use_https,
+            insecure=state.insecure,
+            ca_file=state.ca_file,
+            namespaces=list(options["namespace_filters"]),
+            token=token,
+            username=username,
+            password=password,
+        )
+        pods_out = list(pods or [])
+    if options["show_secrets"]:
+        secrets, secrets_error = _list_secrets(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            use_https=state.use_https,
+            insecure=state.insecure,
+            ca_file=state.ca_file,
+            namespaces=list(options["namespace_filters"]),
+            token=token,
+            username=username,
+            password=password,
+        )
+        secrets_out = list(secrets or [])
+    exec_result: dict[str, Any] | None = None
+    if options["exec_pod"] and options["exec_command"]:
+        resolved_ns, resolved_pod, resolve_error = _resolve_exec_pod_target(
+            options["exec_pod"],
+            list(options["namespace_filters"]),
+            pods_out or None,
+        )
+        if resolve_error:
+            exec_result = {
+                "namespace": None,
+                "pod": options["exec_pod"],
+                "command": options["exec_command"],
+                "ok": False,
+                "stdout": "",
+                "stderr": "",
+                "error": resolve_error,
+                "exit_code": None,
+            }
+        else:
+            exec_result = _kube_exec_ws(
+                str(ctx.host),
+                int(ctx.port),
+                resolved_ns or "",
+                resolved_pod or "",
+                str(options["exec_command"]),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                use_https=state.use_https,
+                insecure=state.insecure,
+                ca_file=state.ca_file,
+                token=token,
+                username=username,
+                password=password,
+            )
+    record.update(
+        {
+            "namespaces": namespaces_out,
+            "pods": pods_out if options["show_pods"] else [],
+            "secrets": secrets_out,
+            "exec_result": exec_result,
+            "namespaces_error": None,
+            "pods_error": pods_error,
+            "secrets_error": secrets_error,
+            "can_list_pods": None if not options["show_pods"] else pods_error is None,
+            "can_list_secrets": None if not options["show_secrets"] else secrets_error is None,
+            "can_exec_pod": None if exec_result is None else bool(exec_result.get("ok")),
+        }
+    )
+    state.deep_record = record
+    return record
 
 
 # Typed runner boundary -----------------------------------------------------

@@ -15,6 +15,8 @@
     "cluster_error": null,
     "cluster_health": null,
     "cluster_nodes": null,
+    "credentials_source": "anonymous",
+    "defcreds_enabled": false,
     "detect_confidence": "high",
     "detect_probe_trace": [
       {
@@ -47,7 +49,7 @@
     "effective_username": null,
     "endpoint_diagnostics": null,
     "endpoints_error": null,
-    "error": null,
+    "error": "authentication failed",
     "host": "127.0.0.1",
     "insecure_effective": false,
     "is_elastic": true,
@@ -76,7 +78,7 @@
       },
       {
         "attempt": 1,
-        "error": "authentication failed",
+        "error": null,
         "result": "auth_required",
         "stage_name": "auth_inference_credentials"
       }

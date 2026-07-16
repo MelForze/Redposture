@@ -12,6 +12,12 @@
         "source": "default",
         "status": "auth_required",
         "username": "pgbouncer"
+      },
+      {
+        "password": "pgbouncer_exporter",
+        "source": "default",
+        "status": "auth_required",
+        "username": "pgbouncer_exporter"
       }
     ],
     "auth_database": "postgres",
@@ -24,13 +30,15 @@
     "database_names": null,
     "defcreds_enabled": true,
     "dump_row_limit": null,
-    "effective_username": "pgbouncer",
-    "error": "password authentication failed for user \"pgbouncer\"",
+    "effective_username": "pgbouncer_exporter",
+    "error": "password authentication failed for user \"pgbouncer_exporter\"",
+    "error_kind": "authentication_failed",
     "execute_attempted": false,
     "execute_command": null,
     "execute_error": null,
     "execute_ok": null,
     "execute_output": null,
+    "failure_phase": "startup",
     "host": "127.0.0.1",
     "is_postgres": true,
     "module": "postgres",
@@ -47,7 +55,7 @@
     "privesc_summary": {},
     "provided_credentials": false,
     "provided_password": null,
-    "provided_username": "pgbouncer",
+    "provided_username": "pgbouncer_exporter",
     "readable_tables": null,
     "service": "postgres",
     "show_columns": false,
@@ -59,6 +67,7 @@
     "sql_error": null,
     "sql_ok": null,
     "sql_output": null,
+    "sqlstate": "28P01",
     "stages": [
       {
         "attempt": 1,

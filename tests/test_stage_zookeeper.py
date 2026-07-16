@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import re
 import struct
-from collections import Counter
 from types import SimpleNamespace
 
 import pytest
 
 import redposture_core.stage_zookeeper as zookeeper_stage
+from redposture_core.audit_models import AuditRecord
+from redposture_core.modules.zookeeper import actions as lifecycle_actions
 from redposture_core.stage_zookeeper import (
     _ZK_ERR_NOAUTH,
     _ZK_ERR_NONODE,
@@ -32,12 +33,46 @@ from redposture_core.stage_zookeeper import (
     _send_frame,
     run_zookeeper_stage,
 )
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 def _zk_string(value: str) -> bytes:
     raw = value.encode("utf-8")
     return struct.pack(">i", len(raw)) + raw
+
+
+def _zookeeper_host_record(
+    kwargs: dict[str, object],
+    *,
+    status: str,
+    detected: bool,
+    error: str | None = None,
+) -> AuditRecord:
+    deep = bool(kwargs.get("run_deep_checks"))
+    query_znode = kwargs.get("query_znode")
+    return AuditRecord(
+        host=str(kwargs["host"]),
+        port=int(kwargs["port"]),
+        service="zookeeper",
+        module="zookeeper",
+        status=status,
+        auth_required=status == "auth_required",
+        extra={
+            "is_zookeeper": detected,
+            "error": error,
+            "provided_username": kwargs.get("username"),
+            "provided_password": kwargs.get("password"),
+            "show_znodes": bool(kwargs.get("show_znodes")),
+            "dump": bool(kwargs.get("dump")),
+            "query_znode": query_znode,
+            "znode_count": 1 if detected else None,
+            "znodes": ["/demo"] if deep else None,
+            "znode_values": ["/demo:value"] if deep and bool(kwargs.get("dump")) else None,
+            "query_znode_value": f"{query_znode}:value" if deep and query_znode else None,
+            "create_allowed": False if detected else None,
+            "delete_allowed": False if detected else None,
+        },
+    )
 
 
 class _QueuedSocket:
@@ -2114,6 +2149,9 @@ def test_run_zookeeper_stage_validation_and_oserror(monkeypatch: pytest.MonkeyPa
             _ = color
             return
 
+        def _paint(self, text: str, _color: str, _stream: object) -> str:
+            return text
+
         def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
@@ -2162,9 +2200,8 @@ def test_run_zookeeper_stage_validation_and_oserror(monkeypatch: pytest.MonkeyPa
         "redposture_core.stage_zookeeper.collect_scan_targets",
         lambda *_args, **_kwargs: ["127.0.0.1"],
     )
-    patch_runner_for_legacy_target_fake(
-        monkeypatch,
-        "zookeeper",
+    monkeypatch.setattr(
+        "redposture_core.modules.zookeeper.stage.AuditCommandRunner.run_plan",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed")),
     )
 
@@ -2192,6 +2229,9 @@ def test_run_zookeeper_stage_trims_and_forwards_credentials(monkeypatch: pytest.
             _ = color
             return
 
+        def _paint(self, text: str, _color: str, _stream: object) -> str:
+            return text
+
         def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
@@ -2201,12 +2241,12 @@ def test_run_zookeeper_stage_trims_and_forwards_credentials(monkeypatch: pytest.
     monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_args, **_kwargs: [2181])
     monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
-    def _fake_audit(*_args, **kwargs):
+    def _fake_audit(**kwargs):
         captured["username"] = kwargs.get("username")
         captured["password"] = kwargs.get("password")
-        return (1, 0, 0, 1, 0)
+        return _zookeeper_host_record(kwargs, status="valid_credentials", detected=True)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", _fake_audit)
+    patch_module_host_stage_for_test(monkeypatch, "zookeeper", _fake_audit)
 
     args = SimpleNamespace(
         debug=False,
@@ -2279,7 +2319,7 @@ def test_run_zookeeper_stage_multi_port_uses_single_global_progress(monkeypatch:
 
     monkeypatch.setattr("redposture_core.stage_zookeeper.Console", _FakeConsole)
     monkeypatch.setattr(
-        "redposture_core.stage_zookeeper.start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
     )
     monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_args, **_kwargs: [2181, 2182])
@@ -2287,13 +2327,11 @@ def test_run_zookeeper_stage_multi_port_uses_single_global_progress(monkeypatch:
 
     captured: list[dict[str, object]] = []
 
-    def _fake_audit(*_args, **kwargs):
-        captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (len(kwargs["hosts"]), 1, 0, 0, 0)
+    def _fake_audit(**kwargs):
+        captured.append(dict(kwargs))
+        return _zookeeper_host_record(kwargs, status="fail", detected=False, error="connection refused")
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", _fake_audit)
+    patch_module_host_stage_for_test(monkeypatch, "zookeeper", _fake_audit)
 
     args = SimpleNamespace(
         debug=False,
@@ -2318,7 +2356,8 @@ def test_run_zookeeper_stage_multi_port_uses_single_global_progress(monkeypatch:
     rc = run_zookeeper_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
     assert len(captured) == 2
-    assert all(call["show_progress"] is False for call in captured)
+    assert [call["port"] for call in captured] == [2181, 2182]
+    assert all(call["run_deep_checks"] is False for call in captured)
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
     assert progress.total == 2
@@ -2635,6 +2674,9 @@ def test_run_stage_additional_error_paths_and_output_modes(monkeypatch: pytest.M
             _ = color
             self.plain_lines.append(message)
 
+        def _paint(self, text: str, _color: str, _stream: object) -> str:
+            return text
+
         def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
@@ -2690,7 +2732,16 @@ def test_run_stage_additional_error_paths_and_output_modes(monkeypatch: pytest.M
     )
     assert any("zookeeper requires -t/--targets" in msg for msg in fake_console.errors)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", lambda *_args, **_kwargs: (1, 0, 0, 0, 1))
+    patch_module_host_stage_for_test(
+        monkeypatch,
+        "zookeeper",
+        lambda **kwargs: _zookeeper_host_record(
+            kwargs,
+            status="fail",
+            detected=False,
+            error="connection refused",
+        ),
+    )
     fake_console.warns.clear()
     fake_console.infos.clear()
     rc = run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None))
@@ -2702,16 +2753,14 @@ def test_run_stage_additional_error_paths_and_output_modes(monkeypatch: pytest.M
     printed: list[str] = []
     monkeypatch.setattr("builtins.print", lambda *a, **_k: printed.append(" ".join(str(x) for x in a)))
 
-    def fake_audit_json(*_args, **kwargs):
-        emit = kwargs.get("emit_line")
-        if emit:
-            emit('{"k":"v"}')
-        return (1, 1, 0, 0, 0)
+    def fake_audit_json(**kwargs):
+        return _zookeeper_host_record(kwargs, status="open_no_auth", detected=True)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", fake_audit_json)
+    patch_module_host_stage_for_test(monkeypatch, "zookeeper", fake_audit_json)
     rc = run_zookeeper_stage(SimpleNamespace(**args_json), logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
-    assert '{"k":"v"}' in fake_console.plain_lines or '{"k":"v"}' in printed
+    json_lines = [line for line in fake_console.plain_lines + printed if line.startswith("{")]
+    assert any('"status": "open_no_auth"' in line for line in json_lines)
 
 
 def test_friendly_error_extra_branches_and_decode_edge_cases() -> None:
@@ -2987,14 +3036,10 @@ def test_render_color_extra_markers_and_run_stage_debug_output(monkeypatch: pyte
     monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_a, **_k: [2181])
     monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_a, **_k: ["127.0.0.1"])
 
-    def fake_audit(*_args, **kwargs):
-        emit = kwargs.get("emit_line")
-        if emit:
-            emit("ZOOKEEPER\t127.0.0.1\t2181\t payload-only-line")
-            emit("ZOOKEEPER\t127.0.0.1\t2181\t [*] marker-line")
-        return (1, 1, 0, 0, 0)
+    def fake_audit(**kwargs):
+        return _zookeeper_host_record(kwargs, status="open_no_auth", detected=True)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", fake_audit)
+    patch_module_host_stage_for_test(monkeypatch, "zookeeper", fake_audit)
     args = SimpleNamespace(
         debug=True,
         timeout=1.0,
@@ -3554,16 +3599,10 @@ def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch:
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._render_colored_zookeeper_line", _fake_render_colored)
 
-    def _fake_stage_audit(*_args, **kwargs):
-        emit = kwargs.get("emit_line")
-        if emit:
-            emit("ZOOKEEPER\t127.0.0.1\t2181\t payload-tagged-line")
-            emit("ZOOKEEPER\t127.0.0.1\t2181\t payload-plain-line")
-            emit("ZOOKEEPER\t127.0.0.1\t2181\t [*] marker-line")
-            emit("raw debug payload")
-        return (1, 1, 0, 0, 0)
+    def _fake_stage_audit(**kwargs):
+        return _zookeeper_host_record(kwargs, status="open_no_auth", detected=True)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", _fake_stage_audit)
+    patch_module_host_stage_for_test(monkeypatch, "zookeeper", _fake_stage_audit)
     assert (
         zookeeper_stage._render_colored_zookeeper_line(fake_console, "ZOOKEEPER\t127.0.0.1\t2181\t plain line") is False
     )
@@ -3614,7 +3653,7 @@ def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch:
             "dump": True,
             "znode": "/demo",
             "targets": "127.0.0.1",
-            "hosts_file": "hosts.txt",
+            "hosts_file": None,
             "output": None,
             "output_format": "txt",
         }
@@ -3622,8 +3661,7 @@ def test_audit_targets_detail_emit_and_run_stage_remaining_branches(monkeypatch:
     rc_debug_stdout = run_zookeeper_stage(args_debug_stdout, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc_debug_stdout == 0
     assert any("zookeeper audit started: format=txt" in msg for msg in fake_console.infos)
-    assert any("payload-plain-line" in line for line in fake_console.plain_lines)
-    assert "raw debug payload" in fake_console.plain_lines
+    assert any("anonymous access" in line or "/demo" in line for line in fake_console.plain_lines)
 
     args_debug_file = SimpleNamespace(
         **{
@@ -3730,27 +3768,13 @@ def test_run_stage_debug_summaries(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_ports", lambda *_a, **_k: [2181])
     monkeypatch.setattr("redposture_core.stage_zookeeper.collect_scan_targets", lambda *_a, **_k: ["127.0.0.1"])
 
-    def _fake_audit(*_args, **kwargs):
+    def _fake_audit(**kwargs):
         debug_emit = kwargs.get("debug_emit")
-        debug_stats = kwargs.get("debug_stats")
         if callable(debug_emit):
             debug_emit("127.0.0.1:2181 attempt=1/1 start timeout=1.0s")
-        if isinstance(debug_stats, dict):
-            debug_stats["timing_sums"] = Counter(
-                {"connect_ms": 10, "auth_ms": 5, "enumerate_ms": 30, "dump_ms": 0, "elapsed_ms": 55}
-            )
-            debug_stats["timing_counts"] = Counter({"connect_ms": 1, "auth_ms": 1, "enumerate_ms": 1, "elapsed_ms": 1})
-            debug_stats["timing_max"] = Counter(
-                {"connect_ms": 10, "auth_ms": 5, "enumerate_ms": 30, "dump_ms": 0, "elapsed_ms": 55}
-            )
-            debug_stats["auth_sources"] = Counter({"root_ok": 1})
-            debug_stats["error_counts"] = Counter({"connect:connection timeout": 2, "query:NOAUTH": 1})
-        emit = kwargs.get("emit_line")
-        if callable(emit):
-            emit("ZOOKEEPER\t127.0.0.1\t2181\t [*] marker-line")
-        return (1, 1, 0, 0, 0)
+        return _zookeeper_host_record(kwargs, status="open_no_auth", detected=True)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "zookeeper", _fake_audit)
+    patch_module_host_stage_for_test(monkeypatch, "zookeeper", _fake_audit)
     args = SimpleNamespace(
         debug=True,
         timeout=1.0,
@@ -3831,3 +3855,160 @@ def test_call_audit_zookeeper_wrapper_propagates_unexpected_typeerror(monkeypatc
             1,
             None,
         )
+
+
+def _lifecycle_options() -> dict[str, object]:
+    return {
+        "show_znodes": False,
+        "dump": False,
+        "dump_limit": None,
+        "query_znode": None,
+        "max_znodes": 100,
+        "transport_config": None,
+    }
+
+
+def test_lifecycle_detect_exhausted_retries_emit_coherent_protocol_traces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connects = 0
+
+    class FakeClient:
+        def connect(self) -> None:
+            nonlocal connects
+            connects += 1
+            raise ConnectionRefusedError(61, "Connection refused")
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: FakeClient(),
+    )
+    monkeypatch.setattr(lifecycle_actions.time, "sleep", lambda _delay: None)
+    ctx = SimpleNamespace(
+        lifecycle_state=lifecycle_actions.ZooKeeperLifecycleState(),
+        args=SimpleNamespace(retries=2, timeout=0.1),
+        host="127.0.0.1",
+        port=12181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+    )
+
+    record = lifecycle_actions.detect_zookeeper(ctx, _lifecycle_options())
+
+    assert connects == 3
+    assert record["status"] == "fail"
+    assert record["is_zookeeper"] is False
+    stages = record["stages"]
+    assert [stage["attempt"] for stage in stages] == [1, 2, 3]
+    assert [stage["result"] for stage in stages] == ["retry", "retry", "fail"]
+    assert {stage["stage_name"] for stage in stages} == {"detect_protocol"}
+    assert {stage["error"] for stage in stages} == {record["error"]}
+    assert record["connect_error"] == record["error"]
+    assert record["stage_failed_at"] == "detect_protocol"
+    assert record["stage_attempts"] == {"detect_protocol": 3}
+    assert record["stage_durations_ms"] == {"detect_protocol": sum(int(stage["duration_ms"]) for stage in stages)}
+
+
+def test_lifecycle_detect_success_defers_complete_stage_contract_to_runner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class FakeClient:
+        selected_transport = "plaintext"
+
+        def connect(self) -> None:
+            events.append("connect")
+
+        def get_children2(self, path: str):
+            events.append(f"children:{path}")
+            return [], _ZK_ERR_OK, {}
+
+        def close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: FakeClient(),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_infer_auth_required_from_anonymous_probes",
+        lambda *_args, **_kwargs: (False, "root_ok", ["/:ok"]),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=lifecycle_actions.ZooKeeperLifecycleState(),
+        args=SimpleNamespace(retries=3, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+    )
+
+    record = lifecycle_actions.detect_zookeeper(ctx, _lifecycle_options())
+
+    assert events == ["connect", "children:/"]
+    assert record["status"] == "open_no_auth"
+    assert record["stages"] == []
+    assert record["stage_durations_ms"] == {}
+    assert record["stage_attempts"] == {}
+
+
+def test_lifecycle_auth_refresh_preserves_runner_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeClient:
+        def connect(self) -> None:
+            return
+
+        def auth_digest(self, _username: str, _password: str):
+            return True, None
+
+        def get_children2(self, _path: str):
+            return [], _ZK_ERR_OK, {}
+
+        def close(self) -> None:
+            return
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(root_err=_ZK_ERR_NOAUTH, auth_required=True)
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: FakeClient(),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username="user", password="pass", source="provided"),
+    )
+    detect_record = {
+        "host": "127.0.0.1",
+        "port": 2181,
+        "status": "auth_required",
+        "stages": [
+            {
+                "stage_name": "detect_protocol",
+                "attempt": 1,
+                "duration_ms": 7,
+                "result": "ok",
+                "error": None,
+            }
+        ],
+        "stage_failed_at": None,
+        "stage_durations_ms": {"detect_protocol": 7},
+        "stage_attempts": {"detect_protocol": 1},
+        "debug_events": ["detect event"],
+        "debug_events_streamed": True,
+    }
+
+    record = lifecycle_actions.authenticate_zookeeper(ctx, detect_record, _lifecycle_options())
+
+    assert record["status"] == "valid_credentials"
+    assert record["stages"] == detect_record["stages"]
+    assert record["stage_durations_ms"] == {"detect_protocol": 7}
+    assert record["stage_attempts"] == {"detect_protocol": 1}
+    assert record["debug_events"] == ["detect event"]
+    assert record["debug_events_streamed"] is True

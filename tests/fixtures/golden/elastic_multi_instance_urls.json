@@ -10,7 +10,46 @@
     "can_manage_security": null,
     "can_read": null,
     "can_write": null,
-    "cat_endpoints": null,
+    "cat_endpoints": [
+      "/_cat/aliases",
+      "/_cat/aliases/",
+      "/_cat/allocation",
+      "/_cat/count",
+      "/_cat/count/",
+      "/_cat/fielddata",
+      "/_cat/fielddata/",
+      "/_cat/health",
+      "/_cat/indices",
+      "/_cat/indices/",
+      "/_cat/master",
+      "/_cat/ml/anomaly_detectors/",
+      "/_cat/ml/data_frame/analytics",
+      "/_cat/ml/data_frame/analytics/",
+      "/_cat/ml/datafeeds",
+      "/_cat/ml/datafeeds/",
+      "/_cat/ml/trained_models",
+      "/_cat/ml/trained_models/",
+      "/_cat/nodeattrs",
+      "/_cat/nodes",
+      "/_cat/pending_tasks",
+      "/_cat/plugins",
+      "/_cat/recovery",
+      "/_cat/recovery/",
+      "/_cat/repositories",
+      "/_cat/segments",
+      "/_cat/segments/",
+      "/_cat/shards",
+      "/_cat/shards/",
+      "/_cat/snapshots/",
+      "/_cat/tasks",
+      "/_cat/templates",
+      "/_cat/thread_pool",
+      "/_cat/thread_pool/",
+      "/_cat/transforms",
+      "/_cat/transforms/",
+      "/_ingest/pipeline",
+      "/_remote/info"
+    ],
     "cat_plugins": null,
     "cluster_error": null,
     "cluster_health": null,
@@ -48,7 +87,213 @@
     "discover_error": null,
     "discover_results": null,
     "effective_username": null,
-    "endpoint_diagnostics": null,
+    "endpoint_diagnostics": [
+      {
+        "endpoint": "/_cat?help",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/allocation",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/component_templates/_cat/ml/anomaly_detectors",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/count",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/count/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/health",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/master",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/anomaly_detectors/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodeattrs",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodes",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/pending_tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/plugins",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/repositories",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/snapshots/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/templates",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_ingest/pipeline",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_remote/info",
+        "error": null,
+        "status": 200
+      }
+    ],
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
@@ -67,7 +312,7 @@
     "scheme": "http",
     "service": "elastic",
     "show_cluster": false,
-    "show_endpoints": false,
+    "show_endpoints": true,
     "show_plugins": false,
     "show_users": false,
     "stages": [
@@ -82,18 +327,6 @@
         "error": null,
         "result": "open_no_auth",
         "stage_name": "auth_inference_credentials"
-      },
-      {
-        "attempt": 1,
-        "error": "no auth provided",
-        "result": "skipped",
-        "stage_name": "access_capabilities"
-      },
-      {
-        "attempt": 1,
-        "error": null,
-        "result": "skipped",
-        "stage_name": "data"
       }
     ],
     "status": "open_no_auth",
@@ -112,7 +345,46 @@
     "can_manage_security": null,
     "can_read": null,
     "can_write": null,
-    "cat_endpoints": null,
+    "cat_endpoints": [
+      "/_cat/aliases",
+      "/_cat/aliases/",
+      "/_cat/allocation",
+      "/_cat/count",
+      "/_cat/count/",
+      "/_cat/fielddata",
+      "/_cat/fielddata/",
+      "/_cat/health",
+      "/_cat/indices",
+      "/_cat/indices/",
+      "/_cat/master",
+      "/_cat/ml/anomaly_detectors/",
+      "/_cat/ml/data_frame/analytics",
+      "/_cat/ml/data_frame/analytics/",
+      "/_cat/ml/datafeeds",
+      "/_cat/ml/datafeeds/",
+      "/_cat/ml/trained_models",
+      "/_cat/ml/trained_models/",
+      "/_cat/nodeattrs",
+      "/_cat/nodes",
+      "/_cat/pending_tasks",
+      "/_cat/plugins",
+      "/_cat/recovery",
+      "/_cat/recovery/",
+      "/_cat/repositories",
+      "/_cat/segments",
+      "/_cat/segments/",
+      "/_cat/shards",
+      "/_cat/shards/",
+      "/_cat/snapshots/",
+      "/_cat/tasks",
+      "/_cat/templates",
+      "/_cat/thread_pool",
+      "/_cat/thread_pool/",
+      "/_cat/transforms",
+      "/_cat/transforms/",
+      "/_ingest/pipeline",
+      "/_remote/info"
+    ],
     "cat_plugins": null,
     "cluster_error": null,
     "cluster_health": null,
@@ -150,7 +422,213 @@
     "discover_error": null,
     "discover_results": null,
     "effective_username": null,
-    "endpoint_diagnostics": null,
+    "endpoint_diagnostics": [
+      {
+        "endpoint": "/_cat?help",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/allocation",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/component_templates/_cat/ml/anomaly_detectors",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/count",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/count/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/health",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/master",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/anomaly_detectors/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodeattrs",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodes",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/pending_tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/plugins",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/repositories",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/snapshots/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/templates",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_ingest/pipeline",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_remote/info",
+        "error": null,
+        "status": 200
+      }
+    ],
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
@@ -169,7 +647,7 @@
     "scheme": "http",
     "service": "elastic",
     "show_cluster": false,
-    "show_endpoints": false,
+    "show_endpoints": true,
     "show_plugins": false,
     "show_users": false,
     "stages": [
@@ -184,18 +662,6 @@
         "error": null,
         "result": "open_no_auth",
         "stage_name": "auth_inference_credentials"
-      },
-      {
-        "attempt": 1,
-        "error": "no auth provided",
-        "result": "skipped",
-        "stage_name": "access_capabilities"
-      },
-      {
-        "attempt": 1,
-        "error": null,
-        "result": "skipped",
-        "stage_name": "data"
       }
     ],
     "status": "open_no_auth",
@@ -214,7 +680,46 @@
     "can_manage_security": null,
     "can_read": null,
     "can_write": null,
-    "cat_endpoints": null,
+    "cat_endpoints": [
+      "/_cat/aliases",
+      "/_cat/aliases/",
+      "/_cat/allocation",
+      "/_cat/count",
+      "/_cat/count/",
+      "/_cat/fielddata",
+      "/_cat/fielddata/",
+      "/_cat/health",
+      "/_cat/indices",
+      "/_cat/indices/",
+      "/_cat/master",
+      "/_cat/ml/anomaly_detectors/",
+      "/_cat/ml/data_frame/analytics",
+      "/_cat/ml/data_frame/analytics/",
+      "/_cat/ml/datafeeds",
+      "/_cat/ml/datafeeds/",
+      "/_cat/ml/trained_models",
+      "/_cat/ml/trained_models/",
+      "/_cat/nodeattrs",
+      "/_cat/nodes",
+      "/_cat/pending_tasks",
+      "/_cat/plugins",
+      "/_cat/recovery",
+      "/_cat/recovery/",
+      "/_cat/repositories",
+      "/_cat/segments",
+      "/_cat/segments/",
+      "/_cat/shards",
+      "/_cat/shards/",
+      "/_cat/snapshots/",
+      "/_cat/tasks",
+      "/_cat/templates",
+      "/_cat/thread_pool",
+      "/_cat/thread_pool/",
+      "/_cat/transforms",
+      "/_cat/transforms/",
+      "/_ingest/pipeline",
+      "/_remote/info"
+    ],
     "cat_plugins": null,
     "cluster_error": null,
     "cluster_health": null,
@@ -252,7 +757,213 @@
     "discover_error": null,
     "discover_results": null,
     "effective_username": null,
-    "endpoint_diagnostics": null,
+    "endpoint_diagnostics": [
+      {
+        "endpoint": "/_cat?help",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/allocation",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/component_templates/_cat/ml/anomaly_detectors",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/count",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/count/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/health",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/master",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/anomaly_detectors/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodeattrs",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodes",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/pending_tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/plugins",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/repositories",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/snapshots/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/templates",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_ingest/pipeline",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_remote/info",
+        "error": null,
+        "status": 200
+      }
+    ],
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
@@ -271,7 +982,7 @@
     "scheme": "http",
     "service": "elastic",
     "show_cluster": false,
-    "show_endpoints": false,
+    "show_endpoints": true,
     "show_plugins": false,
     "show_users": false,
     "stages": [
@@ -286,18 +997,6 @@
         "error": null,
         "result": "open_no_auth",
         "stage_name": "auth_inference_credentials"
-      },
-      {
-        "attempt": 1,
-        "error": "no auth provided",
-        "result": "skipped",
-        "stage_name": "access_capabilities"
-      },
-      {
-        "attempt": 1,
-        "error": null,
-        "result": "skipped",
-        "stage_name": "data"
       }
     ],
     "status": "open_no_auth",
@@ -316,7 +1015,46 @@
     "can_manage_security": null,
     "can_read": null,
     "can_write": null,
-    "cat_endpoints": null,
+    "cat_endpoints": [
+      "/_cat/aliases",
+      "/_cat/aliases/",
+      "/_cat/allocation",
+      "/_cat/count",
+      "/_cat/count/",
+      "/_cat/fielddata",
+      "/_cat/fielddata/",
+      "/_cat/health",
+      "/_cat/indices",
+      "/_cat/indices/",
+      "/_cat/master",
+      "/_cat/ml/anomaly_detectors/",
+      "/_cat/ml/data_frame/analytics",
+      "/_cat/ml/data_frame/analytics/",
+      "/_cat/ml/datafeeds",
+      "/_cat/ml/datafeeds/",
+      "/_cat/ml/trained_models",
+      "/_cat/ml/trained_models/",
+      "/_cat/nodeattrs",
+      "/_cat/nodes",
+      "/_cat/pending_tasks",
+      "/_cat/plugins",
+      "/_cat/recovery",
+      "/_cat/recovery/",
+      "/_cat/repositories",
+      "/_cat/segments",
+      "/_cat/segments/",
+      "/_cat/shards",
+      "/_cat/shards/",
+      "/_cat/snapshots/",
+      "/_cat/tasks",
+      "/_cat/templates",
+      "/_cat/thread_pool",
+      "/_cat/thread_pool/",
+      "/_cat/transforms",
+      "/_cat/transforms/",
+      "/_ingest/pipeline",
+      "/_remote/info"
+    ],
     "cat_plugins": null,
     "cluster_error": null,
     "cluster_health": null,
@@ -354,7 +1092,213 @@
     "discover_error": null,
     "discover_results": null,
     "effective_username": null,
-    "endpoint_diagnostics": null,
+    "endpoint_diagnostics": [
+      {
+        "endpoint": "/_cat?help",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/allocation",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/component_templates/_cat/ml/anomaly_detectors",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/count",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/count/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/health",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/master",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/anomaly_detectors/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodeattrs",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodes",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/pending_tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/plugins",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/repositories",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/snapshots/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/templates",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_ingest/pipeline",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_remote/info",
+        "error": null,
+        "status": 200
+      }
+    ],
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
@@ -373,7 +1317,7 @@
     "scheme": "http",
     "service": "elastic",
     "show_cluster": false,
-    "show_endpoints": false,
+    "show_endpoints": true,
     "show_plugins": false,
     "show_users": false,
     "stages": [
@@ -388,18 +1332,6 @@
         "error": null,
         "result": "open_no_auth",
         "stage_name": "auth_inference_credentials"
-      },
-      {
-        "attempt": 1,
-        "error": "no auth provided",
-        "result": "skipped",
-        "stage_name": "access_capabilities"
-      },
-      {
-        "attempt": 1,
-        "error": null,
-        "result": "skipped",
-        "stage_name": "data"
       }
     ],
     "status": "open_no_auth",
@@ -418,7 +1350,46 @@
     "can_manage_security": null,
     "can_read": null,
     "can_write": null,
-    "cat_endpoints": null,
+    "cat_endpoints": [
+      "/_cat/aliases",
+      "/_cat/aliases/",
+      "/_cat/allocation",
+      "/_cat/count",
+      "/_cat/count/",
+      "/_cat/fielddata",
+      "/_cat/fielddata/",
+      "/_cat/health",
+      "/_cat/indices",
+      "/_cat/indices/",
+      "/_cat/master",
+      "/_cat/ml/anomaly_detectors/",
+      "/_cat/ml/data_frame/analytics",
+      "/_cat/ml/data_frame/analytics/",
+      "/_cat/ml/datafeeds",
+      "/_cat/ml/datafeeds/",
+      "/_cat/ml/trained_models",
+      "/_cat/ml/trained_models/",
+      "/_cat/nodeattrs",
+      "/_cat/nodes",
+      "/_cat/pending_tasks",
+      "/_cat/plugins",
+      "/_cat/recovery",
+      "/_cat/recovery/",
+      "/_cat/repositories",
+      "/_cat/segments",
+      "/_cat/segments/",
+      "/_cat/shards",
+      "/_cat/shards/",
+      "/_cat/snapshots/",
+      "/_cat/tasks",
+      "/_cat/templates",
+      "/_cat/thread_pool",
+      "/_cat/thread_pool/",
+      "/_cat/transforms",
+      "/_cat/transforms/",
+      "/_ingest/pipeline",
+      "/_remote/info"
+    ],
     "cat_plugins": null,
     "cluster_error": null,
     "cluster_health": null,
@@ -456,7 +1427,213 @@
     "discover_error": null,
     "discover_results": null,
     "effective_username": null,
-    "endpoint_diagnostics": null,
+    "endpoint_diagnostics": [
+      {
+        "endpoint": "/_cat?help",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/allocation",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/component_templates/_cat/ml/anomaly_detectors",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/count",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/count/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/health",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/master",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/anomaly_detectors/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/data_frame/analytics/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/datafeeds/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/ml/trained_models/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodeattrs",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodes",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/pending_tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/plugins",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/repositories",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/snapshots/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/templates",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/transforms/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_ingest/pipeline",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_remote/info",
+        "error": null,
+        "status": 200
+      }
+    ],
     "endpoints_error": null,
     "error": null,
     "host": "127.0.0.1",
@@ -475,7 +1652,7 @@
     "scheme": "http",
     "service": "elastic",
     "show_cluster": false,
-    "show_endpoints": false,
+    "show_endpoints": true,
     "show_plugins": false,
     "show_users": false,
     "stages": [
@@ -490,18 +1667,6 @@
         "error": null,
         "result": "open_no_auth",
         "stage_name": "auth_inference_credentials"
-      },
-      {
-        "attempt": 1,
-        "error": "no auth provided",
-        "result": "skipped",
-        "stage_name": "access_capabilities"
-      },
-      {
-        "attempt": 1,
-        "error": null,
-        "result": "skipped",
-        "stage_name": "data"
       }
     ],
     "status": "open_no_auth",

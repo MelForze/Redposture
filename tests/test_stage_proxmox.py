@@ -5,6 +5,9 @@ import json
 import threading
 from types import SimpleNamespace
 
+import pytest
+
+from redposture_core.audit_models import AuditRecord
 from redposture_core.network_proxy import ProxyConfig
 from redposture_core.stage_proxmox import (
     _PROXMOX_DEFAULT_CREDENTIALS,
@@ -43,13 +46,255 @@ from redposture_core.stage_proxmox import (
     _ssl_context,
     _stream_proxmox_status,
     _value_looks_secret,
+    build_proxmox_spec,
     run_proxmox_stage,
 )
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+def _proxmox_stage_record(
+    kwargs: dict[str, object],
+    *,
+    status: str,
+    detected: bool = True,
+    error: str | None = None,
+) -> AuditRecord:
+    return AuditRecord(
+        host=str(kwargs["host"]),
+        port=int(kwargs["port"]),
+        service="proxmox",
+        module="proxmox",
+        status=status,
+        auth_required=status == "auth_failed",
+        extra={
+            "is_proxmox": detected,
+            "error": error,
+            "auth_method": "token" if kwargs.get("pve_api_token") else "password",
+            "show_nodes": bool(kwargs.get("show_nodes")),
+            "show_users": bool(kwargs.get("show_users")),
+        },
+    )
 
 
 def _json_payload(data):
     return json.dumps({"data": data}, ensure_ascii=False).encode("utf-8")
+
+
+def _proxmox_lifecycle_args(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "timeout": 1.0,
+        "retries": 0,
+        "workers": 1,
+        "debug": False,
+        "defcreds": False,
+        "username": None,
+        "password": None,
+        "pve_api_token": None,
+        "https": True,
+        "insecure": True,
+        "proxy": None,
+        "discover_creds": False,
+        "nodes": True,
+        "show_nodes": False,
+        "users": False,
+        "show_users": False,
+        "add_user": None,
+        "output": None,
+        "output_format": "json",
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _run_proxmox_lifecycle(
+    args: SimpleNamespace,
+    credential_runs: tuple[AuditCredentialRun, ...],
+) -> list[dict[str, object]]:
+    plan = AuditCommandPlan(
+        targets_by_port={8006: ("127.0.0.1",)},
+        credential_runs=credential_runs,
+        output_format="json",
+        workers=1,
+    )
+    result = AuditCommandRunner(args=args, spec=build_proxmox_spec(args), emit_line=lambda _line: None).run_plan(plan)
+    return result.records
+
+
+def _install_proxmox_lifecycle_request_spy(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    valid_password: str,
+    calls: list[dict[str, object]],
+    deep_error: Exception | None = None,
+    anonymous_access: bool = False,
+) -> None:
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        _retries: int,
+        **kwargs: object,
+    ):
+        auth_headers = dict(kwargs.get("auth_headers") or {})
+        form = dict(kwargs.get("form") or {})
+        calls.append(
+            {
+                "path": path,
+                "method": str(kwargs.get("method") or "GET"),
+                "authenticated": bool(auth_headers),
+                "username": form.get("username"),
+                "password": form.get("password"),
+            }
+        )
+        if path == "/access/ticket":
+            if form.get("password") != valid_password:
+                return 401, _json_payload({"message": "authentication failure"}), {}, None
+            return (
+                200,
+                _json_payload({"ticket": "PVE:ticket", "CSRFPreventionToken": "csrf"}),
+                {},
+                None,
+            )
+        if path == "/access" and not auth_headers:
+            if anonymous_access:
+                return 200, _json_payload({}), {}, None
+            return 401, _json_payload({"message": "authentication required"}), {}, None
+        if path == "/access" and deep_error is not None:
+            raise deep_error
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"/": {"Sys.Audit": 1}}), {}, None
+        if path == "/nodes":
+            return 200, _json_payload([{"node": "pve-a"}]), {}, None
+        return 200, _json_payload({}), {}, None
+
+    monkeypatch.setattr("redposture_core.modules.proxmox.actions._proxmox_request", fake_request)
+
+
+def test_proxmox_lifecycle_direct_credentials_classify_login_and_data_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    _install_proxmox_lifecycle_request_spy(monkeypatch, valid_password="good", calls=calls)
+    records = _run_proxmox_lifecycle(
+        _proxmox_lifecycle_args(username="root@pam", password="good"),
+        (AuditCredentialRun(username="root@pam", password="good", source="provided"),),
+    )
+
+    assert [(call["path"], call["authenticated"]) for call in calls] == [
+        ("/access", False),
+        ("/access/ticket", False),
+        ("/access", True),
+        ("/access/permissions?path=/", True),
+        ("/nodes", True),
+    ]
+    assert records[0]["status"] == "token_ok"
+    assert records[0]["nodes"] == ["pve-a"]
+
+
+def test_proxmox_lifecycle_anonymous_access_runs_data_once_without_auth_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    _install_proxmox_lifecycle_request_spy(
+        monkeypatch,
+        valid_password="unused",
+        calls=calls,
+        anonymous_access=True,
+    )
+    records = _run_proxmox_lifecycle(
+        _proxmox_lifecycle_args(),
+        (AuditCredentialRun(source="anonymous"),),
+    )
+
+    assert [(call["path"], call["authenticated"]) for call in calls] == [
+        ("/access", False),
+        ("/access", False),
+        ("/access/permissions?path=/", False),
+        ("/nodes", False),
+    ]
+    assert [call["path"] for call in calls].count("/nodes") == 1
+    assert records[0]["status"] == "open_no_auth"
+    assert records[0]["auth_required"] is False
+    assert records[0]["auth_method"] == "anonymous"
+    assert records[0]["nodes"] == ["pve-a"]
+
+
+@pytest.mark.parametrize("source", ["file", "default"])
+def test_proxmox_lifecycle_two_candidates_login_each_but_run_data_only_for_selected(
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+) -> None:
+    calls: list[dict[str, object]] = []
+    _install_proxmox_lifecycle_request_spy(monkeypatch, valid_password="good", calls=calls)
+    records = _run_proxmox_lifecycle(
+        _proxmox_lifecycle_args(defcreds=source == "default"),
+        (
+            AuditCredentialRun(username="first@pam", password="bad", source=source),
+            AuditCredentialRun(username="second@pam", password="good", source=source),
+        ),
+    )
+
+    assert [(call["path"], call["username"], call["password"]) for call in calls[:3]] == [
+        ("/access", None, None),
+        ("/access/ticket", "first@pam", "bad"),
+        ("/access/ticket", "second@pam", "good"),
+    ]
+    assert [call["path"] for call in calls].count("/access") == 2
+    assert [call["path"] for call in calls].count("/access/permissions?path=/") == 1
+    assert [call["path"] for call in calls].count("/nodes") == 1
+    assert records[0]["status"] == "token_ok"
+    assert [item["username"] for item in records[0]["auth_attempts"]] == ["first@pam", "second@pam"]
+
+
+def test_proxmox_lifecycle_preserves_detection_when_authenticated_data_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    _install_proxmox_lifecycle_request_spy(
+        monkeypatch,
+        valid_password="good",
+        calls=calls,
+        deep_error=RuntimeError("deep API exploded"),
+    )
+    records = _run_proxmox_lifecycle(
+        _proxmox_lifecycle_args(username="root@pam", password="good"),
+        (AuditCredentialRun(username="root@pam", password="good", source="provided"),),
+    )
+
+    assert records[0]["status"] == "fail"
+    assert records[0]["is_proxmox"] is True
+    assert records[0]["detection_preserved"] is True
+    assert records[0]["detected_status"] == "auth_failed"
+    assert records[0]["deep_error"] == "deep API exploded"
+
+
+def test_proxmox_lifecycle_auth_failure_preserves_requested_action_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    _install_proxmox_lifecycle_request_spy(monkeypatch, valid_password="good", calls=calls)
+    records = _run_proxmox_lifecycle(
+        _proxmox_lifecycle_args(
+            username="root@pam",
+            password="",
+            nodes=True,
+            users=True,
+        ),
+        (AuditCredentialRun(username="root@pam", password="", source="provided"),),
+    )
+
+    assert [(call["path"], call["username"], call["password"]) for call in calls] == [
+        ("/access", None, None),
+        ("/access/ticket", "root@pam", ""),
+    ]
+    assert records[0]["status"] == "auth_failed"
+    assert records[0]["is_proxmox"] is True
+    assert records[0]["show_nodes"] is True
+    assert records[0]["show_users"] is True
+    assert records[0]["discover_creds"] is False
+    assert records[0]["add_user"] is None
 
 
 def test_proxmox_default_credentials_are_exact() -> None:
@@ -1433,6 +1678,9 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
             _ = color
             return
 
+        def _paint(self, text: str, _color: str, _stream) -> str:
+            return text
+
         def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
@@ -1468,14 +1716,14 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
     assert any("--pveapitoken, -u/-p, or --defcreds is required" in item for item in fake_console.errors)
 
     fake_console.errors.clear()
-    seen_https: list[bool] = []
+    calls: list[dict[str, object]] = []
 
-    def fake_audit_targets(*_args, **kwargs):
-        seen_https.append(bool(kwargs.get("use_https")))
-        hosts = list(kwargs.get("hosts") or [])
-        return len(hosts), 1, 0, 0, 0, 0
+    def fake_audit_targets(**kwargs):
+        calls.append(dict(kwargs))
+        status = "token_ok" if kwargs.get("pve_api_token") else "auth_failed"
+        return _proxmox_stage_record(kwargs, status=status)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "proxmox", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "proxmox", fake_audit_targets)
 
     rc = run_proxmox_stage(
         SimpleNamespace(
@@ -1490,7 +1738,15 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
         logger=SimpleNamespace(log=lambda *_a, **_k: None),
     )
     assert rc == 0
-    assert seen_https == [False, True]
+    assert [
+        (call["host"], call["use_https"])
+        for call in calls
+        if not call["pve_api_token"] and call["run_deep_checks"] is False
+    ] == [("host-http", False), ("host-https", True)]
+    assert all(not call["pve_api_token"] for call in calls[:2])
+    assert {
+        (call["host"], call["use_https"]) for call in calls if call["pve_api_token"] == "monitor@pve!audit=token"
+    } == {("host-http", False), ("host-https", True)}
     assert any("proxmox audit started:" in item for item in fake_console.infos)
 
 
@@ -1513,6 +1769,9 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:
             _ = color
             return
 
+        def _paint(self, text: str, _color: str, _stream) -> str:
+            return text
+
         def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
@@ -1530,13 +1789,12 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:
 
     calls: list[dict[str, object]] = []
 
-    def fake_audit_targets(*_args, **kwargs):
-        calls.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (1, 1, 0, 0, 0, 0)
+    def fake_audit_targets(**kwargs):
+        calls.append(dict(kwargs))
+        status = "token_ok" if kwargs.get("username") else "auth_failed"
+        return _proxmox_stage_record(kwargs, status=status)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "proxmox", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "proxmox", fake_audit_targets)
 
     args = SimpleNamespace(
         debug=False,
@@ -1569,7 +1827,10 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:
 
     assert rc == 0
     assert not fake_console.errors
-    assert [(call["username"], call["password"], call["defcreds"]) for call in calls] == [("root@pam", "proxmox", True)]
+    assert [(call["username"], call["password"], call["defcreds"], call["run_deep_checks"]) for call in calls] == [
+        (None, None, False, False),
+        ("root@pam", "proxmox", False, True),
+    ]
 
 
 def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatch) -> None:
@@ -1615,13 +1876,16 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
 
     calls: list[dict[str, object]] = []
 
-    def fake_audit_targets(*_args, **kwargs):
-        calls.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (1, 1, 0, 0, 0, 0)
+    def fake_audit_targets(**kwargs):
+        calls.append(dict(kwargs))
+        return _proxmox_stage_record(
+            kwargs,
+            status="fail",
+            detected=False,
+            error="connection refused",
+        )
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "proxmox", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "proxmox", fake_audit_targets)
 
     progress_totals: list[int] = []
     progress_advances: list[int] = []
@@ -1668,7 +1932,9 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
     rc = run_proxmox_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
     assert not fake_console.errors
-    assert [bool(call["show_progress"]) for call in calls] == [False, False, False]
+    assert [call["port"] for call in calls] == [8006, 18061, 18062]
+    assert all(call["run_deep_checks"] is False for call in calls)
+    assert all(call["show_nodes"] is False for call in calls)
     assert progress_totals == [3]
     assert progress_advances == [1, 1, 1]
 

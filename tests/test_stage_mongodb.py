@@ -701,7 +701,9 @@ def test_open_client_for_successful_record_and_shell_access_denied(monkeypatch: 
     assert any("authentication required" in line for line in lines)
 
 
-def test_run_mongodb_stage_credential_file_prefilter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_run_mongodb_stage_credential_file_does_not_use_tcp_prefilter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     _patch_open(monkeypatch, auth_required=True)
     creds = tmp_path / "creds.txt"
     creds.write_text("bad:bad\nroot:root\n", encoding="utf-8")
@@ -718,8 +720,11 @@ def test_run_mongodb_stage_credential_file_prefilter(monkeypatch: pytest.MonkeyP
         logger=object(),
     )
     assert rc == 0
-    assert calls == [(["127.0.0.1", "127.0.0.2"], 27017), (["127.0.0.1", "127.0.0.2"], 27018)]
-    assert "root:root" in out.read_text(encoding="utf-8")
+    assert calls == []
+    output = out.read_text(encoding="utf-8")
+    assert "root:root" in output
+    assert "127.0.0.1" in output
+    assert "127.0.0.2" in output
 
 
 def test_run_mongodb_stage_defcreds_expands_default_pairs(monkeypatch: pytest.MonkeyPatch, capsys) -> None:

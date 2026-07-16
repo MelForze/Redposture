@@ -1,14 +1,21 @@
 [
   {
+    "api_auth_required": {
+      "v2": false,
+      "v3": false
+    },
     "api_versions": "v2,v3",
     "auth_required": false,
     "defcreds_enabled": false,
     "dump_keys": false,
+    "effective_password": null,
     "effective_username": null,
     "error": null,
     "host": "127.0.0.1",
     "is_etcd": true,
     "key_count": 11,
+    "key_count_error": null,
+    "key_count_state": "known",
     "key_value_entries": null,
     "key_values": null,
     "keys": [
@@ -65,15 +72,22 @@
     "status": "open_no_auth"
   },
   {
+    "api_auth_required": {
+      "v2": false,
+      "v3": false
+    },
     "api_versions": "v2,v3",
     "auth_required": false,
     "defcreds_enabled": false,
     "dump_keys": false,
+    "effective_password": null,
     "effective_username": null,
     "error": null,
     "host": "127.0.0.1",
     "is_etcd": true,
     "key_count": 11,
+    "key_count_error": null,
+    "key_count_state": "known",
     "key_value_entries": null,
     "key_values": null,
     "keys": [
@@ -130,15 +144,22 @@
     "status": "open_no_auth"
   },
   {
+    "api_auth_required": {
+      "v2": false,
+      "v3": false
+    },
     "api_versions": "v2,v3",
     "auth_required": false,
     "defcreds_enabled": false,
     "dump_keys": false,
+    "effective_password": null,
     "effective_username": null,
     "error": null,
     "host": "127.0.0.1",
     "is_etcd": true,
     "key_count": 11,
+    "key_count_error": null,
+    "key_count_state": "known",
     "key_value_entries": null,
     "key_values": null,
     "keys": [
@@ -195,15 +216,22 @@
     "status": "open_no_auth"
   },
   {
+    "api_auth_required": {
+      "v2": false,
+      "v3": false
+    },
     "api_versions": "v2,v3",
     "auth_required": false,
     "defcreds_enabled": false,
     "dump_keys": false,
+    "effective_password": null,
     "effective_username": null,
     "error": null,
     "host": "127.0.0.1",
     "is_etcd": true,
     "key_count": 11,
+    "key_count_error": null,
+    "key_count_state": "known",
     "key_value_entries": null,
     "key_values": null,
     "keys": [
@@ -260,15 +288,22 @@
     "status": "open_no_auth"
   },
   {
+    "api_auth_required": {
+      "v2": false,
+      "v3": false
+    },
     "api_versions": "v2,v3",
     "auth_required": false,
     "defcreds_enabled": false,
     "dump_keys": false,
+    "effective_password": null,
     "effective_username": null,
     "error": null,
     "host": "127.0.0.1",
     "is_etcd": true,
     "key_count": 11,
+    "key_count_error": null,
+    "key_count_state": "known",
     "key_value_entries": null,
     "key_values": null,
     "keys": [

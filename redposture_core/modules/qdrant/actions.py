@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import threading
 import time
 import urllib.error
 import urllib.parse
 from collections.abc import Callable
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -40,6 +42,8 @@ _QDRANT_TAG = "QDRANT"
 _QDRANT_DEFAULT_PORT = 6333
 _QDRANT_SSRF_PRIORITY = "replica"
 _QDRANT_SSRF_LISTENER_BIND = "0.0.0.0"
+_QDRANT_SSRF_RESPONSE_FILE_ENV = "REDPOSTURE_QDRANT_SSRF_RESPONSE_FILE"
+_QDRANT_SSRF_RESPONSE_MAX_BYTES = 64 * 1024 * 1024
 _QDRANT_GHSA_F632_VM87_2M2F_RANGE_MIN = (1, 9, 3)
 _QDRANT_GHSA_F632_VM87_2M2F_RANGE_MAX_EXCL = (1, 15, 6)
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
@@ -49,6 +53,14 @@ _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _QDRANT_DEEP_STATUSES = {"open_no_auth", "open_auth", "unknown_auth"}
+
+
+@dataclass
+class QdrantLifecycleState:
+    detect_record: dict[str, Any] | None = None
+    action_headers: dict[str, str] | None = None
+    action_source: str | None = None
+    deep_record: dict[str, Any] | None = None
 
 
 def _clip(text: str, width: int = 80) -> str:
@@ -677,9 +689,15 @@ class _QdrantSsrfCaptureHandler(BaseHTTPRequestHandler):
         elif isinstance(hits, list):
             hits.append(hit)
 
-        body = b"redposture-ssrf-capture-ok\n"
+        body = getattr(self.server, "capture_response_body", b"redposture-ssrf-capture-ok\n")
+        if not isinstance(body, bytes):
+            body = b"redposture-ssrf-capture-ok\n"
+        content_type = str(
+            getattr(self.server, "capture_response_content_type", "text/plain; charset=utf-8")
+            or "application/octet-stream"
+        )
         self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Connection", "close")
         self.end_headers()
@@ -704,6 +722,7 @@ class _QdrantSsrfCaptureHandler(BaseHTTPRequestHandler):
 
 def _start_qdrant_ssrf_capture_listener(port: int) -> dict[str, Any]:
     port_value = int(port)
+    response_file = str(os.environ.get(_QDRANT_SSRF_RESPONSE_FILE_ENV) or "").strip()
     result: dict[str, Any] = {
         "attempted": True,
         "bind": _QDRANT_SSRF_LISTENER_BIND,
@@ -713,12 +732,32 @@ def _start_qdrant_ssrf_capture_listener(port: int) -> dict[str, Any]:
         "server": None,
         "hits": [],
         "lock": threading.Lock(),
+        "response_file_configured": bool(response_file),
         "error": None,
     }
+    response_body = b"redposture-ssrf-capture-ok\n"
+    response_content_type = "text/plain; charset=utf-8"
+    if response_file:
+        try:
+            response_size = os.path.getsize(response_file)
+            if response_size <= 0:
+                raise ValueError("response file is empty")
+            if response_size > _QDRANT_SSRF_RESPONSE_MAX_BYTES:
+                raise ValueError(f"response file exceeds {_QDRANT_SSRF_RESPONSE_MAX_BYTES} byte limit")
+            with open(response_file, "rb") as handle:
+                response_body = handle.read(_QDRANT_SSRF_RESPONSE_MAX_BYTES + 1)
+            if len(response_body) != response_size:
+                raise ValueError("response file changed while being read")
+            response_content_type = "application/octet-stream"
+        except (OSError, ValueError) as exc:
+            result["error"] = f"failed to load SSRF listener response file: {exc}"
+            return result
     try:
         server = _QdrantSsrfCaptureServer((_QDRANT_SSRF_LISTENER_BIND, port_value), _QdrantSsrfCaptureHandler)
         server.capture_hits = result["hits"]  # type: ignore[attr-defined]
         server.capture_lock = result["lock"]  # type: ignore[attr-defined]
+        server.capture_response_body = response_body  # type: ignore[attr-defined]
+        server.capture_response_content_type = response_content_type  # type: ignore[attr-defined]
     except OSError as exc:
         result["error"] = str(exc)
         return result
@@ -797,6 +836,9 @@ def _empty_qdrant_record(
         "ssrf_collection": collection_name,
         "ssrf_results": None,
         "ssrf_error": None,
+        "ssrf_listener_started": None,
+        "ssrf_hit_count": None,
+        "ssrf_hits": None,
         "elapsed_ms": None,
         "error": "connection failed",
     }
@@ -1452,6 +1494,7 @@ def _call_audit_qdrant_host_with_stage_debug(
     debug: bool,
     debug_emit: Callable[[str], None] | None,
     dump_limit: int | None = None,
+    ssrf_capture: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     dump_kwargs = {"dump_limit": dump_limit if run_deep_checks else None} if dump_limit is not None else {}
@@ -1469,6 +1512,11 @@ def _call_audit_qdrant_host_with_stage_debug(
     )
 
     result: dict[str, Any] = dict(record)
+    if run_deep_checks and ssrf_urls and ssrf_capture is not None:
+        hits = _qdrant_ssrf_capture_hits(ssrf_capture)
+        result["ssrf_listener_started"] = bool(ssrf_capture.get("started"))
+        result["ssrf_hit_count"] = len(hits)
+        result["ssrf_hits"] = hits
     attempts = max(1, retries + 1)
     status = str(result.get("status") or "fail")
     is_qdrant = bool(result.get("is_qdrant"))
@@ -1513,6 +1561,200 @@ def _call_audit_qdrant_host_with_stage_debug(
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
     return merge_stage_records(detect_record, deep_record)
+
+
+def detect_qdrant(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, QdrantLifecycleState):
+        raise TypeError("qdrant lifecycle state is unavailable")
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    last_error: str | None = None
+    record = _empty_qdrant_record(
+        str(ctx.host),
+        int(ctx.port),
+        show_collections=bool(options["show_collections"]),
+        dump_requested=bool(options["dump_requested"]),
+        dump_limit=options["dump_limit"],
+        collection_name=options["collection_name"],
+        ssrf_urls=list(options["ssrf_urls"]),
+    )
+    for attempt in range(attempts):
+        root_status, root_payload, root_error = _qdrant_get_root_info(
+            str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers=None
+        )
+        col_status, col_payload, col_error = _qdrant_get_collections(
+            str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), headers=None
+        )
+        names = _qdrant_collections_from_payload(col_payload) if col_error is None else None
+        is_qdrant = (
+            _qdrant_is_root_payload(root_payload)
+            or _qdrant_looks_like_response(root_payload)
+            or _qdrant_looks_like_response(col_payload)
+            or (col_status in {401, 403} and isinstance(col_payload, dict))
+        )
+        if is_qdrant:
+            anonymous_ok = col_status == 200 and isinstance(names, list)
+            record.update(
+                {
+                    "timestamp": utc_now_iso(),
+                    "is_qdrant": True,
+                    "status": (
+                        "open_no_auth"
+                        if anonymous_ok
+                        else "auth_required"
+                        if col_status in {401, 403}
+                        else "unknown_auth"
+                    ),
+                    "auth_required": False if anonymous_ok else True if col_status in {401, 403} else None,
+                    "anonymous_access": True if anonymous_ok else False if col_status in {401, 403} else None,
+                    "version": _qdrant_extract_version(root_payload),
+                    "collections": list(names or []) if anonymous_ok else None,
+                    "collections_count": len(names or []) if anonymous_ok else None,
+                    "collections_source": "anonymous" if anonymous_ok else None,
+                    "collections_list_error": (
+                        None
+                        if anonymous_ok
+                        else col_error or _qdrant_error_text(col_payload, fallback_status=col_status)
+                    ),
+                    "error": None,
+                }
+            )
+            state.action_headers = None
+            state.action_source = "anonymous" if anonymous_ok else None
+            break
+        last_error = col_error or root_error
+        if last_error is None:
+            record["error"] = "service is not qdrant"
+            break
+        if attempt >= attempts - 1:
+            record["error"] = last_error
+            break
+        time.sleep(_retry_delay(attempt))
+    state.detect_record = dict(record)
+    return record
+
+
+def authenticate_qdrant(ctx: Any, detect_record: Any, _options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, QdrantLifecycleState):
+        raise TypeError("qdrant lifecycle state is unavailable")
+    record = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
+    api_key = str(ctx.credential.token or "").strip()
+    if not api_key:
+        return record
+    headers = _qdrant_headers(api_key)
+    status, payload, error = _qdrant_get_collections(
+        str(ctx.host),
+        int(ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        headers=headers,
+    )
+    names = _qdrant_collections_from_payload(payload) if error is None else None
+    ok = status == 200 and isinstance(names, list)
+    record.update(
+        {
+            "timestamp": utc_now_iso(),
+            "api_key_provided": True,
+            "api_key_access": bool(ok),
+        }
+    )
+    if ok:
+        state.action_headers = headers
+        state.action_source = "api_key"
+        record.update(
+            {
+                "status": "open_auth" if record.get("anonymous_access") is not True else "open_no_auth",
+                "collections": list(names or []),
+                "collections_count": len(names or []),
+                "collections_source": "api_key",
+                "collections_list_error": None,
+                "error": None,
+            }
+        )
+    elif record.get("anonymous_access") is not True:
+        record.update(
+            {
+                "status": "auth_required",
+                "collections_list_error": error or _qdrant_error_text(payload, fallback_status=status),
+            }
+        )
+    return record
+
+
+def collect_qdrant_data(ctx: Any, source_record: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, QdrantLifecycleState):
+        raise TypeError("qdrant lifecycle state is unavailable")
+    if state.deep_record is not None:
+        return state.deep_record
+    record = dict(source_record.to_dict() if hasattr(source_record, "to_dict") else source_record)
+    headers = state.action_headers
+    action_source = state.action_source or ("anonymous" if headers is None else "api_key")
+    collections = record.get("collections")
+    collection_name = options["collection_name"]
+    timeout = float(getattr(ctx.args, "timeout", 5.0))
+    host, port = str(ctx.host), int(ctx.port)
+
+    if bool(options["dump_requested"]):
+        dump_targets = [collection_name] if collection_name else list(collections or [])
+        if options["dump_limit"] is not None:
+            dump_targets = dump_targets[: int(options["dump_limit"])]
+        record["collection_dump_items"] = []
+        if not dump_targets:
+            record["collection_dump_error"] = (
+                "authentication required for collection dump"
+                if str(record.get("status") or "") == "auth_required"
+                else "no collections available for dump"
+            )
+        for name in dump_targets:
+            status, payload, error = _qdrant_get_collection_info(host, port, timeout, str(name), headers=headers)
+            record["collection_dump_items"].append(
+                {
+                    "name": str(name),
+                    "ok": error is None and status == 200,
+                    "status": status,
+                    "error": error or (None if status == 200 else _qdrant_error_text(payload, fallback_status=status)),
+                    "info_raw": _json_compact(payload) if error is None and status == 200 else None,
+                }
+            )
+
+    edit_target = collection_name or (str(collections[0]) if isinstance(collections, list) and collections else None)
+    if edit_target:
+        edit_probe = _qdrant_edit_probe_empty_patch(host, port, timeout, edit_target, headers=headers)
+        edit_probe["source"] = action_source
+        record["edit_probe"] = edit_probe
+    logger_headers = headers or _qdrant_headers(ctx.credential.token)
+    logger_probe = _qdrant_logger_endpoint_probe(host, port, timeout, headers=logger_headers)
+    logger_probe["source"] = action_source
+    record["logger_probe"] = logger_probe
+    record["ghsa_f632_vm87_2m2f"] = _qdrant_assess_ghsa_f632_vm87_2m2f(
+        version=record.get("version"),
+        logger_probe=logger_probe,
+    )
+    if options["ssrf_urls"]:
+        if not collection_name:
+            record["ssrf_error"] = "--collection is required for qdrant snapshot-restore SSRF probe"
+        else:
+            record["ssrf_results"] = [
+                _qdrant_ssrf_snapshot_recover_probe(
+                    host,
+                    port,
+                    timeout,
+                    collection_name,
+                    target_url,
+                    headers=headers,
+                )
+                for target_url in options["ssrf_urls"]
+            ]
+    capture = getattr(ctx.args, "ssrf_capture", None)
+    if options["ssrf_urls"] and capture is not None:
+        hits = _qdrant_ssrf_capture_hits(capture)
+        record["ssrf_listener_started"] = bool(capture.get("started"))
+        record["ssrf_hit_count"] = len(hits)
+        record["ssrf_hits"] = hits
+    record["elapsed_ms"] = record.get("elapsed_ms") or 0
+    state.deep_record = record
+    return record
 
 
 # Typed runner boundary -----------------------------------------------------

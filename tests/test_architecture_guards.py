@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import ast
 import importlib
+import inspect
 import re
 from pathlib import Path
 
+from redposture_core.cli_args import parse_args
 from redposture_core.module_registry import AUDIT_MODULE_NAMES
+from redposture_core.stage_runtime import _HOST_STAGE_RUNTIME_ARGUMENTS, build_basic_audit_plan
 
 _ROOT = Path(__file__).resolve().parents[1]
 _CORE = _ROOT / "redposture_core"
@@ -24,6 +28,53 @@ def test_stage_and_scanner_code_do_not_use_raw_threadpool_executor() -> None:
         text = path.read_text(encoding="utf-8")
         if "ThreadPoolExecutor" in text or "as_completed" in text:
             offenders.append(str(path.relative_to(_ROOT)))
+
+    assert offenders == []
+
+
+def test_production_code_does_not_reference_threadpool_executor() -> None:
+    offenders: list[str] = []
+    for path in _CORE.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if any(
+            (isinstance(node, ast.Name) and node.id == "ThreadPoolExecutor")
+            or (isinstance(node, ast.Attribute) and node.attr == "ThreadPoolExecutor")
+            or (isinstance(node, ast.ImportFrom) and any(alias.name == "ThreadPoolExecutor" for alias in node.names))
+            for node in ast.walk(tree)
+        ):
+            offenders.append(str(path.relative_to(_ROOT)))
+
+    assert offenders == []
+
+
+def test_fixed_action_modules_use_complete_strict_host_stage_specs() -> None:
+    for module in ("clickhouse", "gitlab", "kubeapi", "grpc", "consul", "grafana", "elastic", "proxmox"):
+        args = parse_args([module, "-t", "127.0.0.1"])
+        stage = importlib.import_module(f"redposture_core.modules.{module}.stage")
+        spec = getattr(stage, f"build_{module}_spec")(args)
+        options = spec.host_stage_options
+
+        assert options is not None, module
+        parameters = set(inspect.signature(spec.host_stage).parameters)
+        assert set(options) <= parameters, module
+        assert parameters - _HOST_STAGE_RUNTIME_ARGUMENTS == set(options), module
+
+
+def test_basic_audit_plan_does_not_call_credential_tcp_prefilter() -> None:
+    tree = ast.parse(inspect.getsource(build_basic_audit_plan))
+
+    assert not any(
+        isinstance(node, ast.Name) and node.id == "filter_open_tcp_hosts_for_credential_file" for node in ast.walk(tree)
+    )
+
+
+def test_legacy_target_fake_harness_is_absent() -> None:
+    helper_name = "patch_runner_for_legacy_target_fake"
+    offenders = [
+        str(path.relative_to(_ROOT))
+        for path in (_ROOT / "tests").rglob("*.py")
+        if path != Path(__file__) and helper_name in path.read_text(encoding="utf-8")
+    ]
 
     assert offenders == []
 

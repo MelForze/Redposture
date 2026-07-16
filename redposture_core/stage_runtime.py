@@ -8,10 +8,11 @@ import json
 import os
 import sys
 import threading
-from collections.abc import Callable, Iterable, Iterator
+import time
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from . import audit_models as _audit_models
 from .audit_config import AuditConfig
@@ -20,7 +21,6 @@ from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
 from .scheduler import BoundedScheduler
 from .show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from .targeting import (
-    DEFAULT_MAX_NETWORK_HOSTS,
     DEFAULT_STREAM_TARGET_WINDOW_SIZE,
     ScanTargetSpec,
     StreamingTargetPlan,
@@ -34,12 +34,18 @@ from .utils import (
     collect_scan_targets,
     filter_open_tcp_hosts_for_credential_file,
     parse_username_password_credential_file,
+    utc_now_iso,
 )
 
 AuditRecord = _audit_models.AuditRecord
 CapabilitySet = _audit_models.CapabilitySet
 CredentialAttempt = _audit_models.CredentialAttempt
-_RUNTIME_COMPAT_EXPORTS = (collect_scan_targets, collect_scan_target_specs)
+_RUNTIME_COMPAT_EXPORTS = (
+    collect_scan_targets,
+    collect_scan_target_specs,
+    build_scan_execution_groups,
+    filter_open_tcp_hosts_for_credential_file,
+)
 DEFAULT_RECORD_RETENTION_LIMIT = 100_000
 
 
@@ -134,6 +140,118 @@ def format_pass_marker(pass_no: int, phase: str, event: str, **fields: Any) -> s
     return f"{base} {suffix}".rstrip()
 
 
+_PHASE_STAGE_NAMES: dict[AuditPhase, str] = {
+    "detect": "detect_protocol",
+    "auth": "auth_inference_credentials",
+    "capabilities": "access_capabilities",
+    "data": "data",
+}
+
+
+def _attach_runtime_phase_trace(
+    current: AuditRecord,
+    *,
+    phase: AuditPhase,
+    duration_ms: int,
+    result: str,
+    error: str | None = None,
+    prior: AuditRecord | None = None,
+    debug_emit: Callable[[str], None] | None = None,
+) -> tuple[AuditRecord, bool]:
+    """Carry phase telemetry across hooks and fill a missing canonical trace.
+
+    Explicit lifecycle hooks may either own their complete telemetry contract or
+    return ordinary records and let the shared runtime instrument the calls.
+    Module-owned entries always win: retry traces and their ordering are kept
+    verbatim, and a canonical phase is synthesized only when the hook omitted
+    that phase entirely.
+    """
+
+    current_payload = current.to_dict()
+    current_stages = [stage.to_dict() for stage in current.stages]
+    current_names = {str(stage.get("stage_name") or "") for stage in current_stages}
+
+    carried: list[dict[str, Any]] = []
+    if prior is not None:
+        for stage in prior.stages:
+            if stage.stage_name not in current_names:
+                carried.append(stage.to_dict())
+
+    stages = carried + current_stages
+    stage_name = _PHASE_STAGE_NAMES[phase]
+    added = stage_name not in {str(stage.get("stage_name") or "") for stage in stages}
+    duration = max(0, int(duration_ms))
+    if added:
+        trace = StageTrace(
+            stage_name=stage_name,
+            attempt=1,
+            duration_ms=duration,
+            result=str(result or "ok"),
+            error=str(error).strip() if error else None,
+        )
+        stages.append(trace.to_dict())
+        if debug_emit is not None:
+            debug_emit(
+                format_stage_trace(
+                    trace.stage_name,
+                    trace.attempt,
+                    trace.duration_ms,
+                    trace.result,
+                    trace.error,
+                )
+            )
+
+    stage_durations: dict[str, int] = {}
+    stage_attempts: dict[str, int] = {}
+    if prior is not None:
+        prior_payload = prior.to_dict()
+        prior_durations = prior_payload.get("stage_durations_ms")
+        prior_attempts = prior_payload.get("stage_attempts")
+        if isinstance(prior_durations, Mapping):
+            stage_durations.update({str(key): int(value or 0) for key, value in prior_durations.items()})
+        if isinstance(prior_attempts, Mapping):
+            stage_attempts.update({str(key): int(value or 0) for key, value in prior_attempts.items()})
+    current_durations = current_payload.get("stage_durations_ms")
+    current_attempts = current_payload.get("stage_attempts")
+    if isinstance(current_durations, Mapping):
+        stage_durations.update({str(key): int(value or 0) for key, value in current_durations.items()})
+    if isinstance(current_attempts, Mapping):
+        stage_attempts.update({str(key): int(value or 0) for key, value in current_attempts.items()})
+    if added:
+        stage_durations.setdefault(stage_name, duration)
+        stage_attempts.setdefault(stage_name, 1)
+
+    current_payload["stages"] = stages
+    current_payload["stage_durations_ms"] = stage_durations
+    current_payload["stage_attempts"] = stage_attempts
+    current_payload.setdefault("timestamp", utc_now_iso())
+    if not current_payload.get("stage_failed_at") and added and str(result).lower() in {"error", "fail", "timeout"}:
+        current_payload["stage_failed_at"] = stage_name
+    return (
+        AuditRecord.from_mapping(
+            current_payload,
+            module=current.module,
+            service=current.service,
+        ),
+        added,
+    )
+
+
+def _runtime_phase_outcome(
+    phase: AuditPhase,
+    current: AuditRecord,
+    prior: AuditRecord | None = None,
+) -> tuple[str, str | None]:
+    status = str(current.status or "").strip().lower()
+    current_error = str(current.extra.get("error") or "").strip() or None
+    prior_error = str(prior.extra.get("error") or "").strip() or None if prior is not None else None
+    if status == "fail":
+        return "error", current_error or "phase failed"
+    if phase == "data" and current_error is not None and current_error != prior_error:
+        return "error", current_error
+    return "ok", None
+
+
 def should_use_global_progress(output_format: str, *dimensions: int) -> bool:
     """Return whether a command-level progress bar should own this run.
 
@@ -210,8 +328,25 @@ class LineOutputSink:
         self.output_path = output_path
         self.emit_line = emit_line
         self.output_written = bool(append)
+        self._append = bool(append)
         self._handle: Any = None
         self._lock = threading.Lock()
+
+    def _prepare_unlocked(self) -> None:
+        if not self.output_path or self._handle is not None:
+            return
+        os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
+        self._handle = open(self.output_path, "a" if self._append else "w", encoding="utf-8")
+
+    def prepare(self) -> None:
+        """Open the output before audit work starts.
+
+        Non-append output is truncated eagerly so a zero-record run cannot
+        preserve stale results from an earlier invocation.
+        """
+
+        with self._lock:
+            self._prepare_unlocked()
 
     def emit_many(self, lines: Iterable[str]) -> None:
         buffered = [line for line in lines if line]
@@ -219,9 +354,7 @@ class LineOutputSink:
             return
         with self._lock:
             if self.output_path:
-                if self._handle is None:
-                    os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
-                    self._handle = open(self.output_path, "a" if self.output_written else "w", encoding="utf-8")
+                self._prepare_unlocked()
                 for line in buffered:
                     self._handle.write(line + "\n")
                 self._handle.flush()
@@ -254,6 +387,9 @@ def _build_colored_emit(console: Any, colorize: Callable[[Any, str], bool] | Non
     return emit
 
 
+AuditPhase = Literal["detect", "auth", "capabilities", "data"]
+
+
 @dataclass(frozen=True)
 class AuditHookContext:
     args: Any
@@ -264,6 +400,9 @@ class AuditHookContext:
     target: ScanTargetSpec | None = None
     run_deep_checks: bool = True
     debug_emit: Callable[[str], None] | None = None
+    phase: AuditPhase = "data"
+    credential_runs: tuple[AuditCredentialRun, ...] = ()
+    lifecycle_state: Any = None
 
 
 @dataclass(frozen=True)
@@ -278,14 +417,22 @@ class ModuleAuditSpec:
     module: str
     label: str
     default_port: int
-    # Modules normally supply only `host_stage` (their real host audit function);
-    # the runner drives the detect/auth/data lifecycle generically. The per-phase
-    # callables below are optional overrides for custom modules and tests.
+    # Legacy production host_stage callables remain supported. The runner keeps
+    # anonymous protocol detection separate, then invokes a monolithic stage
+    # once per credential candidate with deep checks enabled so authentication
+    # and data work are not repeated. Phase-aware host_stage callables and the
+    # explicit hooks below retain the full staged lifecycle.
     host_stage: Callable[..., AuditRecord | dict[str, Any]] | None = None
+    # Exact action/schema values for strict CLI-to-host-stage binding. When
+    # supplied, every non-runtime host-stage parameter must be present by its
+    # exact name; aliases and silent type-based defaults are disabled.
+    host_stage_options: Mapping[str, Any] | None = None
     detect: Callable[[AuditHookContext], AuditRecord] | None = None
     auth: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
     capabilities: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
     data: Callable[[AuditHookContext, AuditRecord], AuditRecord] | None = None
+    lifecycle_state_factory: Callable[[AuditHookContext], Any] | None = None
+    lifecycle_state_close: Callable[[Any], None] | None = None
     # Output: either an explicit `render` callable, or a `render_module` whose
     # `_format_*` functions the runner introspects (via `render_record_with_module`).
     # `colorize` is the module's explicit `_render_colored_*_line` hook; the runner
@@ -471,6 +618,13 @@ class AuditCommandResult:
 
 
 @dataclass(frozen=True)
+class _AuditDetectOutcome:
+    record: AuditRecord
+    lifecycle_state: Any = None
+    runtime_stage_telemetry: bool = False
+
+
+@dataclass(frozen=True)
 class ModuleRunSummary:
     module: str
     attempted_targets: int
@@ -567,41 +721,6 @@ def build_basic_audit_plan(
 
     credential_runs = build_basic_credential_runs(args)
     port_tuple = tuple(int(port) for port in ports)
-
-    if any(run.source == "file" for run in credential_runs) and target_plan.target_count <= DEFAULT_MAX_NETWORK_HOSTS:
-        target_specs = list(target_plan.iter_specs())
-        groups = build_scan_execution_groups(target_specs, ports)
-        targets_by_port: dict[int, tuple[str, ...]] = {}
-        target_specs_by_port: dict[int, tuple[ScanTargetSpec, ...]] = {}
-        requested_target_count = 0
-        for group in groups:
-            port = int(group.port)
-            group_hosts = [str(host) for host in group.hosts]
-            requested_target_count += len(group_hosts)
-            group_hosts = filter_open_tcp_hosts_for_credential_file(
-                group_hosts,
-                port,
-                timeout=cfg.timeout,
-                workers=cfg.workers,
-                enabled=not cfg.proxy,
-            )
-            targets_by_port[port] = (*targets_by_port.get(port, ()), *group_hosts)
-            group_specs = tuple(getattr(group, "target_specs", ()) or ())
-            if group_specs:
-                group_host_set = set(group_hosts)
-                filtered_specs = tuple(spec for spec in group_specs if str(spec.host) in group_host_set)
-                target_specs_by_port[port] = (*target_specs_by_port.get(port, ()), *filtered_specs)
-
-        return AuditCommandPlan(
-            targets_by_port=targets_by_port,
-            target_specs_by_port=target_specs_by_port,
-            ports=port_tuple,
-            credential_runs=credential_runs,
-            output_path=cfg.output,
-            output_format=cfg.output_format,
-            workers=cfg.workers,
-            requested_target_count=requested_target_count,
-        )
 
     return AuditCommandPlan(
         target_plan=target_plan,
@@ -762,15 +881,114 @@ def _resolve_host_stage(func: Callable[..., Any]) -> Callable[..., Any]:
     return func
 
 
+_HOST_STAGE_RUNTIME_ARGUMENTS = frozenset(
+    {
+        "host",
+        "port",
+        "target",
+        "target_spec",
+        "target_path",
+        "url_path",
+        "path",
+        "target_query",
+        "url_query",
+        "query_string",
+        "timeout",
+        "retries",
+        "workers",
+        "username",
+        "password",
+        "token",
+        "api_token",
+        "apitoken",
+        "pve_api_token",
+        "api_key",
+        "defcreds",
+        "credential_candidates",
+        "run_deep_checks",
+        "phase",
+        "debug",
+        "debug_emit",
+        "ssrf_capture",
+        "proxy",
+        "use_https",
+        "preferred_scheme",
+        "insecure",
+        "ca_file",
+        "tls_ca",
+        "tls_cert",
+        "tls_key",
+        "cert_file",
+        "key_file",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _StrictHostStageBinding:
+    func: Callable[..., Any]
+    signature: inspect.Signature
+    options: Mapping[str, Any]
+
+
+def _build_strict_host_stage_binding(
+    func: Callable[..., Any],
+    options: Mapping[str, Any],
+    *,
+    module: str,
+) -> _StrictHostStageBinding:
+    resolved = _resolve_host_stage(func)
+    # Validate against the callable captured by the spec. Compatibility tests
+    # and embedders may replace the module attribute later with a variadic
+    # recorder; invocation remains late-bound, but the production contract
+    # stays anchored to the original explicit signature.
+    signature = _cached_signature(func)
+    normalized = dict(options)
+    parameters = signature.parameters
+
+    variadic = [
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+    ]
+    if variadic:
+        raise ValueError(f"{module} strict host_stage cannot use variadic parameter(s): {', '.join(sorted(variadic))}")
+
+    reserved = sorted(set(normalized) & _HOST_STAGE_RUNTIME_ARGUMENTS)
+    if reserved:
+        raise ValueError(f"{module} host_stage_options cannot override runtime parameter(s): {', '.join(reserved)}")
+
+    unknown = sorted(set(normalized) - set(parameters))
+    if unknown:
+        raise ValueError(f"{module} host_stage_options contain unknown parameter(s): {', '.join(unknown)}")
+
+    missing = sorted(
+        name
+        for name, parameter in parameters.items()
+        if parameter.kind not in {inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD}
+        and name not in _HOST_STAGE_RUNTIME_ARGUMENTS
+        and name not in normalized
+    )
+    if missing:
+        raise ValueError(f"{module} host_stage_options are missing parameter(s): {', '.join(missing)}")
+
+    return _StrictHostStageBinding(func=resolved, signature=signature, options=normalized)
+
+
 def _invoke_host_stage(
     func: Callable[..., Any],
     *,
     module: str,
     ctx: AuditHookContext,
     run_deep_checks: bool | None = None,
+    strict_binding: _StrictHostStageBinding | None = None,
 ) -> AuditRecord:
-    func = _resolve_host_stage(func)
-    signature = _cached_signature(func)
+    if strict_binding is not None:
+        func = strict_binding.func
+        signature = strict_binding.signature
+    else:
+        func = _resolve_host_stage(func)
+        signature = _cached_signature(func)
     if run_deep_checks is not None:
         ctx = AuditHookContext(
             args=ctx.args,
@@ -781,6 +999,9 @@ def _invoke_host_stage(
             target=ctx.target,
             run_deep_checks=bool(run_deep_checks),
             debug_emit=ctx.debug_emit,
+            phase=ctx.phase,
+            credential_runs=ctx.credential_runs,
+            lifecycle_state=ctx.lifecycle_state,
         )
 
     # C6 fix: cache the resolved AuditConfig on the argparse Namespace so
@@ -821,7 +1042,10 @@ def _invoke_host_stage(
     positional: list[Any] = []
     keyword: dict[str, Any] = {}
     for name, parameter in signature.parameters.items():
-        value = _argument_value_for_hook(name, ctx, cfg)
+        if strict_binding is not None and name not in _HOST_STAGE_RUNTIME_ARGUMENTS:
+            value = strict_binding.options[name]
+        else:
+            value = _argument_value_for_hook(name, ctx, cfg)
         if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
             positional.append(value)
         elif parameter.kind is inspect.Parameter.KEYWORD_ONLY:
@@ -921,12 +1145,15 @@ def render_record_with_module(
 
 
 def _record_looks_detected(record: dict[str, Any]) -> bool:
-    if any(bool(value) for key, value in record.items() if key.startswith("is_")):
+    marker_values = [value for key, value in record.items() if key.startswith("is_")]
+    if any(value is True for value in marker_values):
         return True
-    status = str(record.get("status") or "")
-    if status.startswith("not_"):
+    if any(value is False for value in marker_values):
         return False
-    return status not in {"fail", "not_detected", "not_found", "not_service"}
+    status = str(record.get("status") or "").strip().lower()
+    if not status or status == "fail" or status.startswith(("not_", "unknown")):
+        return False
+    return True
 
 
 _PRE_DETECT_NOISE_MARKERS = (
@@ -1042,10 +1269,10 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         return int(ctx.port)
     if name in {"target", "target_spec"}:
         return ctx.target
-    if name in {"target_path", "url_path", "path"} and ctx.target is not None and ctx.target.path:
-        return ctx.target.path
-    if name in {"target_query", "url_query", "query_string"} and ctx.target is not None and ctx.target.query:
-        return ctx.target.query
+    if name in {"target_path", "url_path", "path"}:
+        return ctx.target.path if ctx.target is not None and ctx.target.path else None
+    if name in {"target_query", "url_query", "query_string"}:
+        return ctx.target.query if ctx.target is not None and ctx.target.query else None
     if name == "use_https" and target_scheme in {"http", "https"}:
         return target_scheme == "https"
     if name == "preferred_scheme" and target_scheme in {"http", "https"}:
@@ -1057,34 +1284,23 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
     if name == "workers":
         return cfg.workers
     if name == "username":
-        return credential.username if credential.username is not None else cfg.username
+        return credential.username
     if name == "password":
-        # E2 fix: password-only credentials (e.g. Redis AUTH-with-token, kafka
-        # SASL/PLAIN with anonymous username) provide `password` but no
-        # `username`. The previous check gated password propagation on the
-        # username field, so file-driven password lists were silently replaced
-        # by cfg.password (which is the CLI's raw arg — often the file path).
-        if credential.password is not None:
-            return credential.password
-        if credential.username is not None:
-            return credential.password  # explicit-None on a user-only credential
-        return cfg.password
-    if name in {"token", "api_token"}:
-        return credential.token or getattr(args, name, None) or getattr(args, "token", None)
-    if name == "apitoken":
-        # E2E-batch fix: grafana + elastic use dest="apitoken" (F7 fallback
-        # already resolved cfg.token from this dest for other consumers).
-        # host_stage functions that name their param `apitoken` receive the
-        # value here so the module doesn't need to duck-type args at runtime.
-        return credential.token or getattr(args, "apitoken", None) or getattr(args, "token", None)
+        return credential.password
+    if name in {"token", "api_token", "apitoken", "pve_api_token", "api_key"}:
+        return credential.token
     if name == "defcreds":
-        return cfg.defcreds and credential.source != "file"
+        return ctx.phase != "detect" and cfg.defcreds and credential.source != "file"
     if name == "run_deep_checks":
         return bool(ctx.run_deep_checks)
+    if name == "phase":
+        return ctx.phase
     if name == "debug":
         return cfg.debug
     if name == "debug_emit":
         return ctx.debug_emit
+    if name == "ssrf_capture":
+        return getattr(args, "ssrf_capture", None)
     if name == "proxy":
         # `cli.py` parses --proxy once into `args._proxy_config` (a ProxyConfig).
         # Hand that parsed object through so clients reuse it instead of
@@ -1092,6 +1308,22 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         if hasattr(args, "_proxy_config"):
             return args._proxy_config
         return getattr(args, "proxy", None)
+    if name == "insecure":
+        return bool(getattr(args, "insecure", False))
+    if name in {"ca_file", "tls_ca", "tls_cert", "tls_key", "cert_file", "key_file"}:
+        transport_aliases = {
+            "ca_file": ("ca_file", "tls_ca"),
+            "tls_ca": ("tls_ca", "ca_file"),
+            "tls_cert": ("tls_cert", "cert_file"),
+            "tls_key": ("tls_key", "key_file"),
+            "cert_file": ("cert_file", "tls_cert"),
+            "key_file": ("key_file", "tls_key"),
+        }
+        for attribute in transport_aliases[name]:
+            value = getattr(args, attribute, None)
+            if value is not None:
+                return value
+        return None
     if name == "max_messages":
         raw_max_messages = getattr(args, "max_messages", None)
         if raw_max_messages is not None:
@@ -1114,26 +1346,19 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         # opt-in module knobs.
         return bool(getattr(args, "probe_write", False))
     if name == "credential_candidates":
-        if credential.username is not None:
-            return [
-                {
-                    "username": credential.username,
-                    "password": credential.password or "",
-                    "source": credential.source,
-                    "default": credential.source == "default",
-                }
-            ]
-        builder = getattr(args, "_credential_candidates", None)
-        if builder is not None:
-            return builder
-        public_candidates = getattr(args, "credential_candidates", None)
-        if public_candidates is not None:
-            return public_candidates
-        username = getattr(args, "username", None)
-        password = getattr(args, "password", None)
-        if username:
-            return [{"username": username, "password": password or "", "source": "provided"}]
-        return []
+        if ctx.phase == "detect":
+            return []
+        candidates = ctx.credential_runs or (credential,)
+        return [
+            {
+                "username": item.username,
+                "password": item.password or "",
+                "source": item.source,
+                "default": item.source == "default",
+            }
+            for item in candidates
+            if item.username is not None or item.password is not None
+        ]
     if name.endswith("_limit"):
         base = name.removesuffix("_limit")
         raw = getattr(args, base, None)
@@ -1288,6 +1513,38 @@ class AuditCommandRunner:
         self.args = args
         self.spec = spec
         self.logger = logger
+        self.console = console
+        self._strict_host_stage_binding: _StrictHostStageBinding | None
+        host_stage_options = getattr(spec, "host_stage_options", None)
+        if host_stage_options is not None:
+            if spec.host_stage is None:
+                raise ValueError(f"{spec.module} host_stage_options require host_stage")
+            self._strict_host_stage_binding = _build_strict_host_stage_binding(
+                spec.host_stage,
+                host_stage_options,
+                module=spec.module,
+            )
+        else:
+            self._strict_host_stage_binding = None
+        host_stage_signature = (
+            self._strict_host_stage_binding.signature
+            if self._strict_host_stage_binding is not None
+            else (_cached_signature(_resolve_host_stage(spec.host_stage)) if spec.host_stage is not None else None)
+        )
+        self._host_stage_is_monolithic = bool(
+            spec.host_stage is not None
+            and spec.detect is None
+            and spec.auth is None
+            and spec.capabilities is None
+            and spec.data is None
+            and host_stage_signature is not None
+            and "phase" not in host_stage_signature.parameters
+        )
+        self._host_stage_accepts_credential_batch = bool(
+            host_stage_signature is not None and "credential_candidates" in host_stage_signature.parameters
+        )
+        self._lifecycle_states: dict[int, Any] = {}
+        self._lifecycle_states_lock = threading.Lock()
         if emit_line is not None:
             self.emit_line = emit_line
         elif console is not None:
@@ -1305,6 +1562,17 @@ class AuditCommandRunner:
         return []
 
     def run_plan(self, plan: AuditCommandPlan) -> AuditCommandResult:
+        if self.console is not None and hasattr(self.console, "set_structured_output"):
+            self.console.set_structured_output(plan.output_format == "json")
+        sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append)
+        sink.prepare()
+        try:
+            return self._run_prepared_plan(plan, sink)
+        finally:
+            self._close_all_lifecycle_states()
+            sink.close()
+
+    def _run_prepared_plan(self, plan: AuditCommandPlan, sink: LineOutputSink) -> AuditCommandResult:
         target_count = plan.target_count
         retain_records = target_count <= DEFAULT_RECORD_RETENTION_LIMIT
         # E6 fix: when target_count exceeds the retention limit, downstream
@@ -1326,14 +1594,13 @@ class AuditCommandRunner:
             enabled=should_use_global_progress(plan.output_format, target_count),
             leave=False,
         )
-        sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append)
         worker_count = max(1, int(plan.workers or getattr(self.args, "workers", 1) or 1))
-        scheduler: BoundedScheduler[tuple[int, str, int, ScanTargetSpec | None], AuditRecord] = BoundedScheduler(
-            max_workers=worker_count
-        )
-        deep_scheduler: BoundedScheduler[tuple[int, str, int, ScanTargetSpec | None, AuditRecord], AuditRecord] = (
+        scheduler: BoundedScheduler[tuple[int, str, int, ScanTargetSpec | None], _AuditDetectOutcome] = (
             BoundedScheduler(max_workers=worker_count)
         )
+        deep_scheduler: BoundedScheduler[
+            tuple[int, str, int, ScanTargetSpec | None, _AuditDetectOutcome], AuditRecord
+        ] = BoundedScheduler(max_workers=worker_count)
         emitted_lines = 0
         suppressed_records = 0
         retained_records: list[AuditRecord] = []
@@ -1363,12 +1630,10 @@ class AuditCommandRunner:
             sink.emit_many(lines)
 
         def _finalize_record(record: AuditRecord) -> None:
-            nonlocal record_count, detected_count
+            nonlocal record_count
             record_count += 1
             status = str(record.status or "")
             status_counts[status] = status_counts.get(status, 0) + 1
-            if self._is_detected(record):
-                detected_count += 1
             if retain_records:
                 retained_records.append(record)
             if record_callbacks:
@@ -1384,17 +1649,23 @@ class AuditCommandRunner:
         try:
             for window in plan.iter_target_windows():
                 window_index += 1
-                detected_targets: list[tuple[int, str, int, ScanTargetSpec | None, AuditRecord]] = []
+                detected_targets: list[tuple[int, str, int, ScanTargetSpec | None, _AuditDetectOutcome]] = []
 
-                for (idx, host, port, target), detect_record in scheduler.iter_completed(
+                for (idx, host, port, target), detect_outcome in scheduler.iter_completed(
                     window,
-                    lambda item: self._safe_record(
-                        item[1], item[2], lambda: self._run_detect(item[1], item[2], item[3], debug_emit)
+                    lambda item: self._run_detect_with_state(
+                        item[1],
+                        item[2],
+                        item[3],
+                        debug_emit,
                     ),
                 ):
+                    detect_record = detect_outcome.record
                     if self._is_detected(detect_record):
-                        detected_targets.append((idx, host, port, target, detect_record))
+                        detected_count += 1
+                        detected_targets.append((idx, host, port, target, detect_outcome))
                     else:
+                        self._close_lifecycle_state(detect_outcome.lifecycle_state)
                         if debug_emit is not None:
                             debug_emit(
                                 format_stage2_gate(host, int(port), "skip", self._not_detected_reason(detect_record))
@@ -1403,9 +1674,9 @@ class AuditCommandRunner:
                     progress.advance(1)
 
                 initial_deep_candidates = [
-                    (idx, host, port, target, detect_record)
-                    for idx, host, port, target, detect_record in detected_targets
-                    if self._deep_gate(detect_record)[0]
+                    (idx, host, port, target, detect_outcome)
+                    for idx, host, port, target, detect_outcome in detected_targets
+                    if self._deep_gate(detect_outcome.record)[0]
                 ]
                 total_detected += len(detected_targets)
                 total_deep_candidates += len(initial_deep_candidates)
@@ -1444,14 +1715,15 @@ class AuditCommandRunner:
 
                 if detected_targets:
                     progress.add_total(len(detected_targets))
-                for (_idx, _host, _port, _target, _detect_record), final_record in deep_scheduler.iter_completed(
+                for (_idx, _host, _port, _target, _detect_outcome), final_record in deep_scheduler.iter_completed(
                     detected_targets,
-                    lambda item: self._safe_record(
+                    lambda item: self._run_deep_and_close_state(
                         item[1],
                         item[2],
-                        lambda: self._run_deep_lifecycle(
-                            item[1], item[2], item[3], item[4], plan.credential_runs, debug_emit
-                        ),
+                        item[3],
+                        item[4],
+                        plan.credential_runs,
+                        debug_emit,
                     ),
                 ):
                     _finalize_record(final_record)
@@ -1473,7 +1745,21 @@ class AuditCommandRunner:
             debug_emit(format_pass_marker(2, "deep", "complete", processed=processed_deep))
 
         fallback_target_count = record_count or plan.fallback_target_count
-        if emitted_lines == 0 and fallback_target_count > 0 and plan.output_format != "json":
+        if record_count == 0 and plan.fallback_target_count > 0 and plan.output_format == "json":
+            summary = {
+                "type": "summary",
+                "module": self.spec.module,
+                "service": self.spec.module,
+                "status": "no_results",
+                "requested_targets": int(plan.fallback_target_count),
+                "processed_targets": 0,
+                "record_count": 0,
+                "detected_count": 0,
+                "reason": "no_service_detected",
+            }
+            emitted_lines += 1
+            sink.emit_many((json.dumps(summary, ensure_ascii=False),))
+        elif emitted_lines == 0 and fallback_target_count > 0 and plan.output_format != "json":
             if fallback_target_count > 1:
                 fallback_lines = (f"[*] No {self.spec.label} service detected on {fallback_target_count} target(s)",)
             else:
@@ -1481,19 +1767,16 @@ class AuditCommandRunner:
             emitted_lines += len(fallback_lines)
             sink.emit_many(fallback_lines)
 
-        try:
-            return AuditCommandResult(
-                records=[record.to_dict() for record in retained_records],
-                detected_count=detected_count,
-                emitted_lines=emitted_lines,
-                typed_records=retained_records,
-                suppressed_records=suppressed_records,
-                record_count=record_count,
-                status_counts=status_counts,
-                record_retention_truncated=not retain_records,
-            )
-        finally:
-            sink.close()
+        return AuditCommandResult(
+            records=[record.to_dict() for record in retained_records],
+            detected_count=detected_count,
+            emitted_lines=emitted_lines,
+            typed_records=retained_records,
+            suppressed_records=suppressed_records,
+            record_count=record_count,
+            status_counts=status_counts,
+            record_retention_truncated=not retain_records,
+        )
 
     def _ctx(
         self,
@@ -1502,8 +1785,11 @@ class AuditCommandRunner:
         target: ScanTargetSpec | None,
         credential: AuditCredentialRun,
         *,
+        phase: AuditPhase,
         run_deep_checks: bool,
         debug_emit: Callable[[str], None] | None,
+        credential_runs: tuple[AuditCredentialRun, ...] = (),
+        lifecycle_state: Any = None,
     ) -> AuditHookContext:
         return AuditHookContext(
             args=self.args,
@@ -1514,7 +1800,143 @@ class AuditCommandRunner:
             target=target,
             run_deep_checks=bool(run_deep_checks),
             debug_emit=debug_emit,
+            phase=phase,
+            credential_runs=credential_runs,
+            lifecycle_state=lifecycle_state,
         )
+
+    def _register_lifecycle_state(self, state: Any) -> None:
+        if state is None:
+            return
+        with self._lifecycle_states_lock:
+            self._lifecycle_states[id(state)] = state
+
+    def _close_lifecycle_state(self, state: Any) -> None:
+        if state is None:
+            return
+        with self._lifecycle_states_lock:
+            registered = self._lifecycle_states.pop(id(state), None)
+        if registered is None:
+            return
+        close = getattr(self.spec, "lifecycle_state_close", None)
+        if close is None:
+            return
+        try:
+            close(registered)
+        except Exception:  # noqa: BLE001 - cleanup must not replace the audit result
+            return
+
+    def _close_all_lifecycle_states(self) -> None:
+        with self._lifecycle_states_lock:
+            states = list(self._lifecycle_states.values())
+            self._lifecycle_states.clear()
+        close = getattr(self.spec, "lifecycle_state_close", None)
+        if close is None:
+            return
+        for state in states:
+            try:
+                close(state)
+            except Exception:  # noqa: BLE001 - best-effort outer cleanup
+                continue
+
+    def _run_detect_with_state(
+        self,
+        host: str,
+        port: int,
+        target: ScanTargetSpec | None,
+        debug_emit: Callable[[str], None] | None,
+    ) -> _AuditDetectOutcome:
+        base_ctx = self._ctx(
+            host,
+            port,
+            target,
+            AuditCredentialRun(source="anonymous"),
+            phase="detect",
+            run_deep_checks=False,
+            debug_emit=debug_emit,
+        )
+        state_factory = getattr(self.spec, "lifecycle_state_factory", None)
+        state = state_factory(base_ctx) if state_factory is not None else None
+        self._register_lifecycle_state(state)
+        ctx = self._ctx(
+            host,
+            port,
+            target,
+            AuditCredentialRun(source="anonymous"),
+            phase="detect",
+            run_deep_checks=False,
+            debug_emit=debug_emit,
+            lifecycle_state=state,
+        )
+        started_at = time.monotonic()
+        try:
+            record = self._detect(ctx)
+            runtime_stage_telemetry = not bool(record.stages)
+            if runtime_stage_telemetry:
+                result, error = _runtime_phase_outcome("detect", record)
+                record, _added = _attach_runtime_phase_trace(
+                    record,
+                    phase="detect",
+                    duration_ms=max(1, int((time.monotonic() - started_at) * 1000)),
+                    result=result,
+                    error=error,
+                    debug_emit=debug_emit,
+                )
+            return _AuditDetectOutcome(
+                record=record,
+                lifecycle_state=state,
+                runtime_stage_telemetry=runtime_stage_telemetry,
+            )
+        except TypeError:
+            self._close_lifecycle_state(state)
+            raise
+        except Exception as exc:  # noqa: BLE001 - per-target detect isolation
+            self._close_lifecycle_state(state)
+
+            def _raise(error: Exception = exc) -> AuditRecord:
+                raise error
+
+            record = self._safe_record(host, port, _raise)
+            record, _added = _attach_runtime_phase_trace(
+                record,
+                phase="detect",
+                duration_ms=max(1, int((time.monotonic() - started_at) * 1000)),
+                result="error",
+                error=str(exc).strip() or exc.__class__.__name__,
+                debug_emit=debug_emit,
+            )
+            return _AuditDetectOutcome(
+                record=record,
+                runtime_stage_telemetry=True,
+            )
+
+    def _run_deep_and_close_state(
+        self,
+        host: str,
+        port: int,
+        target: ScanTargetSpec | None,
+        detect_outcome: _AuditDetectOutcome,
+        credential_runs: tuple[AuditCredentialRun, ...],
+        debug_emit: Callable[[str], None] | None,
+    ) -> AuditRecord:
+        try:
+            return self._safe_record(
+                host,
+                port,
+                lambda: self._run_deep_lifecycle(
+                    host,
+                    port,
+                    target,
+                    detect_outcome.record,
+                    credential_runs,
+                    debug_emit,
+                    lifecycle_state=detect_outcome.lifecycle_state,
+                    runtime_stage_telemetry=detect_outcome.runtime_stage_telemetry,
+                ),
+                prior_record=detect_outcome.record,
+            )
+        finally:
+            self._close_lifecycle_state(detect_outcome.lifecycle_state)
 
     def _run_detect(
         self,
@@ -1528,10 +1950,68 @@ class AuditCommandRunner:
             port,
             target,
             AuditCredentialRun(source="anonymous"),
+            phase="detect",
             run_deep_checks=False,
             debug_emit=debug_emit,
         )
         return self._detect(ctx)
+
+    def _runtime_phase_failure(
+        self,
+        *,
+        host: str,
+        port: int,
+        prior: AuditRecord,
+        detect_record: AuditRecord,
+        phase: AuditPhase,
+        started_at: float,
+        exc: Exception,
+        debug_emit: Callable[[str], None] | None,
+    ) -> AuditRecord:
+        def _raise(error: Exception = exc) -> AuditRecord:
+            raise error
+
+        failed = self._safe_record(host, port, _raise, prior_record=prior)
+        if self._is_detected(detect_record):
+            failed_payload = failed.to_dict()
+            failed_payload["detected_status"] = str(detect_record.status)
+            failed_payload["detection_preserved"] = True
+            failed = AuditRecord.from_mapping(
+                failed_payload,
+                module=self.spec.module,
+                service=detect_record.service or self.spec.module,
+            )
+        failed, _added = _attach_runtime_phase_trace(
+            failed,
+            prior=prior,
+            phase=phase,
+            duration_ms=max(1, int((time.monotonic() - started_at) * 1000)),
+            result="error",
+            error=str(exc).strip() or exc.__class__.__name__,
+            debug_emit=debug_emit,
+        )
+        return failed
+
+    @staticmethod
+    def _runtime_skip_phases(
+        record: AuditRecord,
+        phases: Iterable[AuditPhase],
+        *,
+        reason: str,
+        debug_emit: Callable[[str], None] | None,
+    ) -> AuditRecord:
+        current = record
+        for phase in phases:
+            current, _added = _attach_runtime_phase_trace(
+                current,
+                prior=current,
+                phase=phase,
+                duration_ms=0,
+                result="skip",
+                error=reason,
+                debug_emit=debug_emit,
+            )
+        return current
 
     def _run_deep_lifecycle(
         self,
@@ -1541,17 +2021,86 @@ class AuditCommandRunner:
         detect_record: AuditRecord,
         credential_runs: tuple[AuditCredentialRun, ...],
         debug_emit: Callable[[str], None] | None,
+        lifecycle_state: Any = None,
+        runtime_stage_telemetry: bool = False,
     ) -> AuditRecord:
+        if self._host_stage_is_monolithic:
+            return self._run_monolithic_deep_lifecycle(
+                host,
+                port,
+                target,
+                detect_record,
+                credential_runs,
+                debug_emit,
+                lifecycle_state,
+            )
+
         auth_records: list[tuple[AuditCredentialRun, AuditRecord]] = []
         candidates = credential_runs or (AuditCredentialRun(source="anonymous"),)
         if self._should_keep_anonymous_detect_record(detect_record):
             selected_credential = AuditCredentialRun(source="anonymous")
             selected_record = detect_record
+            if runtime_stage_telemetry:
+                selected_record, _added = _attach_runtime_phase_trace(
+                    selected_record,
+                    prior=detect_record,
+                    phase="auth",
+                    duration_ms=0,
+                    result="ok",
+                    debug_emit=debug_emit,
+                )
             gate_reason = "status=open_no_auth"
         else:
             for credential in candidates:
-                ctx = self._ctx(host, port, target, credential, run_deep_checks=False, debug_emit=debug_emit)
-                auth_records.append((credential, self._auth(ctx, detect_record)))
+                ctx = self._ctx(
+                    host,
+                    port,
+                    target,
+                    credential,
+                    phase="auth",
+                    run_deep_checks=False,
+                    debug_emit=debug_emit,
+                    credential_runs=(credential,),
+                    lifecycle_state=lifecycle_state,
+                )
+                auth_started_at = time.monotonic()
+                try:
+                    auth_record = self._auth(ctx, detect_record)
+                except TypeError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - isolate a single target/identity
+                    auth_record = self._runtime_phase_failure(
+                        host=host,
+                        port=port,
+                        prior=detect_record,
+                        detect_record=detect_record,
+                        phase="auth",
+                        started_at=auth_started_at,
+                        exc=exc,
+                        debug_emit=debug_emit,
+                    )
+                    if runtime_stage_telemetry:
+                        auth_record = self._runtime_skip_phases(
+                            auth_record,
+                            ("capabilities", "data"),
+                            reason="deep checks disabled",
+                            debug_emit=debug_emit,
+                        )
+                    return self._preserve_detected_deep_failure(detect_record, auth_record)
+                if runtime_stage_telemetry:
+                    result, error = _runtime_phase_outcome("auth", auth_record, detect_record)
+                    auth_record, _added = _attach_runtime_phase_trace(
+                        auth_record,
+                        prior=detect_record,
+                        phase="auth",
+                        duration_ms=max(1, int((time.monotonic() - auth_started_at) * 1000)),
+                        result=result,
+                        error=error,
+                        debug_emit=debug_emit,
+                    )
+                auth_records.append((credential, auth_record))
+                if self._deep_gate(auth_record)[0]:
+                    break
             selected_credential, selected_record, gate_reason = self._select_deep_record(detect_record, auth_records)
         gate = self._deep_gate(selected_record)
         if not gate[0]:
@@ -1588,14 +2137,235 @@ class AuditCommandRunner:
                     selected_record.extra["attempted_credentials"] = attempts_payload
             if debug_emit is not None:
                 debug_emit(format_stage2_gate(host, int(port), "skip", gate[1] or gate_reason))
-            return selected_record
+            if runtime_stage_telemetry:
+                selected_record = self._runtime_skip_phases(
+                    selected_record,
+                    ("capabilities", "data"),
+                    reason="deep checks disabled",
+                    debug_emit=debug_emit,
+                )
+            return self._preserve_detected_deep_failure(detect_record, selected_record)
         if debug_emit is not None:
             debug_emit(format_stage2_gate(host, int(port), "run", gate[1] or gate_reason))
 
-        deep_ctx = self._ctx(host, port, target, selected_credential, run_deep_checks=True, debug_emit=debug_emit)
-        record = self._capabilities(deep_ctx, selected_record)
-        record = self._data(deep_ctx, record)
-        return record
+        capabilities_ctx = self._ctx(
+            host,
+            port,
+            target,
+            selected_credential,
+            phase="capabilities",
+            run_deep_checks=True,
+            debug_emit=debug_emit,
+            credential_runs=(selected_credential,),
+            lifecycle_state=lifecycle_state,
+        )
+        capabilities_started_at = time.monotonic()
+        try:
+            record = self._capabilities(capabilities_ctx, selected_record)
+        except TypeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - isolate a single target
+            record = self._runtime_phase_failure(
+                host=host,
+                port=port,
+                prior=selected_record,
+                detect_record=detect_record,
+                phase="capabilities",
+                started_at=capabilities_started_at,
+                exc=exc,
+                debug_emit=debug_emit,
+            )
+            if runtime_stage_telemetry:
+                record = self._runtime_skip_phases(
+                    record,
+                    ("data",),
+                    reason="deep checks disabled",
+                    debug_emit=debug_emit,
+                )
+            return self._preserve_detected_deep_failure(detect_record, record)
+        if runtime_stage_telemetry:
+            result, error = _runtime_phase_outcome("capabilities", record, selected_record)
+            record, _added = _attach_runtime_phase_trace(
+                record,
+                prior=selected_record,
+                phase="capabilities",
+                duration_ms=max(1, int((time.monotonic() - capabilities_started_at) * 1000)),
+                result=result,
+                error=error,
+                debug_emit=debug_emit,
+            )
+        data_ctx = self._ctx(
+            host,
+            port,
+            target,
+            selected_credential,
+            phase="data",
+            run_deep_checks=True,
+            debug_emit=debug_emit,
+            credential_runs=(selected_credential,),
+            lifecycle_state=lifecycle_state,
+        )
+        data_started_at = time.monotonic()
+        prior_data_record = record
+        try:
+            record = self._data(data_ctx, prior_data_record)
+        except TypeError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - isolate a single target
+            record = self._runtime_phase_failure(
+                host=host,
+                port=port,
+                prior=prior_data_record,
+                detect_record=detect_record,
+                phase="data",
+                started_at=data_started_at,
+                exc=exc,
+                debug_emit=debug_emit,
+            )
+            return self._preserve_detected_deep_failure(detect_record, record)
+        if runtime_stage_telemetry:
+            result, error = _runtime_phase_outcome("data", record, prior_data_record)
+            record, _added = _attach_runtime_phase_trace(
+                record,
+                prior=prior_data_record,
+                phase="data",
+                duration_ms=max(1, int((time.monotonic() - data_started_at) * 1000)),
+                result=result,
+                error=error,
+                debug_emit=debug_emit,
+            )
+        return self._preserve_detected_deep_failure(detect_record, record)
+
+    def _run_monolithic_deep_lifecycle(
+        self,
+        host: str,
+        port: int,
+        target: ScanTargetSpec | None,
+        detect_record: AuditRecord,
+        credential_runs: tuple[AuditCredentialRun, ...],
+        debug_emit: Callable[[str], None] | None,
+        lifecycle_state: Any,
+    ) -> AuditRecord:
+        """Run each monolithic credential attempt once with actions enabled.
+
+        The old generic lifecycle called the same host_stage for auth with
+        ``run_deep_checks=False`` and then called it again for data with
+        ``run_deep_checks=True``. The selected credential therefore repeated
+        its connection, authentication and baseline queries. A monolithic stage
+        already owns auth+actions, so its deep result is final.
+        """
+
+        candidates = credential_runs or (AuditCredentialRun(source="anonymous"),)
+        has_application_credentials = any(
+            candidate.username is not None or candidate.password is not None or candidate.token is not None
+            for candidate in candidates
+        )
+        if (
+            not has_application_credentials
+            and not bool(getattr(self.args, "defcreds", False))
+            and not self._deep_gate(detect_record)[0]
+        ):
+            gate = self._deep_gate(detect_record)
+            if debug_emit is not None:
+                debug_emit(format_stage2_gate(host, int(port), "skip", gate[1]))
+            return detect_record
+        if self._host_stage_accepts_credential_batch:
+            selected = candidates[0] if candidates else AuditCredentialRun(source="anonymous")
+            ctx = self._ctx(
+                host,
+                port,
+                target,
+                selected,
+                phase="data",
+                run_deep_checks=True,
+                debug_emit=debug_emit,
+                credential_runs=tuple(candidates),
+                lifecycle_state=lifecycle_state,
+            )
+            record = self._host_stage(ctx, run_deep_checks=True)
+            gate = self._deep_gate(record)
+            if debug_emit is not None:
+                debug_emit(
+                    format_stage2_gate(
+                        host,
+                        int(port),
+                        "run" if gate[0] else "skip",
+                        gate[1],
+                    )
+                )
+            return self._preserve_detected_deep_failure(detect_record, record)
+
+        attempts: list[tuple[AuditCredentialRun, AuditRecord]] = []
+        for credential in candidates:
+            ctx = self._ctx(
+                host,
+                port,
+                target,
+                credential,
+                phase="data",
+                run_deep_checks=True,
+                debug_emit=debug_emit,
+                credential_runs=(credential,),
+                lifecycle_state=lifecycle_state,
+            )
+            record = self._host_stage(ctx, run_deep_checks=True)
+            attempts.append((credential, record))
+            gate = self._deep_gate(record)
+            if gate[0]:
+                if debug_emit is not None:
+                    debug_emit(format_stage2_gate(host, int(port), "run", gate[1]))
+                return record
+
+        if not attempts:
+            return detect_record
+        selected_record = attempts[-1][1]
+        if len(attempts) > 1:
+            import dataclasses as _dc
+
+            selected_record = _dc.replace(
+                selected_record,
+                extra={
+                    **selected_record.extra,
+                    "attempted_credentials": [
+                        {
+                            "username": credential.username,
+                            "password": credential.password,
+                            "source": credential.source,
+                            "status": str(record.status),
+                        }
+                        for credential, record in attempts
+                    ],
+                },
+            )
+        if debug_emit is not None:
+            gate = self._deep_gate(selected_record)
+            debug_emit(format_stage2_gate(host, int(port), "skip", gate[1]))
+        return self._preserve_detected_deep_failure(detect_record, selected_record)
+
+    def _preserve_detected_deep_failure(
+        self,
+        detect_record: AuditRecord,
+        deep_record: AuditRecord,
+    ) -> AuditRecord:
+        if self._is_detected(deep_record) or not self._is_detected(detect_record):
+            return deep_record
+        payload = deep_record.to_dict()
+        message = str(payload.get("error") or payload.get("deep_error") or deep_record.status)
+        payload.update(
+            {
+                "module": self.spec.module,
+                "service": detect_record.service or self.spec.module,
+                f"is_{self.spec.module}": True,
+                "detected_status": str(detect_record.status),
+                "detection_preserved": True,
+                "deep_error": message,
+            }
+        )
+        return AuditRecord.from_mapping(
+            payload,
+            module=self.spec.module,
+            service=detect_record.service or self.spec.module,
+        )
 
     def _should_keep_anonymous_detect_record(self, detect_record: AuditRecord) -> bool:
         """When detect confirmed anonymous access + defcreds is on, skip the
@@ -1617,7 +2387,14 @@ class AuditCommandRunner:
             return True
         return bool(getattr(self.spec, "keep_anonymous_open_no_auth", False))
 
-    def _safe_record(self, host: str, port: int, task: Callable[[], AuditRecord]) -> AuditRecord:
+    def _safe_record(
+        self,
+        host: str,
+        port: int,
+        task: Callable[[], AuditRecord],
+        *,
+        prior_record: AuditRecord | None = None,
+    ) -> AuditRecord:
         """Run a per-host task, converting an operational exception into a fail record.
 
         Without this, a single host raising (e.g. a driver bug or a malformed
@@ -1636,20 +2413,45 @@ class AuditCommandRunner:
             raise
         except Exception as exc:  # noqa: BLE001 - deliberate per-host isolation boundary
             message = str(exc).strip() or exc.__class__.__name__
+            if prior_record is not None and self._is_detected(prior_record):
+                payload = prior_record.to_dict()
+                payload.update(
+                    {
+                        "host": str(host),
+                        "port": int(port),
+                        "module": self.spec.module,
+                        "service": prior_record.service or self.spec.module,
+                        "status": "fail",
+                        "error": message,
+                        "deep_error": message,
+                        "detected_status": str(prior_record.status),
+                        "detection_preserved": True,
+                        f"is_{self.spec.module}": True,
+                    }
+                )
+                return AuditRecord.from_mapping(
+                    payload,
+                    module=self.spec.module,
+                    service=prior_record.service or self.spec.module,
+                )
             return AuditRecord(
                 host=str(host),
                 port=int(port),
                 module=self.spec.module,
                 service=self.spec.module,
                 status="fail",
-                extra={"error": message},
+                extra={"error": message, f"is_{self.spec.module}": False},
             )
 
     def _host_stage(self, ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
         if self.spec.host_stage is None:
             raise TypeError(f"{self.spec.module} spec exposes neither hook overrides nor host_stage")
         return _invoke_host_stage(
-            self.spec.host_stage, module=self.spec.module, ctx=ctx, run_deep_checks=run_deep_checks
+            self.spec.host_stage,
+            module=self.spec.module,
+            ctx=ctx,
+            run_deep_checks=run_deep_checks,
+            strict_binding=self._strict_host_stage_binding,
         )
 
     def _detect(self, ctx: AuditHookContext) -> AuditRecord:
@@ -1699,10 +2501,15 @@ class AuditCommandRunner:
         if self.spec.is_detected is not None:
             return bool(self.spec.is_detected(record))
         marker = f"is_{self.spec.module}"
-        if record.extra.get(marker) is False:
+        marker_value = record.extra.get(marker)
+        if marker_value is True:
+            return True
+        if marker_value is False:
             return False
-        status = str(record.status or "")
-        return status not in {"not_detected", "not_found", "not_service", f"not_{self.spec.module}"}
+        status = str(record.status or "").strip().lower()
+        if not status or status == "fail" or status.startswith(("not_", "unknown")):
+            return False
+        return True
 
     def _not_detected_reason(self, record: AuditRecord) -> str:
         status = str(record.status or "")
@@ -1728,7 +2535,9 @@ class AuditCommandRunner:
             "detected",
             "token_ok",
             "valid_credentials",
+            "auth_valid",
             "weak_default_creds",
+            "invalid_credentials_anonymous",
             "valid_token",
             "token_accepted",
             "insufficient_privileges",
@@ -1757,6 +2566,8 @@ def run_basic_host_audit(
     creates and passes `console` so it stays patchable in module-level tests."""
     name = label.lower()
     cfg = AuditConfig.from_namespace(args)
+    if hasattr(console, "set_structured_output"):
+        console.set_structured_output(cfg.output_format == "json")
     validation_rc = validate(args, console)
     if validation_rc is not None:
         return int(validation_rc)
@@ -1772,9 +2583,12 @@ def run_basic_host_audit(
         if cfg.output:
             suffix += f" output={cfg.output}"
         console.info(f"{name} audit started:" + suffix)
-    runner = AuditCommandRunner(args=args, spec=build_spec(args), logger=logger, console=console)
     try:
+        runner = AuditCommandRunner(args=args, spec=build_spec(args), logger=logger, console=console)
         result = runner.run_plan(plan)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
     except OSError as exc:
         console.error(f"failed to process {name} output: {exc}")
         return 2

@@ -2,35 +2,147 @@
 
 from __future__ import annotations
 
+import itertools
+import queue
 import threading
-from collections.abc import Callable, Iterable, Iterator
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from typing import Any, Generic, TypeVar
+from collections.abc import Callable, Generator, Iterable, Iterator
+from dataclasses import dataclass
+from typing import Any, Generic, TypeVar, cast
 
 T = TypeVar("T")
 R = TypeVar("R")
 K = TypeVar("K")
 
+_STOP = object()
+_POOL_SEQUENCE = itertools.count(1)
 
-def _cancel_pending_futures(executor: ThreadPoolExecutor, pending: dict[Future[Any], Any]) -> None:
-    """Best-effort cancel + non-waiting shutdown used by Ctrl+C paths.
 
-    Python's default `with ThreadPoolExecutor` calls `shutdown(wait=True)` on
-    exit, which parks the CLI until every in-flight socket op times out. We
-    cancel futures that never started and detach without waiting so operator
-    Ctrl+C surfaces immediately.
+@dataclass(frozen=True)
+class _Task(Generic[T]):
+    index: int
+    item: T
+
+
+@dataclass(frozen=True)
+class _Outcome(Generic[T, R]):
+    index: int
+    item: T
+    value: R | None = None
+    error: BaseException | None = None
+
+
+class _KeyLimiter(Generic[T, K]):
+    def __init__(self, key_fn: Callable[[T], K] | None, per_key_limit: int) -> None:
+        self._key_fn = key_fn
+        self._per_key_limit = per_key_limit
+        self._semaphores: dict[K, threading.Semaphore] = {}
+        self._lock = threading.Lock()
+
+    def run(self, item: T, worker: Callable[[T], R]) -> R:
+        if self._key_fn is None:
+            return worker(item)
+        key = self._key_fn(item)
+        with self._lock:
+            semaphore = self._semaphores.get(key)
+            if semaphore is None:
+                semaphore = threading.Semaphore(self._per_key_limit)
+                self._semaphores[key] = semaphore
+        with semaphore:
+            return worker(item)
+
+
+class _DaemonWorkerPool(Generic[T, R]):
+    """A small daemon-thread pool whose cancellation path never joins active work.
+
+    ``ThreadPoolExecutor.shutdown(wait=False)`` still leaves its workers registered
+    in CPython's interpreter-exit hook, so a blocked socket operation can hold the
+    CLI open after Ctrl+C. These workers are ordinary daemon threads and therefore
+    cannot delay process exit. Normal completion still joins every worker.
     """
-    for future in list(pending.keys()):
-        future.cancel()
-    try:
-        executor.shutdown(wait=False, cancel_futures=True)
-    except TypeError:
-        # Python < 3.9 lacked cancel_futures — fall back to the two-arg form.
-        executor.shutdown(wait=False)
+
+    def __init__(
+        self,
+        *,
+        max_workers: int,
+        max_inflight: int,
+        worker: Callable[[T], R],
+        key_fn: Callable[[T], Any] | None,
+        per_key_limit: int,
+    ) -> None:
+        self._tasks: queue.Queue[_Task[T] | object] = queue.Queue(maxsize=max_inflight)
+        self.results: queue.Queue[_Outcome[T, R]] = queue.Queue()
+        self._cancelled = threading.Event()
+        self._worker = worker
+        self._limiter: _KeyLimiter[T, Any] = _KeyLimiter(key_fn, per_key_limit)
+        pool_id = next(_POOL_SEQUENCE)
+        self._threads = [
+            threading.Thread(
+                target=self._worker_loop,
+                name=f"redposture-scheduler-{pool_id}-{index + 1}",
+                daemon=True,
+            )
+            for index in range(max_workers)
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def submit(self, task: _Task[T]) -> None:
+        if self._cancelled.is_set():
+            raise RuntimeError("scheduler is cancelled")
+        self._tasks.put(task)
+
+    def _worker_loop(self) -> None:
+        while True:
+            queued = self._tasks.get()
+            try:
+                if queued is _STOP:
+                    return
+                task = cast(_Task[T], queued)
+                if self._cancelled.is_set():
+                    continue
+                try:
+                    value = self._limiter.run(task.item, self._worker)
+                except BaseException as exc:  # noqa: BLE001 - transported to the caller thread
+                    if not self._cancelled.is_set():
+                        self.results.put(_Outcome(index=task.index, item=task.item, error=exc))
+                else:
+                    if not self._cancelled.is_set():
+                        self.results.put(_Outcome(index=task.index, item=task.item, value=value))
+            finally:
+                self._tasks.task_done()
+
+    def close(self) -> None:
+        """Finish a normally drained pool and join all worker threads."""
+
+        for _thread in self._threads:
+            self._tasks.put(_STOP)
+        for thread in self._threads:
+            thread.join()
+
+    def cancel(self) -> None:
+        """Discard queued work and detach immediately from active daemon workers."""
+
+        if self._cancelled.is_set():
+            return
+        self._cancelled.set()
+        while True:
+            try:
+                self._tasks.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                self._tasks.task_done()
+        # Wake workers that are idle now. Active workers will consume a stop
+        # marker after their current call returns; we deliberately do not join.
+        for _thread in self._threads:
+            try:
+                self._tasks.put_nowait(_STOP)
+            except queue.Full:  # pragma: no cover - the queue was drained above
+                break
 
 
 class BoundedScheduler(Generic[T, R]):
-    """Small ThreadPool wrapper with max-inflight and optional per-key limits."""
+    """Bounded daemon-worker scheduler with ordered and completion-order APIs."""
 
     def __init__(
         self,
@@ -43,6 +155,52 @@ class BoundedScheduler(Generic[T, R]):
         self.max_inflight = max(self.max_workers, int(max_inflight or self.max_workers * 2))
         self.per_key_limit = max(1, int(per_key_limit or self.max_inflight))
 
+    def _iter_outcomes(
+        self,
+        items: Iterable[T],
+        worker: Callable[[T], R],
+        *,
+        key_fn: Callable[[T], K] | None = None,
+    ) -> Generator[_Outcome[T, R], None, None]:
+        pool: _DaemonWorkerPool[T, R] = _DaemonWorkerPool(
+            max_workers=self.max_workers,
+            max_inflight=self.max_inflight,
+            worker=worker,
+            key_fn=key_fn,
+            per_key_limit=self.per_key_limit,
+        )
+        source = enumerate(items)
+        exhausted = False
+        in_flight = 0
+        drained_normally = False
+
+        def _fill() -> None:
+            nonlocal exhausted, in_flight
+            while not exhausted and in_flight < self.max_inflight:
+                try:
+                    index, item = next(source)
+                except StopIteration:
+                    exhausted = True
+                    break
+                pool.submit(_Task(index=index, item=item))
+                in_flight += 1
+
+        try:
+            _fill()
+            while in_flight:
+                outcome = pool.results.get()
+                in_flight -= 1
+                if outcome.error is not None:
+                    raise outcome.error
+                yield outcome
+                _fill()
+            drained_normally = True
+        finally:
+            if drained_normally:
+                pool.close()
+            else:
+                pool.cancel()
+
     def map_ordered(
         self,
         items: Iterable[T],
@@ -51,53 +209,13 @@ class BoundedScheduler(Generic[T, R]):
         key_fn: Callable[[T], K] | None = None,
     ) -> list[R]:
         results: dict[int, R] = {}
-        semaphores: dict[K, threading.Semaphore] = {}
-
-        def _run(item: T) -> R:
-            if key_fn is None:
-                return worker(item)
-            key = key_fn(item)
-            semaphore = semaphores.setdefault(key, threading.Semaphore(self.per_key_limit))
-            with semaphore:
-                return worker(item)
-
-        executor = ThreadPoolExecutor(max_workers=self.max_workers)
-        pending: dict[Future[R], int] = {}
+        outcomes = self._iter_outcomes(items, worker, key_fn=key_fn)
         try:
-            iterator = enumerate(items)
-            exhausted = False
-            submitted = 0
-            while not exhausted or pending:
-                while not exhausted and len(pending) < self.max_inflight:
-                    try:
-                        idx, item = next(iterator)
-                    except StopIteration:
-                        exhausted = True
-                        break
-                    pending[executor.submit(_run, item)] = idx
-                    submitted += 1
-                if not pending:
-                    continue
-                done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    idx = pending.pop(future)
-                    results[idx] = future.result()
-        except (KeyboardInterrupt, SystemExit):
-            # C3 fix: default ThreadPoolExecutor.__exit__ calls shutdown(wait=True),
-            # so Ctrl+C freezes the CLI until every in-flight socket times out.
-            _cancel_pending_futures(executor, pending)
-            raise
-        except BaseException:
-            # E1 fix: any worker-side exception (TypeError, KeyError, custom
-            # exceptions from broken render helpers, etc.) previously escaped
-            # without shutting the executor down — the remaining worker threads
-            # kept running against subsequent hosts. Cancel + non-waiting
-            # shutdown here so the leak point is closed.
-            _cancel_pending_futures(executor, pending)
-            raise
-        else:
-            executor.shutdown(wait=True)
-        return [results[idx] for idx in range(submitted)]
+            for outcome in outcomes:
+                results[outcome.index] = cast(R, outcome.value)
+        finally:
+            outcomes.close()
+        return [results[index] for index in range(len(results))]
 
     def iter_completed(
         self,
@@ -106,54 +224,14 @@ class BoundedScheduler(Generic[T, R]):
         *,
         key_fn: Callable[[T], K] | None = None,
     ) -> Iterator[tuple[T, R]]:
-        """Yield completed work items while enforcing shared backpressure.
+        """Yield completed work items while enforcing shared backpressure."""
 
-        Results are yielded as tasks complete. The original item is returned
-        with each result so callers that need stable ordered output can buffer
-        by their own item key.
-        """
-
-        semaphores: dict[K, threading.Semaphore] = {}
-
-        def _run(item: T) -> R:
-            if key_fn is None:
-                return worker(item)
-            key = key_fn(item)
-            semaphore = semaphores.setdefault(key, threading.Semaphore(self.per_key_limit))
-            with semaphore:
-                return worker(item)
-
-        executor = ThreadPoolExecutor(max_workers=self.max_workers)
-        pending: dict[Future[R], T] = {}
-        drained_normally = False
+        outcomes = self._iter_outcomes(items, worker, key_fn=key_fn)
         try:
-            iterator = iter(items)
-            exhausted = False
-            while not exhausted or pending:
-                while not exhausted and len(pending) < self.max_inflight:
-                    try:
-                        item = next(iterator)
-                    except StopIteration:
-                        exhausted = True
-                        break
-                    pending[executor.submit(_run, item)] = item
-                if not pending:
-                    continue
-                done, _ = wait(pending, return_when=FIRST_COMPLETED)
-                for future in done:
-                    item = pending.pop(future)
-                    yield item, future.result()
-            drained_normally = True
+            for outcome in outcomes:
+                yield outcome.item, cast(R, outcome.value)
         finally:
-            # E1 fix: generators can be closed early (GeneratorExit when the
-            # consumer breaks out of the loop) OR raise any exception from
-            # `future.result()`. In every non-normal exit we cancel pending
-            # futures and shut the executor down without waiting so we don't
-            # leak worker threads that keep hammering sockets in the background.
-            if drained_normally:
-                executor.shutdown(wait=True)
-            else:
-                _cancel_pending_futures(executor, pending)
+            outcomes.close()
 
 
 __all__ = ["BoundedScheduler"]

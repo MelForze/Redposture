@@ -7,12 +7,13 @@ import struct
 import pytest
 
 from redposture_core import stage_kafka as kafka
+from redposture_core.audit_models import AuditRecord
 from redposture_core.clients import kafka as kafka_client
 from redposture_core.modules.kafka import actions as kafka_actions
 from redposture_core.modules.kafka import stage as kafka_stage_pkg
 from redposture_core.stage_kafka import _parse_apiversions_response, _parse_metadata_response
 from redposture_core.stage_runtime import AuditCommandResult
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 class _DummySocket:
@@ -100,6 +101,41 @@ def _kafka_args(**overrides: object) -> argparse.Namespace:
     }
     data.update(overrides)
     return argparse.Namespace(**data)
+
+
+def _kafka_host_record(
+    kwargs: dict[str, object],
+    *,
+    status: str,
+    detected: bool,
+    error: str | None = None,
+) -> AuditRecord:
+    deep = bool(kwargs.get("run_deep_checks"))
+    topic = kwargs.get("query_topic")
+    dump = bool(kwargs.get("dump"))
+    return AuditRecord(
+        host=str(kwargs["host"]),
+        port=int(kwargs["port"]),
+        service="kafka",
+        module="kafka",
+        status=status,
+        auth_required=status == "auth_required",
+        extra={
+            "is_kafka": detected,
+            "error": error,
+            "provided_username": kwargs.get("username"),
+            "provided_password": kwargs.get("password"),
+            "show_topics": bool(kwargs.get("show_topics")),
+            "topic_count": 1 if detected else None,
+            "topics": ["orders"] if deep else None,
+            "query_topic": topic,
+            "query_topic_value": "orders (partitions:1)" if deep and topic else None,
+            "dump": dump,
+            "max_messages": kwargs.get("max_messages") if dump else None,
+            "dump_topics": ["orders"] if deep and dump else None,
+            "dump_results": {"orders": ["p0@1 ord-1001"]} if deep and dump else None,
+        },
+    )
 
 
 def _kstr(value: str) -> bytes:
@@ -295,56 +331,40 @@ def test_run_kafka_stage_defcreds_keeps_no_auth_result_as_anonymous(monkeypatch:
     monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
     calls: list[tuple[str | None, str | None, bool]] = []
 
-    def fake_stage_call(
-        host: str,
-        port: int,
-        timeout: float,
-        retries: int,
-        username: str | None,
-        password: str | None,
-        show_topics: bool,
-        query_topic: str | None,
-        dump: bool,
-        max_messages: int,
-        *,
-        run_deep_checks: bool,
-        debug: bool,
-        debug_emit,
-        show_topics_limit: int | None = None,
-    ) -> dict[str, object]:
-        _ = (
-            timeout,
-            retries,
-            query_topic,
-            dump,
-            max_messages,
-            run_deep_checks,
-            debug,
-            debug_emit,
-            show_topics_limit,
-        )
-        provided = username is not None and password is not None
-        calls.append((username, password, bool(run_deep_checks)))
+    def fake_detect(ctx, _options) -> dict[str, object]:
+        calls.append((ctx.credential.username, ctx.credential.password, False))
         return {
             "timestamp": "2026-03-27T00:00:00Z",
-            "host": host,
-            "port": port,
+            "host": ctx.host,
+            "port": ctx.port,
             "is_kafka": True,
-            "status": "invalid_credentials_anonymous" if provided else "open_no_auth",
+            "status": "open_no_auth",
             "auth_required": False,
-            "provided_credentials": provided,
-            "provided_username": username,
-            "provided_password": password if provided else None,
-            "provided_credentials_ok": False if provided else None,
-            "show_topics": bool(show_topics),
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "provided_credentials_ok": None,
+            "show_topics": True,
             "query_topic": None,
             "dump": False,
             "topic_count": 1,
-            "topics": ["orders"] if run_deep_checks else None,
+            "topics": None,
             "error": None,
         }
 
-    monkeypatch.setattr(kafka_actions, "_call_audit_kafka_host_with_stage_debug", fake_stage_call)
+    def fake_data(ctx, record, _options) -> dict[str, object]:
+        calls.append((ctx.credential.username, ctx.credential.password, True))
+        payload = record.to_dict()
+        payload.update({"show_topics": True, "topics": ["orders"], "topic_count": 1})
+        return payload
+
+    monkeypatch.setattr(kafka_actions, "detect_kafka", fake_detect)
+    monkeypatch.setattr(
+        kafka_actions,
+        "authenticate_kafka",
+        lambda *_args, **_kwargs: pytest.fail("anonymous-open detect must skip default credentials"),
+    )
+    monkeypatch.setattr(kafka_actions, "collect_kafka_data", fake_data)
 
     rc = kafka.run_kafka_stage(_kafka_args(defcreds=True, show_topics=True), logger=object())
 
@@ -361,56 +381,48 @@ def test_run_kafka_stage_defcreds_auth_required_renders_failed_attempts(monkeypa
     monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
     calls: list[tuple[str | None, str | None, bool]] = []
 
-    def fake_stage_call(
-        host: str,
-        port: int,
-        timeout: float,
-        retries: int,
-        username: str | None,
-        password: str | None,
-        show_topics: bool,
-        query_topic: str | None,
-        dump: bool,
-        max_messages: int,
-        *,
-        run_deep_checks: bool,
-        debug: bool,
-        debug_emit,
-        show_topics_limit: int | None = None,
-    ) -> dict[str, object]:
-        _ = (
-            timeout,
-            retries,
-            show_topics,
-            query_topic,
-            dump,
-            max_messages,
-            debug,
-            debug_emit,
-            show_topics_limit,
-        )
-        provided = username is not None and password is not None
-        calls.append((username, password, bool(run_deep_checks)))
+    def fake_detect(ctx, _options) -> dict[str, object]:
+        calls.append((ctx.credential.username, ctx.credential.password, False))
         return {
             "timestamp": "2026-03-27T00:00:00Z",
-            "host": host,
-            "port": port,
+            "host": ctx.host,
+            "port": ctx.port,
             "is_kafka": True,
             "status": "auth_required",
             "auth_required": True,
-            "provided_credentials": provided,
-            "provided_username": username,
-            "provided_password": password if provided else None,
-            "provided_credentials_ok": False if provided else None,
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "provided_credentials_ok": None,
             "show_topics": False,
             "query_topic": None,
             "dump": False,
             "topic_count": None,
             "topics": None,
-            "error": "SASL authentication failed" if provided else None,
+            "error": None,
         }
 
-    monkeypatch.setattr(kafka_actions, "_call_audit_kafka_host_with_stage_debug", fake_stage_call)
+    def fake_auth(ctx, record, _options) -> dict[str, object]:
+        calls.append((ctx.credential.username, ctx.credential.password, False))
+        payload = record.to_dict()
+        payload.update(
+            {
+                "provided_credentials": True,
+                "provided_username": ctx.credential.username,
+                "provided_password": ctx.credential.password,
+                "provided_credentials_ok": False,
+                "error": "SASL authentication failed",
+            }
+        )
+        return payload
+
+    monkeypatch.setattr(kafka_actions, "detect_kafka", fake_detect)
+    monkeypatch.setattr(kafka_actions, "authenticate_kafka", fake_auth)
+    monkeypatch.setattr(
+        kafka_actions,
+        "collect_kafka_data",
+        lambda *_args, **_kwargs: pytest.fail("failed credentials must not reach data"),
+    )
 
     rc = kafka.run_kafka_stage(_kafka_args(defcreds=True), logger=object())
 
@@ -1129,14 +1141,25 @@ def test_run_kafka_stage_suppresses_unreachable_summary_without_debug(monkeypatc
     monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
     monkeypatch.setattr(kafka, "collect_scan_ports", lambda *_args, **_kwargs: [])
     monkeypatch.setattr(kafka, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
-    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", lambda **_kwargs: (1, 0, 0, 0, 1))
+    patch_module_host_stage_for_test(
+        monkeypatch,
+        "kafka",
+        lambda **kwargs: _kafka_host_record(
+            kwargs,
+            status="fail",
+            detected=False,
+            error="connection refused",
+        ),
+    )
     rc = kafka.run_kafka_stage(_kafka_args(), logger=object())
     assert rc == 0
     warnings = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
     assert not any("all kafka targets are unreachable" in msg for msg in warnings)
 
 
-def test_run_kafka_stage_debug_flow_passes_logger_and_append_output(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_kafka_stage_debug_flow_binds_actions_and_writes_all_ports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
     monkeypatch.setattr(kafka, "collect_scan_ports", lambda *_args, **_kwargs: [9092, 29092])
@@ -1145,22 +1168,31 @@ def test_run_kafka_stage_debug_flow_passes_logger_and_append_output(monkeypatch:
     captured: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        kwargs["emit_line"]("KAFKA\t127.0.0.1\t9092\t[*] Kafka Broker")
-        return 1, 0, 1, 0, 0
+        captured.append(dict(kwargs))
+        return _kafka_host_record(kwargs, status="open_no_auth", detected=True)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "kafka", fake_audit_targets)
+    output = tmp_path / "kafka.jsonl"
     rc = kafka.run_kafka_stage(
-        _kafka_args(debug=True, output="kafka.json", output_format="json", show_topics=True, dump=True, topic="orders"),
+        _kafka_args(
+            debug=True,
+            output=str(output),
+            output_format="json",
+            show_topics=True,
+            dump=True,
+            topic="orders",
+        ),
         logger=object(),
     )
     assert rc == 0
-    assert len(captured) == 2
-    assert captured[0]["append_output"] is False
-    assert captured[1]["append_output"] is True
-    assert captured[0]["logger"] is not None
+    assert [(call["port"], call["run_deep_checks"]) for call in captured] == [
+        (9092, False),
+        (29092, False),
+        (9092, True),
+        (29092, True),
+    ]
+    assert all(call["debug"] is True and callable(call["debug_emit"]) for call in captured)
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 2
 
 
 def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1172,13 +1204,10 @@ def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypa
     captured: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        kwargs["emit_line"]("KAFKA\t127.0.0.1\t9092\t[*] Kafka Broker")
-        return 1, 0, 1, 0, 0
+        captured.append(dict(kwargs))
+        return _kafka_host_record(kwargs, status="open_no_auth", detected=True)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "kafka", fake_audit_targets)
 
     progress_totals: list[int] = []
     progress_advances: list[int] = []
@@ -1191,12 +1220,14 @@ def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypa
         def advance(self, amount: int = 1) -> None:
             progress_advances.append(int(amount))
 
+        def add_total(self, amount: int) -> None:
+            progress_totals.append(progress_totals.pop() + int(amount))
+
         def close(self) -> None:
             return
 
     monkeypatch.setattr(
-        kafka,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
     )
 
@@ -1205,10 +1236,16 @@ def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypa
         logger=object(),
     )
     assert rc == 0
-    assert len(captured) == 3
-    assert [bool(call["show_progress"]) for call in captured] == [False, False, False]
-    assert progress_totals == [3]
-    assert progress_advances == [1, 1, 1]
+    assert [(call["port"], call["run_deep_checks"]) for call in captured] == [
+        (9092, False),
+        (29092, False),
+        (39092, False),
+        (9092, True),
+        (29092, True),
+        (39092, True),
+    ]
+    assert progress_totals == [6]
+    assert progress_advances == [1, 1, 1, 1, 1, 1]
 
 
 def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
@@ -1217,7 +1254,8 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(kafka, "Console", _ConsoleCapture)
     monkeypatch.setattr(
-        kafka, "filter_open_tcp_hosts_for_credential_file", lambda hosts, *_args, **_kwargs: list(hosts)
+        "redposture_core.stage_runtime.filter_open_tcp_hosts_for_credential_file",
+        lambda *_args, **_kwargs: pytest.fail("credential-file TCP prefilter must not run"),
     )
 
     creds_file = tmp_path / "creds.txt"
@@ -1227,10 +1265,10 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
     captured: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return 1, 0, 0, 1, 0
+        captured.append(dict(kwargs))
+        username = kwargs.get("username")
+        status = "valid_credentials" if username == "bob" else "auth_required"
+        return _kafka_host_record(kwargs, status=status, detected=True)
 
     progress_totals: list[int] = []
     progress_advances: list[int] = []
@@ -1243,13 +1281,15 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
         def advance(self, amount: int = 1) -> None:
             progress_advances.append(int(amount))
 
+        def add_total(self, amount: int) -> None:
+            progress_totals.append(progress_totals.pop() + int(amount))
+
         def close(self) -> None:
             return
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "kafka", fake_audit_targets)
     monkeypatch.setattr(
-        kafka,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
     )
 
@@ -1259,13 +1299,13 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
     )
 
     assert rc == 0
-    assert len(captured) == 4
-    assert all(call["show_progress"] is False for call in captured)
-    assert [(call["hosts"], call["username"], call["password"]) for call in captured] == [
-        (["10.0.0.1"], "alice", "one"),
-        (["10.0.0.1"], "bob", "two"),
-        (["10.0.0.2"], "alice", "one"),
-        (["10.0.0.2"], "bob", "two"),
+    assert [(call["host"], call["username"], call["password"], call["run_deep_checks"]) for call in captured] == [
+        ("10.0.0.1", None, None, False),
+        ("10.0.0.2", None, None, False),
+        ("10.0.0.1", "alice", "one", True),
+        ("10.0.0.1", "bob", "two", True),
+        ("10.0.0.2", "alice", "one", True),
+        ("10.0.0.2", "bob", "two", True),
     ]
     assert progress_totals == [4]
     assert progress_advances == [1, 1, 1, 1]
@@ -1277,11 +1317,16 @@ def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Monk
     monkeypatch.setattr(kafka, "collect_scan_ports", lambda *_args, **_kwargs: [9092])
     monkeypatch.setattr(kafka, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
-    captured: list[tuple[str | None, str | None]] = []
+    captured: list[tuple[str | None, str | None, bool]] = []
 
     def fake_audit_targets(**kwargs):
-        captured.append((kwargs["username"], kwargs["password"]))
-        return 1, 0, 0, 1, 0
+        captured.append((kwargs["username"], kwargs["password"], kwargs["run_deep_checks"]))
+        status = (
+            "valid_credentials"
+            if (kwargs["username"], kwargs["password"]) == ("kafka", "password")
+            else "auth_required"
+        )
+        return _kafka_host_record(kwargs, status=status, detected=True)
 
     class _FakeProgressBar:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -1290,13 +1335,15 @@ def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Monk
         def advance(self, _amount: int = 1) -> None:
             return
 
+        def add_total(self, _amount: int) -> None:
+            return
+
         def close(self) -> None:
             return
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "kafka", fake_audit_targets)
     monkeypatch.setattr(
-        kafka,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
     )
 
@@ -1304,9 +1351,10 @@ def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Monk
 
     assert rc == 0
     assert captured == [
-        ("admin", "admin"),
-        ("kafka", "kafka"),
-        ("kafka", "password"),
+        (None, None, False),
+        ("admin", "admin", True),
+        ("kafka", "kafka", True),
+        ("kafka", "password", True),
     ]
 
 
@@ -1323,10 +1371,9 @@ def test_run_kafka_stage_txt_emit_line_and_error_path(
     )
 
     def fake_audit_targets(**kwargs):
-        kwargs["emit_line"]("KAFKA\t127.0.0.1\t9092\tpayload only")
-        return 1, 0, 1, 0, 0
+        return _kafka_host_record(kwargs, status="open_no_auth", detected=True)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "kafka", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "kafka", fake_audit_targets)
     rc = kafka.run_kafka_stage(
         _kafka_args(debug=True, output_format="txt", show_topics=True, dump=True, topic="orders"),
         logger=object(),
@@ -1334,12 +1381,14 @@ def test_run_kafka_stage_txt_emit_line_and_error_path(
     assert rc == 0
     plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
     infos = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "info"]
-    assert any("payload only" in msg for msg in plains)
+    assert any("Kafka Broker" in msg or "anonymous access" in msg for msg in plains)
     assert any("mode=show-topics,topic=orders,dump,max=10" in msg for msg in infos)
     assert capsys.readouterr().out == ""
 
-    patch_runner_for_legacy_target_fake(
-        monkeypatch, "kafka", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+    monkeypatch.setattr(
+        kafka_stage_pkg.AuditCommandRunner,
+        "run_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
     rc = kafka.run_kafka_stage(_kafka_args(output="kafka.json"), logger=object())
     assert rc == 2

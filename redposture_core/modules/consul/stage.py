@@ -5,7 +5,9 @@ from __future__ import annotations
 from typing import Any
 
 from ...audit_config import AuditConfig
+from ...audit_models import AuditRecord
 from ...console import Console
+from ...show_limits import dump_flag_enabled, dump_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
@@ -17,18 +19,80 @@ from . import actions, policy, render
 
 _DEFAULT_PORT = 8500
 _DEFAULT_PORTS = None
+_PRODUCTION_HOST_STAGE = actions.host_stage
+_PRODUCTION_AUDIT_HOST = actions._audit_consul_host
 
 
 def build_consul_plan(args: Any) -> AuditCommandPlan:
     return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
 
 
+def _build_consul_host_stage_options(args: Any) -> dict[str, Any]:
+    return {
+        "do_ssrf": bool(getattr(args, "ssrf_urls", None)),
+        "ssrf_urls": list(getattr(args, "ssrf_urls", None) or []),
+        "show_keys": bool(getattr(args, "show_keys", False)),
+        "kv_key": str(getattr(args, "kv_key", "") or "").strip() or None,
+        "dump_requested": dump_flag_enabled(getattr(args, "dump", False)),
+        "dump_all_requested": bool(getattr(args, "dump_all_requested", False)),
+        "show_services": bool(getattr(args, "show_services", False)),
+        "show_agents": bool(getattr(args, "show_agents", False)),
+        "show_checks": bool(getattr(args, "show_checks", False)),
+        "check_dump_id": getattr(args, "check_dump_id", None),
+        "show_nodes": bool(getattr(args, "show_nodes", False)),
+        "service_name": None,
+        "service_dump_name": str(getattr(args, "service_dump_name", "") or "").strip() or None,
+        "agent_dump_name": getattr(args, "agent_dump_name", None),
+        "node_dump_name": getattr(args, "node_dump_name", None),
+        "delete_service": False,
+        "service_args": None,
+        "revshell_enabled": bool(getattr(args, "revshell", False)),
+        "delete_revshell": bool(getattr(args, "delete_revshell", False)),
+        "revshell_listen": bool(getattr(args, "revshell_listen", False)),
+        "revshell_host": str(getattr(args, "revshell_host", "") or "").strip() or None,
+        "revshell_port": getattr(args, "revshell_port", None),
+        "revshell_payload": str(getattr(args, "revshell_payload", "") or "").strip() or None,
+        "revshell_check_id": str(getattr(args, "revshell_check_id", "") or "").strip() or None,
+        "dump_limit": dump_flag_limit(getattr(args, "dump", False)),
+    }
+
+
 def build_consul_spec(args: Any) -> ModuleAuditSpec:
+    options = _build_consul_host_stage_options(args)
+    resolved_host_stage = getattr(actions, _PRODUCTION_HOST_STAGE.__name__, _PRODUCTION_HOST_STAGE)
+    use_lifecycle_hooks = (
+        actions.host_stage is _PRODUCTION_HOST_STAGE
+        and resolved_host_stage is _PRODUCTION_HOST_STAGE
+        and actions._audit_consul_host is _PRODUCTION_AUDIT_HOST
+    )
+
+    def _detect(ctx: Any) -> AuditRecord:
+        return AuditRecord.from_mapping(actions.detect_consul(ctx, options), module="consul", service="consul")
+
+    def _auth(ctx: Any, record: Any) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            actions.authenticate_consul(ctx, record, options),
+            module="consul",
+            service="consul",
+        )
+
+    def _data(ctx: Any, record: Any) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            actions.collect_consul_data(ctx, record, options),
+            module="consul",
+            service="consul",
+        )
+
     return ModuleAuditSpec(
         module="consul",
         label="CONSUL",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
+        host_stage_options=options,
+        detect=_detect if use_lifecycle_hooks else None,
+        auth=_auth if use_lifecycle_hooks else None,
+        data=_data if use_lifecycle_hooks else None,
+        lifecycle_state_factory=(lambda _ctx: actions.ConsulLifecycleState()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_consul_line,
     )
@@ -37,12 +101,19 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
 def run_consul_stage(args: Any, logger: Any) -> int:
     cfg = AuditConfig.from_namespace(args)
     console = Console(debug=cfg.debug)
+    if hasattr(console, "set_structured_output"):
+        console.set_structured_output(cfg.output_format == "json")
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
     _normalize_consul_command_args(args, console)
     try:
         plan = build_consul_plan(args)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
+    try:
+        runner = AuditCommandRunner(args=args, spec=build_consul_spec(args), logger=logger, console=console)
     except ValueError as exc:
         console.error(str(exc))
         return 2
@@ -64,13 +135,15 @@ def run_consul_stage(args: Any, logger: Any) -> int:
         if bool(record.get("script_revshell")):
             revshell_registered = True
 
-    runner = AuditCommandRunner(args=args, spec=build_consul_spec(args), logger=logger, console=console)
     try:
         if listener_info is not None:
             with install_record_callback(args, _capture_revshell_record):
                 result = runner.run_plan(plan)
         else:
             result = runner.run_plan(plan)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
     except OSError as exc:
         console.error(f"failed to process consul output: {exc}")
         return 2
@@ -90,19 +163,46 @@ def _normalize_consul_command_args(args: Any, console: Any) -> None:
         args.username = None
         args.password = None
 
-    if bool(getattr(args, "dump", False)):
-        specific = any(
-            bool(getattr(args, name, None))
-            for name in ("kv_key", "service_dump_name", "agent_name", "node_name", "revshell_check_id")
+    dump_requested = dump_flag_enabled(getattr(args, "dump", False))
+    args.kv_key = str(getattr(args, "kv_key", "") or "").strip() or None
+    args.service_dump_name = str(getattr(args, "service_dump_name", "") or "").strip() or None
+    args.agent_dump_name = str(getattr(args, "agent_name", "") or "").strip() or None
+    args.node_dump_name = str(getattr(args, "node_name", "") or "").strip() or None
+    check_id = str(getattr(args, "revshell_check_id", "") or "").strip()
+    if check_id.lower().startswith("id:"):
+        check_id = check_id[3:].strip()
+    args.revshell_check_id = check_id or None
+    args.check_dump_id = args.revshell_check_id if dump_requested else None
+
+    if dump_requested and args.service_dump_name:
+        args.show_services = True
+    if dump_requested and args.agent_dump_name:
+        args.show_agents = True
+    if dump_requested and args.node_dump_name:
+        args.show_nodes = True
+    if dump_requested and args.check_dump_id:
+        args.show_checks = True
+
+    dump_scope_selected = any(
+        (
+            bool(getattr(args, "show_keys", False)),
+            bool(args.kv_key),
+            bool(getattr(args, "show_services", False)),
+            bool(args.service_dump_name),
+            bool(getattr(args, "show_agents", False)),
+            bool(args.agent_dump_name),
+            bool(getattr(args, "show_checks", False)),
+            bool(args.check_dump_id),
+            bool(getattr(args, "show_nodes", False)),
+            bool(args.node_dump_name),
         )
-        args.dump_all_requested = not specific
+    )
+    args.dump_all_requested = bool(dump_requested and not dump_scope_selected)
+    if args.dump_all_requested:
         args.show_services = True
         args.show_agents = True
         args.show_checks = True
         args.show_nodes = True
-    check_id = str(getattr(args, "revshell_check_id", "") or "")
-    if check_id.startswith("id:"):
-        args.revshell_check_id = check_id[3:]
 
     if bool(getattr(args, "revshell", False)) and getattr(args, "revshell_payload", None):
         if getattr(args, "delete_revshell", False):
@@ -117,4 +217,9 @@ def _normalize_consul_command_args(args: Any, console: Any) -> None:
             console.warn("--payload ignored with --delete --check-id")
 
 
-__all__ = ["build_consul_plan", "build_consul_spec", "run_consul_stage"]
+__all__ = [
+    "_build_consul_host_stage_options",
+    "build_consul_plan",
+    "build_consul_spec",
+    "run_consul_stage",
+]

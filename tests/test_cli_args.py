@@ -283,6 +283,12 @@ def test_grpc_help_sections_are_present() -> None:
     assert "--openapi path" in help_text
 
 
+def test_kafka_help_lists_every_runtime_default_port() -> None:
+    help_text = _command_help(COMMAND_KAFKA)
+    for port in (9092, 9093, 19092, 19093, 29092, 29093):
+        assert str(port) in help_text
+
+
 def test_help_documents_implicit_target_file_precedence() -> None:
     help_text = _command_help("registry")
     assert "treated as" in help_text

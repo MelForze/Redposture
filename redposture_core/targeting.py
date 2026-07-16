@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import os
 from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 from urllib.parse import urlparse, urlunsplit
 
@@ -179,6 +179,95 @@ class StreamingTargetPlan:
 
     def has_scheme(self, scheme: str) -> bool:
         return str(scheme or "").strip().lower() in self.schemes
+
+    def with_scheme_default_ports(self, defaults: dict[str, int]) -> StreamingTargetPlan:
+        """Return a plan where URL targets without ports receive scheme defaults.
+
+        Bare hosts and CIDR ranges remain matrix-driven. Explicit URL/host ports
+        always retain priority.
+        """
+
+        normalized_defaults: dict[str, int] = {}
+        for raw_scheme, raw_port in defaults.items():
+            scheme = str(raw_scheme or "").strip().lower()
+            port = int(raw_port)
+            if not scheme:
+                continue
+            if port < 1 or port > 65535:
+                raise ValueError(f"default port for {scheme} must be within 1..65535")
+            normalized_defaults[scheme] = port
+        if not normalized_defaults:
+            return self
+
+        entries: list[_ListTargetEntry | _IPv4RangeTargetEntry] = []
+        seen_specs: set[str] = set()
+        target_count = 0
+        no_port_count = 0
+        explicit_port_counts: dict[int, int] = {}
+        explicit_ports: list[int] = []
+        schemes: list[str] = []
+
+        for entry in self._entries:
+            if isinstance(entry, _IPv4RangeTargetEntry):
+                entries.append(entry)
+                target_count += entry.count
+                no_port_count += entry.count
+                continue
+
+            mapped_specs: list[ScanTargetSpec] = []
+            for spec in entry.specs:
+                mapped = spec
+                scheme = str(spec.scheme or "").strip().lower()
+                if spec.explicit_port is None and scheme in normalized_defaults:
+                    mapped_port = normalized_defaults[scheme]
+                    mapped = replace(
+                        spec,
+                        explicit_port=mapped_port,
+                        normalized_key=_make_normalized_key(
+                            host=spec.host,
+                            scheme=spec.scheme,
+                            port=mapped_port,
+                            path=spec.path,
+                            query=spec.query,
+                            fragment=spec.fragment,
+                        ),
+                    )
+
+                key = mapped.normalized_key or _make_normalized_key(
+                    host=mapped.host,
+                    scheme=mapped.scheme,
+                    port=mapped.explicit_port,
+                    path=mapped.path,
+                    query=mapped.query,
+                    fragment=mapped.fragment,
+                )
+                if key in seen_specs:
+                    continue
+                seen_specs.add(key)
+                mapped_specs.append(mapped)
+                target_count += 1
+
+                if mapped.explicit_port is None:
+                    no_port_count += 1
+                else:
+                    port = int(mapped.explicit_port)
+                    if port not in explicit_port_counts:
+                        explicit_ports.append(port)
+                    explicit_port_counts[port] = explicit_port_counts.get(port, 0) + 1
+                if scheme and scheme not in schemes:
+                    schemes.append(scheme)
+
+            if mapped_specs:
+                entries.append(_ListTargetEntry(tuple(mapped_specs)))
+
+        return StreamingTargetPlan(
+            _entries=tuple(entries),
+            target_count=target_count,
+            no_port_count=no_port_count,
+            explicit_port_counts=explicit_port_counts,
+            explicit_ports=tuple(explicit_ports),
+            schemes=tuple(schemes),
+        )
 
 
 TargetUrlMode = Literal["preserve", "strip", "reject"]

@@ -18,7 +18,15 @@
     "is_kubeapi": true,
     "module": "kubeapi",
     "namespace_filters": [],
-    "namespaces": [],
+    "namespaces": [
+      "default",
+      "finance",
+      "kube-node-lease",
+      "kube-public",
+      "kube-system",
+      "observability",
+      "redposture-lab"
+    ],
     "namespaces_error": null,
     "pods": [],
     "pods_error": null,
@@ -26,7 +34,7 @@
     "secrets": [],
     "secrets_error": null,
     "service": "kubeapi",
-    "show_namespaces": false,
+    "show_namespaces": true,
     "show_pods": false,
     "show_secrets": false,
     "stages": [
@@ -39,7 +47,7 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "open_no_auth",
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
       },
       {
@@ -51,7 +59,7 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "skipped",
+        "result": "ok",
         "stage_name": "data"
       }
     ],
@@ -78,7 +86,15 @@
     "is_kubeapi": true,
     "module": "kubeapi",
     "namespace_filters": [],
-    "namespaces": [],
+    "namespaces": [
+      "default",
+      "finance",
+      "kube-node-lease",
+      "kube-public",
+      "kube-system",
+      "observability",
+      "redposture-lab"
+    ],
     "namespaces_error": null,
     "pods": [],
     "pods_error": null,
@@ -86,7 +102,7 @@
     "secrets": [],
     "secrets_error": null,
     "service": "kubeapi",
-    "show_namespaces": false,
+    "show_namespaces": true,
     "show_pods": false,
     "show_secrets": false,
     "stages": [
@@ -99,7 +115,7 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "open_no_auth",
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
       },
       {
@@ -111,7 +127,7 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "skipped",
+        "result": "ok",
         "stage_name": "data"
       }
     ],
@@ -138,7 +154,15 @@
     "is_kubeapi": true,
     "module": "kubeapi",
     "namespace_filters": [],
-    "namespaces": [],
+    "namespaces": [
+      "default",
+      "finance",
+      "kube-node-lease",
+      "kube-public",
+      "kube-system",
+      "observability",
+      "redposture-lab"
+    ],
     "namespaces_error": null,
     "pods": [],
     "pods_error": null,
@@ -146,7 +170,7 @@
     "secrets": [],
     "secrets_error": null,
     "service": "kubeapi",
-    "show_namespaces": false,
+    "show_namespaces": true,
     "show_pods": false,
     "show_secrets": false,
     "stages": [
@@ -159,7 +183,7 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "open_no_auth",
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
       },
       {
@@ -171,7 +195,7 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "skipped",
+        "result": "ok",
         "stage_name": "data"
       }
     ],
@@ -198,7 +222,15 @@
     "is_kubeapi": true,
     "module": "kubeapi",
     "namespace_filters": [],
-    "namespaces": [],
+    "namespaces": [
+      "default",
+      "finance",
+      "kube-node-lease",
+      "kube-public",
+      "kube-system",
+      "observability",
+      "redposture-lab"
+    ],
     "namespaces_error": null,
     "pods": [],
     "pods_error": null,
@@ -206,7 +238,7 @@
     "secrets": [],
     "secrets_error": null,
     "service": "kubeapi",
-    "show_namespaces": false,
+    "show_namespaces": true,
     "show_pods": false,
     "show_secrets": false,
     "stages": [
@@ -219,7 +251,7 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "open_no_auth",
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
       },
       {
@@ -231,7 +263,7 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "skipped",
+        "result": "ok",
         "stage_name": "data"
       }
     ],
@@ -258,7 +290,15 @@
     "is_kubeapi": true,
     "module": "kubeapi",
     "namespace_filters": [],
-    "namespaces": [],
+    "namespaces": [
+      "default",
+      "finance",
+      "kube-node-lease",
+      "kube-public",
+      "kube-system",
+      "observability",
+      "redposture-lab"
+    ],
     "namespaces_error": null,
     "pods": [],
     "pods_error": null,
@@ -266,7 +306,7 @@
     "secrets": [],
     "secrets_error": null,
     "service": "kubeapi",
-    "show_namespaces": false,
+    "show_namespaces": true,
     "show_pods": false,
     "show_secrets": false,
     "stages": [
@@ -279,7 +319,7 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "open_no_auth",
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
       },
       {
@@ -291,7 +331,7 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "skipped",
+        "result": "ok",
         "stage_name": "data"
       }
     ],

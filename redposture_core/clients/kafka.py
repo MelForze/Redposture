@@ -661,6 +661,27 @@ def _probe_apiversions(sock: socket.socket, correlation_id: int) -> tuple[bool, 
     return _parse_apiversions_response(payload, correlation_id)
 
 
+def _bootstrap_known_kafka_session(sock: socket.socket, correlation_id: int) -> tuple[bool, int, str | None]:
+    """Perform the ApiVersions bootstrap required by many SASL listeners.
+
+    This helper is deliberately separate from ``_probe_apiversions``.  The
+    command lifecycle classifies the target exactly once during anonymous
+    detect; later credential/action sessions already know that the peer is
+    Kafka and only need the protocol bootstrap frame before SASL.
+    """
+
+    payload = _send_kafka_request(
+        sock,
+        api_key=KAFKA_API_VERSIONS,
+        api_version=0,
+        correlation_id=correlation_id,
+        client_id=KAFKA_CLIENT_ID,
+        body=b"",
+    )
+    ok, _error_code, error = _parse_apiversions_response(payload, correlation_id)
+    return ok, correlation_id + 1, error
+
+
 def _fetch_metadata(
     sock: socket.socket,
     correlation_id: int,
@@ -1033,6 +1054,7 @@ def _authenticate_or_probe(
     password: str | None,
     *,
     sasl_first: bool = False,
+    known_kafka: bool = False,
 ) -> tuple[bool, int, str | None]:
     """Bootstrap a Kafka session on ``sock``.
 
@@ -1054,10 +1076,15 @@ def _authenticate_or_probe(
             return False, correlation, auth_error or "authentication failed"
         return True, correlation, None
 
-    is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
-    correlation += 1
-    if not is_kafka:
-        return False, correlation, api_error or "service is not kafka"
+    if known_kafka:
+        bootstrapped, correlation, bootstrap_error = _bootstrap_known_kafka_session(sock, correlation)
+        if not bootstrapped:
+            return False, correlation, bootstrap_error or "Kafka bootstrap failed"
+    else:
+        is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
+        correlation += 1
+        if not is_kafka:
+            return False, correlation, api_error or "service is not kafka"
     if username is not None and password is not None:
         hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
         if not hs_ok:
@@ -1499,6 +1526,7 @@ def _probe_kafka_acls(
     probe_write: bool = False,
     probe_cluster: bool = True,
     debug_emit: Any = None,
+    known_kafka: bool = False,
 ) -> dict[str, Any]:
     """Probe Read (and optionally Write) ACLs per topic AND cluster-level
     Create/Delete ACLs — all on a single authenticated socket.
@@ -1544,12 +1572,15 @@ def _probe_kafka_acls(
         try:
             with sock:
                 correlation = 1
+                auth_kwargs: dict[str, Any] = {"sasl_first": sasl_first}
+                if known_kafka and not sasl_first:
+                    auth_kwargs["known_kafka"] = True
                 ok, correlation, session_error = _authenticate_or_probe(
                     sock,
                     correlation,
                     username,
                     password,
-                    sasl_first=sasl_first,
+                    **auth_kwargs,
                 )
                 if not ok:
                     _log(f"authenticate_or_probe rejected: {session_error!r}")
@@ -1620,6 +1651,9 @@ def _read_topic_messages(
     username: str | None = None,
     password: str | None = None,
     use_tls: bool | None = None,
+    known_kafka: bool = False,
+    bootstrap_metadata: dict[str, Any] | None = None,
+    sasl_first: bool = False,
 ) -> tuple[list[str] | None, str | None, str]:
     """Read up to `max_messages` messages from `topic` across all partitions.
 
@@ -1642,12 +1676,22 @@ def _read_topic_messages(
         with sock:
             correlation = 1
 
-            ok, correlation, session_error = _authenticate_or_probe(sock, correlation, username, password)
+            ok, correlation, session_error = _authenticate_or_probe(
+                sock,
+                correlation,
+                username,
+                password,
+                sasl_first=sasl_first,
+                known_kafka=known_kafka and not sasl_first,
+            )
             if not ok:
                 return None, session_error, transport_mode
 
-            metadata, metadata_error = _fetch_metadata(sock, correlation, topics=[topic])
-            correlation += 1
+            metadata = bootstrap_metadata
+            metadata_error: str | None = None
+            if metadata is None:
+                metadata, metadata_error = _fetch_metadata(sock, correlation, topics=[topic])
+                correlation += 1
             if metadata is None:
                 return None, metadata_error or "metadata request failed", transport_mode
 
@@ -1727,7 +1771,12 @@ def _read_topic_messages(
                 try:
                     leader_corr = 1
                     ok, leader_corr, leader_session_error = _authenticate_or_probe(
-                        leader_sock, leader_corr, username, password
+                        leader_sock,
+                        leader_corr,
+                        username,
+                        password,
+                        sasl_first=sasl_first,
+                        known_kafka=known_kafka and not sasl_first,
                     )
                     if not ok:
                         if not out and fatal_error is None:
@@ -1760,6 +1809,9 @@ def _read_topic_messages(
             username=username,
             password=password,
             use_tls=True,
+            known_kafka=known_kafka,
+            bootstrap_metadata=bootstrap_metadata,
+            sasl_first=sasl_first,
         )
     except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
         return None, _friendly_error_from_exception(exc), "plaintext" if use_tls is not True else "tls"
@@ -1879,15 +1931,24 @@ def _authenticate_and_fetch_metadata(
     password: str,
     *,
     use_tls: bool | None = None,
+    known_kafka: bool = False,
+    sasl_first: bool = False,
 ) -> tuple[bool, dict[str, Any] | None, str | None, str]:
     try:
         sock, transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
         with sock:
             correlation = 1
-            is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
-            correlation += 1
-            if not is_kafka:
-                return False, None, api_error or "service is not kafka", transport_mode
+            if sasl_first:
+                correlation = 1
+            elif known_kafka:
+                bootstrapped, correlation, bootstrap_error = _bootstrap_known_kafka_session(sock, correlation)
+                if not bootstrapped:
+                    return False, None, bootstrap_error or "Kafka bootstrap failed", transport_mode
+            else:
+                is_kafka, _api_error_code, api_error = _probe_apiversions(sock, correlation)
+                correlation += 1
+                if not is_kafka:
+                    return False, None, api_error or "service is not kafka", transport_mode
 
             hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
             if not hs_ok:
@@ -1906,7 +1967,16 @@ def _authenticate_and_fetch_metadata(
     except _TlsProbeError:
         if use_tls is True:
             return False, None, "plaintext read returned TLS record prelude", "tls"
-        return _authenticate_and_fetch_metadata(host, port, timeout, username, password, use_tls=True)
+        return _authenticate_and_fetch_metadata(
+            host,
+            port,
+            timeout,
+            username,
+            password,
+            use_tls=True,
+            known_kafka=known_kafka,
+            sasl_first=sasl_first,
+        )
     except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
         return (
             False,
@@ -1926,6 +1996,9 @@ def _read_dump_topics(
     username: str | None,
     password: str | None,
     use_tls: bool | None = None,
+    known_kafka: bool = False,
+    bootstrap_metadata: dict[str, Any] | None = None,
+    sasl_first: bool = False,
 ) -> tuple[dict[str, list[str] | None], dict[str, str]]:
     dump_results: dict[str, list[str] | None] = {}
     dump_errors: dict[str, str] = {}
@@ -1939,6 +2012,9 @@ def _read_dump_topics(
             username=username,
             password=password,
             use_tls=use_tls,
+            known_kafka=known_kafka,
+            bootstrap_metadata=bootstrap_metadata,
+            sasl_first=sasl_first,
         )
         dump_results[topic_name] = read_items
         if read_error:

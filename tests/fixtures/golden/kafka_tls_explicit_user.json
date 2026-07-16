@@ -15,7 +15,7 @@
         "username": "admin"
       }
     ],
-    "defcreds_enabled": true,
+    "defcreds_enabled": false,
     "dump": true,
     "dump_error": null,
     "dump_errors": {},
@@ -64,14 +64,14 @@
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "data"
       }
     ],

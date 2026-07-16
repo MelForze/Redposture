@@ -203,7 +203,7 @@ run_case registry registry_multi_instance_urls 0 registry -t "http://127.0.0.1:1
 run_case grafana grafana_default 0 grafana -t 127.0.0.1 --defcreds --show-datasources
 run_case grafana grafana_url_http 0 grafana -t "http://127.0.0.1:3000/login?next=%2F" --defcreds --show-datasources
 run_case grafana grafana_url_https_reject 2 grafana -t "https://127.0.0.1:3000/login"
-run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --defcreds --ssrf-target "http://127.0.0.1:19115/probe?module=http_2xx" --show-datasources
+run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --defcreds --ssrf-target "http://grafana-2:3000/api/health" --show-datasources
 run_case grafana grafana_multi_instance_urls 0 grafana -t "http://127.0.0.1:3000/login,http://127.0.0.1:13001/login,http://127.0.0.1:13002/login,http://127.0.0.1:13003/login,http://127.0.0.1:13004/login" --defcreds
 
 run_case gitlab gitlab_public 0 gitlab -t 127.0.0.1 --port 18080

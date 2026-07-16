@@ -954,6 +954,7 @@ def _audit_proxmox_host(
     on_status_ready: Callable[[dict[str, Any]], None] | None = None,
     on_discovered_url: Callable[[str], None] | None = None,
     on_credential_finding: Callable[[dict[str, str]], None] | None = None,
+    _resolved_auth: tuple[dict[str, str], str, str | None, str | None, list[dict[str, str]]] | None = None,
 ) -> dict[str, Any]:
     endpoint_results: list[dict[str, Any]] = []
     findings: list[dict[str, str]] = []
@@ -962,19 +963,25 @@ def _audit_proxmox_host(
     streamed_url_count = 0
     streamed_finding_count = 0
     requested_add_user = str(add_user or "").strip()
-    auth_headers, auth_method, auth_username, auth_password, auth_attempts = _resolve_proxmox_auth_headers(
-        host,
-        port,
-        timeout,
-        retries,
-        pve_api_token=pve_api_token,
-        username=username,
-        password=password,
-        defcreds=defcreds,
-        use_https=use_https,
-        insecure=insecure,
-        proxy=proxy,
-    )
+    if _resolved_auth is None:
+        auth_headers, auth_method, auth_username, auth_password, auth_attempts = _resolve_proxmox_auth_headers(
+            host,
+            port,
+            timeout,
+            retries,
+            pve_api_token=pve_api_token,
+            username=username,
+            password=password,
+            defcreds=defcreds,
+            use_https=use_https,
+            insecure=insecure,
+            proxy=proxy,
+        )
+    else:
+        resolved_headers, auth_method, auth_username, auth_password, resolved_attempts = _resolved_auth
+        auth_headers = dict(resolved_headers)
+        auth_attempts = [dict(item) for item in resolved_attempts]
+    success_status = "open_no_auth" if auth_method == "anonymous" else "token_ok"
 
     def flush_stream_buffers() -> None:
         nonlocal streamed_url_count, streamed_finding_count
@@ -1306,7 +1313,8 @@ def _audit_proxmox_host(
         "host": host,
         "port": port,
         "is_proxmox": True,
-        "status": "token_ok",
+        "status": success_status,
+        "auth_required": auth_method != "anonymous",
         "auth_method": auth_method,
         "auth_username": auth_username,
         "auth_password": auth_password,
@@ -1418,7 +1426,8 @@ def _audit_proxmox_host(
         "host": host,
         "port": port,
         "is_proxmox": True,
-        "status": "token_ok",
+        "status": success_status,
+        "auth_required": auth_method != "anonymous",
         "auth_method": auth_method,
         "auth_username": auth_username,
         "auth_password": auth_password,
@@ -1771,6 +1780,59 @@ def _render_colored_proxmox_line(console: Console, line: str) -> bool:
     )
 
 
+def _attach_proxmox_stage_telemetry(
+    record: dict[str, Any],
+    *,
+    host: str,
+    port: int,
+    retries: int,
+    run_deep_checks: bool,
+    debug: bool,
+    debug_emit: Callable[[str], None] | None,
+    started: float,
+) -> dict[str, Any]:
+    result: dict[str, Any] = dict(record)
+    attempts = max(1, retries + 1)
+    status = str(result.get("status") or "fail")
+    is_proxmox = bool(result.get("is_proxmox"))
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    telemetry = StageTelemetryBuilder(host=host, port=port, attempts=attempts, debug=debug, debug_emit=debug_emit)
+    if attempts > 1 and status == "fail":
+        telemetry.debug(format_retry_decision(_STAGE_DETECT_PROTOCOL, 1, attempts, _retry_delay(0), "error"))
+
+    detect_result = "ok" if is_proxmox else ("error" if status == "fail" else "skip")
+    detect_error = str(result.get("error") or "") if detect_result == "error" else None
+    telemetry.stage(_STAGE_DETECT_PROTOCOL, detect_result, detect_error, 0)
+
+    auth_result = "ok" if is_proxmox and status in _PROXMOX_DEEP_STATUSES.union({"auth_failed"}) else detect_result
+    telemetry.stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
+
+    if run_deep_checks and status in _PROXMOX_DEEP_STATUSES:
+        telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
+        data_result = "error" if status == "fail" and result.get("error") else "ok"
+        telemetry.stage(
+            _STAGE_DATA,
+            data_result,
+            str(result.get("error") or "") if data_result == "error" else None,
+            elapsed_ms,
+        )
+    else:
+        telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "skip", "deep checks disabled", 0)
+        telemetry.stage(_STAGE_DATA, "skip", "deep checks disabled", 0)
+
+    stage_durations_ms = {
+        str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in telemetry.stages
+    }
+    telemetry.debug(
+        f"stage_timing_summary status={status} attempts=1/{attempts} "
+        f"detect_ms={stage_durations_ms.get(_STAGE_DETECT_PROTOCOL, 0)} "
+        f"auth_ms={stage_durations_ms.get(_STAGE_AUTH_INFERENCE, 0)} "
+        f"capabilities_ms={stage_durations_ms.get(_STAGE_ACCESS_CAPABILITIES, 0)} "
+        f"data_ms={stage_durations_ms.get(_STAGE_DATA, 0)} total_ms={elapsed_ms}"
+    )
+    return telemetry.attach(result, status=status, total_ms=elapsed_ms)
+
+
 def _call_audit_proxmox_host_with_stage_debug(
     host: str,
     port: int,
@@ -1838,46 +1900,16 @@ def _call_audit_proxmox_host_with_stage_debug(
             **audit_kwargs,
         )
 
-    result: dict[str, Any] = dict(record)
-    attempts = max(1, retries + 1)
-    status = str(result.get("status") or "fail")
-    is_proxmox = bool(result.get("is_proxmox"))
-    elapsed_ms = int((time.monotonic() - started) * 1000)
-    telemetry = StageTelemetryBuilder(host=host, port=port, attempts=attempts, debug=debug, debug_emit=debug_emit)
-    if attempts > 1 and status == "fail":
-        telemetry.debug(format_retry_decision(_STAGE_DETECT_PROTOCOL, 1, attempts, _retry_delay(0), "error"))
-
-    detect_result = "ok" if is_proxmox else ("error" if status == "fail" else "skip")
-    detect_error = str(result.get("error") or "") if detect_result == "error" else None
-    telemetry.stage(_STAGE_DETECT_PROTOCOL, detect_result, detect_error, 0)
-
-    auth_result = "ok" if is_proxmox and status in _PROXMOX_DEEP_STATUSES.union({"auth_failed"}) else detect_result
-    telemetry.stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
-
-    if run_deep_checks and status in _PROXMOX_DEEP_STATUSES:
-        telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
-        data_result = "error" if status == "fail" and result.get("error") else "ok"
-        telemetry.stage(
-            _STAGE_DATA,
-            data_result,
-            str(result.get("error") or "") if data_result == "error" else None,
-            elapsed_ms,
-        )
-    else:
-        telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "skip", "deep checks disabled", 0)
-        telemetry.stage(_STAGE_DATA, "skip", "deep checks disabled", 0)
-
-    stage_durations_ms = {
-        str(item.get("stage_name") or ""): int(item.get("duration_ms") or 0) for item in telemetry.stages
-    }
-    telemetry.debug(
-        f"stage_timing_summary status={status} attempts=1/{attempts} "
-        f"detect_ms={stage_durations_ms.get(_STAGE_DETECT_PROTOCOL, 0)} "
-        f"auth_ms={stage_durations_ms.get(_STAGE_AUTH_INFERENCE, 0)} "
-        f"capabilities_ms={stage_durations_ms.get(_STAGE_ACCESS_CAPABILITIES, 0)} "
-        f"data_ms={stage_durations_ms.get(_STAGE_DATA, 0)} total_ms={elapsed_ms}"
+    return _attach_proxmox_stage_telemetry(
+        record,
+        host=host,
+        port=port,
+        retries=retries,
+        run_deep_checks=run_deep_checks,
+        debug=debug,
+        debug_emit=debug_emit,
+        started=started,
     )
-    return telemetry.attach(result, status=status, total_ms=elapsed_ms)
 
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:

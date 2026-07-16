@@ -1,35 +1,124 @@
 [
   {
-    "attempted_credentials": 1,
-    "auth_attempts": [
+    "attempted_credentials": [
       {
-        "error": "invalid credentials",
-        "ok": false,
-        "password": "prom-operator",
+        "error": "",
+        "ok": true,
+        "password": "admin",
         "source": "provided",
         "username": "admin"
       }
     ],
-    "auth_required": true,
-    "check_results": null,
-    "check_urls": null,
-    "credentials_source": null,
-    "datasource_count": null,
-    "datasources": null,
+    "attempted_credentials_count": 1,
+    "auth_attempts": [
+      {
+        "error": "",
+        "ok": true,
+        "password": "admin",
+        "source": "provided",
+        "username": "admin"
+      }
+    ],
+    "auth_required": false,
+    "check_results": [
+      {
+        "cleanup_error": null,
+        "cleanup_ok": true,
+        "create_error": null,
+        "create_ok": true,
+        "create_status": 200,
+        "enabled": true,
+        "probe_error": null,
+        "probe_ok": true,
+        "probe_status": 200,
+        "target_url": "http://grafana-2:3000/api/health"
+      }
+    ],
+    "check_urls": [
+      "http://grafana-2:3000/api/health"
+    ],
+    "credential_attempts": [
+      {
+        "error": null,
+        "ok": true,
+        "password": "admin",
+        "token": null,
+        "username": "admin"
+      }
+    ],
+    "credentials_source": "provided",
+    "datasource_count": 11,
+    "datasources": [
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://blackbox-exporter:9115"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://exporter-lab:9116"
+      },
+      {
+        "access": "proxy",
+        "type": "elasticsearch",
+        "url": "https://elasticsearch.internal:9200"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://kafka-exporter:9308"
+      },
+      {
+        "access": "proxy",
+        "type": "loki",
+        "url": "http://loki.internal:3100"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://node-exporter:9100"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://postgres-exporter:9187"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "https://prometheus-prod.internal"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://proxmox-exporter:9221"
+      },
+      {
+        "access": "proxy",
+        "type": "prometheus",
+        "url": "http://redis-exporter:9121"
+      },
+      {
+        "access": "proxy",
+        "type": "tempo",
+        "url": "http://tempo.internal:3200"
+      }
+    ],
     "default_credentials": false,
     "defcreds_enabled": false,
-    "effective_password": null,
-    "effective_username": null,
-    "error": "invalid credentials; authentication required",
+    "effective_password": "admin",
+    "effective_username": "admin",
+    "error": null,
     "host": "127.0.0.1",
     "is_grafana": true,
     "module": "grafana",
     "port": 3000,
     "provided_credentials": true,
-    "provided_credentials_ok": false,
+    "provided_credentials_ok": true,
     "provided_username": "admin",
     "service": "grafana",
-    "show_datasources": false,
+    "show_datasources": true,
     "stages": [
       {
         "attempt": 1,
@@ -45,17 +134,17 @@
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "data"
       }
     ],
-    "status": "auth_required"
+    "status": "valid_credentials"
   }
 ]

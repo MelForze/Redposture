@@ -42,6 +42,8 @@ def build_mongodb_spec(args: Any) -> ModuleAuditSpec:
 def run_mongodb_stage(args: Any, logger: Any) -> int:
     cfg = AuditConfig.from_namespace(args)
     console = Console(debug=cfg.debug)
+    if hasattr(console, "set_structured_output"):
+        console.set_structured_output(cfg.output_format == "json")
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)

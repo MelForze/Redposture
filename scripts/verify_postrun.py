@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import sys
+import urllib.parse
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -411,7 +412,7 @@ _PROGRESS_EXPECTED_TARGETS = {
     "grpc_multi_ports": 5,
     "kafka_multi_ports": 5,
     "zookeeper_multi_ports": 5,
-    "keeper_cluster": 3,
+    "keeper_cluster": 2,
     "proxmox_multi_instance_urls": 5,
 }
 
@@ -421,6 +422,7 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "registry_open": ("redposture/demo-api", "redposture/web-ui"),
     "registry_harbor": ("core/control-plane", "security/scanner-adapter"),
     "registry_gitlab": ("gitlab/project-api", "team/ops-sidecar"),
+    "registry_nexus": ("raw-internal", "raw-observability", "raw-security", "release-metadata.json"),
     "gitlab_public": ("redposture-lab/public-api", "team-platform/ops-scripts"),
     "gitlab_analyst": ("redposture-lab/security-reports", "redposture-lab/incident-timeline"),
     "consul_open": ("redposture/kafka/sasl_password", "svc-redposture-api", "gitlab-runner"),
@@ -524,6 +526,8 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
         '"server_version": "13.',
         '"attempted_credentials"',
     ),
+    "grafana_default": ('"is_grafana": true', '"datasource_count":'),
+    "grafana_url_http": ('"is_grafana": true', '"datasource_count":'),
     # C: URL-variant cases hit the same seeded services as their base cases. Asserting on
     # rich content here means a regression in URL-target parsing or fallback (e.g. proxy
     # rewrites swallowing the host) gets caught instead of slipping past exit-code.
@@ -550,8 +554,6 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "exporters_scan_url_http": ('"exporter":',),
     "exporters_collect_url_http": ('"exporter":',),
     "exporters_trigger_url_http": ('"exporter":',),
-    # grafana_url_http intentionally NOT added: pre-existing lab regression (status=fail
-    # with "Connection reset by peer"). Leaving the case to stay green by exit-code only.
 }
 
 _RICH_OUTPUT_FORBIDDEN_SUBSTRINGS = {
@@ -565,6 +567,32 @@ _RICH_OUTPUT_FORBIDDEN_SUBSTRINGS = {
 }
 
 _ZOOKEEPER_MULTI_DUMP_PORTS = {2181, 22181, 22182, 22183, 22184}
+_SEEDED_ZNODE_EXPECTATIONS: dict[str, dict[int, tuple[str, str]]] = {
+    "zookeeper_default": {2181: ("/redposture/app/api_key", "rp-zk-key-2026")},
+    "zookeeper_multi_ports": {
+        port: ("/redposture/app/api_key", "rp-zk-key-2026") for port in _ZOOKEEPER_MULTI_DUMP_PORTS
+    },
+    "zookeeper_extended_znode_limits": {2181: ("/redposture/app/api_key", "rp-zk-key-2026")},
+    "keeper_cluster": {
+        19181: ("/redposture/app/api_key", "rp-keeper-key-2026"),
+        29181: ("/redposture/app/api_key", "rp-keeper-key-2026"),
+    },
+}
+
+
+def _render_znode_dump_content(record: dict[str, Any]) -> str:
+    """Return actual per-record dump content for bulk and explicit-znode modes."""
+
+    parts: list[str] = []
+    values = record.get("znode_values")
+    if isinstance(values, list):
+        parts.extend(str(value) for value in values)
+
+    query_path = record.get("query_znode")
+    query_dump = record.get("query_znode_dump")
+    if isinstance(query_path, str) and query_path and query_dump not in {None, ""}:
+        parts.extend((query_path, str(query_dump)))
+    return "\n".join(parts)
 
 
 def _parse_status_file(path: Path) -> list[dict[str, str]]:
@@ -792,18 +820,38 @@ def _validate_rich_lab_outputs(rows: list[dict[str, str]]) -> None:
             if not ok:
                 raise SystemExit("label 'oracle_wallet_extract' did not extract seeded wallet metadata")
 
-        if label == "zookeeper_multi_ports":
-            dump_ports = {
-                int(item["port"])
-                for item in _iter_json_objects(output_text)
-                if item.get("type") in {None, "znodes_dump"}
-                and item.get("znode_values")
-                and isinstance(item.get("port"), int)
-            }
-            if dump_ports != _ZOOKEEPER_MULTI_DUMP_PORTS:
+        znode_expectations = _SEEDED_ZNODE_EXPECTATIONS.get(label)
+        if znode_expectations:
+            artifact_text = output_text
+            json_path = row.get("json_path") or "-"
+            if json_path not in {"", "-"} and Path(json_path).exists():
+                artifact_text = Path(json_path).read_text(encoding="utf-8", errors="replace")
+            records_by_port: dict[int, list[dict[str, Any]]] = {}
+            for item in _iter_json_objects(artifact_text):
+                port = item.get("port")
+                if isinstance(port, int) and port in znode_expectations:
+                    records_by_port.setdefault(port, []).append(item)
+            missing_ports: list[int] = []
+            empty_ports: list[int] = []
+            seed_mismatch_ports: list[int] = []
+            for port, needles in znode_expectations.items():
+                records = records_by_port.get(port, [])
+                if not records:
+                    missing_ports.append(port)
+                    continue
+                for record in records:
+                    rendered = _render_znode_dump_content(record)
+                    if not rendered:
+                        empty_ports.append(port)
+                        continue
+                    if any(needle not in rendered for needle in needles):
+                        seed_mismatch_ports.append(port)
+            if missing_ports or empty_ports or seed_mismatch_ports:
                 raise SystemExit(
-                    "label 'zookeeper_multi_ports' did not dump znodes for all expected ports: "
-                    f"expected={sorted(_ZOOKEEPER_MULTI_DUMP_PORTS)} got={sorted(dump_ports)}"
+                    f"label '{label}' did not dump seeded znodes for every expected target: "
+                    f"missing_ports={sorted(set(missing_ports))} "
+                    f"empty_ports={sorted(set(empty_ports))} "
+                    f"seed_mismatch_ports={sorted(set(seed_mismatch_ports))}"
                 )
 
         if label in {"exporters_scan", "exporters_collect"}:
@@ -967,15 +1015,45 @@ def _validate_status_coherence(rows: list[dict[str, str]]) -> None:
 #
 # Exceptions encoded explicitly:
 # - `docker_multi_ports`: TLS port is by-design auth_required, others open_no_auth.
-# - `grafana_multi_instance_urls`: pre-existing lab failure (status=fail for all 5);
-#   not introduced by this work.
 _MIXED_STATUS_MULTI_RECORD = frozenset(
     {
         "docker_multi_ports",  # TLS port intentionally diverges from open_no_auth siblings
-        "grafana_multi_instance_urls",  # pre-existing lab failure (status=fail for all 5)
         "exporters_scan",  # fan-by-check (48 progress events ≠ host record count)
     }
 )
+
+
+def _record_has_meaningful_outcome(record: dict[str, object], *, label: str) -> bool:
+    status = str(record.get("status") or "").strip().lower()
+    if label == "keeper_apache_control" and status == "not_keeper":
+        return (
+            str(record.get("service") or "").strip().lower() == "apache-zookeeper" and record.get("is_keeper") is False
+        )
+    if not status or status == "fail" or status.startswith(("unknown", "not_")):
+        return False
+    return True
+
+
+def _validate_meaningful_outcomes(rows: list[dict[str, str]]) -> None:
+    """A successful audit must contain an actual per-host outcome.
+
+    Exit code zero only means that the CLI completed. It must not make connection
+    failures, protocol mismatches, unknown states, or a zero-record summary look like a
+    successful lab audit.
+    """
+
+    for row in rows:
+        if row["exit_code"] != "0" or row["module"] == "exporters":
+            continue
+        json_path = row.get("json_path") or "-"
+        if json_path in {"", "-"}:
+            continue
+        records = list(_iter_audit_records_for_row(row))
+        if not records:
+            raise SystemExit(f"label '{row['label']}' exited 0 without an audit record")
+        if not any(_record_has_meaningful_outcome(record, label=row["label"]) for record in records):
+            statuses = sorted({str(record.get("status") or "") for record in records})
+            raise SystemExit(f"label '{row['label']}' exited 0 without a meaningful outcome: statuses={statuses}")
 
 
 def _validate_multi_record_consistency(rows: list[dict[str, str]]) -> None:
@@ -984,7 +1062,7 @@ def _validate_multi_record_consistency(rows: list[dict[str, str]]) -> None:
             continue
         label = row["label"]
         expected = _PROGRESS_EXPECTED_TARGETS.get(label)
-        if expected is None or expected <= 1 or label in _MIXED_STATUS_MULTI_RECORD:
+        if expected is None or expected <= 1:
             continue
         json_path = row.get("json_path") or "-"
         if json_path in {"", "-"}:
@@ -1002,6 +1080,17 @@ def _validate_multi_record_consistency(rows: list[dict[str, str]]) -> None:
         ]
         if len(records) != expected:
             raise SystemExit(f"multi-record label '{label}': expected {expected} host records, got {len(records)}")
+        invalid_targets = [
+            f"{record.get('host')}:{record.get('port')}={record.get('status')}"
+            for record in records
+            if not _record_has_meaningful_outcome(record, label=label)
+        ]
+        if invalid_targets:
+            raise SystemExit(
+                f"multi-record label '{label}' has targets without a meaningful outcome: " + ", ".join(invalid_targets)
+            )
+        if label in _MIXED_STATUS_MULTI_RECORD:
+            continue
         statuses = {str(r.get("status")) for r in records}
         if len(statuses) > 1:
             raise SystemExit(
@@ -1024,6 +1113,7 @@ _SUCCESSFUL_AUDIT_STATUSES = frozenset(
         "valid_token",
         "token_accepted",
         "detected",
+        "ok",
     }
 )
 
@@ -1031,25 +1121,33 @@ _SUCCESSFUL_AUDIT_STATUSES = frozenset(
 # indicates the deep phase ran. Field names were extracted from real matrix JSON artifacts
 # (mix of detection markers like `is_<module>` and content markers like `keys`/`topics`).
 _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
-    "redis": ("is_redis", "key_count", "keys", "key_values"),
-    "postgres": ("is_postgres", "database_count", "database_names", "table_names", "server_version"),
-    "mongodb": ("is_mongodb", "database_count", "database_names", "server_version"),
-    "etcd": ("is_etcd", "key_count", "keys", "key_values", "server_version"),
-    "consul": ("is_consul", "version", "leader"),
-    "zookeeper": ("is_zookeeper", "znode_count", "znodes"),
-    "keeper": ("is_zookeeper_compatible", "is_keeper", "znode_count", "version"),
-    "kafka": ("is_kafka", "topic_count", "topics"),
-    "qdrant": ("is_qdrant", "collections_count", "collections", "version"),
-    "clickhouse": ("is_clickhouse", "database", "effective_username", "auth_attempts"),
-    "elastic": ("is_elastic", "server_version", "discover_results", "access_level"),
-    "oracle": ("is_oracle", "connect_service", "capabilities", "credential_attempts"),
-    "docker": ("is_docker", "server_version", "api_version", "containers"),
-    "kubeapi": ("is_kubeapi", "version", "auth_mode", "can_list_namespaces"),
-    "registry": ("is_registry", "image_count", "images"),
-    "gitlab": ("is_gitlab",),
-    "grpc": ("is_grpc", "services", "methods", "reflection_enabled"),
-    "proxmox": ("is_proxmox", "auth_method", "successful_endpoints"),
-    "grafana": ("is_grafana", "server_version", "datasource_count", "datasources"),
+    "redis": ("key_count", "keys", "key_values"),
+    "postgres": ("database_count", "database_names", "table_names", "server_version"),
+    "mongodb": ("database_count", "database_names", "collections", "indexes", "server_version"),
+    "etcd": ("key_count", "keys", "key_values", "server_version"),
+    "consul": ("version", "leader"),
+    "zookeeper": ("znode_count", "znodes", "znode_values", "version"),
+    "keeper": ("znode_count", "znodes", "znode_values", "version", "fingerprint_confidence"),
+    "kafka": ("topic_count", "topics"),
+    "qdrant": ("collections_count", "collections", "version"),
+    "clickhouse": ("database_names", "table_names", "effective_username", "auth_attempts"),
+    "elastic": ("server_version", "discover_results", "cat_endpoints", "cat_plugins", "cluster_health", "users"),
+    "oracle": ("connect_service", "capabilities", "credential_attempts"),
+    "docker": ("server_version", "api_version", "containers"),
+    "kubeapi": ("version", "auth_mode", "can_list_namespaces", "namespaces", "pods", "secrets"),
+    "registry": (
+        "image_count",
+        "images",
+        "harbor_projects",
+        "gitlab_repositories",
+        "nexus_info",
+        "nexus_repositories",
+        "nexus_assets",
+    ),
+    "gitlab": ("version", "open_endpoints", "public_projects", "token_projects", "clone_results"),
+    "grpc": ("services", "methods", "reflection_enabled", "invoke_result"),
+    "proxmox": ("auth_method", "successful_endpoints", "nodes", "users", "added_user"),
+    "grafana": ("server_version", "datasource_count", "datasources", "check_results"),
 }
 
 
@@ -1190,6 +1288,345 @@ def _field_is_populated(value: object) -> bool:
     if isinstance(value, (list, dict, str)):
         return bool(value)
     return True
+
+
+_ACTION_EXPECTED_VALUES: dict[str, dict[str, object]] = {
+    "registry_nexus": {"nexus": True, "assets": True, "is_nexus": True},
+    "grafana_default": {"show_datasources": True, "is_grafana": True},
+    "grafana_url_http": {"show_datasources": True, "is_grafana": True},
+    "grafana_ssrf_edge": {"show_datasources": True, "is_grafana": True},
+    "grafana_extended_auth_ssrf_controls": {"show_datasources": True, "is_grafana": True},
+    "grafana_multi_instance_urls": {"is_grafana": True},
+    "gitlab_url_override_http": {"https": False, "is_gitlab": True},
+    "gitlab_extended_token_project_clone": {"https": False, "clone_requested": True, "is_gitlab": True},
+    "kubeapi_open": {"show_namespaces": True, "show_pods": True, "is_kubeapi": True},
+    "kubeapi_auditor": {
+        "show_namespaces": True,
+        "show_pods": True,
+        "insecure_effective": True,
+        "is_kubeapi": True,
+    },
+    "kubeapi_admin": {"show_secrets": True, "insecure_effective": True, "is_kubeapi": True},
+    "kubeapi_url_override_https": {"show_namespaces": True, "https": True, "is_kubeapi": True},
+    "kubeapi_extended_selectors_basic_auth": {
+        "show_namespaces": True,
+        "show_pods": True,
+        "exec_pod": "redposture-api",
+        "is_kubeapi": True,
+    },
+    "consul_extended_inventory_filters": {
+        "keys_requested": True,
+        "services_list_requested": True,
+        "agents_list_requested": True,
+        "checks_list_requested": True,
+        "nodes_list_requested": True,
+        "dump_requested": True,
+        "kv_key_requested": "redposture/kafka/sasl_password",
+        "service_dump_name": "redposture-api",
+        "agent_dump_name": "redposture-lab-consul",
+        "node_dump_name": "redposture-lab-consul",
+        "is_consul": True,
+    },
+    "consul_extended_ssrf_probe": {
+        "ssrf_enabled": True,
+        "checks_list_requested": True,
+        "is_consul": True,
+    },
+    "qdrant_extended_ssrf_probe": {
+        "ssrf_requested": True,
+        "ssrf_collection": "demo_vectors",
+        "is_qdrant": True,
+    },
+    "consul_url_hint_http": {"scheme": "http", "is_consul": True},
+    "clickhouse_http_open": {
+        "protocol": "http",
+        "show_databases": True,
+        "show_tables": True,
+        "table_dump_enabled": True,
+        "is_clickhouse": True,
+    },
+    "clickhouse_http_auth": {
+        "protocol": "http",
+        "show_databases": True,
+        "show_tables": True,
+        "table_dump_enabled": True,
+        "is_clickhouse": True,
+    },
+    "clickhouse_multi_ports": {
+        "show_databases": True,
+        "is_clickhouse": True,
+    },
+    "clickhouse_extended_query_columns": {
+        "show_databases": True,
+        "show_tables": True,
+        "show_columns": True,
+        "table_dump_enabled": True,
+        "sql_attempted": True,
+        "sql_ok": True,
+        "is_clickhouse": True,
+    },
+    "clickhouse_extended_execute": {
+        "execute_attempted": True,
+        "execute_ok": True,
+        "is_clickhouse": True,
+    },
+    "elastic_open": {
+        "show_endpoints": True,
+        "show_cluster": True,
+        "discover": True,
+        "is_elastic": True,
+    },
+    "elastic_auth": {
+        "show_endpoints": True,
+        "show_cluster": True,
+        "show_users": True,
+        "discover": True,
+        "is_elastic": True,
+    },
+    "elastic_plugins_edge": {"show_plugins": True, "is_elastic": True},
+    "elastic_url_hint_https": {"scheme": "http", "show_endpoints": True, "is_elastic": True},
+    "elastic_extended_all_actions": {
+        "show_endpoints": True,
+        "show_plugins": True,
+        "show_cluster": True,
+        "show_users": True,
+        "discover": True,
+        "is_elastic": True,
+    },
+    "grpc_invoke_health": {"invoke_result.status": "ok", "is_grpc": True},
+    "grpc_proto_invoke": {"invoke_result.status": "ok", "is_grpc": True},
+    "grpc_protoset_invoke": {"invoke_result.status": "ok", "is_grpc": True},
+    "grpc_extended_metadata_invoke": {
+        "invoke_result.status": "ok",
+        "invoke_result.request.service": "",
+        "invoke_result.metadata": [{"key": "x-redposture-matrix", "value": "extended"}],
+        "is_grpc": True,
+    },
+    "keeper_cluster": {"is_keeper": True, "is_zookeeper_compatible": True},
+    "proxmox_audit": {"show_nodes": True, "show_users": True, "is_proxmox": True},
+    "proxmox_admin": {"show_nodes": True, "show_users": True, "discover_creds": True, "is_proxmox": True},
+    "proxmox_url_override_https": {"use_https": True, "show_nodes": True, "is_proxmox": True},
+    "proxmox_extended_add_user_mock": {
+        "show_users": True,
+        "add_user": "rp-matrix@pve",
+        "added_user": "rp-matrix@pve",
+        "is_proxmox": True,
+    },
+    "proxmox_extended_defcreds_empty_password": {
+        "auth_attempts": [{"username": "root@pam", "source": "provided", "ok": "False"}],
+        "is_proxmox": True,
+        "use_https": True,
+    },
+}
+
+_ACTION_NONEMPTY_FIELDS: dict[str, tuple[str, ...]] = {
+    "registry_nexus": ("nexus_repositories", "nexus_assets"),
+    "grafana_default": ("datasources",),
+    "grafana_url_http": ("datasources",),
+    "grafana_ssrf_edge": ("datasources", "check_urls", "check_results"),
+    "grafana_extended_auth_ssrf_controls": ("datasources", "check_urls", "check_results"),
+    "gitlab_extended_token_project_clone": ("clone_results",),
+    "kubeapi_open": ("namespaces", "pods"),
+    "kubeapi_auditor": ("namespaces", "pods"),
+    "kubeapi_admin": ("secrets",),
+    "kubeapi_url_override_https": ("namespaces",),
+    "kubeapi_extended_selectors_basic_auth": ("namespaces", "pods"),
+    "consul_extended_inventory_filters": (
+        "kv_dump_items",
+        "services_list",
+        "service_instances",
+        "agents_list",
+        "checks_list",
+        "nodes_list",
+    ),
+    "consul_extended_ssrf_probe": ("ssrf_results", "checks_list"),
+    "qdrant_extended_ssrf_probe": ("ssrf_results", "ssrf_hits"),
+    "clickhouse_http_open": ("database_names", "table_names", "table_dumps"),
+    "clickhouse_http_auth": ("database_names", "table_names", "table_dumps"),
+    "clickhouse_multi_ports": ("database_names",),
+    "clickhouse_extended_query_columns": ("table_columns_info", "table_dumps", "sql_output"),
+    "grpc_proto_invoke": ("descriptor_protos_b64",),
+    "grpc_protoset_invoke": ("descriptor_protos_b64",),
+    "elastic_open": ("cat_endpoints", "cluster_health", "discover_results"),
+    "elastic_auth": ("cat_endpoints", "cluster_health", "users", "discover_results"),
+    "elastic_extended_all_actions": (
+        "cat_endpoints",
+        "cluster_health",
+        "users",
+        "discover_results",
+    ),
+    "keeper_cluster": ("znode_values",),
+    "proxmox_audit": ("nodes", "users"),
+    "proxmox_admin": ("nodes", "users", "findings"),
+    "proxmox_extended_add_user_mock": ("users",),
+}
+
+_ACTION_LIST_CONTAINS: dict[str, dict[str, tuple[object, ...]]] = {
+    "grafana_ssrf_edge": {
+        "check_urls": ("http://grafana-2:3000/api/health",),
+    },
+    "grafana_extended_auth_ssrf_controls": {
+        "check_urls": ("http://grafana-2:3000/api/health",),
+    },
+    "gitlab_extended_token_project_clone": {
+        "project_filters": ("redposture-lab/public-api",),
+    },
+    "kubeapi_extended_selectors_basic_auth": {"namespace_filters": ("default",)},
+    "clickhouse_extended_query_columns": {
+        "table_targets": ("secure.secrets_inventory",),
+        "table_columns": ("owner", "value_hint"),
+    },
+}
+
+
+_GRAFANA_SSRF_LABELS = frozenset({"grafana_ssrf_edge", "grafana_extended_auth_ssrf_controls"})
+_GRAFANA_SSRF_TARGET_URL = "http://grafana-2:3000/api/health"
+_CONSUL_SSRF_TARGET_URL = "http://consul:8500/v1/status/leader"
+
+
+def _single_dict_result(record: dict[str, object], field: str, *, label: str) -> dict[str, object]:
+    value = record.get(field)
+    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
+        raise SystemExit(f"typed action contract for '{label}' failed: {field} must contain exactly one object")
+    return value[0]
+
+
+def _validate_ssrf_action_contract(label: str, record: dict[str, object]) -> None:
+    if label in _GRAFANA_SSRF_LABELS:
+        item = _single_dict_result(record, "check_results", label=label)
+        if item.get("target_url") != _GRAFANA_SSRF_TARGET_URL:
+            raise SystemExit(
+                f"typed action contract for '{label}' failed: check_results.target_url="
+                f"{item.get('target_url')!r}, expected {_GRAFANA_SSRF_TARGET_URL!r}"
+            )
+        if item.get("create_ok") is not True or item.get("create_status") not in {200, 201}:
+            raise SystemExit(f"typed action contract for '{label}' failed: datasource creation did not succeed")
+        if item.get("probe_ok") is not True or item.get("probe_status") != 200 or item.get("probe_error"):
+            raise SystemExit(f"typed action contract for '{label}' failed: Grafana SSRF probe was not a clean HTTP 200")
+        proxy_path = str(item.get("probe_proxy_path") or "")
+        if not proxy_path.startswith("/api/datasources/proxy/uid/") or not proxy_path.endswith("/api/health"):
+            raise SystemExit(
+                f"typed action contract for '{label}' failed: probe_proxy_path did not use the UID proxy route"
+            )
+        try:
+            sample = json.loads(str(item.get("probe_sample") or ""))
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"typed action contract for '{label}' failed: probe_sample is not Grafana health JSON"
+            ) from exc
+        if not isinstance(sample, dict) or sample.get("database") != "ok":
+            raise SystemExit(f"typed action contract for '{label}' failed: probe_sample did not confirm database=ok")
+        if item.get("cleanup_ok") is not True or item.get("cleanup_error"):
+            raise SystemExit(f"typed action contract for '{label}' failed: temporary Grafana datasource cleanup failed")
+        return
+
+    if label == "consul_extended_ssrf_probe":
+        item = _single_dict_result(record, "ssrf_results", label=label)
+        if item.get("target_url") != _CONSUL_SSRF_TARGET_URL:
+            raise SystemExit(
+                f"typed action contract for '{label}' failed: ssrf_results.target_url="
+                f"{item.get('target_url')!r}, expected {_CONSUL_SSRF_TARGET_URL!r}"
+            )
+        if item.get("registered") is not True or item.get("register_error"):
+            raise SystemExit(f"typed action contract for '{label}' failed: Consul check registration failed")
+        if item.get("status") != "passing" or "200" not in str(item.get("output") or ""):
+            raise SystemExit(
+                f"typed action contract for '{label}' failed: Consul SSRF check did not reach HTTP 200/passing"
+            )
+        if item.get("deregistered") is not True or item.get("deregister_error"):
+            raise SystemExit(f"typed action contract for '{label}' failed: Consul check cleanup failed")
+        return
+
+    if label == "qdrant_extended_ssrf_probe":
+        item = _single_dict_result(record, "ssrf_results", label=label)
+        target_url = str(item.get("target_url") or "")
+        try:
+            parsed = urllib.parse.urlsplit(target_url)
+            target_port = parsed.port
+        except ValueError as exc:
+            raise SystemExit(f"typed action contract for '{label}' failed: invalid SSRF target URL") from exc
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname != "host.docker.internal"
+            or target_port != 19115
+            or not parsed.path.endswith(".snapshot")
+        ):
+            raise SystemExit(
+                f"typed action contract for '{label}' failed: SSRF target is not the host callback snapshot"
+            )
+        if item.get("collection") != "demo_vectors" or item.get("ok") is not True or item.get("status") != 200:
+            raise SystemExit(f"typed action contract for '{label}' failed: Qdrant snapshot recovery did not succeed")
+        if item.get("error"):
+            raise SystemExit(f"typed action contract for '{label}' failed: Qdrant SSRF result contains an error")
+        try:
+            response = json.loads(str(item.get("response_raw") or ""))
+        except json.JSONDecodeError as exc:
+            raise SystemExit(f"typed action contract for '{label}' failed: Qdrant response_raw is not JSON") from exc
+        if not isinstance(response, dict) or response.get("status") != "ok" or response.get("result") is not True:
+            raise SystemExit(
+                f"typed action contract for '{label}' failed: Qdrant response did not confirm restore success"
+            )
+        hits = record.get("ssrf_hits")
+        hit_count = record.get("ssrf_hit_count")
+        if record.get("ssrf_listener_started") is not True:
+            raise SystemExit(f"typed action contract for '{label}' failed: SSRF callback listener did not start")
+        if not isinstance(hit_count, int) or hit_count <= 0 or not isinstance(hits, list) or len(hits) != hit_count:
+            raise SystemExit(f"typed action contract for '{label}' failed: ssrf_hits is empty or inconsistent")
+        if not any(
+            isinstance(hit, dict) and hit.get("method") == "GET" and str(hit.get("path") or "") == parsed.path
+            for hit in hits
+        ):
+            raise SystemExit(f"typed action contract for '{label}' failed: ssrf_hits has no matching snapshot callback")
+
+
+def _nested_field(record: dict[str, object], path: str) -> object:
+    value: object = record
+    for part in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
+
+
+def _validate_action_contracts(rows: list[dict[str, str]]) -> None:
+    """Verify that matrix action flags changed the produced typed record.
+
+    Parser/token coverage alone cannot catch the CLI-to-host-stage binding regression:
+    these assertions require the canonical booleans/selectors and their resulting data to
+    be present in the production JSON record.
+    """
+
+    for row in rows:
+        if row["exit_code"] != "0":
+            continue
+        label = row["label"]
+        expected_values = _ACTION_EXPECTED_VALUES.get(label)
+        nonempty_fields = _ACTION_NONEMPTY_FIELDS.get(label, ())
+        list_contains = _ACTION_LIST_CONTAINS.get(label, {})
+        if expected_values is None and not nonempty_fields and not list_contains:
+            continue
+        records = [
+            record for record in _iter_audit_records_for_row(row) if _record_has_meaningful_outcome(record, label=label)
+        ]
+        if not records:
+            raise SystemExit(f"typed action contract for '{label}' has no meaningful audit records")
+        for record in records:
+            for field, expected in (expected_values or {}).items():
+                actual = _nested_field(record, field)
+                if actual != expected:
+                    raise SystemExit(
+                        f"typed action contract for '{label}' failed: {field}={actual!r}, expected {expected!r}"
+                    )
+            for field in nonempty_fields:
+                if not _field_is_populated(_nested_field(record, field)):
+                    raise SystemExit(f"typed action contract for '{label}' failed: {field} is empty")
+            for field, expected_items in list_contains.items():
+                actual = _nested_field(record, field)
+                if not isinstance(actual, list) or any(item not in actual for item in expected_items):
+                    raise SystemExit(
+                        f"typed action contract for '{label}' failed: {field} does not contain {list(expected_items)!r}"
+                    )
+            _validate_ssrf_action_contract(label, record)
 
 
 # Known stage names that legitimately ship `result="fail"` even when overall status is OK
@@ -1387,7 +1824,7 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_exporters_trigger_bad_callback_ip": ("--callback-ip must be a valid IP address",),
     "fuzz_exporters_trigger_check_without_listen": ("--check-credentials requires --with-listen",),
     "fuzz_exporters_trigger_json_listen_without_output": ("--format json with --with-listen requires --output",),
-    "fuzz_exporters_trigger_negative_listen_seconds": ("--listen-seconds must be >= 0",),
+    "fuzz_exporters_trigger_negative_listen_seconds": ("--listen-seconds must be > 0",),
     **{f"fuzz_{module}_missing_targets": (f"{module} requires -t/--targets",) for module in _MISSING_TARGET_MODULES},
     "fuzz_registry_username_without_password": ("--username and --password must be set together",),
     "fuzz_registry_token_basic_conflict": ("use either --token or --username/--password, not both",),
@@ -1451,7 +1888,7 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_keeper_incomplete_mtls": ("--tls-cert and --tls-key must be used together",),
     "fuzz_keeper_tls_conflict": ("not allowed with argument",),
     "fuzz_keeper_tls_options_plaintext": ("TLS options cannot be combined with --no-tls",),
-    "fuzz_redis_invalid_port_negative": ("port must be in range",),
+    "fuzz_redis_invalid_port_negative": ("failed to parse --port", "invalid port range"),
     "fuzz_redis_invalid_port_huge": ("port must be in range",),
     "fuzz_redis_zero_dump": ("value must be > 0",),
     "fuzz_redis_negative_show_keys": ("value must be > 0",),
@@ -1465,10 +1902,10 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_mongodb_invalid_workers": ("value must be an integer",),
     "fuzz_mongodb_negative_retries": ("value must be >= 0",),
     "fuzz_kafka_negative_workers": ("value must be > 0",),
-    "fuzz_kafka_zero_max_messages": ("--max-messages must be > 0",),
-    "fuzz_kafka_invalid_port": ("port must be an integer",),
+    "fuzz_kafka_zero_max_messages": ("value must be > 0",),
+    "fuzz_kafka_invalid_port": ("failed to parse --port", "invalid port"),
     "fuzz_registry_malformed_target": ("failed to parse targets",),
-    "fuzz_registry_invalid_port": ("port must be in range",),
+    "fuzz_registry_invalid_port": ("failed to parse --port", "invalid port range"),
     "fuzz_grafana_invalid_target": ("failed to parse targets",),
     "fuzz_grafana_huge_port": ("port must be in range",),
     "fuzz_gitlab_invalid_port": ("port must be in range",),
@@ -1477,22 +1914,22 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_consul_negative_dump": ("value must be > 0",),
     "fuzz_kubeapi_zero_timeout": ("value must be > 0",),
     "fuzz_kubeapi_huge_port": ("port must be in range",),
-    "fuzz_oracle_invalid_port": ("port must be in range",),
+    "fuzz_oracle_invalid_port": ("failed to parse --port", "invalid port range"),
     "fuzz_oracle_zero_timeout": ("value must be > 0",),
-    "fuzz_docker_invalid_port": ("port must be an integer",),
+    "fuzz_docker_invalid_port": ("failed to parse --port", "invalid port"),
     "fuzz_docker_zero_timeout": ("value must be > 0",),
     "fuzz_clickhouse_negative_timeout": ("value must be > 0",),
-    "fuzz_clickhouse_invalid_port": ("port must be in range",),
+    "fuzz_clickhouse_invalid_port": ("failed to parse --port", "invalid port range"),
     "fuzz_qdrant_zero_timeout": ("value must be > 0",),
-    "fuzz_qdrant_invalid_port": ("port must be in range",),
+    "fuzz_qdrant_invalid_port": ("failed to parse --port", "invalid port range"),
     "fuzz_elastic_negative_retries": ("value must be >= 0",),
-    "fuzz_elastic_invalid_port": ("port must be an integer",),
-    "fuzz_grpc_invalid_port": ("port must be in range",),
+    "fuzz_elastic_invalid_port": ("failed to parse --port", "invalid port"),
+    "fuzz_grpc_invalid_port": ("failed to parse --port", "invalid port range"),
     "fuzz_grpc_zero_workers": ("value must be > 0",),
-    "fuzz_zookeeper_invalid_port": ("port must be an integer",),
+    "fuzz_zookeeper_invalid_port": ("failed to parse --port", "invalid port"),
     "fuzz_zookeeper_zero_workers": ("value must be > 0",),
     "fuzz_proxmox_negative_workers": ("value must be > 0",),
-    "fuzz_proxmox_invalid_port": ("port must be in range",),
+    "fuzz_proxmox_invalid_port": ("failed to parse --port", "invalid port range"),
 }
 
 
@@ -1580,15 +2017,8 @@ _GOLDEN_SKIP_MODULES = frozenset(
 _GOLDEN_SKIP_LABELS = frozenset(
     {
         "postgres_extended_os_read",  # `/etc/hostname` reads docker-assigned random hex
-        "mongodb_open",  # internal collection ordering not deterministic across boots
-        "mongodb_auth",
-        "mongodb_idempotency",  # same root cause: mongo collection-list ordering varies
         "registry_extended_tags_metadata",  # mock issues fresh tokens per lab boot
         "registry_gitlab",
-        # grafana_multi_instance_urls shows non-deterministic attempted_credentials count
-        # (0 vs 1) because the 5 target URLs all fail and the audit's detection retry path
-        # races against lab grafana availability.
-        "grafana_multi_instance_urls",
         # kafka_extended_defcreds flakes between status=open_no_auth (anonymous worked,
         # no defcred attempts) and status=auth_required (defcreds tried, attempted_credentials
         # list populated). Depends on lab kafka container startup race; the kafka_extended_*
@@ -1704,13 +2134,80 @@ _GOLDEN_VOLATILE_FIELDS = frozenset(
         "content_length",
     }
 )
+# Module-specific fields whose values describe transient lab runtime state rather than
+# the audit contract. Keep this narrow: typed/status assertions above still validate
+# these records before golden comparison.
+_GOLDEN_MODULE_VOLATILE_FIELDS: dict[str, frozenset[str]] = {
+    "keeper": frozenset(
+        {
+            "connections",  # includes the verifier connection itself
+            "latency_ms",  # 4lw timing depends on host load
+        }
+    ),
+}
+# Label-specific runtime state. Keeper TLS/no4lw/control cases have stable roles, while
+# keeper_cluster intentionally samples only two members of a three-node election.
+_GOLDEN_LABEL_VOLATILE_FIELDS: dict[str, frozenset[str]] = {
+    "keeper_cluster": frozenset(
+        {
+            "quorum_status",  # any of the three Keeper members may be elected leader
+            "raft",  # leader-only counters disappear when the target is a follower
+            "server_state",  # leader/follower assignment changes on every cold start
+        }
+    ),
+    "keeper_force_plaintext": frozenset(
+        {
+            "quorum_status",  # port 9181 is another member of the same elected cluster
+            "raft",
+            "server_state",
+        }
+    ),
+    "zookeeper_extended_znode_limits": frozenset(
+        {
+            # The bounded concurrent traversal may reach a different valid subset before
+            # max_znodes=10. Exact count/truncation and the explicit seeded query are
+            # asserted separately; only the subset itself is non-deterministic.
+            "znode_details",
+            "znodes",
+        }
+    ),
+}
+# Volatile fields limited to a specific nested result collection.
+_GOLDEN_CONTEXT_VOLATILE_FIELDS: dict[tuple[str, str], frozenset[str]] = {
+    ("elastic", "cluster_nodes"): frozenset(
+        {
+            "host",  # Docker network address
+            "id",  # Elasticsearch node ID is generated per data volume
+            "ip",  # Docker network address
+        }
+    ),
+    ("grafana", "check_results"): frozenset(
+        {
+            "datasource_id",  # generated for the temporary SSRF probe datasource
+            "datasource_uid",  # generated for the temporary SSRF probe datasource
+            "probe_elapsed_ms",  # network timing
+            "probe_proxy_path",  # embeds the generated datasource UID
+            "probe_sample",  # includes Grafana image version/commit; typed contract validates database=ok
+        }
+    ),
+    ("kubeapi", "pods"): frozenset(
+        {
+            "phase",  # system pods may still be Pending during a cold-start audit
+        }
+    ),
+}
 # Regex pattern: matches any per-run /tmp/rp_matrix_run* path that leaked into a string.
 _GOLDEN_PATH_NOISE = re.compile(r"/tmp/[a-z_]+_matrix[_a-z0-9-]*")
 # ISO 8601 timestamps embedded in string values (e.g. "issued 2026-06-17T15:55:40Z").
 _GOLDEN_ISO_NOISE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?")
+_MONGODB_UNORDERED_LIST_FIELDS = frozenset({"database_names", "collections", "documents", "indexes"})
 
 
-def _normalize_string_value(value: str) -> str:
+def _normalize_string_value(value: str, *, out_dir: Path | None = None) -> str:
+    if out_dir is not None:
+        candidates = {str(out_dir), str(out_dir.resolve(strict=False))}
+        for candidate in sorted((item for item in candidates if item), key=len, reverse=True):
+            value = value.replace(candidate, "<OUT_DIR>")
     value = _GOLDEN_PATH_NOISE.sub("<OUT_DIR>", value)
     value = _GOLDEN_ISO_NOISE.sub("<ISO>", value)
     value = _GOLDEN_DOCKER_CONTAINER_ID.sub("<DOCKER_ID>", value)
@@ -1721,20 +2218,85 @@ def _normalize_string_value(value: str) -> str:
     return value
 
 
-def _normalize_for_golden(payload: Any) -> Any:
+def _normalize_for_golden(
+    payload: Any,
+    *,
+    out_dir: Path | None = None,
+    module: str | None = None,
+    label: str | None = None,
+    parent_key: str | None = None,
+) -> Any:
     """Recursively strip volatile fields and normalize per-run-variable string content
     (paths, timestamps) so the golden diff catches semantic regressions only."""
     if isinstance(payload, dict):
+        effective_module = str(payload.get("module") or module or "").strip() or None
+        module_volatile_fields = _GOLDEN_MODULE_VOLATILE_FIELDS.get(effective_module or "", frozenset())
+        label_volatile_fields = _GOLDEN_LABEL_VOLATILE_FIELDS.get(label or "", frozenset())
+        context_volatile_fields = _GOLDEN_CONTEXT_VOLATILE_FIELDS.get(
+            (effective_module or "", parent_key or ""),
+            frozenset(),
+        )
+        kube_generated_data_fields: frozenset[str] = frozenset()
+        if effective_module == "kubeapi" and parent_key == "secrets" and payload.get("namespace") == "kube-system":
+            secret_name = str(payload.get("name") or "")
+            secret_type = str(payload.get("type") or "")
+            if secret_name.endswith(".node-password.k3s"):
+                kube_generated_data_fields = frozenset({"hash"})
+            elif secret_name == "k3s-serving" and secret_type == "kubernetes.io/tls":
+                kube_generated_data_fields = frozenset({"tls.crt", "tls.key"})
         result: dict[str, Any] = {}
         for key, value in payload.items():
-            if key in _GOLDEN_VOLATILE_FIELDS or key in _GOLDEN_VOLATILE_NESTED_FIELDS:
+            if (
+                key in _GOLDEN_VOLATILE_FIELDS
+                or key in _GOLDEN_VOLATILE_NESTED_FIELDS
+                or key in module_volatile_fields
+                or key in label_volatile_fields
+                or key in context_volatile_fields
+            ):
                 continue
-            result[key] = _normalize_for_golden(value)
+            if kube_generated_data_fields and key == "data" and isinstance(value, dict):
+                result[key] = {
+                    str(data_key): (
+                        "<KUBE_SYSTEM_SECRET>"
+                        if data_key in kube_generated_data_fields
+                        else _normalize_for_golden(
+                            data_value,
+                            out_dir=out_dir,
+                            module=effective_module,
+                            label=label,
+                            parent_key=str(data_key),
+                        )
+                    )
+                    for data_key, data_value in sorted(value.items(), key=lambda item: str(item[0]))
+                }
+                continue
+            result[key] = _normalize_for_golden(
+                value,
+                out_dir=out_dir,
+                module=effective_module,
+                label=label,
+                parent_key=key,
+            )
         return result
     if isinstance(payload, list):
-        return [_normalize_for_golden(item) for item in payload]
+        normalized = [
+            _normalize_for_golden(
+                item,
+                out_dir=out_dir,
+                module=module,
+                label=label,
+                parent_key=parent_key,
+            )
+            for item in payload
+        ]
+        if module == "mongodb" and parent_key in _MONGODB_UNORDERED_LIST_FIELDS:
+            return sorted(
+                normalized,
+                key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            )
+        return normalized
     if isinstance(payload, str):
-        return _normalize_string_value(payload)
+        return _normalize_string_value(payload, out_dir=out_dir)
     return payload
 
 
@@ -1755,10 +2317,18 @@ def _golden_text_for_row(row: dict[str, str]) -> str | None:
     if not artifact.exists():
         return None
     text = artifact.read_text(encoding="utf-8", errors="replace")
+    out_dir = artifact.parent.parent
     normalized: list[dict[str, Any]] = []
     for payload in _iter_json_objects(text):
         if isinstance(payload, dict):
-            normalized.append(_normalize_for_golden(payload))
+            normalized.append(
+                _normalize_for_golden(
+                    payload,
+                    out_dir=out_dir,
+                    module=str(row.get("module") or "").strip() or None,
+                    label=str(row.get("label") or "").strip() or None,
+                )
+            )
     # Multi-target audits intentionally emit records as futures complete. The
     # completion order is not a semantic part of an audit result: the set of
     # discovered host/port records is. Canonicalize only the outer JSONL
@@ -1973,6 +2543,42 @@ def _validate_output_sanity(rows: list[dict[str, str]]) -> None:
             )
 
 
+def _validate_progress_target_mappings(
+    script_path: Path = Path("scripts/run_lab_matrix_sequential.sh"),
+) -> None:
+    """Keep hard-coded verifier target counts tied to the actual matrix command."""
+
+    if not script_path.exists():
+        return
+    try:
+        from scripts.matrix_flag_coverage import parse_matrix_cases
+    except ImportError:
+        return
+    cases = {case.label: case for case in parse_matrix_cases(script_path.read_text(encoding="utf-8"))}
+    for label, expected in _PROGRESS_EXPECTED_TARGETS.items():
+        if label == "exporters_scan":
+            continue  # port list is supplied through the EXPORTER_PORTS shell variable
+        case = cases.get(label)
+        if case is None:
+            continue
+        tokens = list(case.tokens)
+        targets_count = 1
+        for target_flag in ("-t", "--targets"):
+            if target_flag in tokens and tokens.index(target_flag) + 1 < len(tokens):
+                target_value = tokens[tokens.index(target_flag) + 1]
+                if "$" not in target_value:
+                    targets_count = len([item for item in target_value.split(",") if item.strip()])
+                break
+        ports_count = 1
+        if "--ports" in tokens and tokens.index("--ports") + 1 < len(tokens):
+            ports_value = tokens[tokens.index("--ports") + 1]
+            if "$" not in ports_value:
+                ports_count = len([item for item in ports_value.split(",") if item.strip()])
+        inferred = targets_count * ports_count
+        if inferred != expected:
+            raise SystemExit(f"progress target mapping mismatch for '{label}': verifier={expected} matrix={inferred}")
+
+
 def _validate_openapi_artifacts(out_dir: Path, rows: list[dict[str, str]]) -> None:
     labels = {row["label"] for row in rows if row["exit_code"] == "0"}
     if "grpc_openapi_export" not in labels:
@@ -2053,6 +2659,7 @@ def main() -> int:
     _validate_expected_exits(rows)
     _validate_expected_failure_outputs(rows)
     _validate_expected_labels(rows, profile=args.profile)
+    _validate_progress_target_mappings()
 
     successful_modules = _validate_json_artifacts(rows)
     if not successful_modules:
@@ -2068,11 +2675,13 @@ def main() -> int:
     _validate_tee_when_output_set(rows)
     _validate_dump_not_empty(rows)
     _validate_status_coherence(rows)
+    _validate_meaningful_outcomes(rows)
     _validate_multi_record_consistency(rows)
     _validate_schema_mandatory_fields(rows)
     _validate_module_schema(rows)
     _validate_elapsed_sanity(rows)
     _validate_capability_sanity(rows)
+    _validate_action_contracts(rows)
     _validate_stage_coherence(rows)
     _validate_cross_case_invariants(rows)
     _validate_limit_conformance(rows)

@@ -102,6 +102,34 @@ def test_debug_outputs_only_when_enabled(capsys: pytest.CaptureFixture[str]) -> 
     assert "visible" in out_on
 
 
+def test_structured_output_routes_all_diagnostics_to_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    console = Console(debug=True, structured_output=True)
+
+    console.info("info")
+    console.success("success")
+    console.warn("warn")
+    console.debug("debug")
+    console.plain('{"type":"record"}')
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == '{"type":"record"}'
+    assert all(message in captured.err for message in ("info", "success", "warn", "debug"))
+
+
+def test_structured_output_can_be_enabled_after_console_construction(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    console = Console(debug=True)
+    console.set_structured_output(True)
+    console.debug("diagnostic")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "diagnostic" in captured.err
+
+
 def test_set_console_no_color_disables_ansi_rendering() -> None:
     set_console_no_color(True)
     try:

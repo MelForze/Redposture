@@ -12,6 +12,16 @@
     "collection_targets": [],
     "collections": [
       {
+        "collection": "audit_events",
+        "database": "redposture",
+        "documents": 4
+      },
+      {
+        "collection": "demo_accounts",
+        "database": "redposture",
+        "documents": 5
+      },
+      {
         "collection": "invoices",
         "database": "billing",
         "documents": 3
@@ -20,16 +30,6 @@
         "collection": "service_tokens",
         "database": "redposture",
         "documents": 3
-      },
-      {
-        "collection": "demo_accounts",
-        "database": "redposture",
-        "documents": 5
-      },
-      {
-        "collection": "audit_events",
-        "database": "redposture",
-        "documents": 4
       }
     ],
     "credential_attempts": [

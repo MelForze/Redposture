@@ -12,10 +12,11 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from queue import Empty, Queue
 from typing import Any, Literal
+
+from ..scheduler import BoundedScheduler
 
 _ZK_PROTOCOL_VERSION = 0
 _ZK_PASSWD_DEFAULT = b"\x00" * 16
@@ -494,28 +495,29 @@ def fingerprint_zookeeper_implementation(
 ) -> ZkImplementationFingerprint:
     commands = ("srvr", "stat", "mntr", "isro")
     responses: dict[str, ZkFourLetterResult] = {}
-    with ThreadPoolExecutor(max_workers=len(commands), thread_name_prefix="zk-4lw") as executor:
-        futures = {
-            executor.submit(
-                query_four_letter_word,
+    scheduler: BoundedScheduler[str, ZkFourLetterResult] = BoundedScheduler(
+        max_workers=len(commands),
+        max_inflight=len(commands),
+    )
+
+    def _query(command: str) -> ZkFourLetterResult:
+        try:
+            return query_four_letter_word(
                 host,
                 port,
                 timeout,
                 command,
                 transport=transport,
                 config=config,
-            ): command
-            for command in commands
-        }
-        for future in as_completed(futures):
-            command = futures[future]
-            try:
-                responses[command] = future.result()
-            except Exception as exc:  # pragma: no cover - executor isolation boundary
-                responses[command] = ZkFourLetterResult(
-                    command=command,
-                    error=_friendly_error_from_exception(exc),
-                )
+            )
+        except Exception as exc:  # pragma: no cover - scheduler isolation boundary
+            return ZkFourLetterResult(
+                command=command,
+                error=_friendly_error_from_exception(exc),
+            )
+
+    for command, response in scheduler.iter_completed(commands, _query):
+        responses[command] = response
 
     version: str | None = None
     is_keeper: bool | None = None
@@ -1014,6 +1016,21 @@ def _enumerate_znodes_parallel(
                             "error": _friendly_error_from_exception(exc),
                         }
                     )
+                except Exception as exc:  # pragma: no cover - worker isolation boundary
+                    # A dequeued parent must always produce a parent-bound result.
+                    # Publishing an anonymous worker_error here would leave the
+                    # coordinator's in_flight counter permanently elevated.
+                    result_queue.put(
+                        {
+                            "kind": "result",
+                            "parent": parent,
+                            "children": None,
+                            "err": None,
+                            "stat": None,
+                            "error": _friendly_error_from_exception(exc),
+                        }
+                    )
+                    return
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
             result_queue.put(
                 {

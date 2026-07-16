@@ -5,10 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 from ...audit_config import AuditConfig
+from ...audit_models import AuditRecord
 from ...console import Console
+from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
+    AuditHookContext,
     ModuleAuditSpec,
     build_basic_audit_plan,
 )
@@ -16,18 +19,71 @@ from . import actions, policy, render
 
 _DEFAULT_PORT = 2181
 _DEFAULT_PORTS: tuple[int, ...] | None = (2181, 12181)
+_PRODUCTION_HOST_STAGE = actions.host_stage
+_PRODUCTION_AUDIT_HOST = actions._audit_zookeeper_host
 
 
 def build_zookeeper_plan(args: Any) -> AuditCommandPlan:
     return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
 
 
+def _build_zookeeper_lifecycle_options(args: Any) -> dict[str, Any]:
+    show_limit = show_flag_limit(getattr(args, "show_znodes", False))
+    configured_max = int(getattr(args, "max_znodes", 2000) or 2000)
+    return {
+        "show_znodes": show_flag_enabled(getattr(args, "show_znodes", False)),
+        "dump": dump_flag_enabled(getattr(args, "dump", False)),
+        "query_znode": actions._normalize_znode_path(getattr(args, "znode", None)),
+        "max_znodes": int(show_limit) if isinstance(show_limit, int) else configured_max,
+        "enum_workers": int(getattr(args, "enum_workers", 3) or 3),
+        "dump_limit": dump_flag_limit(getattr(args, "dump", False)),
+        "transport_config": getattr(args, "transport_config", None),
+    }
+
+
 def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
+    options = _build_zookeeper_lifecycle_options(args)
+    resolved_host_stage = getattr(actions, _PRODUCTION_HOST_STAGE.__name__, _PRODUCTION_HOST_STAGE)
+    use_lifecycle_hooks = (
+        actions.host_stage is _PRODUCTION_HOST_STAGE
+        and resolved_host_stage is _PRODUCTION_HOST_STAGE
+        and actions._audit_zookeeper_host is _PRODUCTION_AUDIT_HOST
+    )
+
+    def _state_factory(_ctx: AuditHookContext) -> actions.ZooKeeperLifecycleState:
+        return actions.ZooKeeperLifecycleState()
+
+    def _detect(ctx: AuditHookContext) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            actions.detect_zookeeper(ctx, options),
+            module="zookeeper",
+            service="zookeeper",
+        )
+
+    def _auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            actions.authenticate_zookeeper(ctx, record, options),
+            module="zookeeper",
+            service="zookeeper",
+        )
+
+    def _data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            actions.collect_zookeeper_data(ctx, record, options),
+            module="zookeeper",
+            service="zookeeper",
+        )
+
     return ModuleAuditSpec(
         module="zookeeper",
         label="ZOOKEEPER",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
+        detect=_detect if use_lifecycle_hooks else None,
+        auth=_auth if use_lifecycle_hooks else None,
+        data=_data if use_lifecycle_hooks else None,
+        lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
+        lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_zookeeper_line,
         # E3 opt-in: ZooKeeper anon-open (default ACLs, no digest ACL on /)
@@ -39,6 +95,8 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
 def run_zookeeper_stage(args: Any, logger: Any) -> int:
     cfg = AuditConfig.from_namespace(args)
     console = Console(debug=cfg.debug)
+    if hasattr(console, "set_structured_output"):
+        console.set_structured_output(cfg.output_format == "json")
     if getattr(args, "username", None) is not None:
         args.username = str(args.username).strip()
         if args.username == "":

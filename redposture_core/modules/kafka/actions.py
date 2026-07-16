@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from ...clients import kafka as _kafka_client
@@ -119,6 +120,18 @@ _CLIENT_SASL_AUTHENTICATE_PLAIN = _kafka_client._sasl_authenticate_plain
 _CLIENT_SASL_HANDSHAKE_PLAIN = _kafka_client._sasl_handshake_plain
 
 
+@dataclass
+class KafkaLifecycleState:
+    """Per-target protocol facts shared by detect, auth and action hooks."""
+
+    is_kafka: bool = False
+    transport_mode: str | None = None
+    anonymous_metadata: dict[str, Any] | None = None
+    auth_required: bool | None = None
+    sasl_first: bool = False
+    credential_metadata: dict[tuple[str | None, str | None, str], dict[str, Any]] = field(default_factory=dict)
+
+
 def _with_kafka_client_overrides(callback, *args, **kwargs):
     overrides = {
         "_send_kafka_request": _send_kafka_request,
@@ -156,7 +169,14 @@ def _authenticate_and_fetch_metadata(
     password: str,
     *,
     use_tls: bool | None = None,
+    known_kafka: bool = False,
+    sasl_first: bool = False,
 ):
+    kwargs: dict[str, Any] = {"use_tls": use_tls}
+    if known_kafka:
+        kwargs["known_kafka"] = True
+    if sasl_first:
+        kwargs["sasl_first"] = True
     return _with_kafka_client_overrides(
         _CLIENT_AUTHENTICATE_AND_FETCH_METADATA,
         host,
@@ -164,7 +184,7 @@ def _authenticate_and_fetch_metadata(
         timeout,
         username,
         password,
-        use_tls=use_tls,
+        **kwargs,
     )
 
 
@@ -178,7 +198,21 @@ def _read_topic_messages(
     password: str | None = None,
     *,
     use_tls: bool | None = None,
+    known_kafka: bool = False,
+    bootstrap_metadata: dict[str, Any] | None = None,
+    sasl_first: bool = False,
 ):
+    kwargs: dict[str, Any] = {
+        "username": username,
+        "password": password,
+        "use_tls": use_tls,
+    }
+    if known_kafka:
+        kwargs["known_kafka"] = True
+    if bootstrap_metadata is not None:
+        kwargs["bootstrap_metadata"] = bootstrap_metadata
+    if sasl_first:
+        kwargs["sasl_first"] = True
     return _with_kafka_client_overrides(
         _CLIENT_READ_TOPIC_MESSAGES,
         host,
@@ -186,9 +220,7 @@ def _read_topic_messages(
         timeout,
         topic,
         max_messages,
-        username=username,
-        password=password,
-        use_tls=use_tls,
+        **kwargs,
     )
 
 
@@ -202,17 +234,29 @@ def _read_dump_topics(
     username: str | None,
     password: str | None,
     use_tls: bool | None = None,
+    known_kafka: bool = False,
+    bootstrap_metadata: dict[str, Any] | None = None,
+    sasl_first: bool = False,
 ):
+    kwargs: dict[str, Any] = {
+        "host": host,
+        "port": port,
+        "timeout": timeout,
+        "topics": topics,
+        "max_messages": max_messages,
+        "username": username,
+        "password": password,
+        "use_tls": use_tls,
+    }
+    if known_kafka:
+        kwargs["known_kafka"] = True
+    if bootstrap_metadata is not None:
+        kwargs["bootstrap_metadata"] = bootstrap_metadata
+    if sasl_first:
+        kwargs["sasl_first"] = True
     return _with_kafka_client_overrides(
         _CLIENT_READ_DUMP_TOPICS,
-        host=host,
-        port=port,
-        timeout=timeout,
-        topics=topics,
-        max_messages=max_messages,
-        username=username,
-        password=password,
-        use_tls=use_tls,
+        **kwargs,
     )
 
 
@@ -233,6 +277,7 @@ def _probe_kafka_acl_state(
     show_topics_limit: int | None,
     probe_write: bool,
     debug_emit: Callable[[str], None] | None,
+    known_kafka: bool = False,
 ) -> tuple[dict[str, dict[str, bool | None]], dict[str, bool | None]]:
     """Collect topic and cluster ACL markers for either Kafka auth path."""
 
@@ -255,17 +300,22 @@ def _probe_kafka_acl_state(
     if not probe_targets:
         return topic_permissions, cluster_permissions
 
+    acl_kwargs: dict[str, Any] = {
+        "username": username if provided_credentials_ok else None,
+        "password": password if provided_credentials_ok else None,
+        "use_tls": (transport_mode == "tls") or None,
+        "probe_write": bool(probe_write),
+        "probe_cluster": True,
+        "debug_emit": debug_emit,
+    }
+    if known_kafka:
+        acl_kwargs["known_kafka"] = True
     acl_state = _kafka_client._probe_kafka_acls(
         host,
         port,
         timeout,
         probe_targets,
-        username=username if provided_credentials_ok else None,
-        password=password if provided_credentials_ok else None,
-        use_tls=(transport_mode == "tls") or None,
-        probe_write=bool(probe_write),
-        probe_cluster=True,
-        debug_emit=debug_emit,
+        **acl_kwargs,
     )
     return (
         acl_state.get("topics", {}) or {},
@@ -487,6 +537,7 @@ def _audit_kafka_host(
     show_topics_limit: int | None = None,
     probe_write: bool = False,
     debug_emit: Callable[[str], None] | None = None,
+    lifecycle_state: KafkaLifecycleState | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     provided_credentials = username is not None and password is not None
@@ -503,10 +554,14 @@ def _audit_kafka_host(
         for _transport_attempt in ("initial", "tls_fallback"):
             try:
                 sock, transport_mode = open_kafka_socket(host, port, timeout, use_tls=transport_use_tls)
+                if lifecycle_state is not None:
+                    lifecycle_state.transport_mode = transport_mode
                 with sock:
                     correlation = 1
                     is_kafka, api_error_code, api_error = _probe_apiversions(sock, correlation)
                     correlation += 1
+                    if lifecycle_state is not None:
+                        lifecycle_state.is_kafka = bool(is_kafka)
                     if not is_kafka:
                         if _is_sasl_probe_candidate(api_error):
                             fallback_record = _audit_kafka_via_sasl_fallback(
@@ -562,6 +617,8 @@ def _audit_kafka_host(
                         }
 
                     metadata, metadata_error = _fetch_metadata(sock, correlation, topics=None)
+                    if lifecycle_state is not None and metadata is not None:
+                        lifecycle_state.anonymous_metadata = dict(metadata)
 
                 auth_required: bool | None = None
                 topic_map: dict[str, int] | None = None
@@ -590,6 +647,8 @@ def _audit_kafka_host(
                         auth_required = None
                     if metadata_error:
                         error_parts.append(metadata_error)
+                if lifecycle_state is not None:
+                    lifecycle_state.auth_required = auth_required
 
                 provided_credentials_ok: bool | None = None
                 if username is not None and password is not None:
@@ -814,6 +873,230 @@ def _audit_kafka_host(
         "error": last_error or "connection failed",
         "transport_mode": None,
     }
+
+
+def _kafka_lifecycle_key(ctx: Any) -> tuple[str | None, str | None, str]:
+    credential = ctx.credential
+    return credential.username, credential.password, str(credential.source or "provided")
+
+
+def detect_kafka(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Run Kafka classification once with an anonymous protocol exchange."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, KafkaLifecycleState):
+        raise TypeError("kafka lifecycle state is unavailable")
+    record = _audit_kafka_host(
+        str(ctx.host),
+        int(ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        int(getattr(ctx.args, "retries", 0) or 0),
+        None,
+        None,
+        False,
+        None,
+        False,
+        int(options["max_messages"]),
+        show_topics_limit=None,
+        probe_write=False,
+        debug_emit=ctx.debug_emit if bool(getattr(ctx.args, "debug", False)) else None,
+        lifecycle_state=state,
+    )
+    state.is_kafka = bool(record.get("is_kafka"))
+    state.auth_required = record.get("auth_required") if isinstance(record.get("auth_required"), bool) else None
+    transport = record.get("transport_mode")
+    if isinstance(transport, str) and transport:
+        state.transport_mode = transport
+    state.sasl_first = str(record.get("auth_flow") or "") == "sasl_fallback"
+    return record
+
+
+def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Try one SASL credential without repeating Kafka classification."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, KafkaLifecycleState):
+        raise TypeError("kafka lifecycle state is unavailable")
+    payload = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
+    credential = ctx.credential
+    if credential.username is None and credential.password is None:
+        return payload
+
+    username = credential.username or ""
+    password = credential.password or ""
+    ok, metadata, error, transport_mode = _authenticate_and_fetch_metadata(
+        str(ctx.host),
+        int(ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        username,
+        password,
+        use_tls=(state.transport_mode == "tls") or None,
+        known_kafka=True,
+        sasl_first=state.sasl_first,
+    )
+    if ok and metadata is not None:
+        state.credential_metadata[_kafka_lifecycle_key(ctx)] = dict(metadata)
+    anonymous_open = state.auth_required is False or str(payload.get("status") or "") == "open_no_auth"
+    is_default = credential.source == "default" or ((username, password) in _KAFKA_DEFAULT_CREDENTIALS)
+    if ok:
+        status = "weak_default_creds" if is_default else "valid_credentials"
+    elif anonymous_open:
+        status = "invalid_credentials_anonymous"
+    else:
+        status = "auth_required"
+
+    topic_map = dict(metadata.get("topic_map") or {}) if isinstance(metadata, dict) else None
+    topic_names = sorted(topic_map) if isinstance(topic_map, dict) else None
+    payload.update(
+        {
+            "timestamp": utc_now_iso(),
+            "is_kafka": True,
+            "status": status,
+            "auth_required": state.auth_required,
+            "provided_credentials": credential.source != "default",
+            "provided_username": credential.username,
+            "provided_password": credential.password if credential.source != "default" else None,
+            "provided_credentials_ok": bool(ok) if credential.source != "default" else None,
+            "defcreds_enabled": credential.source == "default",
+            "credential_attempts": [
+                {
+                    "username": credential.username,
+                    "password": credential.password,
+                    "default": bool(is_default),
+                    "ok": bool(ok),
+                    "error": None if ok else error,
+                }
+            ],
+            "effective_username": username if ok else None,
+            "topic_count": len(topic_names) if topic_names is not None else payload.get("topic_count"),
+            "topics": topic_names if topic_names is not None else payload.get("topics"),
+            "transport_mode": transport_mode or state.transport_mode,
+            "error": None if ok or status == "invalid_credentials_anonymous" else error or "authentication failed",
+        }
+    )
+    return payload
+
+
+def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Execute requested Kafka inventory/actions once for the selected identity."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, KafkaLifecycleState):
+        raise TypeError("kafka lifecycle state is unavailable")
+    payload = dict(record.to_dict() if hasattr(record, "to_dict") else record)
+    credential = ctx.credential
+    status = str(payload.get("status") or "")
+    use_authenticated = status in {"valid_credentials", "weak_default_creds"}
+    metadata = state.credential_metadata.get(_kafka_lifecycle_key(ctx)) if use_authenticated else None
+    if metadata is None:
+        metadata = state.anonymous_metadata
+
+    topic_map = dict(metadata.get("topic_map") or {}) if isinstance(metadata, dict) else {}
+    topic_names = sorted(topic_map)
+    query_topic_name = str(options.get("query_topic") or "").strip()
+    show_topics = bool(options["show_topics"])
+    dump = bool(options["dump"])
+    max_messages = int(options["max_messages"])
+    show_topics_limit = options.get("show_topics_limit")
+    probe_write = bool(options["probe_write"])
+    username = credential.username if use_authenticated else None
+    password = credential.password if use_authenticated else None
+    transport_mode = str(payload.get("transport_mode") or state.transport_mode or "plaintext")
+
+    query_topic_value: str | None = None
+    if query_topic_name:
+        if query_topic_name in topic_map:
+            query_topic_value = f"{query_topic_name} (partitions:{int(topic_map[query_topic_name])})"
+        elif metadata is not None:
+            query_topic_value = f"{query_topic_name}:<not found>"
+        else:
+            query_topic_value = f"{query_topic_name}:<not available>"
+
+    dump_topics: list[str] = []
+    dump_results: dict[str, list[str] | None] = {}
+    dump_errors: dict[str, str] = {}
+    dump_error: str | None = None
+    if dump:
+        if metadata is None:
+            dump_error = "topic metadata unavailable"
+        elif query_topic_name:
+            if query_topic_name in topic_map:
+                dump_topics = [query_topic_name]
+            else:
+                dump_error = "topic not found"
+        else:
+            dump_topics = topic_names
+        if dump_topics:
+            dump_results, dump_errors = _read_dump_topics(
+                host=str(ctx.host),
+                port=int(ctx.port),
+                timeout=float(getattr(ctx.args, "timeout", 5.0)),
+                topics=dump_topics,
+                max_messages=max_messages,
+                username=username,
+                password=password,
+                use_tls=(transport_mode == "tls") or None,
+                known_kafka=True,
+                bootstrap_metadata=metadata,
+                sasl_first=state.sasl_first,
+            )
+
+    topic_messages: list[str] | None = None
+    topic_read_error: str | None = None
+    if dump and query_topic_name:
+        topic_messages = dump_results.get(query_topic_name)
+        topic_read_error = dump_errors.get(query_topic_name) or dump_error
+
+    topic_permissions, cluster_permissions = _probe_kafka_acl_state(
+        host=str(ctx.host),
+        port=int(ctx.port),
+        timeout=float(getattr(ctx.args, "timeout", 5.0)),
+        topic_names=topic_names,
+        query_topic_name=query_topic_name,
+        show_topics=show_topics,
+        dump=dump,
+        provided_credentials_ok=True if use_authenticated else None,
+        auth_required=state.auth_required,
+        username=username,
+        password=password,
+        transport_mode=transport_mode,
+        show_topics_limit=show_topics_limit if isinstance(show_topics_limit, int) else None,
+        probe_write=probe_write,
+        debug_emit=ctx.debug_emit if bool(getattr(ctx.args, "debug", False)) else None,
+        known_kafka=True,
+    )
+
+    errors: list[str] = []
+    for item in (payload.get("error"), dump_error, *dump_errors.values()):
+        clean = str(item or "").strip()
+        if clean and clean not in errors:
+            errors.append(clean)
+    payload.update(
+        {
+            "timestamp": utc_now_iso(),
+            "show_topics": show_topics,
+            "show_topics_limit": show_topics_limit,
+            "query_topic": query_topic_name or None,
+            "dump": dump,
+            "max_messages": max_messages if dump else None,
+            "max_messages_explicit": bool(options["max_messages_explicit"]),
+            "topic_count": len(topic_names) if metadata is not None else payload.get("topic_count"),
+            "topics": topic_names if metadata is not None else payload.get("topics"),
+            "topic_permissions": topic_permissions or None,
+            "cluster_permissions": (
+                cluster_permissions if any(value is not None for value in cluster_permissions.values()) else None
+            ),
+            "query_topic_value": query_topic_value,
+            "dump_topics": dump_topics if dump else None,
+            "dump_results": dump_results if dump else None,
+            "dump_errors": dump_errors if dump else None,
+            "dump_error": dump_error,
+            "topic_messages": topic_messages,
+            "topic_read_error": topic_read_error,
+            "error": "; ".join(errors) if errors else None,
+        }
+    )
+    return payload
 
 
 def _nxc_prefix(record: dict[str, Any]) -> str:

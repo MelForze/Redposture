@@ -498,7 +498,7 @@ _STAGE_CASES = (
     ),
     _stage_case(
         "trigger",
-        "--listen-seconds must be >= 0",
+        "--listen-seconds must be > 0",
         "exporters",
         "trigger",
         "-t",

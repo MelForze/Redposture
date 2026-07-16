@@ -1,35 +1,28 @@
 [
   {
-    "admin_capability": null,
-    "attempted_credentials": 2,
-    "auth_attempts": [
-      {
-        "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
-        "ok": false,
-        "password": "",
-        "source": "default",
-        "username": "default"
-      },
-      {
-        "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
-        "ok": false,
-        "password": "default",
-        "source": "default",
-        "username": "default"
-      }
-    ],
-    "auth_required": true,
+    "admin_capability": true,
+    "attempted_credentials": 0,
+    "auth_attempts": [],
+    "auth_required": false,
     "credentials_source": null,
     "database": "default",
-    "database_count": null,
-    "database_names": null,
+    "database_count": 7,
+    "database_names": [
+      "INFORMATION_SCHEMA",
+      "analytics",
+      "default",
+      "iam",
+      "information_schema",
+      "observability",
+      "system"
+    ],
     "default_credentials": false,
-    "defcreds_enabled": true,
+    "defcreds_enabled": false,
     "effective_password": null,
     "effective_username": null,
-    "error": "Code: 516.\nDB::Exception: default: Authentication failed: password is incorrect, or there is no user with such name.\n\nIf you have installed ClickHouse and forgot password you ca...",
+    "error": null,
     "execute_attempted": false,
-    "execute_capability": null,
+    "execute_capability": true,
     "execute_command": null,
     "execute_error": null,
     "execute_ok": null,
@@ -43,11 +36,11 @@
     "provided_credentials_ok": null,
     "provided_password": null,
     "provided_username": null,
-    "read_capability": null,
+    "read_capability": true,
     "service": "clickhouse",
     "show_columns": false,
     "show_columns_limit": null,
-    "show_databases": false,
+    "show_databases": true,
     "show_databases_limit": null,
     "show_tables": false,
     "show_tables_limit": null,
@@ -71,18 +64,18 @@
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "data"
       }
     ],
-    "status": "auth_required",
+    "status": "open_no_auth",
     "table_columns": [],
     "table_columns_info": [],
     "table_dump_enabled": false,

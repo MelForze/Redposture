@@ -10,7 +10,8 @@ from uuid import UUID
 import pytest
 
 from redposture_core import stage_clickhouse as clickhouse_stage
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake
+from redposture_core.audit_models import AuditRecord
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test
 
 
 class _DummyClient:
@@ -129,6 +130,34 @@ def _base_args(**kwargs: object) -> SimpleNamespace:
     }
     args.update(kwargs)
     return SimpleNamespace(**args)
+
+
+def _clickhouse_host_record(
+    kwargs: dict[str, object],
+    *,
+    status: str,
+    detected: bool,
+    error: str | None = None,
+) -> AuditRecord:
+    return AuditRecord(
+        host=str(kwargs["host"]),
+        port=int(kwargs["port"]),
+        service="clickhouse",
+        module="clickhouse",
+        status=status,
+        auth_required=status == "auth_required",
+        extra={
+            "is_clickhouse": detected,
+            "protocol": kwargs.get("protocol"),
+            "error": error,
+            "database": kwargs.get("database"),
+            "show_databases": bool(kwargs.get("show_databases")),
+            "show_tables": bool(kwargs.get("show_tables")),
+            "show_columns": bool(kwargs.get("show_columns")),
+            "table_targets": list(kwargs.get("table_targets") or []),
+            "table_columns": list(kwargs.get("table_columns") or []),
+        },
+    )
 
 
 @pytest.mark.parametrize(
@@ -961,13 +990,11 @@ def test_run_clickhouse_stage_calls_audit_with_port_protocols(monkeypatch: pytes
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_connect_module", lambda: object)
     monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
-    def fake_audit(*_args, **kwargs):
-        calls.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (1, 0, 0, 0, 0, 1)
+    def fake_audit(**kwargs):
+        calls.append(dict(kwargs))
+        return _clickhouse_host_record(kwargs, status="fail", detected=False, error="connection refused")
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "clickhouse", fake_audit)
+    patch_module_host_stage_for_test(monkeypatch, "clickhouse", fake_audit)
     exit_code = clickhouse_stage.run_clickhouse_stage(
         _base_args(debug=False, output=None),
         logger=SimpleNamespace(log=lambda *_a, **_k: None),
@@ -976,8 +1003,10 @@ def test_run_clickhouse_stage_calls_audit_with_port_protocols(monkeypatch: pytes
     assert len(calls) == 1
     assert calls[0]["port"] == 9000
     assert calls[0]["protocol"] == "native"
-    assert "port_protocols" not in calls[0]
-    assert calls[0]["suppress_timeout_status_lines"] is True
+    assert calls[0]["port_protocols"] is None
+    assert calls[0]["run_deep_checks"] is False
+    assert calls[0]["table_targets"] == []
+    assert calls[0]["table_columns"] == []
 
 
 def test_audit_clickhouse_host_on_protocol_collects_details(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1342,9 +1371,8 @@ def test_run_clickhouse_stage_debug_info_and_oserror(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_connect_module", lambda: object)
     monkeypatch.setattr(clickhouse_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
-    patch_runner_for_legacy_target_fake(
-        monkeypatch,
-        "clickhouse",
+    monkeypatch.setattr(
+        "redposture_core.modules.clickhouse.stage.AuditCommandRunner.run_plan",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("write failed")),
     )
     rc = clickhouse_stage.run_clickhouse_stage(

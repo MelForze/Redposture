@@ -11,7 +11,9 @@ import threading
 import time
 import urllib.error
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
@@ -43,6 +45,19 @@ _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _THREAD_LOCAL_DEBUG_EMIT = threading.local()
+
+_RegistryProbe = tuple[int, bytes, dict[str, str], str | None]
+_RegistryCredentialKey = tuple[str | None, str | None, str | None, str]
+
+
+@dataclass
+class RegistryLifecycleState:
+    anonymous_probe: _RegistryProbe | None = None
+    anonymous_nexus: tuple[dict[str, Any] | None, str | None] | None = None
+    credential_probes: dict[_RegistryCredentialKey, _RegistryProbe] = dc_field(default_factory=dict)
+    credential_nexus: dict[_RegistryCredentialKey, tuple[dict[str, Any] | None, str | None]] = dc_field(
+        default_factory=dict
+    )
 
 
 def _clip(text: str, width: int = 72) -> str:
@@ -1198,6 +1213,490 @@ def _extract_nexus_assets(components: list[dict[str, Any]]) -> list[dict[str, An
     return assets
 
 
+def _registry_lifecycle_payload(
+    ctx: Any,
+    options: Mapping[str, Any],
+    *,
+    status: str,
+    is_registry: bool,
+    is_nexus: bool | None,
+    auth_required: bool | None,
+    probe_status: int | None,
+    error: str | None,
+) -> dict[str, Any]:
+    credential = ctx.credential
+    provided_credentials = credential.username is not None and credential.password is not None
+    return {
+        "timestamp": utc_now_iso(),
+        "host": str(ctx.host),
+        "port": int(ctx.port),
+        "is_registry": bool(is_registry),
+        "is_harbor": None,
+        "is_gitlab": None,
+        "is_nexus": is_nexus,
+        "status": status,
+        "auth_required": auth_required,
+        "provided_credentials": provided_credentials,
+        "provided_username": credential.username,
+        "provided_password": credential.password if provided_credentials else None,
+        "token_provided": bool(credential.token),
+        "debug": bool(getattr(ctx.args, "debug", False)),
+        "show_images": bool(options["show_images"]),
+        "docker": bool(options["docker"]),
+        "show_tags": bool(options["show_tags"]),
+        "repository": options["repository"],
+        "tag": options["tag"],
+        "metadata": bool(options["metadata"]),
+        "harbor": bool(options["harbor"]),
+        "gitlab": bool(options["gitlab"]),
+        "nexus": bool(options["nexus"]),
+        "assets": bool(options["assets"]),
+        "inspect": bool(options["inspect"]),
+        "image": options["image"],
+        "download": bool(options["download"]),
+        "image_count": None,
+        "images": None,
+        "images_error": None,
+        "harbor_info": None,
+        "harbor_projects": None,
+        "harbor_repositories": None,
+        "harbor_artifacts": None,
+        "harbor_error": None,
+        "gitlab_info": None,
+        "gitlab_error": None,
+        "gitlab_repositories": None,
+        "gitlab_repository_details": None,
+        "selected_repository_tags": None,
+        "metadata_result": None,
+        "nexus_info": None,
+        "nexus_repositories": None,
+        "nexus_repository_details": None,
+        "nexus_assets": None,
+        "nexus_error": None,
+        "inspections": None,
+        "inspection_error": None,
+        "download_result": None,
+        "elapsed_ms": None,
+        "probe_status": probe_status,
+        "error": error,
+    }
+
+
+def _registry_append_lifecycle_stage(
+    payload: Mapping[str, Any],
+    *,
+    stage_name: str,
+    attempt: int,
+    duration_ms: int,
+    result: str,
+    error: str | None,
+    max_attempts: int,
+) -> dict[str, Any]:
+    record = dict(payload)
+    raw_stages = record.get("stages")
+    stages = [dict(item) for item in raw_stages if isinstance(item, dict)] if isinstance(raw_stages, list) else []
+    stage_attempt = max(1, int(attempt))
+    stage_duration = max(0, int(duration_ms))
+    stage_result = str(result or "ok")
+    stage_error = str(error or "").strip() or None
+    stages.append(
+        {
+            "stage_name": stage_name,
+            "attempt": stage_attempt,
+            "duration_ms": stage_duration,
+            "result": stage_result,
+            "error": stage_error,
+        }
+    )
+
+    raw_durations = record.get("stage_durations_ms")
+    stage_durations_ms = dict(raw_durations) if isinstance(raw_durations, dict) else {}
+    stage_durations_ms[stage_name] = max(0, int(stage_durations_ms.get(stage_name, 0) or 0)) + stage_duration
+
+    raw_attempts = record.get("stage_attempts")
+    stage_attempts = dict(raw_attempts) if isinstance(raw_attempts, dict) else {}
+    stage_attempts[stage_name] = max(int(stage_attempts.get(stage_name, 0) or 0), stage_attempt)
+
+    stage_failed_at = str(record.get("stage_failed_at") or "").strip() or None
+    if stage_failed_at is None and stage_result in {"fail", "timeout"}:
+        stage_failed_at = stage_name
+
+    raw_debug_events = record.get("debug_events")
+    debug_events = list(raw_debug_events) if isinstance(raw_debug_events, list) else []
+    record.update(
+        {
+            "attempts": max(int(record.get("attempts", 0) or 0), stage_attempt),
+            "max_attempts": max(int(record.get("max_attempts", 0) or 0), max(1, int(max_attempts))),
+            "stages": stages,
+            "stage_failed_at": stage_failed_at,
+            "stage_durations_ms": stage_durations_ms,
+            "stage_attempts": stage_attempts,
+            "debug_events": debug_events,
+            "debug_events_streamed": bool(record.get("debug_events_streamed", False)),
+        }
+    )
+    return record
+
+
+def _registry_has_lifecycle_stage(payload: Mapping[str, Any], stage_name: str) -> bool:
+    stages = payload.get("stages")
+    return isinstance(stages, list) and any(
+        isinstance(item, dict) and str(item.get("stage_name") or "") == stage_name for item in stages
+    )
+
+
+def _registry_probe_state(probe: _RegistryProbe) -> tuple[bool, str, bool | None]:
+    status, body, headers, error = probe
+    if error:
+        return False, "fail", None
+    body_text = body.decode("utf-8", errors="replace").strip().lower()
+    docker_header = str(headers.get("docker-distribution-api-version") or "").lower()
+    unauthorized = "unauthorized" in body_text or "authentication required" in body_text
+    is_registry = status in {200, 401} or "registry/2.0" in docker_header or (status == 403 and "v2/" in body_text)
+    if not is_registry:
+        return False, "not_registry", None
+    if status == 200:
+        return True, "open_no_auth", False
+    if status == 401 or (status == 403 and unauthorized):
+        return True, "auth_required", True
+    return True, "unknown_auth", None
+
+
+def _registry_error_is_retryable(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and any(
+        marker in text
+        for marker in (
+            "connection timeout",
+            "connection refused",
+            "connection reset",
+            "connection closed",
+            "temporarily unavailable",
+            "timed out",
+            "unexpected eof",
+            "status 408",
+            "status 429",
+            "status 500",
+            "status 502",
+            "status 503",
+            "status 504",
+        )
+    )
+
+
+def _registry_probe_is_retryable(probe: _RegistryProbe) -> bool:
+    status, _body, _headers, error = probe
+    return bool(error and _registry_error_is_retryable(error)) or status in {408, 429, 500, 502, 503, 504}
+
+
+def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, RegistryLifecycleState):
+        raise TypeError("registry lifecycle state is unavailable")
+
+    started_at = time.monotonic()
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    attempts_used = 0
+    probe: _RegistryProbe = (0, b"", {}, "connection failed")
+    for attempt in range(attempts):
+        attempts_used += 1
+        probe = _http_request(
+            str(ctx.host),
+            int(ctx.port),
+            "GET",
+            "/v2/",
+            float(getattr(ctx.args, "timeout", 5.0)),
+            headers=None,
+        )
+        if probe[3] is None or attempt >= attempts - 1:
+            break
+        time.sleep(_retry_delay(attempt))
+    state.anonymous_probe = probe
+    is_registry, status, auth_required = _registry_probe_state(probe)
+    is_nexus: bool | None = None
+    nexus_info: dict[str, Any] | None = None
+    nexus_error: str | None = None
+    if bool(options["nexus"]) and not is_registry:
+        nexus_info, nexus_error = _fetch_nexus_info(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            headers={},
+        )
+        state.anonymous_nexus = (nexus_info, nexus_error)
+        if nexus_info is not None:
+            is_registry = True
+            is_nexus = True
+            status = "open_no_auth"
+            auth_required = False
+        elif nexus_error == "authentication required":
+            is_registry = True
+            is_nexus = True
+            status = "auth_required"
+            auth_required = True
+    payload = _registry_lifecycle_payload(
+        ctx,
+        options,
+        status=status,
+        is_registry=is_registry,
+        is_nexus=is_nexus,
+        auth_required=auth_required,
+        probe_status=probe[0] or None,
+        error=probe[3] if status == "fail" else nexus_error if status == "not_registry" else None,
+    )
+    payload["nexus_info"] = nexus_info
+    stage_result = status if status in {"fail", "not_registry"} else "ok"
+    return _registry_append_lifecycle_stage(
+        payload,
+        stage_name=_STAGE_DETECT_PROTOCOL,
+        attempt=attempts_used,
+        duration_ms=int((time.monotonic() - started_at) * 1000),
+        result=stage_result,
+        error=str(payload.get("error") or "").strip() or None,
+        max_attempts=attempts,
+    )
+
+
+def authenticate_registry(ctx: Any, detect_record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, RegistryLifecycleState):
+        raise TypeError("registry lifecycle state is unavailable")
+    payload = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
+    credential = ctx.credential
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    started_at = time.monotonic()
+    if credential.username is None and credential.password is None and credential.token is None:
+        return _registry_append_lifecycle_stage(
+            payload,
+            stage_name=_STAGE_AUTH_INFERENCE,
+            attempt=1,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+            result=str(payload.get("status") or "unknown_auth"),
+            error=str(payload.get("error") or "").strip() or None,
+            max_attempts=attempts,
+        )
+
+    key = (credential.username, credential.password, credential.token, str(credential.source))
+    headers = _auth_headers(credential.username, credential.password, credential.token)
+    transport_attempts = 0
+    transient_exhausted = False
+    definitive_rejection = False
+    is_nexus_only = bool(payload.get("is_nexus")) and (
+        state.anonymous_probe is None or not _registry_probe_state(state.anonymous_probe)[0]
+    )
+    if is_nexus_only:
+        nexus_result: tuple[dict[str, Any] | None, str | None] = (None, "connection failed")
+        for attempt in range(attempts):
+            transport_attempts += 1
+            nexus_result = _fetch_nexus_info(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                headers=headers,
+            )
+            if nexus_result[0] is not None:
+                break
+            if not _registry_error_is_retryable(nexus_result[1]) or attempt >= attempts - 1:
+                transient_exhausted = _registry_error_is_retryable(nexus_result[1])
+                break
+            time.sleep(_retry_delay(attempt))
+        state.credential_nexus[key] = nexus_result
+        ok = nexus_result[0] is not None
+        anonymous_ok = state.anonymous_nexus is not None and state.anonymous_nexus[0] is not None
+        error = nexus_result[1]
+        definitive_rejection = error == "authentication required"
+        probe_status = payload.get("probe_status")
+    else:
+        probe: _RegistryProbe = (0, b"", {}, "connection failed")
+        for attempt in range(attempts):
+            transport_attempts += 1
+            probe = _http_request(
+                str(ctx.host),
+                int(ctx.port),
+                "GET",
+                "/v2/",
+                float(getattr(ctx.args, "timeout", 5.0)),
+                headers=headers,
+            )
+            if not _registry_probe_is_retryable(probe) or attempt >= attempts - 1:
+                transient_exhausted = _registry_probe_is_retryable(probe)
+                break
+            time.sleep(_retry_delay(attempt))
+        state.credential_probes[key] = probe
+        _detected, probe_state, _auth_required = _registry_probe_state(probe)
+        ok = probe_state == "open_no_auth"
+        definitive_rejection = probe_state == "auth_required"
+        anonymous_ok = state.anonymous_probe is not None and _registry_probe_state(state.anonymous_probe)[1] == (
+            "open_no_auth"
+        )
+        error = probe[3]
+        probe_status = probe[0] or None
+
+    if transient_exhausted and not ok:
+        status = "fail"
+    elif ok and anonymous_ok:
+        status = "invalid_credentials_anonymous"
+    elif ok:
+        status = "valid_credentials"
+    elif definitive_rejection:
+        status = "auth_required"
+    else:
+        status = "fail"
+    payload.update(
+        {
+            "timestamp": utc_now_iso(),
+            "status": status,
+            "auth_required": False if anonymous_ok else True,
+            "provided_credentials": credential.username is not None and credential.password is not None,
+            "provided_username": credential.username,
+            "provided_password": credential.password,
+            "token_provided": bool(credential.token),
+            "credentials_source": str(credential.source),
+            "provided_credentials_ok": (
+                None if transient_exhausted or not definitive_rejection and not ok else bool(ok and not anonymous_ok)
+            ),
+            "auth_transport_attempts": transport_attempts,
+            "probe_status": probe_status,
+            "error": None if ok else error or "authentication required",
+        }
+    )
+    return _registry_append_lifecycle_stage(
+        payload,
+        stage_name=_STAGE_AUTH_INFERENCE,
+        attempt=transport_attempts,
+        duration_ms=int((time.monotonic() - started_at) * 1000),
+        result=status,
+        error=str(payload.get("error") or "").strip() or None,
+        max_attempts=attempts,
+    )
+
+
+def collect_registry_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, RegistryLifecycleState):
+        raise TypeError("registry lifecycle state is unavailable")
+    prior = dict(record.to_dict() if hasattr(record, "to_dict") else record)
+    credential = ctx.credential
+    key = (credential.username, credential.password, credential.token, str(credential.source))
+    status = str(prior.get("status") or "")
+    use_anonymous = status in {"open_no_auth", "invalid_credentials_anonymous"}
+    username = None if use_anonymous else credential.username
+    password = None if use_anonymous else credential.password
+    token = None if use_anonymous else credential.token
+    probe = state.anonymous_probe if use_anonymous else state.credential_probes.get(key)
+    nexus_result = state.anonymous_nexus if use_anonymous else state.credential_nexus.get(key)
+    if probe is None:
+        probe = state.anonymous_probe
+
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    if not _registry_has_lifecycle_stage(prior, _STAGE_AUTH_INFERENCE):
+        prior = _registry_append_lifecycle_stage(
+            prior,
+            stage_name=_STAGE_AUTH_INFERENCE,
+            attempt=1,
+            duration_ms=0,
+            result=str(prior.get("status") or "unknown_auth"),
+            error=str(prior.get("error") or "").strip() or None,
+            max_attempts=attempts,
+        )
+    prior = _registry_append_lifecycle_stage(
+        prior,
+        stage_name=_STAGE_ACCESS_CAPABILITIES,
+        attempt=1,
+        duration_ms=0,
+        result="ok",
+        error=None,
+        max_attempts=attempts,
+    )
+    data_started_at = time.monotonic()
+    result: dict[str, Any] = {}
+    data_attempts = 0
+    for attempt in range(attempts):
+        data_attempts += 1
+        result = _audit_registry_host_core(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            0,
+            username=username,
+            password=password,
+            token=token,
+            docker=bool(options["docker"]),
+            show_images=bool(options["show_images"]),
+            show_tags=bool(options["show_tags"]),
+            repository=options["repository"],
+            tag=options["tag"],
+            metadata=bool(options["metadata"]),
+            harbor=bool(options["harbor"]),
+            gitlab=bool(options["gitlab"]),
+            nexus=bool(options["nexus"]),
+            assets=bool(options["assets"]),
+            inspect=bool(options["inspect"]),
+            image=options["image"],
+            download=bool(options["download"]),
+            download_dir=str(options["download_dir"]),
+            console=options["console"],
+            debug=bool(getattr(ctx.args, "debug", False)),
+            detect_nexus=bool(options["nexus"]),
+            initial_probe=probe,
+            initial_nexus=nexus_result,
+            anonymous_probe_status=state.anonymous_probe[0] if state.anonymous_probe is not None else None,
+        )
+        retry_errors = (
+            result.get("error"),
+            result.get("images_error"),
+            result.get("harbor_error"),
+            result.get("gitlab_error"),
+            result.get("nexus_error"),
+            result.get("inspection_error"),
+        )
+        retryable = any(_registry_error_is_retryable(value) for value in retry_errors)
+        if not retryable or attempt >= attempts - 1:
+            break
+        time.sleep(_retry_delay(attempt))
+    deep_status = str(result.get("status") or "fail")
+    deep_error = str(result.get("error") or "").strip() or None
+    result["data_transport_attempts"] = data_attempts
+    if deep_status == "fail" and bool(prior.get("is_registry")):
+        result["is_registry"] = True
+        result["detection_preserved"] = True
+        result["detected_status"] = str(prior.get("status") or "")
+    for name in (
+        "status",
+        "auth_required",
+        "provided_credentials",
+        "provided_username",
+        "provided_password",
+        "token_provided",
+        "credentials_source",
+        "provided_credentials_ok",
+        "auth_transport_attempts",
+    ):
+        if name in prior:
+            result[name] = prior[name]
+    for name in (
+        "attempts",
+        "max_attempts",
+        "stages",
+        "stage_failed_at",
+        "stage_durations_ms",
+        "stage_attempts",
+        "debug_events",
+        "debug_events_streamed",
+    ):
+        if name in prior:
+            result[name] = prior[name]
+    return _registry_append_lifecycle_stage(
+        result,
+        stage_name=_STAGE_DATA,
+        attempt=data_attempts,
+        duration_ms=int((time.monotonic() - data_started_at) * 1000),
+        result="fail" if deep_status == "fail" else "ok",
+        error=deep_error if deep_status == "fail" else None,
+        max_attempts=attempts,
+    )
+
+
 def _audit_registry_host_core(
     host: str,
     port: int,
@@ -1223,6 +1722,10 @@ def _audit_registry_host_core(
     download_dir: str,
     console: Console,
     debug: bool,
+    detect_nexus: bool = False,
+    initial_probe: _RegistryProbe | None = None,
+    initial_nexus: tuple[dict[str, Any] | None, str | None] | None = None,
+    anonymous_probe_status: int | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -1236,7 +1739,17 @@ def _audit_registry_host_core(
     for attempt in range(attempts):
         started = time.monotonic()
         try:
-            status, body, resp_headers, error = _http_request(host, port, "GET", "/v2/", timeout, headers=auth_headers)
+            if attempt == 0 and initial_probe is not None:
+                status, body, resp_headers, error = initial_probe
+            else:
+                status, body, resp_headers, error = _http_request(
+                    host,
+                    port,
+                    "GET",
+                    "/v2/",
+                    timeout,
+                    headers=auth_headers,
+                )
             if error:
                 raise OSError(error)
 
@@ -1277,7 +1790,10 @@ def _audit_registry_host_core(
             harbor_repositories: list[str] | None = None
             harbor_artifacts: list[str] | None = None
 
-            nexus_info, nexus_error = _fetch_nexus_info(host, port, timeout, headers=auth_headers)
+            if attempt == 0 and initial_nexus is not None:
+                nexus_info, nexus_error = initial_nexus
+            else:
+                nexus_info, nexus_error = _fetch_nexus_info(host, port, timeout, headers=auth_headers)
             if nexus_info is not None:
                 is_nexus: bool | None = True
             elif nexus_error == "not nexus":
@@ -1285,6 +1801,7 @@ def _audit_registry_host_core(
                 nexus_error = None
             else:
                 is_nexus = None
+            nexus_detected_service = bool((nexus or detect_nexus) and is_nexus is True)
             nexus_repositories: list[str] | None = None
             nexus_repository_details: list[dict[str, Any]] | None = None
             nexus_assets_list: list[dict[str, Any]] | None = None
@@ -1348,7 +1865,7 @@ def _audit_registry_host_core(
                 if assets:
                     nexus_assets_list = assets_accum
 
-            if not is_registry:
+            if not is_registry and not nexus_detected_service:
                 return {
                     "timestamp": utc_now_iso(),
                     "host": host,
@@ -1404,34 +1921,45 @@ def _audit_registry_host_core(
                     "error": None,
                 }
 
-            auth_required = status == 401 or (status == 403 and unauthorized_body)
-            anon_probe_status: int | None = None
-            if status == 200 and (provided_credentials or token_provided):
-                # Re-probe /v2/ without credentials to distinguish "valid creds" from
-                # "server is anonymous and never checked what we sent". Without this
-                # distinction any bogus --username/--password against Docker Hub would
-                # be misreported as valid_credentials.
-                anon_status, _anon_body, _anon_headers, anon_error = _http_request(
-                    host, port, "GET", "/v2/", timeout, headers=None
-                )
-                if anon_error is None:
-                    anon_probe_status = anon_status
-            if status == 200 and not (provided_credentials or token_provided):
-                state = "open_no_auth"
-            elif status == 200 and anon_probe_status == 200:
-                state = "open_no_auth"
-            elif status == 200:
-                state = "valid_credentials"
-            elif auth_required:
-                state = "auth_required"
+            if nexus_detected_service and not is_registry:
+                auth_required = False
+                nexus_anonymous = not (provided_credentials or token_provided)
+                if not nexus_anonymous:
+                    anonymous_info, _anonymous_error = _fetch_nexus_info(host, port, timeout, headers={})
+                    nexus_anonymous = anonymous_info is not None
+                state = "open_no_auth" if nexus_anonymous else "valid_credentials"
             else:
-                state = "unknown_auth"
+                auth_required = status == 401 or (status == 403 and unauthorized_body)
+                anon_probe_status: int | None = None
+                if status == 200 and (provided_credentials or token_provided):
+                    # Re-probe /v2/ without credentials to distinguish "valid creds" from
+                    # "server is anonymous and never checked what we sent". Without this
+                    # distinction any bogus --username/--password against Docker Hub would
+                    # be misreported as valid_credentials.
+                    if anonymous_probe_status is not None:
+                        anon_probe_status = int(anonymous_probe_status)
+                    else:
+                        anon_status, _anon_body, _anon_headers, anon_error = _http_request(
+                            host, port, "GET", "/v2/", timeout, headers=None
+                        )
+                        if anon_error is None:
+                            anon_probe_status = anon_status
+                if status == 200 and not (provided_credentials or token_provided):
+                    state = "open_no_auth"
+                elif status == 200 and anon_probe_status == 200:
+                    state = "open_no_auth"
+                elif status == 200:
+                    state = "valid_credentials"
+                elif auth_required:
+                    state = "auth_required"
+                else:
+                    state = "unknown_auth"
 
             repos: list[str] | None = None
             repo_tags_map: dict[str, list[str]] = {}
             image_refs: list[str] | None = None
             images_error: str | None = None
-            can_access_registry_data = status == 200
+            can_access_registry_data = bool(is_registry and status == 200)
 
             if show_images and not can_access_registry_data:
                 images_error = "authentication required"
@@ -1608,7 +2136,7 @@ def _audit_registry_host_core(
                 "timestamp": utc_now_iso(),
                 "host": host,
                 "port": port,
-                "is_registry": True,
+                "is_registry": bool(is_registry or nexus_detected_service),
                 "is_harbor": is_harbor,
                 "is_gitlab": is_gitlab,
                 "is_nexus": is_nexus,
@@ -1977,6 +2505,7 @@ def _audit_registry_host(
             download_dir=download_dir,
             console=console,
             debug=debug,
+            detect_nexus=nexus,
         )
         status = str(detect_record.get("status") or "fail")
         if status in {"fail", "not_registry"}:

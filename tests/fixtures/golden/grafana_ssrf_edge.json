@@ -19,9 +19,24 @@
         "username": "admin"
       }
     ],
-    "auth_required": true,
-    "check_results": null,
-    "check_urls": [],
+    "auth_required": false,
+    "check_results": [
+      {
+        "cleanup_error": null,
+        "cleanup_ok": true,
+        "create_error": null,
+        "create_ok": true,
+        "create_status": 200,
+        "enabled": true,
+        "probe_error": null,
+        "probe_ok": true,
+        "probe_status": 200,
+        "target_url": "http://grafana-2:3000/api/health"
+      }
+    ],
+    "check_urls": [
+      "http://grafana-2:3000/api/health"
+    ],
     "credential_attempts": [
       {
         "error": null,
@@ -101,7 +116,7 @@
     "port": 3000,
     "provided_credentials": false,
     "provided_credentials_ok": null,
-    "provided_username": null,
+    "provided_username": "admin",
     "service": "grafana",
     "show_datasources": true,
     "stages": [

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from scripts.verify_postrun import (
     _infer_target_count_from_jsonl,
     _parse_status_file,
     _progress_counts_from_log,
+    _validate_action_contracts,
     _validate_capability_sanity,
     _validate_cross_case_invariants,
     _validate_dump_not_empty,
@@ -26,9 +28,11 @@ from scripts.verify_postrun import (
     _validate_expected_exits,
     _validate_expected_failure_outputs,
     _validate_expected_labels,
+    _validate_meaningful_outcomes,
     _validate_multi_record_consistency,
     _validate_openapi_artifacts,
     _validate_output_sanity,
+    _validate_progress_target_mappings,
     _validate_rich_lab_outputs,
     _validate_schema_mandatory_fields,
     _validate_stage_coherence,
@@ -197,6 +201,311 @@ def test_golden_snapshot_comparison_ignores_parallel_target_completion_order(
             }
         ]
     )
+
+
+def test_golden_text_replaces_exact_runtime_out_dir(tmp_path: Path) -> None:
+    out_dir = tmp_path / "custom-artifacts-name"
+    artifact = out_dir / "json" / "gitlab_clone.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        f'{{"host":"h","port":18080,"status":"detected","module":"gitlab","clone_dir":"{out_dir}/gitlab_clones"}}\n',
+        encoding="utf-8",
+    )
+    normalized = _golden_text_for_row(
+        {
+            "module": "gitlab",
+            "label": "gitlab_extended_token_project_clone",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(artifact),
+            "log_path": "-",
+        }
+    )
+    assert normalized is not None
+    assert str(out_dir) not in normalized
+    assert "<OUT_DIR>/gitlab_clones" in normalized
+
+
+def test_golden_text_sorts_only_documented_mongodb_unordered_lists(tmp_path: Path) -> None:
+    out_dir = tmp_path / "mongo"
+    artifact = out_dir / "json" / "mongodb.json"
+    artifact.parent.mkdir(parents=True)
+    row = {
+        "module": "mongodb",
+        "label": "mongodb_auth",
+        "expected_exit": "0",
+        "exit_code": "0",
+        "json_path": str(artifact),
+        "log_path": "-",
+    }
+    forward = {
+        "host": "h",
+        "port": 27017,
+        "status": "valid_credentials",
+        "module": "mongodb",
+        "database_names": ["redposture", "admin"],
+        "collections": [{"collection": "tokens"}, {"collection": "accounts"}],
+        "documents": [
+            {"collection": "tokens", "document": {"_id": 2}},
+            {"collection": "accounts", "document": {"_id": 1}},
+        ],
+        "indexes": [{"name": "username_1"}, {"name": "_id_"}],
+        "credential_attempts": [{"username": "first"}, {"username": "second"}],
+        "query_documents": [{"_id": 1}, {"_id": 2}],
+        "stages": [{"stage_name": "detect"}, {"stage_name": "data"}],
+    }
+    reverse_unordered = dict(forward)
+    reverse_unordered["database_names"] = list(reversed(forward["database_names"]))
+    reverse_unordered["collections"] = list(reversed(forward["collections"]))
+    reverse_unordered["documents"] = list(reversed(forward["documents"]))
+    reverse_unordered["indexes"] = list(reversed(forward["indexes"]))
+    artifact.write_text(json.dumps(forward) + "\n", encoding="utf-8")
+    normalized_forward = _golden_text_for_row(row)
+    artifact.write_text(json.dumps(reverse_unordered) + "\n", encoding="utf-8")
+    normalized_reverse = _golden_text_for_row(row)
+    assert normalized_forward == normalized_reverse
+
+    reverse_stages = dict(reverse_unordered)
+    reverse_stages["stages"] = list(reversed(forward["stages"]))
+    artifact.write_text(json.dumps(reverse_stages) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) != normalized_forward
+
+    reverse_attempts = dict(reverse_unordered)
+    reverse_attempts["credential_attempts"] = list(reversed(forward["credential_attempts"]))
+    artifact.write_text(json.dumps(reverse_attempts) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) != normalized_forward
+
+    reverse_query_results = dict(reverse_unordered)
+    reverse_query_results["query_documents"] = list(reversed(forward["query_documents"]))
+    artifact.write_text(json.dumps(reverse_query_results) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) != normalized_forward
+
+
+def test_golden_text_normalizes_grafana_temporary_datasource_identity(tmp_path: Path) -> None:
+    artifact = tmp_path / "grafana.json"
+    row = {
+        "module": "grafana",
+        "label": "grafana_ssrf_edge",
+        "expected_exit": "0",
+        "exit_code": "0",
+        "json_path": str(artifact),
+        "log_path": "-",
+    }
+    first = {
+        "module": "grafana",
+        "status": "valid_credentials",
+        "check_results": [
+            {
+                "datasource_uid": "generated-first",
+                "probe_elapsed_ms": 7,
+                "target_url": "http://127.0.0.1:19115/probe",
+                "probe_status": 404,
+            }
+        ],
+    }
+    artifact.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    normalized = _golden_text_for_row(row)
+    second = json.loads(json.dumps(first))
+    second["check_results"][0]["datasource_uid"] = "generated-second"
+    second["check_results"][0]["probe_elapsed_ms"] = 31
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) == normalized
+
+    second["check_results"][0]["probe_status"] = 500
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) != normalized
+
+
+def test_golden_text_normalizes_only_generated_kube_system_secret_values(tmp_path: Path) -> None:
+    artifact = tmp_path / "kubeapi.json"
+    row = {
+        "module": "kubeapi",
+        "label": "kubeapi_admin",
+        "expected_exit": "0",
+        "exit_code": "0",
+        "json_path": str(artifact),
+        "log_path": "-",
+    }
+    first = {
+        "module": "kubeapi",
+        "status": "auth_valid",
+        "secrets": [
+            {
+                "namespace": "kube-system",
+                "name": "abc123.node-password.k3s",
+                "data": {"hash": "generated-first"},
+            },
+            {
+                "namespace": "kube-system",
+                "name": "k3s-serving",
+                "type": "kubernetes.io/tls",
+                "data": {"tls.crt": "generated-cert-first", "tls.key": "generated-key-first"},
+            },
+            {
+                "namespace": "kube-system",
+                "name": "seeded-control",
+                "type": "Opaque",
+                "data": {"token": "seeded-system-token"},
+            },
+            {
+                "namespace": "finance",
+                "name": "payroll-service",
+                "data": {"service_token": "seeded-token"},
+            },
+        ],
+    }
+    artifact.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    normalized = _golden_text_for_row(row)
+    second = json.loads(json.dumps(first))
+    second["secrets"][0]["data"]["hash"] = "generated-second"
+    second["secrets"][1]["data"]["tls.crt"] = "generated-cert-second"
+    second["secrets"][1]["data"]["tls.key"] = "generated-key-second"
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) == normalized
+
+    second["secrets"][2]["data"]["token"] = "unexpected-change"
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) != normalized
+
+
+def test_golden_text_normalizes_kube_pod_phase_but_keeps_namespace(tmp_path: Path) -> None:
+    artifact = tmp_path / "kubeapi.json"
+    row = {
+        "module": "kubeapi",
+        "label": "kubeapi_open",
+        "expected_exit": "0",
+        "exit_code": "0",
+        "json_path": str(artifact),
+        "log_path": "-",
+    }
+    first = {
+        "module": "kubeapi",
+        "status": "open_no_auth",
+        "pods": [{"namespace": "kube-system", "name": "coredns-a", "phase": "Pending"}],
+    }
+    artifact.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    normalized = _golden_text_for_row(row)
+    second = json.loads(json.dumps(first))
+    second["pods"][0]["phase"] = "Running"
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) == normalized
+
+    second["pods"][0]["namespace"] = "unexpected"
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) != normalized
+
+
+def test_golden_text_normalizes_elastic_node_identity_but_keeps_roles(tmp_path: Path) -> None:
+    artifact = tmp_path / "elastic.json"
+    row = {
+        "module": "elastic",
+        "label": "elastic_open",
+        "expected_exit": "0",
+        "exit_code": "0",
+        "json_path": str(artifact),
+        "log_path": "-",
+    }
+    first = {
+        "module": "elastic",
+        "status": "open_no_auth",
+        "cluster_nodes": [{"id": "node-a", "host": "172.18.0.2", "ip": "172.18.0.2", "roles": ["data"]}],
+    }
+    artifact.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    normalized = _golden_text_for_row(row)
+    second = json.loads(json.dumps(first))
+    second["cluster_nodes"][0].update({"id": "node-b", "host": "172.31.0.4", "ip": "172.31.0.4"})
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) == normalized
+
+    second["cluster_nodes"][0]["roles"] = ["master"]
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) != normalized
+
+
+def test_golden_text_normalizes_keeper_election_and_timing_but_keeps_dump(tmp_path: Path) -> None:
+    artifact = tmp_path / "keeper.json"
+    row = {
+        "module": "keeper",
+        "label": "keeper_cluster",
+        "expected_exit": "0",
+        "exit_code": "0",
+        "json_path": str(artifact),
+        "log_path": "-",
+    }
+    first = {
+        "module": "keeper",
+        "status": "open_no_auth",
+        "connections": 1,
+        "latency_ms": {"min": 0, "avg": 0, "max": 0},
+        "server_state": "leader",
+        "quorum_status": "healthy",
+        "raft": {"followers": 2},
+        "znode_values": ["/redposture/app/api_key:rp-keeper-key-2026"],
+    }
+    artifact.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    normalized = _golden_text_for_row(row)
+    second = json.loads(json.dumps(first))
+    second.update(
+        {
+            "connections": 3,
+            "latency_ms": {"min": 1, "avg": 2.5, "max": 7},
+            "server_state": "follower",
+            "quorum_status": "unknown",
+            "raft": {"followers": None},
+        }
+    )
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) == normalized
+
+    stable_role_row = dict(row, label="keeper_tls")
+    artifact.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    stable_role_normalized = _golden_text_for_row(stable_role_row)
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(stable_role_row) != stable_role_normalized
+
+    forced_cluster_member_row = dict(row, label="keeper_force_plaintext")
+    artifact.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    forced_member_normalized = _golden_text_for_row(forced_cluster_member_row)
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(forced_cluster_member_row) == forced_member_normalized
+
+    second["znode_values"] = ["/redposture/app/api_key:wrong"]
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) != normalized
+
+
+def test_golden_text_normalizes_only_bounded_zookeeper_traversal_subset(tmp_path: Path) -> None:
+    artifact = tmp_path / "zookeeper.json"
+    row = {
+        "module": "zookeeper",
+        "label": "zookeeper_extended_znode_limits",
+        "expected_exit": "0",
+        "exit_code": "0",
+        "json_path": str(artifact),
+        "log_path": "-",
+    }
+    first = {
+        "module": "zookeeper",
+        "status": "open_no_auth",
+        "znode_count": 22,
+        "max_znodes": 10,
+        "znodes_truncated": True,
+        "znodes": ["/observability", "/redposture"],
+        "znode_details": [{"path": "/observability", "bytes": 33}],
+        "query_znode": "/redposture/app/api_key",
+        "query_znode_dump": "rp-zk-key-2026",
+    }
+    artifact.write_text(json.dumps(first) + "\n", encoding="utf-8")
+    normalized = _golden_text_for_row(row)
+    second = json.loads(json.dumps(first))
+    second["znodes"] = ["/brokers", "/config"]
+    second["znode_details"] = [{"path": "/brokers", "bytes": 18}]
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) == normalized
+
+    second["query_znode_dump"] = "unexpected"
+    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
+    assert _golden_text_for_row(row) != normalized
 
 
 def test_validate_output_sanity_detects_single_target_regression(tmp_path: Path) -> None:
@@ -370,6 +679,11 @@ def test_grpc_multi_ports_expected_targets_is_five() -> None:
     assert _PROGRESS_EXPECTED_TARGETS["grpc_multi_ports"] == 5
 
 
+def test_keeper_cluster_expected_targets_matches_matrix_command() -> None:
+    assert _PROGRESS_EXPECTED_TARGETS["keeper_cluster"] == 2
+    _validate_progress_target_mappings()
+
+
 def test_grpc_expected_labels_include_feature_wave() -> None:
     for label in (
         "grpc_invoke_health",
@@ -523,8 +837,57 @@ def test_validate_rich_lab_outputs_requires_zookeeper_dump_for_all_ports(tmp_pat
             "log_path": str(log),
         }
     ]
-    with pytest.raises(SystemExit, match="did not dump znodes for all expected ports"):
+    with pytest.raises(SystemExit, match="did not dump seeded znodes"):
         _validate_rich_lab_outputs(rows)
+
+
+def test_validate_rich_lab_outputs_requires_keeper_dump_for_each_cluster_target(tmp_path: Path) -> None:
+    artifact = tmp_path / "keeper.jsonl"
+    log = tmp_path / "keeper.log"
+    artifact.write_text(
+        '{"host":"127.0.0.1","port":19181,"status":"open_no_auth",'
+        '"znode_values":["/redposture/app/api_key:rp-keeper-key-2026","/clickhouse:clickhouse-keeper"]}\n'
+        '{"host":"127.0.0.1","port":29181,"status":"open_no_auth","znode_values":[]}\n',
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+    rows = [
+        {
+            "module": "keeper",
+            "label": "keeper_cluster",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(artifact),
+            "log_path": str(log),
+        }
+    ]
+    with pytest.raises(SystemExit, match="empty_ports=\\[29181\\]"):
+        _validate_rich_lab_outputs(rows)
+
+
+def test_validate_rich_lab_outputs_accepts_explicit_zookeeper_query_dump(tmp_path: Path) -> None:
+    artifact = tmp_path / "zookeeper.jsonl"
+    log = tmp_path / "zookeeper.log"
+    artifact.write_text(
+        '{"host":"127.0.0.1","port":2181,"status":"open_no_auth",'
+        '"znode_values":null,"query_znode":"/redposture/app/api_key",'
+        '"query_znode_dump":"rp-zk-key-2026"}\n',
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+
+    _validate_rich_lab_outputs(
+        [
+            {
+                "module": "zookeeper",
+                "label": "zookeeper_extended_znode_limits",
+                "expected_exit": "0",
+                "exit_code": "0",
+                "json_path": str(artifact),
+                "log_path": str(log),
+            }
+        ]
+    )
 
 
 def test_validate_rich_lab_outputs_requires_all_pgbackrest_exporter_ports(tmp_path: Path) -> None:
@@ -905,7 +1268,7 @@ def test_validate_multi_record_consistency_fires_on_status_split(tmp_path: Path)
         )
     ]
     (tmp_path / "consul.log").write_text("ok\n", encoding="utf-8")
-    with pytest.raises(SystemExit, match="inconsistent status across host records"):
+    with pytest.raises(SystemExit, match="without a meaningful outcome"):
         _validate_multi_record_consistency(rows)
 
 
@@ -962,6 +1325,83 @@ def test_validate_multi_record_consistency_skips_known_mixed_cases(tmp_path: Pat
         )
     ]
     _validate_multi_record_consistency(rows)
+
+
+def test_validate_meaningful_outcomes_rejects_zero_exit_fail(tmp_path: Path) -> None:
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "grafana_default",
+        '{"host":"h","port":3000,"status":"fail","module":"grafana","error":"Connection reset by peer"}',
+    )
+    rows = [
+        _mk_row(
+            module="grafana",
+            label="grafana_default",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+    with pytest.raises(SystemExit, match="without a meaningful outcome"):
+        _validate_meaningful_outcomes(rows)
+
+
+def test_validate_meaningful_outcomes_rejects_summary_only(tmp_path: Path) -> None:
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "grafana_default",
+        '{"type":"summary","status":"no_results","module":"grafana","requested_targets":1}',
+    )
+    rows = [
+        _mk_row(
+            module="grafana",
+            label="grafana_default",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+    with pytest.raises(SystemExit, match="without an audit record"):
+        _validate_meaningful_outcomes(rows)
+
+
+def test_validate_meaningful_outcomes_allows_keeper_negative_control(tmp_path: Path) -> None:
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "keeper_apache_control",
+        '{"host":"h","port":12181,"status":"not_keeper","module":"keeper",'
+        '"service":"apache-zookeeper","is_keeper":false}',
+    )
+    rows = [
+        _mk_row(
+            module="keeper",
+            label="keeper_apache_control",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+    _validate_meaningful_outcomes(rows)
+
+
+def test_validate_multi_record_consistency_rejects_failed_grafana_replica(tmp_path: Path) -> None:
+    json_path = tmp_path / "grafana_multi_instance_urls.json"
+    records = [f'{{"host":"127.0.0.1","port":{3000 + index},"status":"valid_credentials"}}' for index in range(4)]
+    records.append('{"host":"127.0.0.1","port":13004,"status":"fail"}')
+    json_path.write_text("\n".join(records) + "\n", encoding="utf-8")
+    log_path = tmp_path / "grafana.log"
+    log_path.write_text("ok\n", encoding="utf-8")
+    rows = [
+        _mk_row(
+            module="grafana",
+            label="grafana_multi_instance_urls",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+    with pytest.raises(SystemExit, match="without a meaningful outcome"):
+        _validate_multi_record_consistency(rows)
 
 
 def test_validate_json_artifacts_handles_nel_byte_in_payload(tmp_path: Path) -> None:
@@ -1107,13 +1547,408 @@ def test_validate_capability_sanity_fires_when_all_fields_empty(tmp_path: Path) 
 def test_validate_capability_sanity_passes_when_one_field_populated(tmp_path: Path) -> None:
     body = (
         '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t","stages":[],'
-        '"module":"redis","is_redis":true}'
+        '"module":"redis","is_redis":true,"key_count":1}'
     )
     json_path, log_path = _audit_json(tmp_path, "redis_default", body)
     rows = [
         _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
     ]
     _validate_capability_sanity(rows)
+
+
+def test_validate_capability_sanity_rejects_identity_marker_only(tmp_path: Path) -> None:
+    body = (
+        '{"host":"h","port":6379,"status":"valid_credentials","timestamp":"t","stages":[],'
+        '"module":"redis","is_redis":true}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "redis_default", body)
+    rows = [
+        _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
+    ]
+    with pytest.raises(SystemExit, match="capability regression"):
+        _validate_capability_sanity(rows)
+
+
+def test_validate_action_contracts_requires_grafana_datasource_effect(tmp_path: Path) -> None:
+    body = (
+        '{"host":"h","port":3000,"status":"valid_credentials","module":"grafana",'
+        '"is_grafana":true,"show_datasources":true,"datasources":[]}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "grafana_default", body)
+    rows = [
+        _mk_row(
+            module="grafana",
+            label="grafana_default",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+    with pytest.raises(SystemExit, match="datasources is empty"):
+        _validate_action_contracts(rows)
+
+
+def test_validate_action_contracts_accepts_typed_nexus_inventory(tmp_path: Path) -> None:
+    body = (
+        '{"host":"h","port":15004,"status":"open_no_auth","module":"registry",'
+        '"is_registry":true,"is_nexus":true,"nexus":true,"assets":true,'
+        '"nexus_info":{"version":"3.72.0"},"nexus_repositories":["raw-internal"],'
+        '"nexus_assets":[{"path":"release-metadata.json"}]}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "registry_nexus", body)
+    rows = [
+        _mk_row(
+            module="registry",
+            label="registry_nexus",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+    _validate_action_contracts(rows)
+
+
+def test_validate_action_contracts_require_clickhouse_multi_port_database_results(tmp_path: Path) -> None:
+    records = [
+        {
+            "host": "h",
+            "port": port,
+            "status": "open_no_auth",
+            "module": "clickhouse",
+            "is_clickhouse": True,
+            "show_databases": True,
+            "database_names": ["default", "system"],
+        }
+        for port in (9000, 29001)
+    ]
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "clickhouse_multi_ports",
+        "\n".join(json.dumps(record) for record in records),
+    )
+    rows = [
+        _mk_row(
+            module="clickhouse",
+            label="clickhouse_multi_ports",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+    _validate_action_contracts(rows)
+
+    records[1]["database_names"] = []
+    json_path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="database_names is empty"):
+        _validate_action_contracts(rows)
+
+
+def test_validate_action_contracts_preserve_proxmox_explicit_empty_password_attempt(tmp_path: Path) -> None:
+    record = {
+        "host": "h",
+        "port": 8006,
+        "status": "auth_failed",
+        "module": "proxmox",
+        "is_proxmox": True,
+        "use_https": True,
+        "auth_attempts": [{"username": "root@pam", "source": "provided", "ok": "False"}],
+    }
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "proxmox_extended_defcreds_empty_password",
+        json.dumps(record),
+    )
+    rows = [
+        _mk_row(
+            module="proxmox",
+            label="proxmox_extended_defcreds_empty_password",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+    _validate_action_contracts(rows)
+
+    record["auth_attempts"] = []
+    json_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="auth_attempts"):
+        _validate_action_contracts(rows)
+
+
+def test_validate_action_contracts_require_exact_grpc_metadata_and_request(tmp_path: Path) -> None:
+    record = {
+        "host": "h",
+        "port": 50051,
+        "status": "open_no_auth",
+        "module": "grpc",
+        "is_grpc": True,
+        "invoke_result": {
+            "status": "ok",
+            "request": {"service": ""},
+            "metadata": [{"key": "x-redposture-matrix", "value": "extended"}],
+        },
+    }
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "grpc_extended_metadata_invoke",
+        json.dumps(record),
+    )
+    rows = [
+        _mk_row(
+            module="grpc",
+            label="grpc_extended_metadata_invoke",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    _validate_action_contracts(rows)
+    record["invoke_result"]["metadata"] = []
+    json_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="invoke_result.metadata"):
+        _validate_action_contracts(rows)
+
+
+def test_validate_action_contracts_require_exact_consul_selectors(tmp_path: Path) -> None:
+    record = {
+        "host": "h",
+        "port": 8500,
+        "status": "open_no_auth",
+        "module": "consul",
+        "is_consul": True,
+        "keys_requested": True,
+        "services_list_requested": True,
+        "agents_list_requested": True,
+        "checks_list_requested": True,
+        "nodes_list_requested": True,
+        "dump_requested": True,
+        "kv_key_requested": "redposture/kafka/sasl_password",
+        "service_dump_name": "redposture-api",
+        "agent_dump_name": "redposture-lab-consul",
+        "node_dump_name": "redposture-lab-consul",
+        "kv_keys_list": None,
+        "kv_dump_items": [{"key": "redposture/kafka/sasl_password"}],
+        "services_list": [{"name": "redposture-api"}],
+        "service_instances": {"redposture-api": [{"service_id": "svc-redposture-api"}]},
+        "agents_list": [{"name": "redposture-lab-consul"}],
+        "checks_list": [{"id": "service:svc-redposture-api"}],
+        "nodes_list": [{"name": "redposture-lab-consul"}],
+    }
+    json_path, log_path = _audit_json(
+        tmp_path,
+        "consul_extended_inventory_filters",
+        json.dumps(record),
+    )
+    rows = [
+        _mk_row(
+            module="consul",
+            label="consul_extended_inventory_filters",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    _validate_action_contracts(rows)
+    record["agent_dump_name"] = None
+    json_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="agent_dump_name"):
+        _validate_action_contracts(rows)
+
+
+@pytest.mark.parametrize("label", ["grafana_ssrf_edge", "grafana_extended_auth_ssrf_controls"])
+def test_validate_action_contracts_require_exact_grafana_ssrf_url(tmp_path: Path, label: str) -> None:
+    expected_url = "http://grafana-2:3000/api/health"
+    record = {
+        "host": "h",
+        "port": 3000,
+        "status": "valid_credentials",
+        "module": "grafana",
+        "is_grafana": True,
+        "show_datasources": True,
+        "datasources": [{"name": "lab"}],
+        "check_urls": [expected_url],
+        "check_results": [
+            {
+                "target_url": expected_url,
+                "create_ok": True,
+                "create_status": 200,
+                "create_error": None,
+                "probe_ok": True,
+                "probe_status": 200,
+                "probe_error": None,
+                "probe_proxy_path": "/api/datasources/proxy/uid/generated/api/health",
+                "probe_sample": '{"database":"ok","version":"13.0.2"}',
+                "cleanup_ok": True,
+                "cleanup_error": None,
+            }
+        ],
+    }
+    json_path, log_path = _audit_json(tmp_path, label, json.dumps(record))
+    rows = [
+        _mk_row(
+            module="grafana",
+            label=label,
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    _validate_action_contracts(rows)
+    record["check_urls"] = ["http://grafana-2:3000/wrong"]
+    json_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="check_urls"):
+        _validate_action_contracts(rows)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("probe_ok", False, "clean HTTP 200"),
+        ("probe_status", 404, "clean HTTP 200"),
+        ("cleanup_ok", False, "cleanup failed"),
+    ],
+)
+def test_validate_action_contracts_rejects_failed_grafana_ssrf_semantics(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    target_url = "http://grafana-2:3000/api/health"
+    result = {
+        "target_url": target_url,
+        "create_ok": True,
+        "create_status": 200,
+        "create_error": None,
+        "probe_ok": True,
+        "probe_status": 200,
+        "probe_error": None,
+        "probe_proxy_path": "/api/datasources/proxy/uid/generated/api/health",
+        "probe_sample": '{"database":"ok"}',
+        "cleanup_ok": True,
+        "cleanup_error": None,
+    }
+    result[field] = value
+    record = {
+        "host": "h",
+        "port": 3000,
+        "status": "valid_credentials",
+        "module": "grafana",
+        "is_grafana": True,
+        "show_datasources": True,
+        "datasources": [{"name": "lab"}],
+        "check_urls": [target_url],
+        "check_results": [result],
+    }
+    json_path, log_path = _audit_json(tmp_path, "grafana_ssrf_edge", json.dumps(record))
+    rows = [
+        _mk_row(
+            module="grafana",
+            label="grafana_ssrf_edge",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    with pytest.raises(SystemExit, match=message):
+        _validate_action_contracts(rows)
+
+
+def test_validate_action_contracts_require_passing_consul_ssrf_and_cleanup(tmp_path: Path) -> None:
+    record = {
+        "host": "h",
+        "port": 8500,
+        "status": "open_no_auth",
+        "module": "consul",
+        "is_consul": True,
+        "ssrf_enabled": True,
+        "checks_list_requested": True,
+        "checks_list": [{"check_id": "seeded"}],
+        "ssrf_results": [
+            {
+                "target_url": "http://consul:8500/v1/status/leader",
+                "registered": True,
+                "register_error": None,
+                "status": "passing",
+                "output": "HTTP GET http://consul:8500/v1/status/leader: 200 OK",
+                "deregistered": True,
+                "deregister_error": None,
+            }
+        ],
+    }
+    json_path, log_path = _audit_json(tmp_path, "consul_extended_ssrf_probe", json.dumps(record))
+    rows = [
+        _mk_row(
+            module="consul",
+            label="consul_extended_ssrf_probe",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    _validate_action_contracts(rows)
+    record["ssrf_results"][0]["status"] = "critical"
+    record["ssrf_results"][0]["output"] = "connection refused"
+    json_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="did not reach HTTP 200/passing"):
+        _validate_action_contracts(rows)
+
+
+def test_validate_action_contracts_require_successful_qdrant_callback_hit(tmp_path: Path) -> None:
+    snapshot_path = "/demo_vectors-123.snapshot"
+    target_url = f"http://host.docker.internal:19115{snapshot_path}"
+    record = {
+        "host": "h",
+        "port": 6333,
+        "status": "open_no_auth",
+        "module": "qdrant",
+        "is_qdrant": True,
+        "ssrf_requested": True,
+        "ssrf_collection": "demo_vectors",
+        "ssrf_listener_started": True,
+        "ssrf_hit_count": 1,
+        "ssrf_hits": [{"method": "GET", "path": snapshot_path}],
+        "ssrf_results": [
+            {
+                "target_url": target_url,
+                "collection": "demo_vectors",
+                "status": 200,
+                "ok": True,
+                "error": None,
+                "response_raw": '{"result":true,"status":"ok"}',
+            }
+        ],
+    }
+    json_path, log_path = _audit_json(tmp_path, "qdrant_extended_ssrf_probe", json.dumps(record))
+    rows = [
+        _mk_row(
+            module="qdrant",
+            label="qdrant_extended_ssrf_probe",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    _validate_action_contracts(rows)
+    record["ssrf_results"][0].update({"status": 500, "ok": False, "error": "restore failed"})
+    json_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="snapshot recovery did not succeed"):
+        _validate_action_contracts(rows)
+
+    record["ssrf_results"][0].update(
+        {"status": 200, "ok": True, "error": None, "response_raw": '{"result":true,"status":"ok"}'}
+    )
+    record["ssrf_hit_count"] = 0
+    record["ssrf_hits"] = []
+    json_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="ssrf_hits is empty"):
+        _validate_action_contracts(rows)
 
 
 # --- P3-B stage coherence --------------------------------------------------------
@@ -1176,9 +2011,7 @@ def test_validate_cross_case_invariants_passes_on_agreement(tmp_path: Path) -> N
 
 def test_validate_expected_failure_outputs_passes_for_expected_error(tmp_path: Path) -> None:
     log_path = tmp_path / "fuzz_redis_invalid_port_negative.log"
-    log_path.write_text(
-        "usage: redposture redis\nerror: argument --port: port must be in range 1..65535\n", encoding="utf-8"
-    )
+    log_path.write_text("[!] failed to parse --port: invalid port range '-1'\n", encoding="utf-8")
 
     _validate_expected_failure_outputs(
         [
@@ -1216,7 +2049,7 @@ def test_validate_expected_failure_outputs_fails_on_wrong_error(tmp_path: Path) 
 def test_validate_expected_failure_outputs_rejects_traceback(tmp_path: Path) -> None:
     log_path = tmp_path / "fuzz_redis_invalid_port_negative.log"
     log_path.write_text(
-        "error: argument --port: port must be in range 1..65535\nTraceback (most recent call last)\n",
+        "[!] failed to parse --port: invalid port range '-1'\nTraceback (most recent call last)\n",
         encoding="utf-8",
     )
 
@@ -1238,7 +2071,7 @@ def test_validate_expected_failure_outputs_rejects_traceback(tmp_path: Path) -> 
 def test_validate_expected_failure_outputs_rejects_nonempty_json_artifact(tmp_path: Path) -> None:
     log_path = tmp_path / "fuzz_redis_invalid_port_negative.log"
     json_path = tmp_path / "fuzz_redis_invalid_port_negative.json"
-    log_path.write_text("error: argument --port: port must be in range 1..65535\n", encoding="utf-8")
+    log_path.write_text("[!] failed to parse --port: invalid port range '-1'\n", encoding="utf-8")
     json_path.write_text('{"status":"valid_credentials"}\n', encoding="utf-8")
 
     with pytest.raises(SystemExit, match="non-empty JSON artifact"):
@@ -1259,7 +2092,7 @@ def test_validate_expected_failure_outputs_rejects_nonempty_json_artifact(tmp_pa
 def test_validate_expected_failure_outputs_rejects_progress_marker(tmp_path: Path) -> None:
     log_path = tmp_path / "fuzz_redis_invalid_port_negative.log"
     log_path.write_text(
-        "error: argument --port: port must be in range 1..65535\nRunning redposture against 1 target\n",
+        "[!] failed to parse --port: invalid port range '-1'\nRunning redposture against 1 target\n",
         encoding="utf-8",
     )
 

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import json
 import struct
 
 import pytest
 
 from redposture_core import stage_postgres as postgres
+from redposture_core.audit_models import AuditRecord
+from redposture_core.modules.postgres import stage as postgres_module_stage
 from redposture_core.stage_postgres import (
     _audit_postgres_host,
     _caps_suffix,
@@ -39,7 +42,8 @@ from redposture_core.stage_postgres import (
     _scram_client_final,
     _scram_client_first,
 )
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 class _DummySocket:
@@ -207,6 +211,273 @@ def _postgres_args(**overrides: object) -> argparse.Namespace:
     }
     data.update(overrides)
     return argparse.Namespace(**data)
+
+
+def _postgres_host_record(
+    kwargs: dict[str, object],
+    *,
+    status: str,
+    detected: bool,
+    error: str | None = None,
+) -> AuditRecord:
+    return AuditRecord(
+        host=str(kwargs["host"]),
+        port=int(kwargs["port"]),
+        service="postgres",
+        module="postgres",
+        status=status,
+        auth_required=status == "auth_required",
+        extra={
+            "is_postgres": detected,
+            "error": error,
+            "provided_username": kwargs.get("username"),
+            "provided_password": kwargs.get("password"),
+            "show_databases": bool(kwargs.get("show_databases")),
+            "show_tables": bool(kwargs.get("show_tables")),
+            "show_row_counts": bool(kwargs.get("show_row_counts")),
+            "show_columns": bool(kwargs.get("show_columns")),
+            "table_targets": list(kwargs.get("table_targets") or []),
+            "table_columns": list(kwargs.get("table_columns") or []),
+            "dump_table_rows": bool(kwargs.get("dump_table_rows")),
+            "dump_row_limit": kwargs.get("dump_row_limit"),
+            "execute_command": kwargs.get("execute_command"),
+            "sql_command": kwargs.get("sql_command"),
+        },
+    )
+
+
+def _run_postgres_lifecycle(
+    args: argparse.Namespace,
+    credential_runs: tuple[AuditCredentialRun, ...],
+) -> list[dict[str, object]]:
+    postgres._normalize_postgres_action_args(args)
+    plan = AuditCommandPlan(
+        targets_by_port={5432: ("127.0.0.1",)},
+        credential_runs=credential_runs,
+        output_format="json",
+        workers=1,
+    )
+    result = AuditCommandRunner(
+        args=args, spec=postgres.build_postgres_spec(args), emit_line=lambda _line: None
+    ).run_plan(plan)
+    return result.records
+
+
+def _install_postgres_lifecycle_spy(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    valid_password: str,
+    events: list[tuple[str, object]],
+    deep_error: Exception | None = None,
+) -> None:
+    monkeypatch.setattr(postgres.socket, "create_connection", lambda *_args, **_kwargs: _DummySocket())
+
+    def fake_startup(_sock, username: str, password: str | None, database: str):
+        events.append(("startup", (username, password, database)))
+        if password is None:
+            raise _PgAuditError(
+                "password authentication required",
+                detected=True,
+                auth_required=True,
+                auth_method="cleartext",
+            )
+        if password != valid_password:
+            raise _PgAuditError(
+                "password authentication failed",
+                detected=True,
+                auth_required=True,
+                auth_method="cleartext",
+                sqlstate="28P01",
+                failure_phase="startup",
+                error_kind="authentication_failed",
+            )
+        return _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0")
+
+    def fake_privileges(_sock):
+        events.append(("capabilities", None))
+        if deep_error is not None:
+            raise deep_error
+        return False, False, True, 1, None
+
+    monkeypatch.setattr(postgres, "_pg_startup_and_auth", fake_startup)
+    monkeypatch.setattr(postgres, "_collect_postgres_privileges", fake_privileges)
+    monkeypatch.setattr(
+        postgres,
+        "_pg_query_databases",
+        lambda _sock: (events.append(("databases", None)) or ["postgres"], None),
+    )
+    monkeypatch.setattr(
+        postgres,
+        "_pg_collect_database_artifacts",
+        lambda *_args, **_kwargs: (
+            events.append(("data", None)) or None,
+            [],
+            [],
+            [],
+            1,
+            None,
+        ),
+    )
+    monkeypatch.setattr(postgres, "_pg_send_terminate", lambda *_args, **_kwargs: None)
+
+
+def test_postgres_lifecycle_direct_credentials_classify_first_and_run_deep_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    _install_postgres_lifecycle_spy(monkeypatch, valid_password="good", events=events)
+    records = _run_postgres_lifecycle(
+        _postgres_args(show_databases=True),
+        (AuditCredentialRun(username="app", password="good", source="provided"),),
+    )
+
+    assert [value for name, value in events if name == "startup"] == [
+        ("postgres", None, "postgres"),
+        ("app", "good", "postgres"),
+    ]
+    assert [name for name, _value in events].count("capabilities") == 1
+    assert [name for name, _value in events].count("databases") == 1
+    assert [name for name, _value in events].count("data") == 1
+    assert records[0]["status"] == "valid_credentials"
+
+
+def test_postgres_lifecycle_anonymous_open_skips_defcreds_but_runs_data_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    monkeypatch.setattr(postgres.socket, "create_connection", lambda *_args, **_kwargs: _DummySocket())
+
+    def fake_startup(_sock, username: str, password: str | None, database: str):
+        events.append(("startup", (username, password, database)))
+        return _PgSession(auth_required=False, auth_method="trust", server_version="16.0")
+
+    monkeypatch.setattr(postgres, "_pg_startup_and_auth", fake_startup)
+    monkeypatch.setattr(
+        postgres,
+        "_collect_postgres_privileges",
+        lambda _sock: events.append(("capabilities", None)) or (False, False, True, 1, None),
+    )
+    monkeypatch.setattr(postgres, "_pg_query_databases", lambda _sock: (["postgres"], None))
+    monkeypatch.setattr(
+        postgres,
+        "_pg_collect_database_artifacts",
+        lambda *_args, **_kwargs: (None, [], [], [], 1, None),
+    )
+    monkeypatch.setattr(postgres, "_pg_send_terminate", lambda *_args, **_kwargs: None)
+    records = _run_postgres_lifecycle(
+        _postgres_args(defcreds=True),
+        (
+            AuditCredentialRun(username="postgres", password="postgres", source="default"),
+            AuditCredentialRun(username="pgbouncer", password="pgbouncer", source="default"),
+        ),
+    )
+
+    assert [value for name, value in events if name == "startup"] == [
+        ("postgres", None, "postgres"),
+        ("postgres", None, "postgres"),
+    ]
+    assert [name for name, _value in events].count("capabilities") == 1
+    assert records[0]["status"] == "open_no_auth"
+
+
+@pytest.mark.parametrize("source", ["file", "default"])
+def test_postgres_lifecycle_two_candidates_only_deep_checks_selected_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+) -> None:
+    events: list[tuple[str, object]] = []
+    _install_postgres_lifecycle_spy(monkeypatch, valid_password="good", events=events)
+    records = _run_postgres_lifecycle(
+        _postgres_args(defcreds=source == "default", show_databases=True),
+        (
+            AuditCredentialRun(username="first", password="bad", source=source),
+            AuditCredentialRun(username="second", password="good", source=source),
+        ),
+    )
+
+    assert [value for name, value in events if name == "startup"] == [
+        ("postgres", None, "postgres"),
+        ("first", "bad", "postgres"),
+        ("second", "good", "postgres"),
+    ]
+    assert [name for name, _value in events].count("capabilities") == 1
+    assert [name for name, _value in events].count("data") == 1
+    assert records[0]["status"] == ("weak_default_creds" if source == "default" else "valid_credentials")
+
+
+def test_postgres_lifecycle_preserves_positive_detection_when_deep_work_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    _install_postgres_lifecycle_spy(
+        monkeypatch,
+        valid_password="good",
+        events=events,
+        deep_error=RuntimeError("deep query exploded"),
+    )
+    records = _run_postgres_lifecycle(
+        _postgres_args(),
+        (AuditCredentialRun(username="app", password="good", source="provided"),),
+    )
+
+    assert records[0]["status"] == "fail"
+    assert records[0]["is_postgres"] is True
+    assert records[0]["detection_preserved"] is True
+    assert records[0]["detected_status"] == "auth_required"
+    assert records[0]["deep_error"] == "deep query exploded"
+
+
+@pytest.mark.parametrize("auth_failure_mode", ["return", "raise"])
+def test_postgres_auth_failure_preserves_detect_evidence_and_txt_service(
+    monkeypatch: pytest.MonkeyPatch,
+    auth_failure_mode: str,
+) -> None:
+    def fake_detect(ctx):
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="postgres",
+            service="postgres",
+            status="auth_required",
+            auth_required=True,
+            extra={"is_postgres": True},
+        )
+
+    def fake_auth(ctx, _record):
+        if auth_failure_mode == "raise":
+            raise RuntimeError("auth transport failed")
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="postgres",
+            service="postgres",
+            status="fail",
+            extra={"is_postgres": False, "error": "auth transport failed"},
+        )
+
+    monkeypatch.setattr(postgres_module_stage, "_postgres_detect", fake_detect)
+    monkeypatch.setattr(postgres_module_stage, "_postgres_auth", fake_auth)
+    args = _postgres_args()
+    emitted: list[str] = []
+    result = AuditCommandRunner(
+        args=args,
+        spec=postgres_module_stage.build_postgres_spec(args),
+        emit_line=emitted.append,
+    ).run_plan(
+        AuditCommandPlan(
+            targets_by_port={5432: ("127.0.0.1",)},
+            credential_runs=(AuditCredentialRun(username="app", password="secret", source="provided"),),
+            output_format="txt",
+        )
+    )
+
+    assert result.detected_count == 1
+    assert result.records[0]["status"] == "fail"
+    assert result.records[0]["is_postgres"] is True
+    assert result.records[0]["detection_preserved"] is True
+    assert result.records[0]["detected_status"] == "auth_required"
+    assert result.records[0]["deep_error"] == "auth transport failed"
+    assert all("No POSTGRES service detected" not in line for line in emitted)
 
 
 def test_postgres_parsing_helpers_cover_error_status_and_data_rows() -> None:
@@ -817,27 +1088,28 @@ def test_run_postgres_stage_shell_modes_and_main_flow(monkeypatch: pytest.Monkey
     captured: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        kwargs["emit_line"]("POSTGRES\t127.0.0.1\t5432\t[*] Postgres Database")
-        return 1, 0, 0, 1, 0, 0
+        captured.append(dict(kwargs))
+        return _postgres_host_record(kwargs, status="open_no_auth", detected=True)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "postgres", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "postgres", fake_audit_targets)
     rc = postgres.run_postgres_stage(
         _postgres_args(debug=True, output_format="txt", execute=None, sql_cmd=None),
         logger=object(),
     )
     assert rc == 0
-    assert captured and captured[0]["suppress_timeout_status_lines"] is False
+    assert [(call["run_deep_checks"], call["username"]) for call in captured] == [
+        (False, None),
+        (True, None),
+    ]
+    assert captured[-1]["debug"] is True
 
 
 def test_run_postgres_stage_additional_output_and_error_paths(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path
 ) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(postgres, "Console", _ConsoleCapture)
-    monkeypatch.setattr(postgres, "collect_scan_ports", lambda *_args, **_kwargs: [5432, 15432])
+    monkeypatch.setattr(postgres, "collect_scan_ports", lambda *_args, **_kwargs: [5432])
     monkeypatch.setattr(
         postgres,
         "collect_scan_targets",
@@ -847,21 +1119,18 @@ def test_run_postgres_stage_additional_output_and_error_paths(
     captured: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        kwargs["emit_line"]('{"type":"detect"}')
-        return 1, 0, 0, 0, 1, 0
+        captured.append(dict(kwargs))
+        return _postgres_host_record(kwargs, status="valid_credentials", detected=True)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "postgres", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "postgres", fake_audit_targets)
     rc = postgres.run_postgres_stage(
         _postgres_args(
             debug=True,
             output_format="json",
-            output="postgres.json",
+            output=str(tmp_path / "postgres.jsonl"),
             password="secret",
-            targets=None,
-            hosts_file="hosts.txt",
+            targets="127.0.0.1",
+            hosts_file=None,
             tables=["public.users,public.users", "public.audit"],
             dump=5,
             rows=True,
@@ -869,15 +1138,19 @@ def test_run_postgres_stage_additional_output_and_error_paths(
         logger=object(),
     )
     assert rc == 0
-    assert len(captured) == 2
-    assert captured[0]["username"] == "postgres"
-    assert captured[0]["table_targets"] == ["public.users", "public.audit"]
-    assert captured[0]["dump_row_limit"] == 5
-    assert captured[0]["show_row_counts"] is True
-    assert any('"type":"detect"' in msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain")
+    assert [(call["username"], call["run_deep_checks"]) for call in captured] == [
+        (None, False),
+        ("postgres", True),
+    ]
+    assert captured[-1]["table_targets"] == ["public.users", "public.audit"]
+    assert captured[-1]["dump_row_limit"] == 5
+    assert captured[-1]["show_row_counts"] is True
+    payload = json.loads((tmp_path / "postgres.jsonl").read_text(encoding="utf-8"))
+    assert payload["status"] == "valid_credentials"
 
-    patch_runner_for_legacy_target_fake(
-        monkeypatch, "postgres", lambda **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+    monkeypatch.setattr(
+        "redposture_core.modules.postgres.stage.AuditCommandRunner.run_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
     )
     rc = postgres.run_postgres_stage(_postgres_args(output="postgres.json"), logger=object())
     assert rc == 2
@@ -909,16 +1182,13 @@ def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
     monkeypatch.setattr(postgres, "collect_scan_ports", lambda *_args, **_kwargs: [5432, 25432, 25433, 25434, 25435])
     monkeypatch.setattr(postgres, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
-    show_progress_flags: list[bool] = []
+    calls: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        show_progress_flags.append(bool(kwargs["show_progress"]))
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        kwargs["emit_line"]("POSTGRES\t127.0.0.1\t5432\t[*] Postgres Database")
-        return 1, 0, 0, 1, 0, 0
+        calls.append(dict(kwargs))
+        return _postgres_host_record(kwargs, status="fail", detected=False, error="connection refused")
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "postgres", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "postgres", fake_audit_targets)
 
     progress_totals: list[int] = []
     progress_advanced: list[int] = []
@@ -937,8 +1207,7 @@ def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
             progress_closed += 1
 
     monkeypatch.setattr(
-        postgres,
-        "start_command_progress",
+        "redposture_core.stage_runtime.start_command_progress",
         lambda _args, label, total, **kwargs: DummyProgressBar(label, total, **kwargs),
     )
 
@@ -947,11 +1216,14 @@ def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
             username="postgres",
             password="postgres",
             show_databases=True,
+            port=None,
+            ports="5432,25432,25433,25434,25435",
         ),
         logger=object(),
     )
     assert rc == 0
-    assert show_progress_flags == [False, False, False, False, False]
+    assert [call["port"] for call in calls] == [5432, 25432, 25433, 25434, 25435]
+    assert all(call["run_deep_checks"] is False for call in calls)
     assert progress_totals == [5]
     assert sum(progress_advanced) == 5
     assert progress_closed == 1
@@ -1543,6 +1815,97 @@ def test_table_rows_detail_txt_renders_row_counts() -> None:
     assert any("public.audit <error:permission denied>" in line for line in lines)
 
 
+def test_table_selector_alone_renders_row_count_without_querying_or_printing_columns(monkeypatch) -> None:
+    row_count_targets: list[str] = []
+
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: _PgSession(auth_required=True, auth_method="cleartext", server_version="16.0"),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._collect_postgres_privileges",
+        lambda *_args, **_kwargs: (False, False, True, 1, None),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_query_databases", lambda *_args, **_kwargs: ([], None))
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_readable_tables",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("table inventory must not be queried")),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_table_columns",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("columns require --show-columns")),
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_query_table_row_count",
+        lambda _sock, table_name, **_kwargs: (
+            row_count_targets.append(table_name) or table_name,
+            42,
+            None,
+        ),
+    )
+    monkeypatch.setattr("redposture_core.stage_postgres._pg_send_terminate", lambda *_args, **_kwargs: None)
+
+    record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=5432,
+        timeout=1.0,
+        retries=0,
+        username="postgres",
+        password="secret",
+        defcreds=False,
+        database=None,
+        show_databases=False,
+        show_tables=False,
+        show_row_counts=False,
+        show_columns=False,
+        table_targets=["candidate"],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=False,
+        dump_row_limit=None,
+        execute_command=None,
+        sql_command=None,
+    )
+
+    assert row_count_targets == ["candidate"]
+    assert record["show_tables"] is False
+    assert record["show_row_counts"] is True
+    assert record["show_columns"] is False
+    assert record["table_names"] is None
+    assert record["table_columns_info"] == []
+    assert record["table_row_counts"] == [
+        {"database": "postgres", "table": "candidate", "row_count": 42, "error": None}
+    ]
+
+    stale_columns_record = {
+        **record,
+        "table_columns_info": [{"table": "candidate", "columns": ["id"], "error": None}],
+    }
+    assert _format_table_columns_detail_records(stale_columns_record, "txt") == []
+    assert _format_table_columns_detail_records(stale_columns_record, "json") == []
+    lines = _format_table_row_count_detail_records(record, "txt")
+    assert lines[0].endswith("[*] Table")
+    assert lines[1].endswith("candidate (Rows:42)")
+    assert not any("Table Columns" in line for line in lines)
+    json_rows = [json.loads(line) for line in _format_table_row_count_detail_records(record, "json")]
+    assert json_rows == [
+        {
+            "timestamp": record["timestamp"],
+            "type": "table_rows",
+            "service": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "database": "postgres",
+            "table": "candidate",
+            "row_count": 42,
+            "error": None,
+        }
+    ]
+
+
 def test_show_tables_txt_renders_inline_row_counts() -> None:
     record = {
         "timestamp": "2026-03-11T00:00:00Z",
@@ -2117,6 +2480,7 @@ def test_postgres_detail_and_status_renderers_cover_text_and_json_paths() -> Non
         "database": "postgres",
         "show_databases": True,
         "database_names": ["appdb", "postgres"],
+        "show_columns": True,
         "table_columns_info": [
             {"table": "public.users", "columns": ["id", "email"], "error": None},
             {"table": "public.audit", "columns": None, "error": "permission denied"},
@@ -2394,6 +2758,9 @@ def test_audit_postgres_targets_emits_two_pass_debug_markers(monkeypatch) -> Non
         sql_command: str | None,
         os_read_path: str | None = None,
         privesc_check: bool = False,
+        show_databases_limit: int | None = None,
+        show_tables_limit: int | None = None,
+        show_columns_limit: int | None = None,
         *,
         run_deep_checks: bool,
         debug: bool,
@@ -2420,6 +2787,9 @@ def test_audit_postgres_targets_emits_two_pass_debug_markers(monkeypatch) -> Non
             sql_command,
             os_read_path,
             privesc_check,
+            show_databases_limit,
+            show_tables_limit,
+            show_columns_limit,
             debug,
             debug_emit,
         )

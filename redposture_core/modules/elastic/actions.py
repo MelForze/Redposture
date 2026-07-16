@@ -12,7 +12,9 @@ import time
 import urllib.error
 import urllib.parse
 import zlib
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig
@@ -96,6 +98,16 @@ _ELASTIC_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("elastic", "elastic"),
     ("elastic", "password"),
 )
+
+
+@dataclass
+class ElasticLifecycleState:
+    """Anonymous classification plus per-candidate authorization headers."""
+
+    detect_record: dict[str, Any] | None = None
+    auth_headers: dict[tuple[str | None, str | None, str | None, str], dict[str, str]] = dataclass_field(
+        default_factory=dict
+    )
 
 
 def _clip(text: str, width: int = 96) -> str:
@@ -2597,6 +2609,313 @@ def _audit_elastic_host(
         attempts_done=attempts,
         max_attempts=attempts,
     )
+
+
+def _elastic_lifecycle_key(ctx: Any) -> tuple[str | None, str | None, str | None, str]:
+    credential = ctx.credential
+    return (
+        credential.username,
+        credential.password,
+        credential.token,
+        str(credential.source or "provided"),
+    )
+
+
+def detect_elastic(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Perform the complete anonymous identity/version classification once."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, ElasticLifecycleState):
+        raise TypeError("elastic lifecycle state is unavailable")
+    target_scheme = getattr(ctx.target, "scheme", None)
+    record = _audit_elastic_host(
+        str(ctx.host),
+        int(ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        int(getattr(ctx.args, "retries", 0) or 0),
+        None,
+        None,
+        None,
+        str(getattr(ctx.args, "ca_file", "") or "").strip() or None,
+        False,
+        False,
+        False,
+        False,
+        False,
+        preferred_scheme=str(target_scheme or "https"),
+        debug=bool(getattr(ctx.args, "debug", False)),
+        run_deep_checks=False,
+    )
+    state.detect_record = dict(record)
+    return record
+
+
+def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Verify one credential candidate without replaying detection probes."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, ElasticLifecycleState):
+        raise TypeError("elastic lifecycle state is unavailable")
+    payload = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
+    credential = ctx.credential
+    if credential.username is None and credential.password is None and credential.token is None:
+        return payload
+
+    headers = _elastic_headers(
+        username=credential.username,
+        password=credential.password,
+        api_token=credential.token,
+    )
+    state.auth_headers[_elastic_lifecycle_key(ctx)] = headers
+    scheme = str(payload.get("scheme") or "https")
+    insecure = bool(payload.get("insecure_effective"))
+    ca_file = str(getattr(ctx.args, "ca_file", "") or "").strip() or None
+    auth_valid, auth_error, effective_username = _verify_authenticate(
+        str(ctx.host),
+        int(ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        scheme=scheme,
+        insecure=insecure,
+        ca_file=ca_file,
+        auth_headers=headers,
+    )
+    auth_required = payload.get("auth_required")
+    if auth_valid is True:
+        status = "weak_default_creds" if credential.source == "default" else "valid_credentials"
+    elif auth_valid is False and auth_required is False:
+        status = "invalid_credentials_anonymous"
+    elif auth_required is False:
+        status = "open_no_auth"
+    elif auth_required is True:
+        status = "auth_required"
+    else:
+        status = "unknown_auth"
+
+    version = payload.get("server_version")
+    if not version and auth_valid is True:
+        resolved_version, version_error = _resolve_server_version_with_auth(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=headers,
+        )
+        if resolved_version:
+            version = resolved_version
+        elif version_error:
+            auth_error = f"{auth_error}; version probe: {version_error}" if auth_error else version_error
+
+    payload.update(
+        {
+            "timestamp": utc_now_iso(),
+            "status": status,
+            "server_version": version,
+            "provided_credentials": (
+                credential.source != "default" and credential.username is not None and credential.password is not None
+            ),
+            "provided_username": credential.username,
+            "provided_password": credential.password if credential.source != "default" else None,
+            "provided_token": credential.token is not None,
+            "api_token": credential.token,
+            "effective_username": effective_username,
+            "auth_valid": auth_valid,
+            "defcreds_enabled": credential.source == "default",
+            "credentials_source": str(credential.source),
+            "error": None if auth_valid is True or status == "invalid_credentials_anonymous" else auth_error,
+        }
+    )
+    return payload
+
+
+def collect_elastic_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Run capabilities and requested Elastic actions once after auth selection."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, ElasticLifecycleState):
+        raise TypeError("elastic lifecycle state is unavailable")
+    payload = dict(record.to_dict() if hasattr(record, "to_dict") else record)
+    credential = ctx.credential
+    status = str(payload.get("status") or "")
+    use_authenticated = status in {"valid_credentials", "weak_default_creds"}
+    if use_authenticated:
+        auth_headers = state.auth_headers.get(_elastic_lifecycle_key(ctx))
+        if auth_headers is None:
+            auth_headers = _elastic_headers(
+                username=credential.username,
+                password=credential.password,
+                api_token=credential.token,
+            )
+    else:
+        auth_headers = _elastic_headers(username=None, password=None, api_token=None)
+
+    host = str(ctx.host)
+    port = int(ctx.port)
+    timeout = float(getattr(ctx.args, "timeout", 5.0))
+    scheme = str(payload.get("scheme") or "https")
+    insecure = bool(payload.get("insecure_effective"))
+    ca_file = str(getattr(ctx.args, "ca_file", "") or "").strip() or None
+
+    can_read: bool | None = None
+    can_write: bool | None = None
+    can_manage: bool | None = None
+    can_manage_security: bool | None = None
+    rights_error: str | None = None
+    access_level = "unknown"
+    api_key_probe_status = "not_run"
+    api_key_probe_error: str | None = None
+    if use_authenticated:
+        can_read, can_write, can_manage, can_manage_security, rights_error = _check_privileges(
+            host,
+            port,
+            timeout,
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=auth_headers,
+        )
+        access_level = _normalize_access_level(
+            can_read=can_read,
+            can_write=can_write,
+            can_manage=can_manage,
+            can_manage_security=can_manage_security,
+        )
+        if credential.token is not None:
+            api_key_probe_status, api_key_probe_error = _verify_api_key_probe(
+                host,
+                port,
+                timeout,
+                scheme=scheme,
+                insecure=insecure,
+                ca_file=ca_file,
+                auth_headers=auth_headers,
+            )
+
+    cat_endpoints: list[str] | None = None
+    endpoint_diagnostics: list[dict[str, Any]] | None = None
+    endpoints_error: str | None = None
+    cat_plugins: list[dict[str, str]] | None = None
+    plugins_error: str | None = None
+    cluster_health: dict[str, Any] | None = None
+    cluster_nodes: list[dict[str, Any]] | None = None
+    cluster_error: str | None = None
+    misconfig_findings: list[dict[str, str]] | None = None
+    misconfig_error: str | None = None
+    users: list[dict[str, Any]] | None = None
+    users_error: str | None = None
+    discover_results: list[dict[str, Any]] | None = None
+    discover_error: str | None = None
+
+    if bool(options["show_endpoints"]):
+        cat_endpoints, endpoints_error, endpoint_diagnostics = _fetch_cat_endpoints(
+            host,
+            port,
+            timeout,
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=auth_headers,
+        )
+    if bool(options["show_plugins"]):
+        cat_plugins, plugins_error = _fetch_cat_plugins(
+            host,
+            port,
+            timeout,
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=auth_headers,
+        )
+    if bool(options["show_cluster"]):
+        cluster_health, cluster_nodes, cluster_error = _fetch_cluster_data(
+            host,
+            port,
+            timeout,
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=auth_headers,
+        )
+        misconfig_findings, misconfig_error = _fetch_cluster_misconfig_findings(
+            host,
+            port,
+            timeout,
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=auth_headers,
+        )
+    if bool(options["show_users"]):
+        users, users_error = _fetch_security_users(
+            host,
+            port,
+            timeout,
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=auth_headers,
+        )
+    if bool(options["discover"]):
+        discover_results, discover_error = _collect_discover_results(
+            host,
+            port,
+            timeout,
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=auth_headers,
+        )
+
+    errors: list[str] = []
+    for item in (
+        payload.get("error"),
+        rights_error,
+        api_key_probe_error,
+        endpoints_error,
+        plugins_error,
+        cluster_error,
+        misconfig_error,
+        users_error,
+        discover_error,
+    ):
+        clean = str(item or "").strip()
+        if clean and clean not in errors:
+            errors.append(clean)
+    payload.update(
+        {
+            "timestamp": utc_now_iso(),
+            "show_endpoints": bool(options["show_endpoints"]),
+            "show_plugins": bool(options["show_plugins"]),
+            "show_cluster": bool(options["show_cluster"]),
+            "show_users": bool(options["show_users"]),
+            "discover": bool(options["discover"]),
+            "api_key_probe_status": api_key_probe_status,
+            "api_key_probe_error": api_key_probe_error,
+            "cat_endpoints": cat_endpoints,
+            "endpoint_diagnostics": endpoint_diagnostics,
+            "cat_plugins": cat_plugins,
+            "cluster_health": cluster_health,
+            "cluster_nodes": cluster_nodes,
+            "misconfig_findings": misconfig_findings,
+            "misconfig_error": misconfig_error,
+            "users": users,
+            "discover_results": discover_results,
+            "can_read": can_read,
+            "can_write": can_write,
+            "can_manage": can_manage,
+            "can_manage_security": can_manage_security,
+            "access_level": access_level,
+            "rights_error": rights_error,
+            "endpoints_error": endpoints_error,
+            "plugins_error": plugins_error,
+            "cluster_error": cluster_error,
+            "users_error": users_error,
+            "discover_error": discover_error,
+            "error": "; ".join(errors) if errors else None,
+        }
+    )
+    return payload
 
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:

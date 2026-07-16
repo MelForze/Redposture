@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core import stage_redis as redis_stage
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from redposture_core.audit_models import AuditRecord
+from redposture_core.cli_args import parse_args
+from redposture_core.modules.redis import actions as redis_actions
+from redposture_core.modules.redis import stage as redis_module_stage
+from redposture_core.stage_runtime import AuditCommandRunner
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
 
 
 class _DummySocket:
@@ -34,6 +39,32 @@ class _ReadSocket(_DummySocket):
 
     def sendall(self, data: bytes) -> None:
         self.sent.append(data)
+
+
+def _redis_host_record(
+    kwargs: dict[str, object],
+    *,
+    status: str,
+    detected: bool,
+    error: str | None = None,
+) -> AuditRecord:
+    return AuditRecord(
+        host=str(kwargs["host"]),
+        port=int(kwargs["port"]),
+        service="redis",
+        module="redis",
+        status=status,
+        auth_required=status == "auth_required",
+        extra={
+            "is_redis": detected,
+            "error": error,
+            "provided_username": kwargs.get("username"),
+            "provided_password": kwargs.get("password"),
+            "show_keys": bool(kwargs.get("show_keys")),
+            "dump_keys": bool(kwargs.get("dump_keys")),
+            "query_key": kwargs.get("query_key"),
+        },
+    )
 
 
 def test_encode_resp_array_builds_valid_payload() -> None:
@@ -615,7 +646,12 @@ def test_audit_redis_targets_json_output_and_suppression(monkeypatch: pytest.Mon
             },
         ]
     )
-    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))
+    monkeypatch.setattr(
+        redis_actions,
+        "redis_detect_hook",
+        lambda ctx: AuditRecord.from_mapping(next(records), module="redis", service="redis"),
+    )
+    monkeypatch.setattr(redis_actions, "redis_auth_hook", lambda _ctx, record: record)
 
     output_path = tmp_path / "redis.json"
     emitted: list[str] = []
@@ -699,7 +735,11 @@ def test_audit_redis_targets_suppresses_pre_detect_connection_noise(
             },
         ]
     )
-    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))
+    monkeypatch.setattr(
+        redis_actions,
+        "redis_detect_hook",
+        lambda ctx: AuditRecord.from_mapping(next(records), module="redis", service="redis"),
+    )
 
     emitted: list[str] = []
     totals = run_module_targets_for_test(
@@ -758,7 +798,11 @@ def test_audit_redis_targets_keeps_non_refused_fail_lines_when_suppression_enabl
             }
         ]
     )
-    monkeypatch.setattr(redis_stage, "_audit_redis_host", lambda *args, **kwargs: next(records))
+    monkeypatch.setattr(
+        redis_actions,
+        "redis_detect_hook",
+        lambda ctx: AuditRecord.from_mapping(next(records), module="redis", service="redis"),
+    )
 
     emitted: list[str] = []
     totals = run_module_targets_for_test(
@@ -787,15 +831,33 @@ def test_audit_redis_targets_keeps_non_refused_fail_lines_when_suppression_enabl
 
 @pytest.mark.parametrize("debug", [False, True])
 def test_run_redis_stage_connection_refused_suppression_matches_debug(
-    monkeypatch: pytest.MonkeyPatch, debug: bool
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], debug: bool
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_audit_redis_targets(*_args, **kwargs):
-        captured.update(kwargs)
-        return (1, 0, 0, 0, 0, 1)
+    def fake_detect(ctx):
+        captured.update(
+            {
+                "host": ctx.host,
+                "port": ctx.port,
+                "phase": ctx.phase,
+                "username": ctx.credential.username,
+                "run_deep_checks": ctx.run_deep_checks,
+            }
+        )
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="redis",
+            service="redis",
+            status="fail",
+            extra={
+                "is_redis": False,
+                "error": "connection refused (service is not listening on target port)",
+            },
+        )
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "redis", fake_audit_redis_targets)
+    monkeypatch.setattr(redis_actions, "redis_detect_hook", fake_detect)
 
     args = SimpleNamespace(
         debug=debug,
@@ -823,13 +885,26 @@ def test_run_redis_stage_connection_refused_suppression_matches_debug(
 
     rc = redis_stage.run_redis_stage(args, _DummyLogger())
     assert rc == 0
-    assert captured.get("suppress_connection_refused_status_lines") is (not debug)
+    assert captured["phase"] == "detect"
+    assert captured["username"] is None
+    assert captured["run_deep_checks"] is False
+    output = capsys.readouterr().out.lower()
+    assert ("connection refused" in output) is debug
 
 
 def test_run_redis_stage_non_debug_suppresses_unreachable_summary(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    patch_runner_for_legacy_target_fake(monkeypatch, "redis", lambda *_args, **_kwargs: (1, 0, 0, 0, 0, 1))
+    patch_module_host_stage_for_test(
+        monkeypatch,
+        "redis",
+        lambda **kwargs: _redis_host_record(
+            kwargs,
+            status="fail",
+            detected=False,
+            error="connection refused",
+        ),
+    )
 
     args = SimpleNamespace(
         debug=False,
@@ -864,7 +939,16 @@ def test_run_redis_stage_non_debug_suppresses_unreachable_summary(
 def test_run_redis_stage_debug_shows_unreachable_summary(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    patch_runner_for_legacy_target_fake(monkeypatch, "redis", lambda *_args, **_kwargs: (1, 0, 0, 0, 0, 1))
+    patch_module_host_stage_for_test(
+        monkeypatch,
+        "redis",
+        lambda **kwargs: _redis_host_record(
+            kwargs,
+            status="fail",
+            detected=False,
+            error="connection refused",
+        ),
+    )
 
     args = SimpleNamespace(
         debug=True,
@@ -897,15 +981,20 @@ def test_run_redis_stage_debug_shows_unreachable_summary(
 
 
 def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured_calls: list[dict[str, object]] = []
+    captured_calls: list[tuple[str, int, str]] = []
 
-    def fake_audit_redis_targets(*_args, **kwargs):
-        captured_calls.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (1, 1, 0, 0, 0, 0)
+    def fake_detect(ctx):
+        captured_calls.append((ctx.host, ctx.port, ctx.phase))
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="redis",
+            service="redis",
+            status="fail",
+            extra={"is_redis": False, "error": "connection refused"},
+        )
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "redis", fake_audit_redis_targets)
+    monkeypatch.setattr(redis_actions, "redis_detect_hook", fake_detect)
     monkeypatch.setattr(redis_stage, "collect_scan_ports", lambda *_args, **_kwargs: [6379, 26380, 26381])
     monkeypatch.setattr(redis_stage, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
@@ -951,7 +1040,8 @@ def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypa
 
     rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
-    assert [bool(call["show_progress"]) for call in captured_calls] == [False, False, False]
+    assert [call[1] for call in captured_calls] == [6379, 26380, 26381]
+    assert all(call[2] == "detect" for call in captured_calls)
     assert progress_totals == [3]
     assert progress_advances == [1, 1, 1]
 
@@ -961,15 +1051,36 @@ def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
 ) -> None:
     creds_file = tmp_path / "creds.txt"
     creds_file.write_text("bad:bad\ngood:good\n", encoding="utf-8")
-    captured_calls: list[dict[str, object]] = []
+    captured_calls: list[tuple[str, str | None, str | None, bool]] = []
 
-    def fake_audit_redis_targets(*_args, **kwargs):
-        captured_calls.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (1, 0, 0, 1, 0, 0)
+    def fake_detect(ctx):
+        captured_calls.append(("detect", ctx.credential.username, ctx.credential.password, ctx.run_deep_checks))
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="redis",
+            service="redis",
+            status="auth_required",
+            auth_required=True,
+            extra={"is_redis": True},
+        )
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "redis", fake_audit_redis_targets)
+    def fake_auth(ctx, record):
+        captured_calls.append(("auth", ctx.credential.username, ctx.credential.password, ctx.run_deep_checks))
+        status = "valid_credentials" if ctx.credential.username == "good" else "auth_required"
+        return AuditRecord.from_mapping(
+            {**record.to_dict(), "status": status, "is_redis": True},
+            module="redis",
+            service="redis",
+        )
+
+    def fake_data(ctx, record):
+        captured_calls.append(("data", ctx.credential.username, ctx.credential.password, ctx.run_deep_checks))
+        return record
+
+    monkeypatch.setattr(redis_actions, "redis_detect_hook", fake_detect)
+    monkeypatch.setattr(redis_actions, "redis_auth_hook", fake_auth)
+    monkeypatch.setattr(redis_actions, "redis_data_hook", fake_data)
     monkeypatch.setattr(
         "redposture_core.stage_runtime.filter_open_tcp_hosts_for_credential_file",
         lambda hosts, _port, **_kwargs: list(hosts),
@@ -985,6 +1096,9 @@ def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
 
         def advance(self, amount: int = 1) -> None:
             progress_advances.append(int(amount))
+
+        def add_total(self, amount: int) -> None:
+            progress_totals.append(progress_totals.pop() + int(amount))
 
         def close(self) -> None:
             return
@@ -1017,31 +1131,435 @@ def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
     rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
 
     assert rc == 0
-    assert [(call["username"], call["password"]) for call in captured_calls] == [("bad", "bad"), ("good", "good")]
-    assert [call["defcreds"] for call in captured_calls] == [False, False]
-    assert [call["append_output"] for call in captured_calls] == [False, True]
-    assert [call["show_progress"] for call in captured_calls] == [False, False]
+    assert captured_calls == [
+        ("detect", None, None, False),
+        ("auth", "bad", "bad", False),
+        ("auth", "good", "good", False),
+        ("data", "good", "good", True),
+    ]
     assert progress_totals == [2]
     assert progress_advances == [1, 1]
 
 
-def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_redis_production_path_credential_batch_detects_protocol_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    credentials = tmp_path / "credentials.txt"
+    credentials.write_text("bad:bad\ngood:good\n", encoding="utf-8")
+    command_counts: dict[str, int] = {"CONNECT": 0, "PING": 0, "AUTH": 0, "DBSIZE": 0}
+
+    def create_connection(*_args, **_kwargs):
+        command_counts["CONNECT"] += 1
+        return _DummySocket()
+
+    def send_cmd(_sock, *parts):
+        command = str(parts[0]).upper()
+        command_counts[command] = command_counts.get(command, 0) + 1
+        if command == "PING":
+            return "error", "NOAUTH Authentication required."
+        if command == "AUTH":
+            return ("simple", "OK") if parts[-1] == "good" else ("error", "WRONGPASS invalid credentials")
+        if command == "DBSIZE":
+            return "integer", 7
+        pytest.fail(f"unexpected Redis command: {parts!r}")
+
+    monkeypatch.setattr(redis_stage.socket, "create_connection", create_connection)
+    monkeypatch.setattr(redis_stage, "_send_cmd", send_cmd)
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "-u",
+            str(credentials),
+            "-f",
+            "json",
+        ]
+    )
+
+    rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_args, **_kwargs: None))
+
+    assert rc == 0
+    assert command_counts == {"CONNECT": 1, "PING": 1, "AUTH": 2, "DBSIZE": 1}
+
+
+def test_redis_production_path_direct_credentials_detect_protocol_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_counts: dict[str, int] = {"CONNECT": 0, "PING": 0, "AUTH": 0, "DBSIZE": 0}
+
+    def create_connection(*_args, **_kwargs):
+        command_counts["CONNECT"] += 1
+        return _DummySocket()
+
+    def send_cmd(_sock, *parts):
+        command = str(parts[0]).upper()
+        command_counts[command] = command_counts.get(command, 0) + 1
+        if command == "PING":
+            return "error", "NOAUTH Authentication required."
+        if command == "AUTH":
+            return "simple", "OK"
+        if command == "DBSIZE":
+            return "integer", 7
+        pytest.fail(f"unexpected Redis command: {parts!r}")
+
+    monkeypatch.setattr(redis_stage.socket, "create_connection", create_connection)
+    monkeypatch.setattr(redis_stage, "_send_cmd", send_cmd)
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "-u",
+            "good",
+            "-p",
+            "good",
+            "-f",
+            "json",
+        ]
+    )
+
+    rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_args, **_kwargs: None))
+
+    assert rc == 0
+    assert command_counts == {"CONNECT": 1, "PING": 1, "AUTH": 1, "DBSIZE": 1}
+
+
+def _run_redis_lifecycle_result(args):
+    redis_module_stage._prepare_redis_credential_runs(args)
+    plan = redis_module_stage.build_redis_plan(args)
+    return AuditCommandRunner(
+        args=args,
+        spec=redis_module_stage.build_redis_spec(args),
+        emit_line=lambda _line: None,
+    ).run_plan(plan)
+
+
+def test_redis_defcreds_expand_after_provided_and_file_candidates_stay_unchanged(tmp_path) -> None:
+    direct_args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "-u",
+            "app",
+            "-p",
+            "secret",
+            "--defcreds",
+        ]
+    )
+    redis_module_stage._prepare_redis_credential_runs(direct_args)
+    assert [(run.username, run.password, run.source) for run in direct_args._audit_credential_runs] == [
+        ("app", "secret", "provided"),
+        ("redis", "redis", "default"),
+    ]
+
+    credentials = tmp_path / "credentials.txt"
+    credentials.write_text("one:1\ntwo:2\n", encoding="utf-8")
+    file_args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "-u",
+            str(credentials),
+            "--defcreds",
+        ]
+    )
+    redis_module_stage._prepare_redis_credential_runs(file_args)
+    plan = redis_module_stage.build_redis_plan(file_args)
+    assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
+        ("one", "1", "file"),
+        ("two", "2", "file"),
+    ]
+
+
+def test_redis_defcreds_try_provided_before_default_and_classify_default(monkeypatch) -> None:
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(redis_actions.socket, "create_connection", lambda *_args, **_kwargs: _DummySocket())
+
+    def send_cmd(_sock, *parts):
+        command = tuple(str(item) for item in parts)
+        commands.append(command)
+        if command == ("PING",):
+            return "error", "NOAUTH Authentication required."
+        if command == ("AUTH", "app", "bad"):
+            return "error", "WRONGPASS invalid credentials"
+        if command == ("AUTH", "redis", "redis"):
+            return "simple", "OK"
+        if command == ("DBSIZE",):
+            return "integer", 3
+        pytest.fail(f"unexpected Redis command: {command!r}")
+
+    monkeypatch.setattr(redis_actions, "_send_cmd", send_cmd)
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "-u",
+            "app",
+            "-p",
+            "bad",
+            "--defcreds",
+            "-f",
+            "json",
+        ]
+    )
+
+    result = _run_redis_lifecycle_result(args)
+
+    assert commands == [
+        ("PING",),
+        ("AUTH", "app", "bad"),
+        ("AUTH", "redis", "redis"),
+        ("DBSIZE",),
+    ]
+    assert result.records[0]["status"] == "weak_default_creds"
+    assert result.records[0]["default_credentials"] is True
+
+
+def test_redis_auth_transient_retries_without_repeating_detect(monkeypatch) -> None:
+    commands: list[str] = []
+    connects = 0
+
+    def create_connection(*_args, **_kwargs):
+        nonlocal connects
+        connects += 1
+        return _DummySocket()
+
+    def send_cmd(_sock, *parts):
+        command = str(parts[0]).upper()
+        commands.append(command)
+        if command == "PING":
+            return "error", "NOAUTH Authentication required."
+        if command == "AUTH" and commands.count("AUTH") == 1:
+            raise ConnectionResetError("transient auth reset")
+        if command == "AUTH":
+            return "simple", "OK"
+        if command == "DBSIZE":
+            return "integer", 4
+        pytest.fail(f"unexpected Redis command: {parts!r}")
+
+    monkeypatch.setattr(redis_actions.socket, "create_connection", create_connection)
+    monkeypatch.setattr(redis_actions, "_send_cmd", send_cmd)
+    monkeypatch.setattr(redis_actions, "_retry_delay", lambda _attempt: 0.0)
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "-u",
+            "app",
+            "-p",
+            "good",
+            "--retries",
+            "1",
+            "-f",
+            "json",
+        ]
+    )
+
+    result = _run_redis_lifecycle_result(args)
+
+    assert connects == 2
+    assert commands == ["PING", "AUTH", "AUTH", "DBSIZE"]
+    assert result.records[0]["status"] == "valid_credentials"
+
+
+def test_redis_conclusive_auth_rejection_is_not_retried(monkeypatch) -> None:
+    commands: list[str] = []
+    connects = 0
+
+    def create_connection(*_args, **_kwargs):
+        nonlocal connects
+        connects += 1
+        return _DummySocket()
+
+    def send_cmd(_sock, *parts):
+        command = str(parts[0]).upper()
+        commands.append(command)
+        if command == "PING":
+            return "error", "NOAUTH Authentication required."
+        if command == "AUTH":
+            return "error", "WRONGPASS invalid credentials"
+        pytest.fail(f"unexpected Redis command: {parts!r}")
+
+    monkeypatch.setattr(redis_actions.socket, "create_connection", create_connection)
+    monkeypatch.setattr(redis_actions, "_send_cmd", send_cmd)
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "-u",
+            "app",
+            "-p",
+            "bad",
+            "--retries",
+            "3",
+            "-f",
+            "json",
+        ]
+    )
+
+    result = _run_redis_lifecycle_result(args)
+
+    assert connects == 1
+    assert commands == ["PING", "AUTH"]
+    assert result.records[0]["status"] == "auth_required"
+
+
+def test_redis_data_transient_reconnects_and_reauths_without_ping(monkeypatch) -> None:
+    commands: list[str] = []
+    connects = 0
+
+    def create_connection(*_args, **_kwargs):
+        nonlocal connects
+        connects += 1
+        return _DummySocket()
+
+    def send_cmd(_sock, *parts):
+        command = str(parts[0]).upper()
+        commands.append(command)
+        if command == "PING":
+            return "error", "NOAUTH Authentication required."
+        if command == "AUTH":
+            return "simple", "OK"
+        if command == "DBSIZE" and commands.count("DBSIZE") == 1:
+            raise ConnectionResetError("transient data reset")
+        if command == "DBSIZE":
+            return "integer", 9
+        pytest.fail(f"unexpected Redis command: {parts!r}")
+
+    monkeypatch.setattr(redis_actions.socket, "create_connection", create_connection)
+    monkeypatch.setattr(redis_actions, "_send_cmd", send_cmd)
+    monkeypatch.setattr(redis_actions, "_retry_delay", lambda _attempt: 0.0)
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "-u",
+            "app",
+            "-p",
+            "good",
+            "--retries",
+            "1",
+            "-f",
+            "json",
+        ]
+    )
+
+    result = _run_redis_lifecycle_result(args)
+
+    assert connects == 2
+    assert commands == ["PING", "AUTH", "DBSIZE", "AUTH", "DBSIZE"]
+    assert result.records[0]["status"] == "valid_credentials"
+    assert result.records[0]["key_count"] == 9
+
+
+def test_redis_lifecycle_hooks_disable_when_host_stage_is_replaced(monkeypatch) -> None:
+    def fake_host_stage(**kwargs):
+        return _redis_host_record(kwargs, status="fail", detected=False, error="fake")
+
+    patch_module_host_stage_for_test(monkeypatch, "redis", fake_host_stage)
+    spec = redis_module_stage.build_redis_spec(SimpleNamespace())
+
+    assert spec.detect is None
+    assert spec.auth is None
+    assert spec.data is None
+    assert spec.lifecycle_state_factory is None
+
+
+def test_redis_lifecycle_hooks_disable_when_audit_implementation_is_replaced(monkeypatch) -> None:
+    monkeypatch.setattr(
+        redis_actions,
+        "_audit_redis_host",
+        lambda *args, **kwargs: {
+            "host": args[0] if args else kwargs["host"],
+            "port": args[1] if len(args) > 1 else kwargs["port"],
+            "status": "fail",
+            "is_redis": False,
+        },
+    )
+    spec = redis_module_stage.build_redis_spec(SimpleNamespace())
+
+    assert spec.detect is None
+    assert spec.auth is None
+    assert spec.data is None
+    assert spec.lifecycle_state_factory is None
+
+
+def test_run_redis_stage_username_file_keeps_all_hosts_for_protocol_detect(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     creds_file = tmp_path / "creds.txt"
     creds_file.write_text("bad:bad\ngood:good\n", encoding="utf-8")
     targets_file = tmp_path / "targets.txt"
     targets_file.write_text("closed\nopen-a\nopen-b\n", encoding="utf-8")
-    captured_calls: list[dict[str, object]] = []
+    captured_calls: list[tuple[str, str, str | None, str | None]] = []
 
-    def fake_audit_redis_targets(*_args, **kwargs):
-        captured_calls.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (1, 0, 0, 1, 0, 0)
+    def fake_detect(ctx):
+        captured_calls.append(("detect", ctx.host, ctx.credential.username, ctx.credential.password))
+        if ctx.host == "closed":
+            return AuditRecord(
+                host=ctx.host,
+                port=ctx.port,
+                module="redis",
+                service="redis",
+                status="fail",
+                extra={"is_redis": False, "error": "connection refused"},
+            )
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="redis",
+            service="redis",
+            status="auth_required",
+            auth_required=True,
+            extra={"is_redis": True},
+        )
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "redis", fake_audit_redis_targets)
+    def fake_auth(ctx, record):
+        captured_calls.append(("auth", ctx.host, ctx.credential.username, ctx.credential.password))
+        return AuditRecord.from_mapping(
+            {
+                **record.to_dict(),
+                "status": "valid_credentials" if ctx.credential.username == "good" else "auth_required",
+                "is_redis": True,
+            },
+            module="redis",
+            service="redis",
+        )
+
+    def fake_data(ctx, record):
+        captured_calls.append(("data", ctx.host, ctx.credential.username, ctx.credential.password))
+        return record
+
+    monkeypatch.setattr(redis_actions, "redis_detect_hook", fake_detect)
+    monkeypatch.setattr(redis_actions, "redis_auth_hook", fake_auth)
+    monkeypatch.setattr(redis_actions, "redis_data_hook", fake_data)
     monkeypatch.setattr(
         "redposture_core.stage_runtime.filter_open_tcp_hosts_for_credential_file",
-        lambda hosts, _port, **_kwargs: [host for host in hosts if host.startswith("open-")],
+        lambda *_args, **_kwargs: pytest.fail("credential-file TCP prefilter must not run"),
     )
 
     progress_totals: list[int] = []
@@ -1054,6 +1572,9 @@ def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pyte
 
         def advance(self, amount: int = 1) -> None:
             progress_advances.append(int(amount))
+
+        def add_total(self, amount: int) -> None:
+            progress_totals.append(progress_totals.pop() + int(amount))
 
         def close(self) -> None:
             return
@@ -1086,15 +1607,23 @@ def test_run_redis_stage_username_file_prefilters_closed_hosts(monkeypatch: pyte
     rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
 
     assert rc == 0
-    assert [call["hosts"] for call in captured_calls] == [["open-a"], ["open-a"], ["open-b"], ["open-b"]]
-    assert [(call["username"], call["password"]) for call in captured_calls] == [
-        ("bad", "bad"),
-        ("good", "good"),
-        ("bad", "bad"),
-        ("good", "good"),
+    assert [call for call in captured_calls if call[0] == "detect"] == [
+        ("detect", "closed", None, None),
+        ("detect", "open-a", None, None),
+        ("detect", "open-b", None, None),
     ]
-    assert progress_totals == [4]
-    assert progress_advances == [1, 1, 1, 1]
+    assert [call for call in captured_calls if call[0] == "auth"] == [
+        ("auth", "open-a", "bad", "bad"),
+        ("auth", "open-a", "good", "good"),
+        ("auth", "open-b", "bad", "bad"),
+        ("auth", "open-b", "good", "good"),
+    ]
+    assert [call for call in captured_calls if call[0] == "data"] == [
+        ("data", "open-a", "good", "good"),
+        ("data", "open-b", "good", "good"),
+    ]
+    assert progress_totals == [5]
+    assert progress_advances == [1, 1, 1, 1, 1]
 
 
 def test_call_audit_redis_host_with_stage_debug_adds_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1137,49 +1666,36 @@ def test_call_audit_redis_host_with_stage_debug_adds_stage_telemetry(monkeypatch
 
 
 def test_audit_redis_targets_emits_two_pass_debug_markers(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_stage_call(
-        host: str,
-        port: int,
-        timeout: float,
-        retries: int,
-        username: str | None,
-        password: str | None,
-        defcreds: bool,
-        show_keys: bool,
-        dump_keys: bool,
-        query_key: str | None,
-        *,
-        run_deep_checks: bool,
-        debug: bool,
-        debug_emit,
-    ) -> dict[str, object]:
-        _ = (port, timeout, retries, username, password, defcreds, show_keys, dump_keys, query_key, debug, debug_emit)
-        base = {
-            "timestamp": "2026-03-27T00:00:00Z",
-            "host": host,
-            "port": 6379,
-            "is_redis": True,
-            "status": "open_no_auth",
-            "auth_required": False,
-            "provided_credentials": False,
-            "default_credentials_attempted": False,
-            "show_keys": bool(run_deep_checks),
-            "dump_keys": False,
-            "query_key": None,
-            "keys": ["a"] if run_deep_checks else None,
-            "key_values": None,
-            "query_key_value": None,
-            "error": None,
-            "debug_events": [],
-            "debug_events_streamed": True,
-            "stages": [],
-            "stage_durations_ms": {},
-            "stage_attempts": {},
-            "stage_failed_at": None,
-        }
-        return base
+    def fake_detect(ctx):
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="redis",
+            service="redis",
+            status="open_no_auth",
+            auth_required=False,
+            extra={"is_redis": True},
+        )
 
-    monkeypatch.setattr(redis_stage, "_call_audit_redis_host_with_stage_debug", fake_stage_call)
+    def fake_auth(_ctx, record):
+        return record
+
+    def fake_data(_ctx, record):
+        return AuditRecord.from_mapping(
+            {
+                **record.to_dict(),
+                "status": "open_no_auth",
+                "is_redis": True,
+                "show_keys": True,
+                "keys": ["a"],
+            },
+            module="redis",
+            service="redis",
+        )
+
+    monkeypatch.setattr(redis_actions, "redis_detect_hook", fake_detect)
+    monkeypatch.setattr(redis_actions, "redis_auth_hook", fake_auth)
+    monkeypatch.setattr(redis_actions, "redis_data_hook", fake_data)
     debug_lines: list[str] = []
     emitted: list[str] = []
     totals = run_module_targets_for_test(

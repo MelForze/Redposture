@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import inspect
+from typing import Any
+
 import pytest
 
 from redposture_core.audit_models import AuditRecord
 from redposture_core.cli_args import parse_args
 from redposture_core.logger import AttemptLogger
+from redposture_core.modules.consul import actions as consul_actions
+from redposture_core.modules.elastic import actions as elastic_actions
+from redposture_core.modules.gitlab import actions as gitlab_actions
+from redposture_core.modules.kubeapi import actions as kubeapi_actions
+from redposture_core.modules.proxmox import actions as proxmox_actions
 from redposture_core.stage_collect import run_collect_stage
 from redposture_core.stage_consul import run_consul_stage
 from redposture_core.stage_elastic import run_elastic_stage
 from redposture_core.stage_etcd import run_etcd_stage
-from redposture_core.stage_gitlab import run_gitlab_stage
+from redposture_core.stage_gitlab import build_gitlab_plan, run_gitlab_stage
 from redposture_core.stage_grafana import run_grafana_stage
 from redposture_core.stage_kubeapi import run_kubeapi_stage
 from redposture_core.stage_proxmox import run_proxmox_stage
@@ -17,6 +25,27 @@ from redposture_core.stage_qdrant import run_qdrant_stage
 from redposture_core.stage_registry import run_registry_stage
 from redposture_core.stage_scan import run_scan_stage
 from redposture_core.stage_trigger import run_trigger_stage
+
+
+class _HostStageCapture:
+    def __init__(self, original: Any, module: str, status: str) -> None:
+        self.__signature__ = inspect.signature(original)
+        self.module = module
+        self.status = status
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, *args: Any, **kwargs: Any) -> AuditRecord:
+        bound = self.__signature__.bind(*args, **kwargs)
+        bound.apply_defaults()
+        call = dict(bound.arguments)
+        self.calls.append(call)
+        return AuditRecord(
+            host=str(call["host"]),
+            port=int(call["port"]),
+            module=self.module,
+            service=self.module,
+            status=self.status,
+        )
 
 
 @pytest.mark.parametrize(
@@ -146,48 +175,55 @@ def test_trigger_uses_explicit_port_batches(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_gitlab_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[tuple[str | None, int, str, str]] = []
-
-    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:
-        captured.append((target.scheme if target else None, int(port), target.path, target.query))
-        return AuditRecord(host=host, port=int(port), module="gitlab", service="gitlab", status="open_no_auth")
-
-    monkeypatch.setattr("redposture_core.modules.gitlab.actions.host_stage", fake_host_stage)
+    captured = _HostStageCapture(gitlab_actions.host_stage, "gitlab", "open_no_auth")
+    monkeypatch.setattr(gitlab_actions, "host_stage", captured)
 
     args = parse_args(["gitlab", "-t", "http://127.0.0.1:18080/users/sign_in?ref=matrix", "--https"])
     rc = run_gitlab_stage(args, AttemptLogger())
 
     assert rc == 0
-    assert captured == [
-        ("http", 18080, "/users/sign_in", "ref=matrix"),
-        ("http", 18080, "/users/sign_in", "ref=matrix"),
-    ]
+    assert len(captured.calls) == 2
+    assert all(call["host"] == "127.0.0.1" and call["port"] == 18080 for call in captured.calls)
+    assert all(call["use_https"] is False for call in captured.calls)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["gitlab", "-t", "gitlab.local"], [("gitlab.local", 80)]),
+        (["gitlab", "-t", "gitlab.local", "--https"], [("gitlab.local", 443)]),
+        (["gitlab", "-t", "https://gitlab.local"], [("gitlab.local", 443)]),
+        (["gitlab", "-t", "http://gitlab.local"], [("gitlab.local", 80)]),
+        (["gitlab", "-t", "https://gitlab.local", "--port", "8443"], [("gitlab.local", 8443)]),
+        (
+            ["gitlab", "-t", "http://http.local,https://https.local,bare.local"],
+            [("http.local", 80), ("bare.local", 80), ("https.local", 443)],
+        ),
+    ],
+)
+def test_gitlab_scheme_aware_default_ports(argv: list[str], expected: list[tuple[str, int]]) -> None:
+    args = parse_args(argv)
+    plan = build_gitlab_plan(args)
+
+    assert [(host, port) for _idx, host, port, _target in plan.iter_target_specs()] == expected
 
 
 def test_kubeapi_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[tuple[str | None, int, str]] = []
-
-    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:
-        captured.append((target.scheme if target else None, int(port), target.path))
-        return AuditRecord(host=host, port=int(port), module="kubeapi", service="kubeapi", status="open_no_auth")
-
-    monkeypatch.setattr("redposture_core.modules.kubeapi.actions.host_stage", fake_host_stage)
+    captured = _HostStageCapture(kubeapi_actions.host_stage, "kubeapi", "open_no_auth")
+    monkeypatch.setattr(kubeapi_actions, "host_stage", captured)
 
     args = parse_args(["kubeapi", "-t", "https://127.0.0.1:26443/api", "--no-https", "--namespaces"])
     rc = run_kubeapi_stage(args, AttemptLogger())
 
     assert rc == 0
-    assert captured == [("https", 26443, "/api"), ("https", 26443, "/api")]
+    assert len(captured.calls) == 2
+    assert all(call["host"] == "127.0.0.1" and call["port"] == 26443 for call in captured.calls)
+    assert all(call["use_https"] is True for call in captured.calls)
 
 
 def test_proxmox_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[tuple[str | None, int, str]] = []
-
-    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:
-        captured.append((target.scheme if target else None, int(port), target.path))
-        return AuditRecord(host=host, port=int(port), module="proxmox", service="proxmox", status="valid_credentials")
-
-    monkeypatch.setattr("redposture_core.modules.proxmox.actions.host_stage", fake_host_stage)
+    captured = _HostStageCapture(proxmox_actions.host_stage, "proxmox", "valid_credentials")
+    monkeypatch.setattr(proxmox_actions, "host_stage", captured)
 
     args = parse_args(
         [
@@ -203,43 +239,32 @@ def test_proxmox_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPat
     rc = run_proxmox_stage(args, AttemptLogger())
 
     assert rc == 0
-    # F7 fix: cfg.token now resolves from `pve_api_token`, so the credential
-    # is no longer treated as anonymous in the auth stage; the runner runs
-    # host_stage during the auth phase too (detect + auth + data = 3 calls)
-    # instead of skipping it for a would-be anonymous credential (which was
-    # the previous 2-call behavior). All three calls use the same URL — the
-    # invariant this test cares about is scheme+port+path propagation.
-    assert len(captured) == 3
-    assert all(entry == ("https", 18006, "/api2/json/access/ticket") for entry in captured)
+    # The phase-aware lifecycle classifies anonymously, then executes the
+    # selected token's authenticated work once; data reuses that result.
+    assert len(captured.calls) == 2
+    assert all(call["host"] == "127.0.0.1" and call["port"] == 18006 for call in captured.calls)
+    assert all(call["use_https"] is True for call in captured.calls)
 
 
 def test_consul_passes_preferred_scheme_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[tuple[str | None, int, str]] = []
-
-    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:
-        captured.append((target.scheme if target else None, int(port), target.path))
-        return AuditRecord(host=host, port=int(port), module="consul", service="consul", status="open_no_auth")
-
-    monkeypatch.setattr("redposture_core.modules.consul.actions.host_stage", fake_host_stage)
+    captured = _HostStageCapture(consul_actions.host_stage, "consul", "open_no_auth")
+    monkeypatch.setattr(consul_actions, "host_stage", captured)
 
     args = parse_args(["consul", "-t", "http://127.0.0.1:8500/v1/status/leader", "--dump"])
     rc = run_consul_stage(args, AttemptLogger())
 
     assert rc == 0
-    assert captured == [("http", 8500, "/v1/status/leader"), ("http", 8500, "/v1/status/leader")]
+    assert len(captured.calls) == 2
+    assert all(call["preferred_scheme"] == "http" for call in captured.calls)
 
 
 def test_elastic_passes_preferred_scheme_hint(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[tuple[str | None, int, str]] = []
-
-    def fake_host_stage(host, port, target, **_kwargs) -> AuditRecord:
-        captured.append((target.scheme if target else None, int(port), target.path))
-        return AuditRecord(host=host, port=int(port), module="elastic", service="elastic", status="auth_required")
-
-    monkeypatch.setattr("redposture_core.modules.elastic.actions.host_stage", fake_host_stage)
+    captured = _HostStageCapture(elastic_actions.host_stage, "elastic", "auth_required")
+    monkeypatch.setattr(elastic_actions, "host_stage", captured)
 
     args = parse_args(["elastic", "-t", "https://127.0.0.1:19201/"])
     rc = run_elastic_stage(args, AttemptLogger())
 
     assert rc == 0
-    assert captured == [("https", 19201, "/")]
+    assert len(captured.calls) == 1
+    assert captured.calls[0]["preferred_scheme"] == "https"

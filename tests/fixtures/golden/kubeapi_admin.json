@@ -7,7 +7,7 @@
     "can_exec_pod": null,
     "can_list_namespaces": true,
     "can_list_pods": null,
-    "can_list_secrets": null,
+    "can_list_secrets": true,
     "error": null,
     "exec_command": null,
     "exec_pod": null,
@@ -23,12 +23,54 @@
     "pods": [],
     "pods_error": null,
     "port": 16443,
-    "secrets": [],
+    "secrets": [
+      {
+        "data": {
+          "service_token": "finance-svc-token-2026",
+          "stripe_api_key": "sk_test_redposture_finance_2026"
+        },
+        "namespace": "finance",
+        "type": "Opaque"
+      },
+      {
+        "data": {
+          "hash": "<KUBE_SYSTEM_SECRET>"
+        },
+        "namespace": "kube-system",
+        "type": "Opaque"
+      },
+      {
+        "data": {
+          "tls.crt": "<KUBE_SYSTEM_SECRET>",
+          "tls.key": "<KUBE_SYSTEM_SECRET>"
+        },
+        "namespace": "kube-system",
+        "type": "kubernetes.io/tls"
+      },
+      {
+        "data": {
+          "datasource_dsn": "postgresql://postgres:postgres@postgres:5432/postgres?sslmode=disable",
+          "password": "admin",
+          "username": "admin"
+        },
+        "namespace": "observability",
+        "type": "Opaque"
+      },
+      {
+        "data": {
+          "api_key": "k8s-rp-demo-api-key-2026",
+          "db_password": "postgres",
+          "redis_uri": "redis://default:redis@redis:6379/0"
+        },
+        "namespace": "redposture-lab",
+        "type": "Opaque"
+      }
+    ],
     "secrets_error": null,
     "service": "kubeapi",
     "show_namespaces": false,
     "show_pods": false,
-    "show_secrets": false,
+    "show_secrets": true,
     "stages": [
       {
         "attempt": 1,
@@ -39,8 +81,20 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "auth_valid",
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
       }
     ],
     "status": "auth_valid",

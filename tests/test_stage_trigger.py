@@ -1037,7 +1037,7 @@ def test_trigger_with_listen_closes_progress_before_credential_checks(monkeypatc
     monkeypatch.setattr("redposture_core.stage_trigger._run_trigger_credential_checks", fake_check_credentials)
 
     rc = run_trigger_stage(
-        _base_args(with_listen=True, check_credentials=True, listen_seconds=0),
+        _base_args(with_listen=True, check_credentials=True, listen_seconds=0.001),
         AttemptLogger(),
     )
 
@@ -1176,6 +1176,8 @@ def test_trigger_stage_argument_and_validation_paths(monkeypatch: pytest.MonkeyP
     rc = run_trigger_stage(_base_args(timeout=0), AttemptLogger())
     assert rc == 2
     rc = run_trigger_stage(_base_args(retries=-1), AttemptLogger())
+    assert rc == 2
+    rc = run_trigger_stage(_base_args(with_listen=True, listen_seconds=0), AttemptLogger())
     assert rc == 2
     rc = run_trigger_stage(_base_args(with_listen=True, listen_seconds=-1), AttemptLogger())
     assert rc == 2

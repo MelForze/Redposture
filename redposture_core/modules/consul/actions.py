@@ -15,6 +15,7 @@ import time
 import urllib.error
 import urllib.parse
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig
@@ -45,6 +46,35 @@ _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _THREAD_LOCAL_DEBUG_EMIT = threading.local()
+_THREAD_LOCAL_LIFECYCLE = threading.local()
+
+
+@dataclass
+class ConsulLifecycleState:
+    scheme: str | None = None
+    insecure: bool = False
+    tls_auto_insecure: bool = False
+    leader: str | None = None
+    anonymous_scopes: dict[str, Any] | None = None
+    anonymous_self: dict[str, Any] | None = None
+    auth_scopes: dict[str, Any] | None = None
+    auth_self: dict[str, Any] | None = None
+    auth_headers: dict[str, str] | None = None
+    deep_record: dict[str, Any] | None = None
+
+
+class _ConsulLifecycleReplay:
+    def __init__(self, state: ConsulLifecycleState) -> None:
+        self.state = state
+
+    def __enter__(self) -> None:
+        _THREAD_LOCAL_LIFECYCLE.state = self.state
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        try:
+            delattr(_THREAD_LOCAL_LIFECYCLE, "state")
+        except AttributeError:
+            pass
 
 
 def _limit_dump_items(items: list[Any] | None, limit: int | None) -> list[Any] | None:
@@ -241,6 +271,9 @@ def _probe_consul_scheme(
     *,
     preferred_scheme: str | None = None,
 ) -> tuple[bool, str | None, bool, bool, str | None, str | None]:
+    replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
+    if isinstance(replay, ConsulLifecycleState) and replay.scheme is not None:
+        return True, replay.scheme, replay.insecure, replay.tls_auto_insecure, replay.leader, None
     normalized_scheme = str(preferred_scheme or "").strip().lower()
     if normalized_scheme in {"http", "https"}:
         alternate = "https" if normalized_scheme == "http" else "http"
@@ -395,6 +428,11 @@ def _agent_self_probe(
     insecure: bool,
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
+    if isinstance(replay, ConsulLifecycleState):
+        cached = replay.auth_self if headers else replay.anonymous_self
+        if cached is not None:
+            return dict(cached)
     status, payload, error, effective_insecure, tls_auto = _consul_get_json_any(
         host,
         port,
@@ -441,6 +479,11 @@ def _consul_access_matrix(
     insecure: bool,
     headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
+    if isinstance(replay, ConsulLifecycleState):
+        cached = replay.auth_scopes if headers else replay.anonymous_scopes
+        if cached is not None:
+            return dict(cached)
     probes = {
         "kv": _scope_probe(
             host,
@@ -2659,7 +2702,10 @@ def _audit_consul_host(
         error: str | None = None,
     ) -> None:
         nonlocal stage_failed_at
-        duration_ms = int((time.monotonic() - started_at) * 1000)
+        # A trace is emitted only after the stage was actually executed.  Very
+        # fast probes can complete inside one monotonic clock tick, but a zero
+        # duration is reserved by the telemetry contract for explicit skips.
+        duration_ms = max(1, int((time.monotonic() - started_at) * 1000))
         stage_attempts[stage_name] = max(int(stage_attempts.get(stage_name, 0)), int(attempt))
         stage_durations_ms[stage_name] = int(stage_durations_ms.get(stage_name, 0)) + duration_ms
         entry = {
@@ -2797,7 +2843,7 @@ def _audit_consul_host(
                         "service_result": None,
                         "service_args": service_args,
                         "error": probe_error or "not a Consul API",
-                        "elapsed_ms": int((time.monotonic() - started) * 1000),
+                        "elapsed_ms": max(1, int((time.monotonic() - started) * 1000)),
                         "auth_required": None,
                     },
                     attempts_done=attempt + 1,
@@ -2940,7 +2986,7 @@ def _audit_consul_host(
                 "service_result": None,
                 "service_args": service_args,
                 "error": None if service_status in {"open_no_auth", "valid_credentials"} else auth_error,
-                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "elapsed_ms": max(1, int((time.monotonic() - started) * 1000)),
                 "auth_required": auth_required,
             }
 
@@ -3006,7 +3052,7 @@ def _audit_consul_host(
                 )
                 fallback_record = dict(base_record)
                 fallback_record["error"] = deep_error
-                fallback_record["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+                fallback_record["elapsed_ms"] = max(1, int((time.monotonic() - started) * 1000))
                 return _record(fallback_record, attempts_done=attempt + 1, max_attempts=attempts)
 
             _stage_trace(
@@ -3020,7 +3066,7 @@ def _audit_consul_host(
             if str(final_record.get("status") or "").strip() in {"", "ok"}:
                 final_record["status"] = service_status
             final_record["auth_required"] = auth_required
-            final_record["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+            final_record["elapsed_ms"] = max(1, int((time.monotonic() - started) * 1000))
             return _record(final_record, attempts_done=attempt + 1, max_attempts=attempts)
         except (OSError, ValueError) as exc:
             last_error = str(exc)
@@ -3618,8 +3664,10 @@ def _detail_lines(record: dict[str, Any], output_format: str, *, debug: bool = F
             status_text = str(item.get("status") or "").strip()
             output_text = str(item.get("output") or "").strip()
             poll_error = str(item.get("poll_error") or "").strip()
-            if status_text:
+            if status_text == "passing":
                 lines.append(f"{prefix} [+] probe status={status_text}")
+            elif status_text:
+                lines.append(f"{prefix} [-] probe status={status_text}")
             elif poll_error:
                 lines.append(f"{prefix} [-] probe failed err={_clip(poll_error, 120)}")
             if output_text:
@@ -3729,6 +3777,149 @@ def _render_colored_consul_line(console: Console, line: str) -> bool:
     if line.startswith(_CONSUL_TAG) and "\t" in line:
         return render_tagged_detail_line(console, line, tag=_CONSUL_TAG, default_color="orange")
     return False
+
+
+def _consul_lifecycle_call(ctx: Any, options: dict[str, Any], *, run_deep_checks: bool) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, ConsulLifecycleState) or state.scheme is None:
+        raise TypeError("consul lifecycle state is unavailable")
+    credential = ctx.credential
+    with _ConsulLifecycleReplay(state):
+        return _call_audit_consul_host_with_thread_debug(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            int(getattr(ctx.args, "retries", 0) or 0),
+            token=credential.token,
+            username=credential.username,
+            password=credential.password,
+            do_ssrf=bool(options["do_ssrf"]),
+            ssrf_urls=list(options["ssrf_urls"]),
+            show_keys=bool(options["show_keys"]),
+            kv_key=options["kv_key"],
+            dump_requested=bool(options["dump_requested"]),
+            dump_all_requested=bool(options["dump_all_requested"]),
+            show_services=bool(options["show_services"]),
+            show_agents=bool(options["show_agents"]),
+            show_checks=bool(options["show_checks"]),
+            check_dump_id=options["check_dump_id"],
+            show_nodes=bool(options["show_nodes"]),
+            service_name=options["service_name"],
+            service_dump_name=options["service_dump_name"],
+            agent_dump_name=options["agent_dump_name"],
+            node_dump_name=options["node_dump_name"],
+            delete_service=bool(options["delete_service"]),
+            service_args=options["service_args"],
+            revshell_enabled=bool(options["revshell_enabled"]),
+            delete_revshell=bool(options["delete_revshell"]),
+            revshell_listen=bool(options["revshell_listen"]),
+            revshell_host=options["revshell_host"],
+            revshell_port=options["revshell_port"],
+            revshell_payload=options["revshell_payload"],
+            revshell_check_id=options["revshell_check_id"],
+            preferred_scheme=state.scheme,
+            debug=bool(getattr(ctx.args, "debug", False)),
+            run_deep_checks=run_deep_checks,
+            debug_emit=ctx.debug_emit,
+            dump_limit=options["dump_limit"],
+        )
+
+
+def detect_consul(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, ConsulLifecycleState):
+        raise TypeError("consul lifecycle state is unavailable")
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    preferred = str(ctx.target.scheme) if ctx.target is not None and ctx.target.scheme else None
+    for attempt in range(attempts):
+        detected, scheme, insecure, tls_auto, leader, error = _probe_consul_scheme(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            preferred_scheme=preferred,
+        )
+        if detected and scheme is not None:
+            state.scheme = scheme
+            state.insecure = insecure
+            state.tls_auto_insecure = tls_auto
+            state.leader = leader
+            state.anonymous_scopes = _consul_access_matrix(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                scheme=scheme,
+                insecure=insecure,
+                headers=None,
+            )
+            state.anonymous_self = _agent_self_probe(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                scheme=scheme,
+                insecure=insecure,
+                headers=None,
+            )
+            anonymous_ctx = type("_AnonymousConsulContext", (), {})()
+            anonymous_ctx.args = ctx.args
+            anonymous_ctx.host = ctx.host
+            anonymous_ctx.port = ctx.port
+            anonymous_ctx.target = ctx.target
+            anonymous_ctx.lifecycle_state = state
+            anonymous_ctx.debug_emit = ctx.debug_emit
+            anonymous_ctx.credential = type(
+                "_AnonymousCredential",
+                (),
+                {"username": None, "password": None, "token": None, "source": "anonymous"},
+            )()
+            return _consul_lifecycle_call(anonymous_ctx, options, run_deep_checks=False)
+        if error is None or attempt >= attempts - 1:
+            return {
+                "timestamp": utc_now_iso(),
+                "host": str(ctx.host),
+                "port": int(ctx.port),
+                "is_consul": False,
+                "status": "fail" if error else "not_consul",
+                "error": error or "not a Consul API",
+            }
+        time.sleep(_retry_delay(attempt))
+    raise AssertionError("unreachable")
+
+
+def authenticate_consul(ctx: Any, _detect_record: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, ConsulLifecycleState) or state.scheme is None:
+        raise TypeError("consul lifecycle state is unavailable")
+    credential = ctx.credential
+    if credential.token is None and credential.username is None and credential.password is None:
+        return _consul_lifecycle_call(ctx, options, run_deep_checks=False)
+    headers = _consul_headers(credential.token, credential.username, credential.password)
+    state.auth_scopes = _consul_access_matrix(
+        str(ctx.host),
+        int(ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        scheme=state.scheme,
+        insecure=state.insecure,
+        headers=headers,
+    )
+    state.auth_self = _agent_self_probe(
+        str(ctx.host),
+        int(ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        scheme=state.scheme,
+        insecure=state.insecure,
+        headers=headers,
+    )
+    state.auth_headers = headers
+    return _consul_lifecycle_call(ctx, options, run_deep_checks=False)
+
+
+def collect_consul_data(ctx: Any, _record: Any, options: dict[str, Any]) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, ConsulLifecycleState):
+        raise TypeError("consul lifecycle state is unavailable")
+    if state.deep_record is None:
+        state.deep_record = _consul_lifecycle_call(ctx, options, run_deep_checks=True)
+    return state.deep_record
 
 
 # Typed runner boundary -----------------------------------------------------

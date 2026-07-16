@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import redposture_core.stage_elastic as elastic_stage
+from redposture_core.audit_models import AuditRecord
 from redposture_core.stage_elastic import (
     _audit_elastic_host,
     _build_discover_query_string,
@@ -33,7 +34,40 @@ from redposture_core.stage_elastic import (
     _verify_authenticate,
     run_elastic_stage,
 )
-from tests.stage_runtime_helpers import patch_runner_for_legacy_target_fake, run_module_targets_for_test
+from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+def _elastic_stage_record(
+    kwargs: dict[str, object],
+    *,
+    status: str,
+    detected: bool = True,
+    error: str | None = None,
+) -> AuditRecord:
+    return AuditRecord(
+        host=str(kwargs["host"]),
+        port=int(kwargs["port"]),
+        service="elastic",
+        module="elastic",
+        status=status,
+        auth_required=status == "auth_required",
+        extra={
+            "is_elastic": detected,
+            "error": error,
+            "scheme": kwargs.get("preferred_scheme") or "http",
+            "version": "8.17.3",
+            "show_endpoints": bool(kwargs.get("show_endpoints")),
+            "show_plugins": bool(kwargs.get("show_plugins")),
+            "show_cluster": bool(kwargs.get("show_cluster")),
+            "show_users": bool(kwargs.get("show_users")),
+            "discover": bool(kwargs.get("discover")),
+            "cat_endpoints": ["/_cluster/health"],
+            "cat_plugins": [],
+            "cluster_health": {"cluster_name": "test", "status": "green", "number_of_nodes": 1},
+            "users": [],
+            "discover_results": [],
+        },
+    )
 
 
 def test_elastic_headers_prefer_apikey_over_basic() -> None:
@@ -1227,13 +1261,14 @@ def test_run_elastic_stage_validation_and_apikey_precedence(monkeypatch: pytest.
     rc = run_elastic_stage(args_bad_pair, logger=SimpleNamespace(log=lambda *a, **k: None))
     assert rc == 2
 
-    captured: dict[str, object] = {}
+    captured: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        captured.update(kwargs)
-        return 1, 0, 1, 0, 0
+        captured.append(dict(kwargs))
+        status = "valid_credentials" if kwargs.get("api_token") else "auth_required"
+        return _elastic_stage_record(kwargs, status=status)
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "elastic", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "elastic", fake_audit_targets)
 
     args = SimpleNamespace(
         timeout=1.0,
@@ -1262,18 +1297,19 @@ def test_run_elastic_stage_validation_and_apikey_precedence(monkeypatch: pytest.
 
     rc = run_elastic_stage(args, logger=SimpleNamespace(log=lambda *a, **k: None))
     assert rc == 0
-    assert captured["username"] is None
-    assert captured["password"] is None
-    assert captured["api_token"] == "ZXM6bGFiLXRva2Vu"
-    assert captured["show_plugins"] is False
+    assert [(call["username"], call["password"], call["api_token"], call["run_deep_checks"]) for call in captured] == [
+        (None, None, None, False),
+        (None, None, "ZXM6bGFiLXRva2Vu", True),
+    ]
+    assert all(call["show_plugins"] is False for call in captured)
 
 
 def test_run_elastic_stage_defcreds_expands_default_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: list[tuple[str | None, str | None]] = []
+    captured: list[tuple[str | None, str | None, bool]] = []
 
     def fake_audit_targets(**kwargs):
-        captured.append((kwargs["username"], kwargs["password"]))
-        return 1, 0, 0, 1, 0
+        captured.append((kwargs["username"], kwargs["password"], kwargs["run_deep_checks"]))
+        return _elastic_stage_record(kwargs, status="auth_required")
 
     class _FakeProgressBar:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -1282,10 +1318,13 @@ def test_run_elastic_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Mo
         def advance(self, _amount: int = 1) -> None:
             return
 
+        def add_total(self, _amount: int) -> None:
+            return
+
         def close(self) -> None:
             return
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "elastic", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "elastic", fake_audit_targets)
     monkeypatch.setattr(
         elastic_stage,
         "start_command_progress",
@@ -1321,9 +1360,10 @@ def test_run_elastic_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Mo
 
     assert rc == 0
     assert captured == [
-        ("elastic", "changeme"),
-        ("elastic", "elastic"),
-        ("elastic", "password"),
+        (None, None, False),
+        ("elastic", "changeme", True),
+        ("elastic", "elastic", True),
+        ("elastic", "password", True),
     ]
 
 
@@ -1345,6 +1385,9 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
             _ = color
             return
 
+        def _paint(self, text: str, _color: str, _stream) -> str:
+            return text
+
         def render_tagged_payload_line(self, _line: str, _tag: str, payload_color: str | None = None) -> bool:
             _ = payload_color
             return False
@@ -1361,6 +1404,9 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
 
         def advance(self, step: int = 1) -> None:
             self.advances.append(int(step))
+
+        def add_total(self, amount: int) -> None:
+            self.total += int(amount)
 
         def close(self) -> None:
             self.closed = True
@@ -1389,12 +1435,15 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
     captured: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (len(kwargs["hosts"]), 1, 0, 0, 0)
+        captured.append(dict(kwargs))
+        return _elastic_stage_record(
+            kwargs,
+            status="fail",
+            detected=False,
+            error="connection refused",
+        )
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "elastic", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "elastic", fake_audit_targets)
 
     args = SimpleNamespace(
         timeout=1.0,
@@ -1421,7 +1470,8 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
     rc = run_elastic_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
     assert len(captured) == 2
-    assert all(call["show_progress"] is False for call in captured)
+    assert [call["port"] for call in captured] == [9200, 9201]
+    assert all(call["run_deep_checks"] is (call["username"] is not None) for call in captured)
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
     assert progress.total == 2
@@ -1449,6 +1499,9 @@ def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
             _ = color
             return
 
+        def _paint(self, text: str, _color: str, _stream) -> str:
+            return text
+
         def render_tagged_payload_line(self, _line: str, _tag: str, payload_color: str | None = None) -> bool:
             _ = payload_color
             return False
@@ -1466,6 +1519,9 @@ def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
         def advance(self, step: int = 1) -> None:
             self.advances.append(int(step))
 
+        def add_total(self, amount: int) -> None:
+            self.total += int(amount)
+
         def close(self) -> None:
             self.closed = True
 
@@ -1475,38 +1531,18 @@ def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
         "start_command_progress",
         lambda _args, label, total, **kwargs: _FakeProgress(label, total, **kwargs),
     )
-    monkeypatch.setattr(elastic_stage, "collect_scan_ports", lambda *_a, **_k: [9200])
-    monkeypatch.setattr(
-        elastic_stage,
-        "collect_scan_target_specs",
-        lambda *_a, **_k: [
-            SimpleNamespace(host="10.0.0.1", scheme=None, explicit_port=None),
-            SimpleNamespace(host="10.0.0.2", scheme=None, explicit_port=None),
-        ],
-    )
-    monkeypatch.setattr(
-        elastic_stage,
-        "build_scan_execution_groups",
-        lambda *_a, **_k: [SimpleNamespace(hosts=["10.0.0.1", "10.0.0.2"], port=9200, scheme_hint=None)],
-    )
-    monkeypatch.setattr(
-        elastic_stage,
-        "filter_open_tcp_hosts_for_credential_file",
-        lambda hosts, *_a, **_k: list(hosts),
-    )
-
     captured: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
-        captured.append(kwargs)
-        if kwargs.get("command_progress") is not None:
-            kwargs["command_progress"].advance(len(kwargs.get("hosts", [])))
-        return (len(kwargs["hosts"]), 0, 0, 1, 0)
+        captured.append(dict(kwargs))
+        return _elastic_stage_record(kwargs, status="auth_required")
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "elastic", fake_audit_targets)
+    patch_module_host_stage_for_test(monkeypatch, "elastic", fake_audit_targets)
 
     creds_file = tmp_path / "creds.txt"
     creds_file.write_text("alice:one\nbob:two\n", encoding="utf-8")
+    targets_file = tmp_path / "targets.txt"
+    targets_file.write_text("10.0.0.1\n10.0.0.2\n", encoding="utf-8")
     output_file = tmp_path / "elastic.txt"
 
     args = SimpleNamespace(
@@ -1514,7 +1550,7 @@ def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
         retries=0,
         port=9200,
         ports=None,
-        targets="targets.txt",
+        targets=str(targets_file),
         hosts=None,
         hosts_file=None,
         username=str(creds_file),
@@ -1537,13 +1573,20 @@ def test_run_elastic_stage_credential_file_output_uses_single_global_progress(
     rc = run_elastic_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
 
     assert rc == 0
-    assert [(call["hosts"], call["username"], call["password"]) for call in captured] == [
-        (["10.0.0.1"], "alice", "one"),
-        (["10.0.0.1"], "bob", "two"),
-        (["10.0.0.2"], "alice", "one"),
-        (["10.0.0.2"], "bob", "two"),
+    assert [call["host"] for call in captured if call["username"] is None and call["run_deep_checks"] is False] == [
+        "10.0.0.1",
+        "10.0.0.2",
     ]
-    assert all(call["show_progress"] is False for call in captured)
+    assert [
+        (call["host"], call["username"], call["password"]) for call in captured if call["username"] is not None
+    ] == [
+        ("10.0.0.1", "alice", "one"),
+        ("10.0.0.1", "bob", "two"),
+        ("10.0.0.2", "alice", "one"),
+        ("10.0.0.2", "bob", "two"),
+    ]
+    assert all(call["run_deep_checks"] is (call["username"] is not None) for call in captured)
+    assert all(call["show_endpoints"] is True for call in captured)
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
     assert progress.total == 4
@@ -1968,19 +2011,21 @@ def test_elastic_low_level_error_and_tls_helpers(monkeypatch: pytest.MonkeyPatch
 
 
 def test_elastic_request_http_error_and_exception_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    http_error = urllib.error.HTTPError(
+        url="http://127.0.0.1:9200/",
+        code=418,
+        msg="teapot",
+        hdrs={"Content-Type": "application/json"},
+        fp=io.BytesIO(b'{"error":"teapot"}'),
+    )
+
     class _UrlOpen:
         def __init__(self, mode: str) -> None:
             self.mode = mode
 
         def __call__(self, _request, **_kwargs):
             if self.mode == "http_error":
-                raise urllib.error.HTTPError(
-                    url="http://127.0.0.1:9200/",
-                    code=418,
-                    msg="teapot",
-                    hdrs={"Content-Type": "application/json"},
-                    fp=io.BytesIO(b'{"error":"teapot"}'),
-                )
+                raise http_error
             raise urllib.error.URLError(OSError("[Errno 111] Connection refused"))
 
     monkeypatch.setattr(elastic_stage.urllib.request, "urlopen", _UrlOpen("http_error"))
@@ -1997,6 +2042,7 @@ def test_elastic_request_http_error_and_exception_paths(monkeypatch: pytest.Monk
     assert payload == b'{"error":"teapot"}'
     assert headers == {"Content-Type": "application/json"}
     assert error is None
+    http_error.close()
 
     monkeypatch.setattr(elastic_stage.urllib.request, "urlopen", _UrlOpen("url_error"))
     status, payload, headers, error = elastic_stage._elastic_request(
@@ -2060,7 +2106,10 @@ def test_collect_discover_results_mixed_and_truncated(monkeypatch: pytest.Monkey
     assert by_index["big"]["truncated"] is True
 
 
-def test_run_elastic_stage_debug_emit_and_payload_rendering(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_elastic_stage_debug_emit_and_payload_rendering(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     class _Console:
         instances: list[_Console] = []
 
@@ -2086,6 +2135,9 @@ def test_run_elastic_stage_debug_emit_and_payload_rendering(monkeypatch: pytest.
             _ = color
             self.plains.append(message)
 
+        def _paint(self, text: str, _color: str, _stream) -> str:
+            return text
+
         def render_tagged_payload_line(self, line: str, tag: str, payload_color: str | None = None) -> bool:
             _ = (tag, payload_color)
             self.render_calls += 1
@@ -2107,16 +2159,12 @@ def test_run_elastic_stage_debug_emit_and_payload_rendering(monkeypatch: pytest.
     )
 
     def fake_audit(**kwargs):
-        emit_line = kwargs["emit_line"]
-        emit_line("ELASTIC\t127.0.0.1\t19200\tpayload-primary")
-        emit_line("ELASTIC\t127.0.0.1\t19200\tpayload-secondary")
-        emit_line("unparsed-line")
         debug_emit = kwargs.get("debug_emit")
         if callable(debug_emit):
             debug_emit("debug-event")
-        return 1, 1, 0, 0, 0
+        return _elastic_stage_record(kwargs, status="open_no_auth")
 
-    patch_runner_for_legacy_target_fake(monkeypatch, "elastic", fake_audit)
+    patch_module_host_stage_for_test(monkeypatch, "elastic", fake_audit)
 
     args = SimpleNamespace(
         timeout=1.0,
@@ -2134,7 +2182,7 @@ def test_run_elastic_stage_debug_emit_and_payload_rendering(monkeypatch: pytest.
         cluster=True,
         user=True,
         discover=True,
-        output="elastic.txt",
+        output=str(tmp_path / "elastic.txt"),
         output_format="txt",
         debug=True,
         workers=1,
@@ -2145,8 +2193,8 @@ def test_run_elastic_stage_debug_emit_and_payload_rendering(monkeypatch: pytest.
     console = _Console.instances[-1]
     assert any("elastic audit started" in message for message in console.infos)
     assert any("debug-event" in message for message in console.infos)
-    assert any("payload-primary" in line for line in console.plains)
-    assert any("unparsed-line" in line for line in console.plains)
+    assert any("Elasticsearch API" in line for line in console.plains)
+    assert any("/_cluster/health" in line for line in console.plains)
 
 
 def test_elastic_classify_and_version_resolution_branches(monkeypatch: pytest.MonkeyPatch) -> None:

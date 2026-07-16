@@ -2,6 +2,7 @@
   {
     "assets": false,
     "auth_required": false,
+    "data_transport_attempts": 1,
     "debug": false,
     "docker": false,
     "download": false,

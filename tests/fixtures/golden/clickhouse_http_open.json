@@ -1,40 +1,48 @@
 [
   {
-    "admin_capability": null,
+    "admin_capability": true,
     "attempted_credentials": 0,
     "auth_attempts": [],
-    "auth_required": null,
+    "auth_required": false,
     "credentials_source": null,
     "database": "default",
-    "database_count": null,
-    "database_names": null,
+    "database_count": 7,
+    "database_names": [
+      "INFORMATION_SCHEMA",
+      "analytics",
+      "default",
+      "iam",
+      "information_schema",
+      "observability",
+      "system"
+    ],
     "default_credentials": false,
     "defcreds_enabled": false,
     "effective_password": null,
     "effective_username": null,
-    "error": "Code: 102. Unexpected packet from server 127.0.0.1:8123 (expected Hello or Exception, got Unknown packet)",
+    "error": null,
     "execute_attempted": false,
-    "execute_capability": null,
+    "execute_capability": true,
     "execute_command": null,
     "execute_error": null,
     "execute_ok": null,
     "execute_output": null,
     "host": "127.0.0.1",
-    "is_clickhouse": false,
+    "is_clickhouse": true,
     "module": "clickhouse",
     "port": 8123,
-    "protocol": "native",
+    "protocol": "http",
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
     "provided_username": null,
-    "read_capability": null,
+    "read_capability": true,
     "service": "clickhouse",
     "show_columns": false,
     "show_columns_limit": null,
-    "show_databases": false,
+    "show_databases": true,
     "show_databases_limit": null,
-    "show_tables": false,
+    "show_tables": true,
     "show_tables_limit": null,
     "sql_attempted": false,
     "sql_command": null,
@@ -44,36 +52,165 @@
     "stages": [
       {
         "attempt": 1,
-        "error": "Code: 102. Unexpected packet from server 127.0.0.1:8123 (expected Hello or Exception, got Unknown packet)",
-        "result": "error",
+        "error": null,
+        "result": "ok",
         "stage_name": "detect_protocol"
       },
       {
         "attempt": 1,
-        "error": "Code: 102. Unexpected packet from server 127.0.0.1:8123 (expected Hello or Exception, got Unknown packet)",
-        "result": "error",
+        "error": null,
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "data"
       }
     ],
-    "status": "fail",
+    "status": "open_no_auth",
     "table_columns": [],
     "table_columns_info": [],
-    "table_dump_enabled": false,
+    "table_dump_enabled": true,
     "table_dump_limit": null,
-    "table_dumps": [],
-    "table_names": null,
-    "table_targets": []
+    "table_dumps": [
+      {
+        "columns": [
+          "order_id",
+          "customer_id",
+          "region",
+          "currency",
+          "amount",
+          "created_at",
+          "status",
+          "payment_ref",
+          "promo_code",
+          "metadata"
+        ],
+        "error": null,
+        "rows": [
+          "[500001, 1001, \"eu\", \"EUR\", \"912.35\", \"<ISO>\", \"paid\", \"txn_3N9h1Q\", \"SPRING24\", \"{\\\"channel\\\":\\\"web\\\",\\\"campaign\\\":\\\"spring\\\"}\"]",
+          "[500002, 1002, \"eu\", \"EUR\", \"122.10\", \"<ISO>\", \"pending\", \"txn_3N9h8A\", null, \"{\\\"channel\\\":\\\"api\\\",\\\"partner\\\":\\\"erp\\\"}\"]",
+          "[500003, 1003, \"us\", \"USD\", \"42.00\", \"<ISO>\", \"cancelled\", \"txn_3N9hMM\", \"VIP10\", \"{\\\"channel\\\":\\\"mobile\\\",\\\"reason\\\":\\\"fraud_check\\\"}\"]",
+          "[500004, 1004, \"us\", \"USD\", \"1715.99\", \"<ISO>\", \"paid\", \"txn_3N9hX2\", null, \"{\\\"channel\\\":\\\"web\\\",\\\"warehouse\\\":\\\"us-east-2\\\"}\"]"
+        ],
+        "table": "analytics.orders"
+      },
+      {
+        "columns": [
+          "session_id",
+          "user_id",
+          "email",
+          "source_ip",
+          "device",
+          "issued_at",
+          "expires_at",
+          "revoked",
+          "token",
+          "auth_provider",
+          "mfa"
+        ],
+        "error": null,
+        "rows": [
+          "[\"aaaaaaaa-aaaa-aaaa-aaaa-<DOCKER_HEX>\", 1001, \"alice@acme.io\", \"10.10.10.10\", \"Chrome/macOS\", \"<ISO>\", \"<ISO>\", 0, \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.alice.session.sig\", \"oidc\", 1]",
+          "[\"bbbbbbbb-bbbb-bbbb-bbbb-<DOCKER_HEX>\", 1002, \"bob@acme.io\", \"10.10.10.11\", \"Safari/iOS\", \"<ISO>\", \"<ISO>\", 0, \"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.bob.session.sig\", \"oidc\", 1]",
+          "[\"cccccccc-cccc-cccc-cccc-<DOCKER_HEX>\", 1003, \"carol@globex.io\", \"10.10.11.2\", \"Firefox/Linux\", \"<ISO>\", \"<ISO>\", 1, \"legacy-token-carol-2026\", \"local\", 0]",
+          "[\"dddddddd-dddd-dddd-dddd-<DOCKER_HEX>\", 1004, \"dave@globex.io\", \"10.10.12.9\", \"Edge/Windows\", \"<ISO>\", \"<ISO>\", 0, \"oauth2-at-0f3f4d5e6a\", \"saml\", 1]"
+        ],
+        "table": "analytics.sessions"
+      },
+      {
+        "columns": [
+          "client_id",
+          "owner",
+          "secret",
+          "scopes",
+          "created_at",
+          "rotate_at"
+        ],
+        "error": null,
+        "rows": [
+          "[\"billing-etl\", \"finance-data\", \"billing-etl-secret-2026\", [\"read:billing\", \"read:warehouse\"], \"<ISO>\", \"<ISO>\"]",
+          "[\"grafana-sync\", \"platform-observability\", \"grafana-sync-token-2026\", [\"read:metrics\", \"write:alerts\"], \"<ISO>\", \"<ISO>\"]",
+          "[\"support-portal\", \"customer-success\", \"support-portal-api-key\", [\"read:users\"], \"<ISO>\", \"<ISO>\"]"
+        ],
+        "table": "iam.api_clients"
+      },
+      {
+        "columns": [
+          "ts",
+          "cluster",
+          "env",
+          "service",
+          "level",
+          "trace_id",
+          "request_id",
+          "method",
+          "route",
+          "status_code",
+          "latency_ms",
+          "client_ip",
+          "user_agent",
+          "upstream",
+          "message",
+          "attrs"
+        ],
+        "error": null,
+        "rows": [
+          "[\"<ISO>\", \"eu-1\", \"prod\", \"api-gateway\", \"INFO\", \"11111111-1111-1111-1111-<DOCKER_HEX>\", \"req-7f1a4c\", \"GET\", \"/v1/profile\", 200, 31, \"10.20.4.15\", \"curl/8.7.1\", \"user-service:8080\", \"profile loaded\", {\"tenant\": \"acme\", \"role\": \"user\"}]",
+          "[\"<ISO>\", \"eu-1\", \"prod\", \"api-gateway\", \"WARN\", \"22222222-2222-2222-2222-<DOCKER_HEX>\", \"req-a9ff11\", \"POST\", \"/v1/payments\", 429, 184, \"10.20.8.94\", \"okhttp/4.12\", \"billing-service:8080\", \"rate limited request\", {\"tenant\": \"globex\", \"limit\": \"100rps\"}]",
+          "[\"<ISO>\", \"us-1\", \"stage\", \"api-gateway\", \"INFO\", \"88888888-8888-8888-8888-<DOCKER_HEX>\", \"req-webhook-77\", \"POST\", \"/v1/webhooks\", 202, 42, \"172.18.33.4\", \"Go-http-client/1.1\", \"webhook-service:8080\", \"webhook accepted\", {\"provider\": \"stripe\", \"event\": \"invoice.paid\"}]",
+          "[\"<ISO>\", \"eu-1\", \"prod\", \"auth-service\", \"INFO\", \"44444444-4444-4444-4444-<DOCKER_HEX>\", \"req-03d9cd\", \"POST\", \"/v1/login\", 200, 94, \"10.20.4.99\", \"Mozilla/5.0\", \"iam-core:8080\", \"login successful\", {\"auth_provider\": \"oidc\", \"mfa\": \"true\"}]",
+          "[\"<ISO>\", \"eu-1\", \"prod\", \"auth-service\", \"WARN\", \"55555555-5555-5555-5555-<DOCKER_HEX>\", \"req-bad-cred\", \"POST\", \"/v1/login\", 401, 77, \"10.20.4.77\", \"Mozilla/5.0\", \"iam-core:8080\", \"invalid credentials\", {\"auth_provider\": \"local\", \"username\": \"admin\"}]",
+          "[\"<ISO>\", \"us-1\", \"stage\", \"edge-proxy\", \"INFO\", \"66666666-6666-6666-6666-<DOCKER_HEX>\", \"req-cache-hit\", \"GET\", \"/assets/app.js\", 304, 6, \"172.18.10.5\", \"Chrome/121\", \"cdn-node-03\", \"cache hit\", {\"cache\": \"hit\", \"node\": \"edge-03\"}]",
+          "[\"<ISO>\", \"us-1\", \"stage\", \"etl-worker\", \"INFO\", \"77777777-7777-7777-7777-<DOCKER_HEX>\", \"etl-20260311-01\", \"COPY\", \"/etl/load/orders\", 202, 3810, \"172.18.20.9\", \"etl/2.1\", \"clickhouse-auth:9000\", \"batch accepted\", {\"batch_id\": \"orders-20260311-01\", \"rows\": \"12034\"}]",
+          "[\"<ISO>\", \"eu-1\", \"prod\", \"scheduler\", \"ERROR\", \"33333333-3333-3333-3333-<DOCKER_HEX>\", \"job-rotate-22\", \"EXEC\", \"/jobs/rotate-keys\", 500, 1542, \"10.30.1.11\", \"worker/1.9\", \"vault-sync:9001\", \"key rotation failed\", {\"vault_path\": \"kv/prod/reporting\", \"retry\": \"true\"}]"
+        ],
+        "table": "observability.events"
+      },
+      {
+        "columns": [
+          "ts",
+          "metric_name",
+          "labels",
+          "value"
+        ],
+        "error": null,
+        "rows": [
+          "[\"<ISO>\", \"active_sessions\", {\"service\": \"auth-service\", \"realm\": \"internal\"}, 1432.0]",
+          "[\"<ISO>\", \"cpu_usage_percent\", {\"service\": \"etl-worker\", \"instance\": \"etl-02\"}, 82.4]",
+          "[\"<ISO>\", \"cpu_usage_percent\", {\"service\": \"etl-worker\", \"instance\": \"etl-03\"}, 64.8]",
+          "[\"<ISO>\", \"http_requests_total\", {\"service\": \"api-gateway\", \"code\": \"200\", \"method\": \"GET\"}, 154920.0]",
+          "[\"<ISO>\", \"http_requests_total\", {\"service\": \"api-gateway\", \"code\": \"500\", \"method\": \"POST\"}, 44.0]",
+          "[\"<ISO>\", \"http_requests_total\", {\"service\": \"auth-service\", \"code\": \"401\", \"method\": \"POST\"}, 312.0]",
+          "[\"<ISO>\", \"http_requests_total\", {\"service\": \"auth-service\", \"code\": \"200\", \"method\": \"POST\"}, 8840.0]",
+          "[\"<ISO>\", \"login_failures_total\", {\"service\": \"auth-service\", \"realm\": \"internal\"}, 27.0]",
+          "[\"<ISO>\", \"queue_depth\", {\"service\": \"scheduler\", \"queue\": \"billing-sync\"}, 17.0]",
+          "[\"<ISO>\", \"queue_depth\", {\"service\": \"scheduler\", \"queue\": \"mailer\"}, 3.0]"
+        ],
+        "table": "observability.metric_samples"
+      }
+    ],
+    "table_names": [
+      "analytics.orders",
+      "analytics.sessions",
+      "iam.api_clients",
+      "observability.events",
+      "observability.metric_samples"
+    ],
+    "table_targets": [
+      "analytics.orders",
+      "analytics.sessions",
+      "iam.api_clients",
+      "observability.events",
+      "observability.metric_samples"
+    ]
   }
 ]

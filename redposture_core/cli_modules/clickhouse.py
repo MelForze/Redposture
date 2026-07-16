@@ -34,7 +34,7 @@ def configure_clickhouse_parser(
         help=(
             "ClickHouse port spec: single port, list/range, or file "
             "(examples: 9000, 8123, 9000,8123, ./ports.txt). "
-            "If omitted, scans 9000, 19000."
+            "If omitted, scans native 9000/19000 or HTTP 8123/18123 with --http."
         ),
     )
     add_multi_ports_flag(common)

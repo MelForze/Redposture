@@ -6,8 +6,9 @@ import json
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable
-from dataclasses import replace
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from typing import Any
 
 from ...clients import transport
@@ -101,7 +102,47 @@ _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 
+_LIFECYCLE_TELEMETRY_FIELDS = (
+    "stages",
+    "stage_failed_at",
+    "stage_durations_ms",
+    "stage_attempts",
+    "debug_events",
+    "debug_events_streamed",
+)
+
 _THREAD_LOCAL_DEBUG_EMIT = threading.local()
+
+
+@dataclass
+class ZooKeeperLifecycleState:
+    """Per-target ZooKeeper clients and anonymous protocol evidence."""
+
+    anonymous_client: _ZkClient | None = None
+    selected_transport_config: ZkTransportConfig | None = None
+    root_children: list[str] | None = None
+    root_err: int | None = None
+    auth_required: bool | None = None
+    auth_inference_source: str = "not_run"
+    auth_probe_trace: list[str] = dataclass_field(default_factory=list)
+    credential_clients: dict[tuple[str | None, str | None, str], _ZkClient] = dataclass_field(default_factory=dict)
+
+    def close(self) -> None:
+        clients = list(self.credential_clients.values())
+        self.credential_clients.clear()
+        if self.anonymous_client is not None:
+            clients.append(self.anonymous_client)
+            self.anonymous_client = None
+        seen: set[int] = set()
+        for client in clients:
+            marker = id(client)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            try:
+                client.close()
+            except OSError:
+                pass
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -1431,6 +1472,708 @@ def _audit_zookeeper_host(
         attempts=last_attempts,
         max_attempts=last_max_attempts,
     )
+
+
+def _zookeeper_lifecycle_key(ctx: Any) -> tuple[str | None, str | None, str]:
+    credential = ctx.credential
+    return credential.username, credential.password, str(credential.source or "provided")
+
+
+def _zookeeper_lifecycle_client(
+    ctx: Any,
+    transport_config: ZkTransportConfig | None,
+) -> _ZkClient:
+    if transport_config is None:
+        return _ZkClient(str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)))
+    return _ZkClient(
+        str(ctx.host),
+        int(ctx.port),
+        float(getattr(ctx.args, "timeout", 5.0)),
+        transport_config=transport_config,
+    )
+
+
+def _zookeeper_lifecycle_payload(
+    ctx: Any,
+    options: Mapping[str, Any],
+    state: ZooKeeperLifecycleState,
+    *,
+    status: str,
+    is_zookeeper: bool,
+    provided_credentials_ok: bool | None = None,
+    credential_verdict: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    credential = ctx.credential
+    provided = credential.username is not None and credential.password is not None
+    return {
+        "timestamp": utc_now_iso(),
+        "host": str(ctx.host),
+        "port": int(ctx.port),
+        "is_zookeeper": is_zookeeper,
+        "status": status,
+        "auth_required": state.auth_required,
+        "provided_credentials": provided and credential.source != "default",
+        "provided_username": credential.username,
+        "provided_password": credential.password if provided and credential.source != "default" else None,
+        "provided_credentials_ok": provided_credentials_ok,
+        "credential_verdict": credential_verdict,
+        "defcreds_enabled": credential.source == "default",
+        "show_znodes": bool(options["show_znodes"]),
+        "dump": bool(options["dump"]),
+        "dump_limit": options["dump_limit"],
+        "query_znode": options["query_znode"],
+        "max_znodes": int(options["max_znodes"]),
+        "znode_count": None,
+        "znodes": None,
+        "znode_details": None,
+        "znode_values": None,
+        "znodes_truncated": False,
+        "query_znode_value": None,
+        "query_znode_dump": None,
+        "query_znode_dump_error": None,
+        "can_create_znode": None,
+        "can_delete_znode": None,
+        "znode_capability_error": None,
+        "auth_inference_source": state.auth_inference_source,
+        "auth_probe_trace": list(state.auth_probe_trace),
+        "connect_ms": None,
+        "auth_ms": None,
+        "enumerate_ms": None,
+        "dump_ms": None,
+        "elapsed_ms": None,
+        "connect_error": None,
+        "auth_error": error if provided else None,
+        "enum_error": None,
+        "query_error": None,
+        "dump_error": None,
+        "attempts": 1,
+        "max_attempts": max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1),
+        "znode_count_unknown": False,
+        "znode_count_attempt_timeouts": [],
+        "znode_count_partial": False,
+        "stage2_error": None,
+        "stages": [],
+        "stage_failed_at": None,
+        "stage_durations_ms": {},
+        "stage_attempts": {},
+        "debug_events": [],
+        "debug_events_streamed": False,
+        "error": error,
+    }
+
+
+def _zookeeper_append_lifecycle_stage(
+    payload: Mapping[str, Any],
+    *,
+    attempt: int,
+    duration_ms: int,
+    result: str,
+    error: str | None,
+    max_attempts: int,
+) -> dict[str, Any]:
+    """Append one detect trace while keeping all aggregate telemetry coherent."""
+
+    record = dict(payload)
+    raw_stages = record.get("stages")
+    stages = [dict(item) for item in raw_stages if isinstance(item, dict)] if isinstance(raw_stages, list) else []
+    stage_attempt = max(1, int(attempt))
+    stage_duration = max(0, int(duration_ms))
+    stage_error = str(error or "").strip() or None
+    stages.append(
+        {
+            "stage_name": _STAGE_DETECT_PROTOCOL,
+            "attempt": stage_attempt,
+            "duration_ms": stage_duration,
+            "result": str(result or "fail"),
+            "error": stage_error,
+        }
+    )
+
+    raw_durations = record.get("stage_durations_ms")
+    durations = dict(raw_durations) if isinstance(raw_durations, dict) else {}
+    durations[_STAGE_DETECT_PROTOCOL] = (
+        max(
+            0,
+            int(durations.get(_STAGE_DETECT_PROTOCOL, 0) or 0),
+        )
+        + stage_duration
+    )
+
+    raw_attempts = record.get("stage_attempts")
+    stage_attempts = dict(raw_attempts) if isinstance(raw_attempts, dict) else {}
+    stage_attempts[_STAGE_DETECT_PROTOCOL] = max(
+        int(stage_attempts.get(_STAGE_DETECT_PROTOCOL, 0) or 0),
+        stage_attempt,
+    )
+
+    stage_failed_at = str(record.get("stage_failed_at") or "").strip() or None
+    if stage_failed_at is None and result in {"fail", "timeout"}:
+        stage_failed_at = _STAGE_DETECT_PROTOCOL
+    record.update(
+        {
+            "attempts": max(int(record.get("attempts", 0) or 0), stage_attempt),
+            "max_attempts": max(int(record.get("max_attempts", 0) or 0), max(1, int(max_attempts))),
+            "stages": stages,
+            "stage_failed_at": stage_failed_at,
+            "stage_durations_ms": durations,
+            "stage_attempts": stage_attempts,
+        }
+    )
+    return record
+
+
+def _zookeeper_update_lifecycle_payload(
+    payload: dict[str, Any],
+    update: Mapping[str, Any],
+) -> None:
+    """Refresh lifecycle fields without discarding traces owned by the runner."""
+
+    preserved = {field: payload[field] for field in _LIFECYCLE_TELEMETRY_FIELDS if field in payload}
+    payload.update(update)
+    payload.update(preserved)
+
+
+def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Open one anonymous session and classify ZooKeeper from the root query."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, ZooKeeperLifecycleState):
+        raise TypeError("zookeeper lifecycle state is unavailable")
+    requested_transport = options.get("transport_config")
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    last_error: str | None = None
+    failed_attempts: list[tuple[int, int, str]] = []
+    for attempt in range(attempts):
+        attempt_started = time.monotonic()
+        client = _zookeeper_lifecycle_client(
+            ctx,
+            requested_transport if isinstance(requested_transport, ZkTransportConfig) else None,
+        )
+        try:
+            client.connect()
+            selected_transport = getattr(client, "selected_transport", None)
+            if isinstance(requested_transport, ZkTransportConfig):
+                selected_mode = (
+                    selected_transport if selected_transport in {"plaintext", "tls"} else requested_transport.mode
+                )
+                selected_config = replace(requested_transport, mode=selected_mode)
+            else:
+                selected_config = None
+            root_children, root_err, _root_stat = client.get_children2("/")
+            if selected_config is not None:
+                auth_required, source, trace = _infer_auth_required_from_anonymous_probes(
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    root_err,
+                    options.get("query_znode"),
+                    transport_config=selected_config,
+                )
+            else:
+                auth_required, source, trace = _infer_auth_required_from_anonymous_probes(
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    root_err,
+                    options.get("query_znode"),
+                )
+            state.anonymous_client = client
+            state.selected_transport_config = selected_config
+            state.root_children = list(root_children or [])
+            state.root_err = int(root_err)
+            state.auth_required = auth_required
+            state.auth_inference_source = source
+            state.auth_probe_trace = list(trace)
+            if root_err == _ZK_ERR_OK:
+                status = "open_no_auth"
+                error = None
+            elif root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH} and auth_required is True:
+                status = "auth_required"
+                error = None
+            else:
+                status = "fail"
+                error = f"root query failed: {_zk_error_name(root_err)}"
+            payload = _zookeeper_lifecycle_payload(
+                ctx,
+                options,
+                state,
+                status=status,
+                is_zookeeper=True,
+                error=error,
+            )
+            payload["attempts"] = attempt + 1
+            # Successful detection intentionally leaves telemetry empty. The
+            # shared runner then owns the complete detect/auth/capabilities/data
+            # contract instead of mixing runner- and module-owned traces.
+            return payload
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            last_error = _friendly_error_from_exception(exc)
+            failed_attempts.append(
+                (
+                    attempt + 1,
+                    int((time.monotonic() - attempt_started) * 1000),
+                    last_error,
+                )
+            )
+            client.close()
+            if attempt < attempts - 1:
+                time.sleep(_retry_delay(attempt))
+    payload = _zookeeper_lifecycle_payload(
+        ctx,
+        options,
+        state,
+        status="fail",
+        is_zookeeper=False,
+        error=last_error or "connection failed",
+    )
+    payload["connect_error"] = last_error or "connection failed"
+    for failed_attempt, duration_ms, attempt_error in failed_attempts:
+        payload = _zookeeper_append_lifecycle_stage(
+            payload,
+            attempt=failed_attempt,
+            duration_ms=duration_ms,
+            result="retry" if failed_attempt < attempts else "fail",
+            error=attempt_error,
+            max_attempts=attempts,
+        )
+    return payload
+
+
+def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Try one digest identity without replaying the anonymous root detect."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, ZooKeeperLifecycleState):
+        raise TypeError("zookeeper lifecycle state is unavailable")
+    payload = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
+    credential = ctx.credential
+    if credential.username is None and credential.password is None:
+        return payload
+
+    username = credential.username or ""
+    password = credential.password or ""
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    last_transient_error: str | None = None
+    for attempt in range(attempts):
+        client = _zookeeper_lifecycle_client(ctx, state.selected_transport_config)
+        try:
+            client.connect()
+            auth_ok, auth_error = client.auth_digest(username, password)
+            authenticated_root_err: int | None = None
+            if auth_ok:
+                _children, authenticated_root_err, _stat = client.get_children2("/")
+
+            transient_error: str | None = None
+            if not auth_ok and _is_retryable_stage_error(auth_error):
+                transient_error = str(auth_error or "authentication probe failed")
+            elif (
+                auth_ok
+                and authenticated_root_err is not None
+                and authenticated_root_err != _ZK_ERR_OK
+                and _is_retryable_stage_error(_zk_error_name(authenticated_root_err))
+            ):
+                transient_error = f"root query failed: {_zk_error_name(authenticated_root_err)}"
+            if transient_error is not None:
+                last_transient_error = transient_error
+                client.close()
+                if attempt < attempts - 1:
+                    time.sleep(_retry_delay(attempt))
+                    continue
+                break
+
+            anonymous_root_err = state.root_err
+            provided_ok: bool | None
+            credential_verdict: str
+            result_error: str | None = None
+            if (
+                auth_ok
+                and anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH}
+                and authenticated_root_err == _ZK_ERR_OK
+            ):
+                provided_ok = True
+                credential_verdict = "valid"
+                previous = state.credential_clients.get(_zookeeper_lifecycle_key(ctx))
+                state.credential_clients[_zookeeper_lifecycle_key(ctx)] = client
+                if previous is not None and previous is not client:
+                    previous.close()
+                status = "weak_default_creds" if credential.source == "default" else "valid_credentials"
+            elif auth_ok and anonymous_root_err == _ZK_ERR_OK and authenticated_root_err == _ZK_ERR_OK:
+                provided_ok = None
+                credential_verdict = "unverified_anonymous"
+                status = "open_no_auth"
+                client.close()
+            elif not auth_ok:
+                provided_ok = False
+                credential_verdict = "rejected"
+                status = "invalid_credentials_anonymous" if state.auth_required is False else "auth_required"
+                result_error = (
+                    None if status == "invalid_credentials_anonymous" else auth_error or "authentication failed"
+                )
+                client.close()
+            else:
+                provided_ok = None
+                credential_verdict = "unverified"
+                status = "open_no_auth" if state.auth_required is False else "auth_required"
+                result_error = (
+                    f"root query failed: {_zk_error_name(authenticated_root_err)}"
+                    if authenticated_root_err is not None
+                    else auth_error or "authentication could not be verified"
+                )
+                client.close()
+
+            _zookeeper_update_lifecycle_payload(
+                payload,
+                _zookeeper_lifecycle_payload(
+                    ctx,
+                    options,
+                    state,
+                    status=status,
+                    is_zookeeper=True,
+                    provided_credentials_ok=provided_ok,
+                    credential_verdict=credential_verdict,
+                    error=result_error,
+                ),
+            )
+            return payload
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            client.close()
+            last_transient_error = _friendly_error_from_exception(exc)
+            if attempt < attempts - 1:
+                time.sleep(_retry_delay(attempt))
+                continue
+            break
+
+    _zookeeper_update_lifecycle_payload(
+        payload,
+        _zookeeper_lifecycle_payload(
+            ctx,
+            options,
+            state,
+            status="open_no_auth" if state.auth_required is False else "fail",
+            is_zookeeper=True,
+            provided_credentials_ok=None,
+            credential_verdict="unverified",
+            error=last_transient_error or "authentication could not be verified",
+        ),
+    )
+    return payload
+
+
+def _reopen_zookeeper_lifecycle_client(
+    ctx: Any,
+    state: ZooKeeperLifecycleState,
+    *,
+    authenticated: bool,
+) -> _ZkClient:
+    """Replace an operational session without replaying anonymous detection."""
+
+    key = _zookeeper_lifecycle_key(ctx)
+    previous = state.credential_clients.get(key) if authenticated else state.anonymous_client
+    client = _zookeeper_lifecycle_client(ctx, state.selected_transport_config)
+    try:
+        client.connect()
+        if authenticated:
+            credential = ctx.credential
+            auth_ok, auth_error = client.auth_digest(
+                credential.username or "",
+                credential.password or "",
+            )
+            if not auth_ok:
+                raise ConnectionError(auth_error or "authentication failed while reopening session")
+    except (TimeoutError, ConnectionError, OSError, ValueError):
+        client.close()
+        raise
+    if authenticated:
+        state.credential_clients[key] = client
+    else:
+        state.anonymous_client = client
+    if previous is not None and previous is not client:
+        previous.close()
+    return client
+
+
+def _enumerate_zookeeper_lifecycle(
+    ctx: Any,
+    options: Mapping[str, Any],
+    state: ZooKeeperLifecycleState,
+    client: _ZkClient,
+    *,
+    authenticated: bool,
+    collect_paths: bool,
+    progress_hook: Callable[[dict[str, Any]], None] | None,
+) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
+    credential = ctx.credential
+    enum_kwargs: dict[str, Any] = {
+        "collect_paths": collect_paths,
+        "enum_workers": int(options["enum_workers"]),
+        "auth_username": credential.username if authenticated else None,
+        "auth_password": credential.password if authenticated else None,
+    }
+    if state.selected_transport_config is not None:
+        enum_kwargs["transport_config"] = state.selected_transport_config
+    try:
+        return _enumerate_znodes(
+            client,
+            int(options["max_znodes"]),
+            progress_hook,
+            **enum_kwargs,
+        )
+    except TypeError as exc:
+        if not is_signature_compat_typeerror(
+            exc,
+            expected_keywords={
+                "collect_paths",
+                "enum_workers",
+                "auth_username",
+                "auth_password",
+                "transport_config",
+            },
+        ):
+            raise
+        try:
+            return _enumerate_znodes(
+                client,
+                int(options["max_znodes"]),
+                progress_hook,
+                collect_paths=collect_paths,
+            )
+        except TypeError as legacy_exc:
+            if not is_signature_compat_typeerror(
+                legacy_exc,
+                expected_keywords={"collect_paths"},
+            ):
+                raise
+            return _enumerate_znodes(
+                client,
+                int(options["max_znodes"]),
+                progress_hook,
+            )
+
+
+def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Run capability, enumeration and dump work once on the selected session."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, ZooKeeperLifecycleState):
+        raise TypeError("zookeeper lifecycle state is unavailable")
+    payload = dict(record.to_dict() if hasattr(record, "to_dict") else record)
+    status = str(payload.get("status") or "")
+    client = state.credential_clients.get(_zookeeper_lifecycle_key(ctx))
+    authenticated = client is not None and status in {"valid_credentials", "weak_default_creds"}
+    if client is None:
+        client = state.anonymous_client
+    if client is None:
+        return payload
+
+    started = time.monotonic()
+    show_znodes = bool(options["show_znodes"])
+    dump = bool(options["dump"])
+    query_znode = options.get("query_znode")
+    collect_paths = bool(show_znodes or (dump and not query_znode))
+    progress_hook: Callable[[dict[str, Any]], None] | None = None
+    if callable(ctx.debug_emit):
+
+        def _progress(event: dict[str, Any]) -> None:
+            event_type = str(event.get("event") or "")
+            if event_type == "enumerate_progress":
+                ctx.debug_emit(
+                    f"{ctx.host}:{ctx.port} enumerate progress "
+                    f"discovered={int(event.get('total_count') or 0)} "
+                    f"listed={int(event.get('listed_count') or 0)} "
+                    f"processed={int(event.get('processed_parents') or 0)} "
+                    f"queued={int(event.get('queued') or 0)}"
+                )
+            elif event_type == "enumerate_done":
+                ctx.debug_emit(
+                    f"{ctx.host}:{ctx.port} enumerate done "
+                    f"discovered={int(event.get('total_count') or 0)} "
+                    f"listed={int(event.get('listed_count') or 0)} "
+                    f"processed={int(event.get('processed_parents') or 0)} "
+                    f"queued={int(event.get('queued') or 0)} "
+                    f"elapsed={float(event.get('elapsed_s') or 0.0):.1f}s"
+                )
+
+        progress_hook = _progress
+
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    can_create: bool | None = None
+    can_delete: bool | None = None
+    capability_error: str | None = None
+    listed: list[str] = []
+    total_count = 0
+    truncated = False
+    listed_meta: dict[str, dict[str, Any]] = {}
+    enum_error: str | None = None
+    enumerate_ms = 0
+    reopen_error: str | None = None
+    attempts_done = 0
+    for attempt in range(attempts):
+        attempts_done = attempt + 1
+        if attempt > 0:
+            try:
+                client = _reopen_zookeeper_lifecycle_client(
+                    ctx,
+                    state,
+                    authenticated=authenticated,
+                )
+                reopen_error = None
+            except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+                reopen_error = _friendly_error_from_exception(exc)
+                if attempt < attempts - 1:
+                    time.sleep(_retry_delay(attempt))
+                    continue
+                break
+
+        can_create, can_delete, capability_error = _probe_znode_create_delete(
+            client,
+            str(ctx.host),
+            int(ctx.port),
+        )
+        if capability_error and _is_retryable_stage_error(capability_error) and attempt < attempts - 1:
+            time.sleep(_retry_delay(attempt))
+            continue
+
+        enum_started = time.monotonic()
+        try:
+            listed, total_count, truncated, listed_meta, enum_error = _enumerate_zookeeper_lifecycle(
+                ctx,
+                options,
+                state,
+                client,
+                authenticated=authenticated,
+                collect_paths=collect_paths,
+                progress_hook=progress_hook,
+            )
+        finally:
+            enumerate_ms += int((time.monotonic() - enum_started) * 1000)
+        if enum_error and _is_retryable_stage_error(enum_error) and attempt < attempts - 1:
+            time.sleep(_retry_delay(attempt))
+            continue
+        break
+
+    sorted_znodes = sorted(listed) if collect_paths else []
+    znode_details = (
+        [_znode_detail_entry(path, listed_meta.get(path)) for path in sorted_znodes] if collect_paths else None
+    )
+
+    noauth_text = "Access Denied"
+    dump_started = time.monotonic() if (dump or query_znode) else None
+    dump_errors: set[str] = set()
+    znode_values: list[str] | None = None
+    if dump and not query_znode and reopen_error is None:
+        znode_values = []
+        dump_limit = options.get("dump_limit")
+        dump_paths = sorted_znodes[: int(dump_limit)] if isinstance(dump_limit, int) else sorted_znodes
+        for path in dump_paths:
+            value, value_err, _stat = client.get_data(path)
+            if value_err == _ZK_ERR_OK:
+                znode_values.append(f"{path}:{_format_znode_data(value)}")
+            elif value_err == _ZK_ERR_NOAUTH:
+                znode_values.append(f"{path}:<{noauth_text}>")
+                dump_errors.add("NOAUTH")
+            elif value_err == _ZK_ERR_NONODE:
+                znode_values.append(f"{path}:<not found>")
+                dump_errors.add("NONODE")
+            else:
+                error_name = _zk_error_name(value_err)
+                znode_values.append(f"{path}:<error:{error_name}>")
+                dump_errors.add(error_name)
+
+    query_value: str | None = None
+    query_dump: str | None = None
+    query_dump_error: str | None = None
+    query_error: str | None = None
+    if query_znode and reopen_error is None:
+        children, query_err, query_stat = client.get_children2(str(query_znode))
+        if query_err == _ZK_ERR_OK:
+            query_value = (
+                f"{query_znode} (children:{len(children or [])},"
+                f"bytes:{int((query_stat or {}).get('data_length') or 0)})"
+            )
+            if dump:
+                value, value_err, _stat = client.get_data(str(query_znode))
+                if value_err == _ZK_ERR_OK:
+                    query_dump = _format_znode_data(value)
+                elif value_err == _ZK_ERR_NOAUTH:
+                    query_dump_error = noauth_text
+                    dump_errors.add("NOAUTH")
+                elif value_err == _ZK_ERR_NONODE:
+                    query_dump_error = "znode not found"
+                    dump_errors.add("NONODE")
+                else:
+                    query_dump_error = _zk_error_name(value_err)
+                    dump_errors.add(query_dump_error)
+        elif query_err == _ZK_ERR_NOAUTH:
+            query_value = f"{query_znode}:<{noauth_text}>"
+            query_error = "NOAUTH"
+            if dump:
+                query_dump_error = noauth_text
+                dump_errors.add("NOAUTH")
+        elif query_err == _ZK_ERR_NONODE:
+            query_value = f"{query_znode}:<not found>"
+            query_error = "NONODE"
+            if dump:
+                query_dump_error = "znode not found"
+                dump_errors.add("NONODE")
+        else:
+            query_error = _zk_error_name(query_err)
+            query_value = f"{query_znode}:<error:{query_error}>"
+            if dump:
+                query_dump_error = query_error
+                dump_errors.add(query_error)
+
+    dump_ms = int((time.monotonic() - dump_started) * 1000) if dump_started is not None else None
+    root_count = len(state.root_children or [])
+    if total_count == 0 and root_count > 0:
+        total_count = root_count
+    errors: list[str] = []
+    for item in (payload.get("error"), reopen_error, capability_error, enum_error):
+        clean = str(item or "").strip()
+        if clean and clean not in errors:
+            errors.append(clean)
+    prior_stage_attempts_raw = payload.get("stage_attempts")
+    prior_stage_attempts: dict[str, Any] = (
+        dict(prior_stage_attempts_raw) if isinstance(prior_stage_attempts_raw, dict) else {}
+    )
+    payload.update(
+        {
+            "timestamp": utc_now_iso(),
+            "show_znodes": show_znodes,
+            "dump": dump,
+            "dump_limit": options.get("dump_limit"),
+            "query_znode": query_znode,
+            "max_znodes": int(options["max_znodes"]),
+            "znode_count": total_count,
+            "znodes": sorted_znodes,
+            "znode_details": znode_details,
+            "znode_values": znode_values,
+            "znodes_truncated": bool(truncated),
+            "query_znode_value": query_value,
+            "query_znode_dump": query_dump,
+            "query_znode_dump_error": query_dump_error,
+            "can_create_znode": can_create,
+            "can_delete_znode": can_delete,
+            "znode_capability_error": capability_error,
+            "enumerate_ms": enumerate_ms,
+            "dump_ms": dump_ms,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "connect_error": reopen_error,
+            "enum_error": enum_error,
+            "query_error": query_error,
+            "dump_error": ",".join(sorted(dump_errors)) if dump_errors else None,
+            "znode_count_partial": bool(enum_error),
+            "attempts": attempts_done,
+            "max_attempts": attempts,
+            "stage_attempts": {
+                **prior_stage_attempts,
+                "access_capabilities": attempts_done,
+                "data": attempts_done,
+            },
+            "error": "; ".join(errors) if errors else None,
+        }
+    )
+    return payload
 
 
 def _nxc_prefix(record: dict[str, Any]) -> str:

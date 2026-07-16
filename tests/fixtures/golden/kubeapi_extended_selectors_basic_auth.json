@@ -6,28 +6,43 @@
     "auth_valid": true,
     "can_exec_pod": null,
     "can_list_namespaces": true,
-    "can_list_pods": null,
+    "can_list_pods": true,
     "can_list_secrets": null,
     "error": null,
     "exec_command": null,
-    "exec_pod": null,
+    "exec_pod": "redposture-api",
     "exec_result": null,
     "host": "127.0.0.1",
     "https": true,
     "insecure_effective": true,
     "is_kubeapi": true,
     "module": "kubeapi",
-    "namespace_filters": [],
-    "namespaces": [],
+    "namespace_filters": [
+      "default"
+    ],
+    "namespaces": [
+      "default",
+      "finance",
+      "kube-node-lease",
+      "kube-public",
+      "kube-system",
+      "observability",
+      "redposture-lab"
+    ],
     "namespaces_error": null,
-    "pods": [],
+    "pods": [
+      {
+        "containers": 1,
+        "namespace": "default"
+      }
+    ],
     "pods_error": null,
     "port": 26443,
     "secrets": [],
     "secrets_error": null,
     "service": "kubeapi",
-    "show_namespaces": false,
-    "show_pods": false,
+    "show_namespaces": true,
+    "show_pods": true,
     "show_secrets": false,
     "stages": [
       {
@@ -39,8 +54,20 @@
       {
         "attempt": 1,
         "error": null,
-        "result": "auth_valid",
+        "result": "ok",
         "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
       }
     ],
     "status": "auth_valid",

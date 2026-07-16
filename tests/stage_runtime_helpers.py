@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 from collections.abc import Iterable
+from functools import wraps
 from types import SimpleNamespace
 from typing import Any
 
@@ -117,14 +119,29 @@ def run_module_targets_for_test(
     args.workers = int(getattr(args, "workers", 1) or 1)
     args.debug = bool(getattr(args, "debug", False) or getattr(args, "debug_emit", None) is not None)
     args._progress_owner = getattr(args, "_progress_owner", None)
-    credential = AuditCredentialRun(
-        username=getattr(args, "username", None),
-        password=getattr(args, "password", None),
-        token=getattr(args, "token", None) or getattr(args, "api_token", None),
-    )
+    raw_candidates = getattr(args, "credential_candidates", None)
+    if isinstance(raw_candidates, list) and raw_candidates:
+        credential_runs = tuple(
+            AuditCredentialRun(
+                username=item.get("username"),
+                password=item.get("password"),
+                token=item.get("token"),
+                source="default" if bool(item.get("default")) else str(item.get("source") or "provided"),
+            )
+            for item in raw_candidates
+            if isinstance(item, dict)
+        )
+    else:
+        credential_runs = (
+            AuditCredentialRun(
+                username=getattr(args, "username", None),
+                password=getattr(args, "password", None),
+                token=getattr(args, "token", None) or getattr(args, "api_token", None),
+            ),
+        )
     plan = AuditCommandPlan(
         targets_by_port={int(port): tuple(str(host) for host in hosts)},
-        credential_runs=(credential,),
+        credential_runs=credential_runs,
         output_path=output_path,
         output_format=output_format,
         workers=args.workers,
@@ -192,89 +209,36 @@ def run_module_targets_for_test(
             logger.log(module, record)
     if output_path and emit_line is not None:
         try:
-            for line in open(output_path, encoding="utf-8").read().splitlines():
+            with open(output_path, encoding="utf-8") as output_file:
+                output_lines = output_file.read().splitlines()
+            for line in output_lines:
                 _emit(line)
         except OSError:
             pass
     return _legacy_status_tuple(module, result.records)
 
 
-def patch_runner_for_legacy_target_fake(monkeypatch, module: str, fake) -> None:
-    from redposture_core import stage_runtime
-    from redposture_core.stage_runtime import AuditCommandResult
+def patch_module_host_stage_for_test(monkeypatch, module: str, fake) -> None:
+    """Patch the real module host hook without bypassing the runtime binder.
 
-    def _run_plan(self, plan):
-        has_file_credentials = any(credential.source == "file" for credential in plan.credential_runs)
-        skip_anonymous_file_detect = module == "redis" and has_file_credentials
-        work_items = [
-            item
-            for item in plan.iter_work_items()
-            if not (skip_anonymous_file_detect and item[3].source == "anonymous")
-        ]
-        progress = stage_runtime.start_command_progress(
-            self.args,
-            self.spec.label,
-            len(work_items),
-            enabled=plan.output_format == "txt" and plan.target_count > 0,
-        )
-        emitted = 0
-        for _idx, host, port, credential, _target in work_items:
-            kwargs = dict(vars(self.args)) if hasattr(self.args, "__dict__") else {}
-            kwargs.update(
-                {
-                    "hosts": [host],
-                    "port": int(port),
-                    "username": credential.username,
-                    "password": credential.password,
-                    "api_token": credential.token,
-                    "output_format": plan.output_format,
-                    "output_path": plan.output_path,
-                    "emit_line": self.emit_line,
-                    "logger": self.logger,
-                    "append_output": plan.append or emitted > 0,
-                    "show_progress": False,
-                    "command_progress": progress,
-                    "debug_emit": getattr(self.args, "debug_emit", None),
-                }
-            )
-            if has_file_credentials:
-                kwargs["defcreds"] = False
-            if module == "clickhouse":
-                kwargs.setdefault("protocol", getattr(self.args, "protocol", "native"))
-                kwargs.setdefault("suppress_timeout_status_lines", True)
-                kwargs.setdefault("suppress_fail_status_lines", True)
-            if module in {"redis", "kafka", "elastic", "zookeeper"}:
-                kwargs.setdefault(
-                    "suppress_connection_refused_status_lines",
-                    not bool(getattr(self.args, "debug", False)),
-                )
-                kwargs.setdefault("suppress_timeout_status_lines", True)
-            if module == "postgres":
-                kwargs.setdefault("suppress_connection_refused_status_lines", False)
-                kwargs.setdefault("suppress_timeout_status_lines", False)
-            if module == "consul":
-                kwargs.setdefault("check_dump_id", getattr(self.args, "revshell_check_id", None))
-                kwargs.setdefault("dump_all_requested", bool(getattr(self.args, "dump_all_requested", False)))
-                kwargs.setdefault("show_services", bool(getattr(self.args, "show_services", False)))
-                kwargs.setdefault("show_agents", bool(getattr(self.args, "show_agents", False)))
-                kwargs.setdefault("show_checks", bool(getattr(self.args, "show_checks", False)))
-                kwargs.setdefault("show_nodes", bool(getattr(self.args, "show_nodes", False)))
-            if module == "elastic":
-                kwargs.setdefault("show_plugins", bool(getattr(self.args, "plugins", False)))
-                kwargs.setdefault(
-                    "api_token", getattr(self.args, "api_token", None) or getattr(self.args, "apitoken", None)
-                )
-            if module == "kubeapi":
-                kwargs.setdefault("use_https", bool(getattr(self.args, "use_https", True)))
-                kwargs.setdefault("namespace_filters", getattr(self.args, "namespace_filters", None) or [])
-            if module == "proxmox":
-                if _target is not None and getattr(_target, "scheme", None) in {"http", "https"}:
-                    kwargs["use_https"] = str(_target.scheme).lower() == "https"
-                else:
-                    kwargs.setdefault("use_https", bool(getattr(self.args, "https", False)))
-            fake(**kwargs)
-            emitted += 1
-        progress.close()
-        return AuditCommandResult(records=[], detected_count=0, emitted_lines=emitted, typed_records=[])
+    The spec stores the exported ``host_stage`` callable, while the runner
+    deliberately resolves that callable's original module/name at invocation
+    time. Patch that exact implementation name and preserve its signature so
+    both strict and compatibility binders still execute their production path.
+    The callback receives only the arguments actually bound by the runtime and
+    must return an ``AuditRecord`` or compatible mapping.
+    """
 
-    monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", _run_plan)
+    actions = importlib.import_module(f"redposture_core.modules.{module}.actions")
+    original = actions.host_stage
+    signature = inspect.signature(original)
+
+    @wraps(original)
+    def _host_stage(*args: Any, **kwargs: Any):
+        bound = signature.bind(*args, **kwargs)
+        return fake(**bound.arguments)
+
+    monkeypatch.setattr(actions, original.__name__, _host_stage)
+    root = importlib.import_module(f"redposture_core.stage_{module}")
+    if getattr(root, original.__name__, None) is original:
+        monkeypatch.setattr(root, original.__name__, _host_stage)
