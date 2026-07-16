@@ -110,7 +110,13 @@ def test_count_v2_keys_and_v3_keys_helpers() -> None:
 
     assert _count_v3_keys('{"count": 7}') == 7
     assert _count_v3_keys('{"count": "8"}') == 8
+    assert _count_v3_keys("{}") == 0
     assert _count_v3_keys('{"count": "x"}') is None
+    assert etcd._parse_v3_key_count("{}") == (0, None)
+    malformed_count, malformed_error = etcd._parse_v3_key_count('{"count": "x"}')
+    assert malformed_count is None
+    assert "invalid count" in str(malformed_error)
+    assert etcd._parse_v3_key_count("not-json") == (None, "count response returned invalid JSON")
 
 
 def test_join_api_versions_formats_expected_values() -> None:
@@ -138,6 +144,15 @@ def test_format_record_for_main_statuses() -> None:
 
     line_open = _format_record({**base, "status": "open_no_auth", "key_count": 3}, "txt")
     assert "[+] anonymous access (keys:3)" in line_open
+
+    line_empty = _format_record({**base, "status": "open_no_auth", "key_count": 0}, "txt")
+    assert "(keys:0)" in line_empty
+
+    line_count_unknown = _format_record(
+        {**base, "status": "open_no_auth", "key_count": None, "key_count_error": "invalid count"}, "txt"
+    )
+    assert "(keys:unknown) err=invalid count" in line_count_unknown
+    assert "keys:-" not in line_count_unknown
 
     line_auth = _format_record({**base, "status": "auth_required"}, "txt")
     assert "[-] authentication required" in line_auth
@@ -345,6 +360,121 @@ def test_audit_etcd_host_v3_range_probe_uses_valid_all_range_payload(monkeypatch
     assert record["status"] == "open_no_auth"
     assert record["auth_required"] is False
     assert record["key_count"] == 8
+
+
+def test_audit_etcd_mixed_api_open_access_wins_over_auth_required(monkeypatch) -> None:
+    def fake_request(_host, _port, _method, path, _timeout, *, payload=None):
+        _ = payload
+        if path == "/version":
+            return 200, '{"etcdserver":"3.5.14"}'
+        if path == "/v2/keys?recursive=true":
+            return 200, '{"node":{"dir":true,"nodes":[]}}'
+        if path == "/v3/auth/status":
+            return 200, '{"enabled":true}'
+        raise AssertionError(path)
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert record["auth_required"] is False
+    assert record["api_auth_required"] == {"v2": False, "v3": True}
+    assert record["key_count"] == 0
+    assert record["key_count_state"] == "known"
+
+
+def test_audit_etcd_malformed_v3_count_is_explicitly_unknown(monkeypatch) -> None:
+    def fake_request(_host, _port, _method, path, _timeout, *, payload=None):
+        _ = payload
+        if path == "/version":
+            return 200, '{"etcdserver":"3.5.14"}'
+        if path == "/v2/keys?recursive=true":
+            return 404, ""
+        if path == "/v3/auth/status":
+            return 200, '{"enabled":false}'
+        if path == "/v3/kv/range":
+            return 200, '{"count":[]}'
+        raise AssertionError(path)
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+
+    assert record["status"] == "open_no_auth"
+    assert record["key_count"] is None
+    assert record["key_count_state"] == "unknown"
+    assert "invalid count" in str(record["key_count_error"])
+    assert "(keys:unknown) err=count response returned invalid count" in _format_record(record, "txt")
+
+
+def test_audit_etcd_authenticated_reads_propagate_token_and_render_selected_default(monkeypatch) -> None:
+    token_calls: list[tuple[dict[str, object], str | None]] = []
+
+    def fake_request(_host, _port, _method, path, _timeout, *, payload=None, auth_token=None):
+        if path == "/version":
+            return 200, '{"etcdserver":"3.5.14"}'
+        if path == "/v2/keys?recursive=true":
+            return 404, ""
+        if path == "/v3/auth/status":
+            return 200, '{"enabled":true}'
+        if path == "/v3/kv/range":
+            assert isinstance(payload, dict)
+            token_calls.append((payload, auth_token))
+            if payload.get("count_only"):
+                return 200, "{}"
+            if payload.get("key") == etcd._b64_encode_text("/wanted"):
+                return 200, '{"kvs":[]}'
+            return 200, '{"kvs":[],"more":false}'
+        raise AssertionError(path)
+
+    auth_attempts: list[tuple[str, str]] = []
+
+    def fake_auth(_host, _port, _timeout, username, password):
+        auth_attempts.append((username, password))
+        if (username, password) == ("root", "etcd"):
+            return "token-123", None
+        return None, "authentication failed"
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    monkeypatch.setattr(etcd, "_etcd_v3_authenticate", fake_auth)
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=True,
+        dump_keys=True,
+        query_key="/wanted",
+        defcreds=True,
+        dump_batch=10,
+        dump_delay=0,
+    )
+
+    assert auth_attempts[:2] == [("root", "root"), ("root", "etcd")]
+    assert record["status"] == "weak_default_creds"
+    assert record["key_count"] == 0
+    assert record["key_count_state"] == "known"
+    assert record["effective_username"] == "root"
+    assert record["effective_password"] == "etcd"
+    assert len(token_calls) == 3
+    assert all(token == "token-123" for _payload, token in token_calls)
+    rendered = _format_record(record, "txt")
+    assert "[+] root:etcd (keys:0)" in rendered
 
 
 def test_audit_etcd_host_marks_non_etcd_and_retries_failures(monkeypatch) -> None:

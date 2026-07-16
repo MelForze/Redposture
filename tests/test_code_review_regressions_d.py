@@ -137,12 +137,10 @@ def test_fix_d2_mongo_stage_exits_2_on_parse_error(monkeypatch: pytest.MonkeyPat
 
 
 def test_fix_d3_marker_regression_lives_next_to_a1() -> None:
-    """D3 shares its coverage with A1 (see
-    test_code_review_regressions_abc::test_fix_a1d3_zk_*). This stub keeps a
-    one-to-one D-file mapping and fails if the paired tests are ever deleted."""
+    """D3 coverage now enforces conservative digest credential verification."""
     from tests import test_code_review_regressions_abc as abc_mod
 
-    assert hasattr(abc_mod, "test_fix_a1d3_zk_ambiguous_noauth_pair_disambiguated_by_zookeeper_probe")
+    assert hasattr(abc_mod, "test_zk_noauth_after_digest_does_not_become_valid_via_control_probe")
     assert hasattr(abc_mod, "test_fix_a1d3_zk_ambiguous_noauth_pair_creds_rejected_when_zookeeper_also_denies")
 
 

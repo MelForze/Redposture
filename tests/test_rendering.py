@@ -10,6 +10,7 @@ from redposture_core.rendering import (
     collect_color_spans,
     collect_stage_payload_spans,
     colorize_spans,
+    format_count_value,
     render_colored_marker_line,
     render_module_marker_line,
     render_tagged_detail_line,
@@ -104,7 +105,7 @@ def test_render_tagged_detail_line_and_marker_line_apply_shared_layout() -> None
 
 
 def test_collect_stage_payload_spans_handles_common_auth_bool_and_count_rules() -> None:
-    text = "(auth required:unknown) (read:True) (write:False) (keys:0) (items:3)"
+    text = "(auth required:unknown) (read:True) (write:False) (keys:0) (items:3) (missing:unknown)"
 
     spans = collect_stage_payload_spans(
         text,
@@ -112,7 +113,11 @@ def test_collect_stage_payload_spans_handles_common_auth_bool_and_count_rules() 
             BooleanColorRule("read"),
             BooleanColorRule("write"),
         ),
-        counts=(CountColorRule("keys", "red"), CountColorRule("items", "orange")),
+        counts=(
+            CountColorRule("keys", "red"),
+            CountColorRule("items", "orange"),
+            CountColorRule("missing", "red"),
+        ),
     )
 
     colored_fragments = [(text[start:end], color) for start, end, color in spans]
@@ -121,6 +126,47 @@ def test_collect_stage_payload_spans_handles_common_auth_bool_and_count_rules() 
     assert ("(write:False)", "bright_green") in colored_fragments
     assert ("(keys:0)", "red") not in colored_fragments
     assert ("(items:3)", "orange") in colored_fragments
+    assert ("(missing:unknown)", "yellow") in colored_fragments
+
+
+def test_format_count_value_distinguishes_known_unknown_and_partial() -> None:
+    assert format_count_value(0) == "0"
+    assert format_count_value(12) == "12"
+    assert format_count_value(None) == "unknown"
+    assert format_count_value(True) == "unknown"
+    assert format_count_value(3, state="partial") == "3+"
+    assert format_count_value(None, state="partial") == "unknown partial"
+
+
+def test_all_audit_summary_renderers_use_unknown_instead_of_dash_for_counts() -> None:
+    from redposture_core.modules.clickhouse import actions as clickhouse
+    from redposture_core.modules.consul import actions as consul
+    from redposture_core.modules.etcd import actions as etcd
+    from redposture_core.modules.grafana import actions as grafana
+    from redposture_core.modules.kafka import actions as kafka
+    from redposture_core.modules.mongodb import actions as mongodb
+    from redposture_core.modules.postgres import actions as postgres
+    from redposture_core.modules.qdrant import actions as qdrant
+    from redposture_core.modules.redis import actions as redis
+    from redposture_core.modules.registry import actions as registry
+    from redposture_core.modules.zookeeper import actions as zookeeper
+
+    rendered = [
+        redis._with_optional_keys({"key_count": None}, "line"),
+        etcd._format_record({"host": "h", "port": 2379, "status": "open_no_auth", "key_count": None}, "txt"),
+        zookeeper._with_optional_znodes({"znode_count": None}, "line"),
+        kafka._with_optional_topics({"topic_count": None}, "line"),
+        registry._with_optional_images({"image_count": None}, "line"),
+        grafana._with_optional_datasources({"datasource_count": None}, "line"),
+        postgres._caps_suffix({}),
+        mongodb._caps_suffix({}),
+        clickhouse._caps_suffix({}),
+        qdrant._format_record({"host": "h", "port": 6333, "status": "open_no_auth", "collections_count": None}, "txt"),
+        consul._scope_counts_suffix({}),
+    ]
+
+    assert all(":-)" not in line for line in rendered)
+    assert all("unknown" in line for line in rendered)
 
 
 def test_render_colored_marker_line_applies_declarative_rules_and_extra_spans() -> None:

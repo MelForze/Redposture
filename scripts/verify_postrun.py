@@ -29,6 +29,7 @@ _EXPECTED_MODULES = (
     "grpc",
     "kafka",
     "zookeeper",
+    "keeper",
     "proxmox",
 )
 
@@ -151,6 +152,10 @@ _EXPECTED_LABELS = (
     "kafka_tls_explicit_user",
     "zookeeper_default",
     "zookeeper_multi_ports",
+    "keeper_cluster",
+    "keeper_tls",
+    "keeper_no4lw",
+    "keeper_apache_control",
     "proxmox_audit",
     "proxmox_admin",
     "proxmox_url_override_https",
@@ -226,6 +231,9 @@ _EXTENDED_EXPECTED_LABELS = (
     "zookeeper_debug_smoke",
     "zookeeper_extended_znode_limits",
     "zookeeper_extended_empty_password",
+    "keeper_debug_smoke",
+    "keeper_force_plaintext",
+    "keeper_force_tls",
     "proxmox_debug_smoke",
     "proxmox_extended_ports_flag",
     "proxmox_extended_defcreds",
@@ -276,6 +284,7 @@ _EXTENDED_EXPECTED_LABELS = (
     "fuzz_grpc_missing_targets",
     "fuzz_kafka_missing_targets",
     "fuzz_zookeeper_missing_targets",
+    "fuzz_keeper_missing_targets",
     "fuzz_proxmox_missing_targets",
     "fuzz_registry_username_without_password",
     "fuzz_registry_token_basic_conflict",
@@ -336,6 +345,9 @@ _EXTENDED_EXPECTED_LABELS = (
     "fuzz_clickhouse_os_shell_execute_conflict",
     "fuzz_zookeeper_zero_max_znodes",
     "fuzz_zookeeper_zero_enum_workers",
+    "fuzz_keeper_incomplete_mtls",
+    "fuzz_keeper_tls_conflict",
+    "fuzz_keeper_tls_options_plaintext",
     "fuzz_redis_invalid_port_negative",
     "fuzz_redis_invalid_port_huge",
     "fuzz_redis_zero_dump",
@@ -381,7 +393,7 @@ _EXTENDED_EXPECTED_LABELS = (
 )
 
 _PROGRESS_EXPECTED_TARGETS = {
-    "exporters_scan": 48,
+    "exporters_scan": 51,
     "registry_multi_instance_urls": 5,
     "grafana_multi_instance_urls": 5,
     "gitlab_multi_instance_urls": 5,
@@ -399,6 +411,7 @@ _PROGRESS_EXPECTED_TARGETS = {
     "grpc_multi_ports": 5,
     "kafka_multi_ports": 5,
     "zookeeper_multi_ports": 5,
+    "keeper_cluster": 3,
     "proxmox_multi_instance_urls": 5,
 }
 
@@ -436,6 +449,10 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "kafka_multi_ports": ("orders", "payments.events", "audit.logs", "ord-1001"),
     "zookeeper_default": ("/redposture/app/api_key", "rp-zk-key-2026"),
     "zookeeper_multi_ports": ("/redposture/app/api_key", "rp-zk-key-2026"),
+    "keeper_cluster": ("/redposture/app/api_key", "rp-keeper-key-2026", "clickhouse-keeper"),
+    "keeper_tls": ("clickhouse-keeper", '"transport": "tls"'),
+    "keeper_no4lw": ('"service": "zookeeper-compatible"', '"fingerprint_confidence": "unconfirmed"'),
+    "keeper_apache_control": ('"service": "apache-zookeeper"', '"status": "not_keeper"'),
     "proxmox_admin": ("credential_hit", "pve-edge-01", "pve-core-02", "GitLabCloudInit!2026"),
     "registry_extended_tags_metadata": ("redposture/demo-api", "latest"),
     "consul_extended_inventory_filters": ("redposture/kafka/sasl_password", "svc-redposture-api"),
@@ -789,6 +806,21 @@ def _validate_rich_lab_outputs(rows: list[dict[str, str]]) -> None:
                     f"expected={sorted(_ZOOKEEPER_MULTI_DUMP_PORTS)} got={sorted(dump_ports)}"
                 )
 
+        if label in {"exporters_scan", "exporters_collect"}:
+            pgbackrest_ports = {
+                int(item["port"])
+                for item in _iter_json_objects(output_text)
+                if item.get("exporter") == "pgbackrest_exporter"
+                and isinstance(item.get("port"), int)
+                and (item.get("detected") is True or item.get("ok") is True)
+            }
+            expected_ports = {9854, 19854, 29854}
+            if not expected_ports <= pgbackrest_ports:
+                raise SystemExit(
+                    f"label '{label}' did not cover all pgBackRest exporter ports: "
+                    f"expected={sorted(expected_ports)} got={sorted(pgbackrest_ports)}"
+                )
+
 
 # Modules where every successful `--dump` run on the seeded lab is expected to surface
 # non-empty data. A run that exits 0 but produces an empty-dump marker is a regression
@@ -1005,6 +1037,7 @@ _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
     "etcd": ("is_etcd", "key_count", "keys", "key_values", "server_version"),
     "consul": ("is_consul", "version", "leader"),
     "zookeeper": ("is_zookeeper", "znode_count", "znodes"),
+    "keeper": ("is_zookeeper_compatible", "is_keeper", "znode_count", "version"),
     "kafka": ("is_kafka", "topic_count", "topics"),
     "qdrant": ("is_qdrant", "collections_count", "collections", "version"),
     "clickhouse": ("is_clickhouse", "database", "effective_username", "auth_attempts"),
@@ -1255,6 +1288,7 @@ _MODULE_SCHEMA_REQUIRED: dict[str, tuple[str, ...]] = {
     "consul": ("is_consul", "scheme", "auth_mode", "auth_valid"),
     "kafka": ("is_kafka", "show_topics", "dump", "max_messages"),
     "zookeeper": ("is_zookeeper", "max_znodes", "show_znodes", "dump"),
+    "keeper": ("is_zookeeper_compatible", "is_keeper", "fingerprint_confidence", "transport"),
     "qdrant": ("is_qdrant", "anonymous_access", "show_collections"),
     "elastic": ("is_elastic", "scheme", "show_endpoints", "show_plugins"),
     "oracle": ("is_oracle", "transport", "transport_mode", "defcreds_enabled"),
@@ -1330,6 +1364,7 @@ _MISSING_TARGET_MODULES = (
     "grpc",
     "kafka",
     "zookeeper",
+    "keeper",
     "proxmox",
 )
 
@@ -1413,6 +1448,9 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_clickhouse_os_shell_execute_conflict": ("--os-shell cannot be combined with --execute",),
     "fuzz_zookeeper_zero_max_znodes": ("value must be > 0",),
     "fuzz_zookeeper_zero_enum_workers": ("value must be > 0",),
+    "fuzz_keeper_incomplete_mtls": ("--tls-cert and --tls-key must be used together",),
+    "fuzz_keeper_tls_conflict": ("not allowed with argument",),
+    "fuzz_keeper_tls_options_plaintext": ("TLS options cannot be combined with --no-tls",),
     "fuzz_redis_invalid_port_negative": ("port must be in range",),
     "fuzz_redis_invalid_port_huge": ("port must be in range",),
     "fuzz_redis_zero_dump": ("value must be > 0",),

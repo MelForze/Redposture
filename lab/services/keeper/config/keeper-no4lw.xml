@@ -1,0 +1,15 @@
+<clickhouse>
+    <logger><level>warning</level><console>true</console></logger>
+    <listen_host>0.0.0.0</listen_host>
+    <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>1</server_id>
+        <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+        <four_letter_word_white_list>ruok</four_letter_word_white_list>
+        <coordination_settings><raft_logs_level>warning</raft_logs_level></coordination_settings>
+        <raft_configuration>
+            <server><id>1</id><hostname>keeper-no4lw</hostname><port>9234</port></server>
+        </raft_configuration>
+    </keeper_server>
+</clickhouse>

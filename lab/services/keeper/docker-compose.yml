@@ -1,0 +1,128 @@
+services:
+  keeper-1:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    container_name: redposture-lab-keeper-1
+    command: ["clickhouse", "keeper", "--config-file=/etc/clickhouse-server/keeper_config.xml"]
+    volumes:
+      - ./config/keeper-1.xml:/etc/clickhouse-server/keeper_config.xml:ro
+      - keeper-1-data:/var/lib/clickhouse/coordination
+    ports: ["9181:9181"]
+    healthcheck: &keeper-health
+      test: ["CMD-SHELL", "clickhouse keeper-client -h 127.0.0.1 -p 9181 -q ruok 2>/dev/null | grep -q imok"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 5s
+
+  keeper-2:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    container_name: redposture-lab-keeper-2
+    command: ["clickhouse", "keeper", "--config-file=/etc/clickhouse-server/keeper_config.xml"]
+    volumes:
+      - ./config/keeper-2.xml:/etc/clickhouse-server/keeper_config.xml:ro
+      - keeper-2-data:/var/lib/clickhouse/coordination
+    ports: ["19181:9181"]
+    healthcheck: *keeper-health
+
+  keeper-3:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    container_name: redposture-lab-keeper-3
+    command: ["clickhouse", "keeper", "--config-file=/etc/clickhouse-server/keeper_config.xml"]
+    volumes:
+      - ./config/keeper-3.xml:/etc/clickhouse-server/keeper_config.xml:ro
+      - keeper-3-data:/var/lib/clickhouse/coordination
+    ports: ["29181:9181"]
+    healthcheck: *keeper-health
+
+  keeper-seed:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    container_name: redposture-lab-keeper-seed
+    depends_on:
+      keeper-1: {condition: service_healthy}
+      keeper-2: {condition: service_healthy}
+      keeper-3: {condition: service_healthy}
+    command:
+      - bash
+      - -ceu
+      - |
+        create_or_set() {
+          local path="$${1}" value="$${2}"
+          clickhouse keeper-client -h keeper-1 -p 9181 -q "create '$${path}' '$${value}'" >/dev/null 2>&1 || \
+            clickhouse keeper-client -h keeper-1 -p 9181 -q "set '$${path}' '$${value}'" >/dev/null
+        }
+        create_or_set /redposture "env=keeper-lab,owner=platform"
+        create_or_set /redposture/app "service=redposture-api"
+        create_or_set /redposture/app/api_key "rp-keeper-key-2026"
+        create_or_set /clickhouse "cluster=keeper-lab"
+        create_or_set /clickhouse/tables "replicas=3"
+        clickhouse keeper-client -h keeper-1 -p 9181 -q "get '/redposture/app/api_key'" | grep -q rp-keeper-key-2026
+        touch /tmp/seed-ready
+        tail -f /dev/null
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/seed-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  keeper-no4lw:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    container_name: redposture-lab-keeper-no4lw
+    command: ["clickhouse", "keeper", "--config-file=/etc/clickhouse-server/keeper_config.xml"]
+    volumes:
+      - ./config/keeper-no4lw.xml:/etc/clickhouse-server/keeper_config.xml:ro
+      - keeper-no4lw-data:/var/lib/clickhouse/coordination
+    ports: ["39181:9181"]
+    healthcheck: *keeper-health
+
+  keeper-tls-certs:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    container_name: redposture-lab-keeper-tls-certs
+    user: root
+    entrypoint: ["bash", "-ceu"]
+    command:
+      - |
+        openssl req -x509 -newkey rsa:2048 -nodes -days 7 -subj '/CN=localhost' \
+          -addext 'subjectAltName=DNS:localhost,DNS:keeper-tls,IP:127.0.0.1' \
+          -keyout /certs/server.key -out /certs/server.crt >/dev/null 2>&1
+        chmod 644 /certs/server.crt /certs/server.key
+    volumes:
+      - keeper-tls-certs:/certs
+
+  keeper-tls:
+    image: clickhouse/clickhouse-server:24.8.14.39
+    container_name: redposture-lab-keeper-tls
+    depends_on:
+      keeper-tls-certs: {condition: service_completed_successfully}
+    command: ["clickhouse", "keeper", "--config-file=/etc/clickhouse-server/keeper_config.xml"]
+    volumes:
+      - ./config/keeper-tls.xml:/etc/clickhouse-server/keeper_config.xml:ro
+      - keeper-tls-certs:/certs:ro
+      - keeper-tls-data:/var/lib/clickhouse/coordination
+    ports: ["19281:9281"]
+    healthcheck:
+      test: ["CMD-SHELL", "printf ruok | timeout 2 openssl s_client -quiet -connect 127.0.0.1:9281 2>/dev/null | grep -q imok"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 5s
+
+  apache-zookeeper:
+    image: zookeeper:3.9.5
+    container_name: redposture-lab-keeper-apache-control
+    environment:
+      ZOO_4LW_COMMANDS_WHITELIST: "ruok,srvr,stat,mntr,isro"
+    ports: ["12181:2181"]
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/2181; printf ruok >&3; grep -q imok <&3'"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 5s
+
+volumes:
+  keeper-1-data:
+  keeper-2-data:
+  keeper-3-data:
+  keeper-no4lw-data:
+  keeper-tls-certs:
+  keeper-tls-data:

@@ -16,7 +16,7 @@ from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
@@ -2219,10 +2219,7 @@ def _nxc_prefix(record: dict[str, Any]) -> str:
 
 
 def _with_optional_images(record: dict[str, Any], message: str) -> str:
-    image_count = record.get("image_count")
-    if isinstance(image_count, int):
-        return f"{message} (images:{image_count})"
-    return f"{message} (images:-)"
+    return f"{message} (images:{format_count_value(record.get('image_count'))})"
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
@@ -2558,7 +2555,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     tags_count = gitlab_repo.get("tags_count")
                     latest_tag = str(gitlab_repo.get("latest_tag") or "").strip() or "-"
                     last_pushed = str(gitlab_repo.get("last_pushed") or "").strip() or "-"
-                    tags_count_text = str(tags_count) if isinstance(tags_count, int) else "-"
+                    tags_count_text = format_count_value(tags_count)
                     lines.append(
                         f"{prefix} {repo_name} (tags:{tags_count_text}) (latest:{latest_tag}) (last pushed:{last_pushed})"
                     )
@@ -2640,7 +2637,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     online_raw = nexus_repo.get("online")
                     online_text = "True" if online_raw is True else "False" if online_raw is False else "unknown"
                     components_raw = nexus_repo.get("components")
-                    components_text = str(components_raw) if isinstance(components_raw, int) else "-"
+                    components_text = format_count_value(components_raw)
                     lines.append(
                         f"{prefix} {repo_name} (type:{repo_type}) (online:{online_text}) (components:{components_text})"
                     )

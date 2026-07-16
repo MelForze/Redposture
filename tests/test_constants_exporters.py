@@ -29,7 +29,7 @@ def test_discovery_exporters_include_new_defaults() -> None:
     assert ports["windows_exporter"] == {9182}
     assert ports["ipmi_exporter"] == {9290}
     assert ports["sql_exporter"] == {9399}
-    assert ports["pgbackrest_exporter"] == {9854}
+    assert ports["pgbackrest_exporter"] == {9854, 19854, 29854}
     assert ports["victoriametrics_exporter"] == {8428, 8429}
     assert ports["snmp_exporter"] == {9117}
 
@@ -64,6 +64,14 @@ def test_collect_exporters_include_new_defaults() -> None:
     assert ports["windows_exporter"] == {9182}
     assert ports["ipmi_exporter"] == {9290}
     assert ports["sql_exporter"] == {9399}
-    assert ports["pgbackrest_exporter"] == {9854}
+    assert ports["pgbackrest_exporter"] == {9854, 19854, 29854}
     assert ports["victoriametrics_exporter"] == {8428, 8429}
     assert ports["snmp_exporter"] == {9117}
+
+
+def test_pgbackrest_exporter_profiles_share_detection_contract() -> None:
+    profiles = [item for item in DISCOVERY_EXPORTERS if item.get("name") == "pgbackrest_exporter"]
+    assert {int(item.get("port") or 0) for item in profiles} == {9854, 19854, 29854}
+    assert all("pgbackrest_exporter_build_info" in item.get("strong_markers", ()) for item in profiles)
+    assert all("pgbackrest_info" in item.get("strong_markers", ()) for item in profiles)
+    assert all("pgbackrest_exporter" in item.get("fingerprint_cmdline", ()) for item in profiles)

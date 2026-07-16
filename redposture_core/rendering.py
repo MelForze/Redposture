@@ -44,6 +44,16 @@ class CountColorRule:
     field: str
     color: str
     skip_zero: bool = True
+    unknown_color: str = "yellow"
+
+
+def format_count_value(value: object, *, state: str | None = None) -> str:
+    """Render a text count without conflating unknown values with zero."""
+
+    normalized_state = str(state or "").strip().lower()
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return f"{value}+" if normalized_state == "partial" else str(value)
+    return "unknown partial" if normalized_state == "partial" else "unknown"
 
 
 def collect_color_spans(
@@ -119,9 +129,13 @@ def collect_count_spans(text: str, rules: Iterable[CountColorRule | tuple[str, s
     spans: list[tuple[int, int, str]] = []
     for rule in rules:
         spec = CountColorRule(*rule) if isinstance(rule, tuple) else rule
-        pattern = re.compile(rf"\({re.escape(spec.field)}:(\d+)(?:\+)?(?: [^)]*)?\)")
+        pattern = re.compile(rf"\({re.escape(spec.field)}:(\d+|unknown)(?:\+| partial)?(?: [^)]*)?\)")
         for match in pattern.finditer(text):
-            value = int(match.group(1))
+            raw_value = match.group(1)
+            if raw_value == "unknown":
+                spans.append((match.start(), match.end(), spec.unknown_color))
+                continue
+            value = int(raw_value)
             if spec.skip_zero and value == 0:
                 continue
             spans.append((match.start(), match.end(), spec.color))

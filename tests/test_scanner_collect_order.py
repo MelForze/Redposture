@@ -173,6 +173,8 @@ def test_collect_output_file_keeps_failed_records_before_summary(tmp_path: Path)
         ("rabbitmq_exporter", "RabbitMQ Exporter", 9419),
         ("sql_exporter", "SQL Exporter", 9399),
         ("pgbackrest_exporter", "pgBackRest Exporter", 9854),
+        ("pgbackrest_exporter", "pgBackRest Exporter", 19854),
+        ("pgbackrest_exporter", "pgBackRest Exporter", 29854),
         ("victoriametrics_exporter", "VictoriaMetrics Exporter", 8428),
     ],
 )

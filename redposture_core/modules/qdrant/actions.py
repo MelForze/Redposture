@@ -16,7 +16,13 @@ from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
-from ...rendering import CountColorRule, RegexColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import (
+    CountColorRule,
+    RegexColorRule,
+    format_count_value,
+    render_colored_marker_line,
+    render_tagged_detail_line,
+)
 from ...servers import server_listen_port
 from ...stage_runtime import (
     StageTelemetryBuilder,
@@ -1125,7 +1131,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     prefix = _nxc_prefix(record)
     err = _clip(str(record.get("error") or "-"), 96)
     collections_count = record.get("collections_count")
-    collections_text = str(collections_count) if isinstance(collections_count, int) else "-"
+    collections_text = format_count_value(collections_count)
     edit_probe = record.get("edit_probe")
     ghsa_check = record.get("ghsa_f632_vm87_2m2f")
     idor_text = "unknown"
@@ -1279,7 +1285,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
     if show_collections:
         source = str(record.get("collections_source") or "-")
         count = record.get("collections_count")
-        count_text = str(count) if isinstance(count, int) else "-"
+        count_text = format_count_value(count)
         suffix = f" (source:{source})" if source and source != "-" else ""
         lines.append(f"{prefix} [*] Collections (count:{count_text}){suffix}")
         if isinstance(collections, list):

@@ -13,7 +13,7 @@ from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
     StageTelemetryBuilder,
     format_retry_decision,
@@ -847,10 +847,7 @@ def _nxc_prefix(record: dict[str, Any]) -> str:
 
 
 def _with_optional_datasources(record: dict[str, Any], message: str) -> str:
-    datasource_count = record.get("datasource_count")
-    if isinstance(datasource_count, int):
-        return f"{message} (datasources:{datasource_count})"
-    return f"{message} (datasources:-)"
+    return f"{message} (datasources:{format_count_value(record.get('datasource_count'))})"
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:

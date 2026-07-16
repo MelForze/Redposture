@@ -21,7 +21,7 @@ from ...clients.mongodb import (
     open_mongodb_client,
 )
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -804,9 +804,8 @@ def _nxc_prefix(record: dict[str, Any]) -> str:
 def _caps_suffix(record: dict[str, Any]) -> str:
     database_count = record.get("database_count")
     collections = record.get("collections")
-    collection_count = len(collections) if isinstance(collections, list) else 0
-    db_text = str(database_count) if isinstance(database_count, int) else "-"
-    return f"(DBs:{db_text}) (collections:{collection_count})"
+    collection_count = len(collections) if isinstance(collections, list) else None
+    return f"(DBs:{format_count_value(database_count)}) (collections:{format_count_value(collection_count)})"
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:

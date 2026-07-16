@@ -27,6 +27,7 @@ RUN_CASES = {
     "oracle": ["oracle", "-t", "127.0.0.1"],
     "grpc": ["grpc", "-t", "127.0.0.1"],
     "clickhouse": ["clickhouse", "-t", "127.0.0.1"],
+    "keeper": ["keeper", "-t", "127.0.0.1"],
     "zookeeper": ["zookeeper", "-t", "127.0.0.1"],
 }
 
@@ -70,6 +71,7 @@ def test_run_cases_cover_every_registered_audit_module() -> None:
         # validator, which emits `argument --max-messages: value must be > 0`.
         ("kafka", ["kafka", "-t", "127.0.0.1", "--max-messages", "0"], "value must be > 0"),
         ("zookeeper", ["zookeeper", "-t", "127.0.0.1", "-u", "zkuser"], "--username and --password"),
+        ("keeper", ["keeper", "-t", "127.0.0.1", "--tls-cert", "client.pem"], "--tls-cert and --tls-key"),
         ("proxmox", ["proxmox", "-t", "127.0.0.1"], "--pveapitoken, -u/-p, or --defcreds is required"),
     ],
 )

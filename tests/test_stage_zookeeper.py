@@ -12,7 +12,7 @@ from redposture_core.stage_zookeeper import (
     _ZK_ERR_NOAUTH,
     _ZK_ERR_NONODE,
     _ZK_ERR_OK,
-    _ZK_ERR_RETRYABLE_ROOT_QUERY,
+    _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH,
     _audit_zookeeper_host,
     _call_audit_host_with_thread_debug,
     _decode_zk_buffer,
@@ -88,7 +88,8 @@ def test_clip_and_error_helpers() -> None:
     assert zookeeper_stage._is_connection_refused_fail_record({"status": "fail", "error": "connection refused"})
     assert zookeeper_stage._is_connection_timeout_error("connection timeout")
     assert zookeeper_stage._is_unexpected_eof_error("unexpected EOF")
-    assert zookeeper_stage._is_root_query_err_124_error("root query failed: err_-124")
+    assert not zookeeper_stage._is_retryable_stage_error("SESSIONCLOSEDREQUIRESASLAUTH")
+    assert zookeeper_stage._is_retryable_stage_error("THROTTLEDOP")
     assert zookeeper_stage._is_remote_closed_connection_error("Remote end closed connection without response")
     assert zookeeper_stage._is_suppressed_fail_record({"status": "fail", "error": "unexpected eof"})
     assert not zookeeper_stage._is_suppressed_fail_record(
@@ -1036,7 +1037,7 @@ def test_stage_trace_skips_deep_stages_when_auth_required(monkeypatch: pytest.Mo
     assert "data" not in stage_names
 
 
-def test_stage4_timeout_retries_with_shared_policy_and_keeps_status(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_stage4_throttled_operation_retries_with_shared_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
         lambda *_a, **_k: (False, "root_ok", ["/:ok"]),
@@ -1064,7 +1065,7 @@ def test_stage4_timeout_retries_with_shared_policy_and_keeps_status(monkeypatch:
     def _enum(*_args, **_kwargs):
         enum_calls["count"] += 1
         if enum_calls["count"] < 3:
-            return [], 0, False, {}, "connection timeout"
+            return [], 0, False, {}, "getChildren failed for /: THROTTLEDOP"
         return ["/a"], 1, False, {"/a": {"path": "/a", "children": 0, "bytes": 0, "error": None}}, None
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _Client)
@@ -1098,11 +1099,7 @@ def test_stage4_timeout_retries_with_shared_policy_and_keeps_status(monkeypatch:
     assert any("retry_decision stage=data" in line for line in rec.get("debug_events") or [])
 
 
-def test_audit_zookeeper_valid_credentials_on_open_target(monkeypatch) -> None:
-    """A2 fix: when auth_digest succeeds AND post-auth root read works, the
-    credentials are valid regardless of whether the anonymous read also
-    worked. The old code (`anonymous_root_err != _ZK_ERR_OK`) mislabeled
-    good creds against an open ZK as invalid_credentials_anonymous."""
+def test_audit_zookeeper_digest_on_open_target_is_unverified(monkeypatch) -> None:
     calls = {"auth": 0}
 
     class _FakeZkClient:
@@ -1122,7 +1119,10 @@ def test_audit_zookeeper_valid_credentials_on_open_target(monkeypatch) -> None:
             return True, None
 
         def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
-            _ = path
+            if path == "/":
+                return ["clickhouse"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
+            if path == "/clickhouse":
+                return None, _ZK_ERR_NOAUTH, None
             return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
 
         def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
@@ -1138,15 +1138,22 @@ def test_audit_zookeeper_valid_credentials_on_open_target(monkeypatch) -> None:
         retries=0,
         username="admin",
         password="admin",
-        show_znodes=False,
+        show_znodes=True,
         dump=False,
         query_znode=None,
         max_znodes=100,
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "valid_credentials"
-    assert record["provided_credentials_ok"] is True
+    assert record["status"] == "open_no_auth"
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unverified_anonymous"
+    assert record["auth_required"] is False
+    rendered = _format_record(record, "txt")
+    assert "anonymous access" in rendered
+    assert "(credentials:unverified)" in rendered
+    assert "admin:admin" not in rendered
+    assert any("/clickhouse:<Access Denied>" in line for line in _format_znodes_detail_records(record, "txt"))
 
 
 def test_audit_zookeeper_dump_uses_access_denied_after_successful_auth(monkeypatch) -> None:
@@ -1263,12 +1270,13 @@ def test_audit_zookeeper_valid_credentials_when_auth_was_required(monkeypatch) -
     assert record["auth_probe_trace"] == ["/:noauth"]
 
 
-def test_audit_zookeeper_valid_credentials_after_retryable_root_query(monkeypatch) -> None:
-    calls = {"auth": 0}
+def test_audit_zookeeper_valid_credentials_after_session_requires_auth(monkeypatch) -> None:
+    calls = {"auth": 0, "instances": 0}
 
     class _FakeZkClient:
         def __init__(self, host: str, port: int, timeout: float) -> None:
             _ = (host, port, timeout)
+            calls["instances"] += 1
             self._authed = False
 
         def connect(self) -> None:
@@ -1286,7 +1294,7 @@ def test_audit_zookeeper_valid_credentials_after_retryable_root_query(monkeypatc
 
         def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
             if not self._authed:
-                return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+                return None, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH, None
             if path == "/":
                 return ["secure"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
             if path == "/secure":
@@ -1313,13 +1321,12 @@ def test_audit_zookeeper_valid_credentials_after_retryable_root_query(monkeypatc
     )
 
     assert calls["auth"] == 1
+    assert calls["instances"] == 2
     assert record["status"] == "valid_credentials"
     assert record["provided_credentials_ok"] is True
-    # A3 fix: consistent -124 across anonymous probes no longer promotes to
-    # auth_required=True — it stays inconclusive so transient leader-election
-    # noise does not masquerade as an auth requirement.
-    assert record["auth_required"] is None
-    assert record["auth_inference_source"] == "probe_retryable_124_inconclusive"
+    assert record["auth_required"] is True
+    assert record["auth_inference_source"] == "session_closed_requires_auth"
+    assert record["auth_probe_trace"] == ["/:sessionclosedrequiresaslauth"]
 
 
 def test_audit_zookeeper_infers_auth_required_true_from_anonymous_probes(monkeypatch) -> None:
@@ -1459,14 +1466,10 @@ def test_audit_zookeeper_inference_keeps_unknown_for_neutral_and_error_probes(
     assert "/zookeeper:nonode" in record["auth_probe_trace"]
 
 
-def test_audit_zookeeper_inference_leaves_consistent_err_124_inconclusive(
+def test_audit_zookeeper_session_closed_requires_auth_without_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A3 fix: err_-124 is a documented retryable/transient marker. When every
-    anonymous probe returns -124 (leader election, brief server load) the
-    inference must stay inconclusive rather than promoting to auth_required=True
-    — the previous behavior misclassified open ZooKeeper clusters as auth-gated
-    during churn."""
+    calls = {"root": 0}
 
     class _FakeZkClient:
         def __init__(self, host: str, port: int, timeout: float) -> None:
@@ -1480,7 +1483,8 @@ def test_audit_zookeeper_inference_leaves_consistent_err_124_inconclusive(
 
         def get_children2(self, path: str) -> tuple[list[str] | None, int, dict[str, int] | None]:
             _ = path
-            return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+            calls["root"] += 1
+            return None, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH, None
 
         def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
             _ = path
@@ -1500,10 +1504,15 @@ def test_audit_zookeeper_inference_leaves_consistent_err_124_inconclusive(
         max_znodes=100,
     )
 
-    # Inference is inconclusive; auth_required stays None instead of True.
-    assert record["auth_required"] is None
-    assert record["auth_inference_source"] == "probe_retryable_124_inconclusive"
-    assert record["auth_probe_trace"] == ["/:err_-124", "/zookeeper:err_-124", "/zookeeper/config:err_-124"]
+    assert calls["root"] == 1
+    assert record["status"] == "auth_required"
+    assert record["auth_required"] is True
+    assert record["auth_inference_source"] == "session_closed_requires_auth"
+    assert record["auth_probe_trace"] == ["/:sessionclosedrequiresaslauth"]
+    rendered = _format_record(record, "txt")
+    assert "authentication required by server policy" in rendered
+    assert "connection failed" not in rendered
+    assert "-124" not in rendered
 
 
 def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(monkeypatch) -> None:
@@ -1628,7 +1637,7 @@ def test_format_record_shows_zookeeper_password_for_valid_credentials() -> None:
     assert "[+] admin:admin" in line
 
 
-def test_audit_zookeeper_retries_retryable_root_query_and_reports_query_auth(monkeypatch) -> None:
+def test_audit_zookeeper_does_not_retry_session_closed_requires_auth(monkeypatch) -> None:
     calls = {"root": 0}
 
     class _FakeZkClient:
@@ -1649,7 +1658,7 @@ def test_audit_zookeeper_retries_retryable_root_query_and_reports_query_auth(mon
             if path == "/":
                 calls["root"] += 1
                 if calls["root"] == 1:
-                    return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+                    return None, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH, None
                 return ["brokers"], _ZK_ERR_OK, {"data_length": 0, "num_children": 1}
             if path == "/secure":
                 return None, _ZK_ERR_NOAUTH, None
@@ -1686,14 +1695,13 @@ def test_audit_zookeeper_retries_retryable_root_query_and_reports_query_auth(mon
         debug=True,
     )
 
-    assert calls["root"] == 2
-    assert record["status"] == "open_no_auth"
-    assert record["query_znode_value"] == "/secure:<Access Denied>"
-    assert record["query_znode_dump_error"] is None
-    assert any("retry_decision stage=detect_protocol" in line for line in record.get("debug_events") or [])
+    assert calls["root"] == 1
+    assert record["status"] == "auth_required"
+    assert record["query_znode_value"] is None
+    assert not any("retry_decision" in line for line in record.get("debug_events") or [])
 
 
-def test_audit_zookeeper_repeated_retryable_root_query_reports_auth_required(monkeypatch) -> None:
+def test_audit_zookeeper_session_policy_auth_required_txt_is_not_connection_failure(monkeypatch) -> None:
     calls = {"root": 0}
 
     class _RetryableRootClient:
@@ -1709,14 +1717,9 @@ def test_audit_zookeeper_repeated_retryable_root_query_reports_auth_required(mon
         def get_children2(self, path: str):
             assert path == "/"
             calls["root"] += 1
-            return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+            return None, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH, None
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _RetryableRootClient)
-    monkeypatch.setattr("redposture_core.stage_zookeeper._retry_delay", lambda _attempt: 0.0)
-    monkeypatch.setattr(
-        "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
-        lambda *_a, **_k: (True, "probe_retryable_124", ["/:err_-124", "/zookeeper:err_-124"]),
-    )
 
     record = _audit_zookeeper_host(
         host="127.0.0.1",
@@ -1731,17 +1734,17 @@ def test_audit_zookeeper_repeated_retryable_root_query_reports_auth_required(mon
         max_znodes=100,
     )
 
-    assert calls["root"] == 2
+    assert calls["root"] == 1
     assert record["status"] == "auth_required"
     assert record["auth_required"] is True
-    assert record["auth_inference_source"] == "probe_retryable_124"
+    assert record["auth_inference_source"] == "session_closed_requires_auth"
     rendered = _format_record(record, "txt")
-    assert "authentication required" in rendered
+    assert "authentication required by server policy" in rendered
     assert "connection failed" not in rendered
     assert "ERR_-124" not in rendered
 
 
-def test_audit_zookeeper_digest_ok_retryable_root_query_is_not_connection_failure(monkeypatch) -> None:
+def test_audit_zookeeper_digest_frame_without_access_is_not_valid_credentials(monkeypatch) -> None:
     class _RetryableAfterDigestClient:
         def __init__(self, *_args, **_kwargs) -> None:
             self.authed = False
@@ -1758,14 +1761,9 @@ def test_audit_zookeeper_digest_ok_retryable_root_query_is_not_connection_failur
 
         def get_children2(self, path: str):
             assert path == "/"
-            return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+            return None, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH, None
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _RetryableAfterDigestClient)
-    monkeypatch.setattr("redposture_core.stage_zookeeper._retry_delay", lambda _attempt: 0.0)
-    monkeypatch.setattr(
-        "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
-        lambda *_a, **_k: (True, "probe_retryable_124", ["/:err_-124", "/zookeeper:err_-124"]),
-    )
     monkeypatch.setattr(
         "redposture_core.stage_zookeeper._probe_znode_create_delete",
         lambda *_a, **_k: (None, None, None),
@@ -1788,12 +1786,11 @@ def test_audit_zookeeper_digest_ok_retryable_root_query_is_not_connection_failur
         max_znodes=100,
     )
 
-    assert record["status"] == "valid_credentials"
-    assert record["provided_credentials_ok"] is True
-    assert record["znode_count_unknown"] is True
-    assert record["stage2_error"] == "root query failed: ERR_-124"
+    assert record["status"] == "auth_required"
+    assert record["provided_credentials_ok"] is False
+    assert record["credential_verdict"] == "rejected"
     rendered = _format_record(record, "txt")
-    assert "admin:admin" in rendered
+    assert "[-] admin:admin" in rendered
     assert "connection failed" not in rendered
 
 
@@ -2370,12 +2367,32 @@ def test_detail_entry_and_auth_probe_helpers() -> None:
     assert zookeeper_stage._znode_detail_entry("/x", {"children": 1, "bytes": 1})["state"] == "readable"
     assert zookeeper_stage._znode_detail_entry("/x", None)["state"] == "unknown"
 
-    assert zookeeper_stage._normalize_auth_probe_result(_ZK_ERR_RETRYABLE_ROOT_QUERY) == (
-        "retryable_auth_hint",
-        "err_-124",
+    assert zookeeper_stage._normalize_auth_probe_result(_ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH) == (
+        "auth_required",
+        "sessionclosedrequiresaslauth",
     )
     assert zookeeper_stage._normalize_auth_probe_result(_ZK_ERR_NONODE) == ("neutral", "nonode")
     assert zookeeper_stage._normalize_auth_probe_result(-115) == ("error", "authfailed")
+
+
+@pytest.mark.parametrize(
+    ("code", "name"),
+    [
+        (0, "OK"),
+        (-4, "CONNECTIONLOSS"),
+        (-7, "OPERATIONTIMEOUT"),
+        (-101, "NONODE"),
+        (-102, "NOAUTH"),
+        (-115, "AUTHFAILED"),
+        (-122, "REQUESTTIMEOUT"),
+        (-124, "SESSIONCLOSEDREQUIRESASLAUTH"),
+        (-125, "QUOTAEXCEEDED"),
+        (-126, "BADAVERSION"),
+        (-127, "THROTTLEDOP"),
+    ],
+)
+def test_keeper_exception_code_mapping(code: int, name: str) -> None:
+    assert zookeeper_stage._zk_error_name(code) == name
 
 
 def test_run_anonymous_probe_and_infer_unknown_lines(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2481,8 +2498,10 @@ def test_render_colored_zookeeper_line_and_emit_line(tmp_path) -> None:
     class _FakeConsole:
         def __init__(self) -> None:
             self.lines: list[str] = []
+            self.paint_calls: list[tuple[str, str]] = []
 
         def _paint(self, text: str, color: str, _stream) -> str:
+            self.paint_calls.append((text, color))
             return f"<{color}>{text}</{color}>"
 
         def plain(self, text: str, color: str | None = None) -> None:
@@ -2501,6 +2520,12 @@ def test_render_colored_zookeeper_line_and_emit_line(tmp_path) -> None:
         "ZOOKEEPER   127.0.0.1 2181 [+] anonymous access (create:True) (delete:False) (znodes:12)",
     )
     assert len(console.lines) >= 2
+
+    assert zookeeper_stage._render_colored_zookeeper_line(
+        console,
+        "ZOOKEEPER\t127.0.0.1\t2181\t/x (children:0,bytes:25)",
+    )
+    assert ("(children:0,bytes:25)", "white") in console.paint_calls
 
     output_path = tmp_path / "out.txt"
     emitted: list[str] = []
@@ -3087,7 +3112,7 @@ def test_audit_host_auth_digest_edge_branches(monkeypatch: pytest.MonkeyPatch) -
     assert rec["error"] == "authentication failed"
 
 
-def test_audit_host_retryable_root_query_after_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_host_session_auth_policy_is_not_retried_after_digest(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
         lambda *_a, **_k: (True, "probe_noauth", []),
@@ -3123,7 +3148,7 @@ def test_audit_host_retryable_root_query_after_auth(monkeypatch: pytest.MonkeyPa
                 if self.root_calls == 1:
                     return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
                 if self.root_calls == 2:
-                    return None, _ZK_ERR_RETRYABLE_ROOT_QUERY, None
+                    return None, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH, None
             else:
                 if self.root_calls == 1:
                     return None, _ZK_ERR_NOAUTH, None
@@ -3144,8 +3169,9 @@ def test_audit_host_retryable_root_query_after_auth(monkeypatch: pytest.MonkeyPa
         query_znode=None,
         max_znodes=100,
     )
-    assert rec["status"] == "valid_credentials"
-    assert rec["provided_credentials_ok"] is True
+    assert rec["status"] == "auth_required"
+    assert rec["provided_credentials_ok"] is False
+    assert rec["attempts"] == 1
 
 
 def test_audit_host_dump_query_dump_and_retry_fail_branches(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3299,7 +3325,7 @@ def test_audit_host_dump_query_dump_and_retry_fail_branches(monkeypatch: pytest.
 
 
 def test_formatting_remaining_text_branches() -> None:
-    assert zookeeper_stage._with_optional_znodes({"znode_count": None}, "line") == "line (znodes:-)"
+    assert zookeeper_stage._with_optional_znodes({"znode_count": None}, "line") == "line (znodes:unknown)"
 
     auth_failed_line = _format_record(
         {

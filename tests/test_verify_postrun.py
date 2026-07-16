@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -526,6 +527,61 @@ def test_validate_rich_lab_outputs_requires_zookeeper_dump_for_all_ports(tmp_pat
         _validate_rich_lab_outputs(rows)
 
 
+def test_validate_rich_lab_outputs_requires_all_pgbackrest_exporter_ports(tmp_path: Path) -> None:
+    artifact = tmp_path / "exporters_scan.jsonl"
+    log = tmp_path / "exporters_scan.log"
+    artifact.write_text(
+        "\n".join(
+            f'{{"host":"127.0.0.1","port":{port},"exporter":"pgbackrest_exporter","detected":true}}'
+            for port in (9854, 19854)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+
+    rows = [
+        {
+            "module": "exporters",
+            "label": "exporters_scan",
+            "expected_exit": "0",
+            "exit_code": "0",
+            "json_path": str(artifact),
+            "log_path": str(log),
+        }
+    ]
+    with pytest.raises(SystemExit, match="did not cover all pgBackRest exporter ports"):
+        _validate_rich_lab_outputs(rows)
+
+
+def test_validate_rich_lab_outputs_accepts_all_pgbackrest_exporter_ports(tmp_path: Path) -> None:
+    artifact = tmp_path / "exporters_collect.jsonl"
+    log = tmp_path / "exporters_collect.log"
+    artifact.write_text(
+        '{"host":"127.0.0.1","port":7777,"exporter":"nats_exporter","ok":true}\n'
+        + "\n".join(
+            f'{{"host":"127.0.0.1","port":{port},"exporter":"pgbackrest_exporter","ok":true}}'
+            for port in (9854, 19854, 29854)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    log.write_text("", encoding="utf-8")
+
+    _validate_rich_lab_outputs(
+        [
+            {
+                "module": "exporters",
+                "label": "exporters_collect",
+                "expected_exit": "0",
+                "exit_code": "0",
+                "json_path": str(artifact),
+                "log_path": str(log),
+            }
+        ]
+    )
+
+
 def test_validate_rich_lab_outputs_accepts_seeded_happy_paths(tmp_path: Path) -> None:
     kafka = tmp_path / "kafka.jsonl"
     kafka_log = tmp_path / "kafka.log"
@@ -641,6 +697,18 @@ def test_sequential_matrix_uses_deep_dump_for_multi_target_seeded_labs() -> None
     assert "kafka_multi_ports 0 kafka" in matrix and "--show-topics --dump --max-messages 10" in matrix
     assert "zookeeper_multi_ports 0 zookeeper" in matrix and "--show-znodes --dump" in matrix
     assert "registry_gitlab 0 registry" in matrix and "--token glrt-lab-token --gitlab --images" in matrix
+
+
+def test_exporter_matrices_cover_all_pgbackrest_ports() -> None:
+    expected_ports = {9854, 19854, 29854}
+    for matrix_path in (Path("scripts/run_lab_matrix.sh"), Path("scripts/run_lab_matrix_sequential.sh")):
+        matrix = matrix_path.read_text(encoding="utf-8")
+        match = re.search(r'^EXPORTER_PORTS="([^"]+)"$', matrix, re.MULTILINE)
+        assert match is not None, f"missing EXPORTER_PORTS in {matrix_path}"
+        ports = {int(value) for value in match.group(1).split(",")}
+        assert expected_ports <= ports
+
+    assert _PROGRESS_EXPECTED_TARGETS["exporters_scan"] == 51
 
 
 def _mk_row(

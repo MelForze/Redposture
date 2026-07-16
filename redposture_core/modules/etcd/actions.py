@@ -12,7 +12,7 @@ from typing import Any
 from ...clients import transport
 from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
     limit_metadata,
     limit_sequence,
@@ -183,16 +183,25 @@ def _count_v2_keys(body: str) -> int | None:
     return _count_v2_nodes(node)
 
 
-def _count_v3_keys(body: str) -> int | None:
+def _parse_v3_key_count(body: str) -> tuple[int | None, str | None]:
     payload = _load_json(body)
     if payload is None:
-        return None
+        return None, "count response returned invalid JSON"
+    if "count" not in payload:
+        # protobuf JSON omits scalar zero-values, so a successful count_only
+        # response with no count field represents an empty keyspace.
+        return 0, None
     raw_count = payload.get("count")
-    if isinstance(raw_count, int):
-        return raw_count
+    if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count >= 0:
+        return raw_count, None
     if isinstance(raw_count, str) and raw_count.isdigit():
-        return int(raw_count)
-    return None
+        return int(raw_count), None
+    return None, f"count response returned invalid count: {raw_count!r}"
+
+
+def _count_v3_keys(body: str) -> int | None:
+    count, _error = _parse_v3_key_count(body)
+    return count
 
 
 def _join_api_versions(v2_supported: bool, v3_supported: bool) -> str:
@@ -323,19 +332,22 @@ def _dump_v2_key(host: str, port: int, key: str, timeout: float) -> tuple[dict[s
 
 
 def _dump_v3_all(
-    host: str, port: int, timeout: float, *, limit: int | None = None
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    limit: int | None = None,
+    auth_token: str | None = None,
 ) -> tuple[list[dict[str, str | None]] | None, str | None]:
     request_payload: dict[str, Any] = {"key": _ETCD_V3_ALL_RANGE_KEY_B64, "range_end": _ETCD_V3_ALL_RANGE_KEY_B64}
     if limit is not None:
         request_payload["limit"] = limit
-    status, body = _http_json_request(
-        host,
-        port,
-        "POST",
-        "/v3/kv/range",
-        timeout,
-        payload=request_payload,
-    )
+    if auth_token is None:
+        status, body = _http_json_request(host, port, "POST", "/v3/kv/range", timeout, payload=request_payload)
+    else:
+        status, body = _http_json_request(
+            host, port, "POST", "/v3/kv/range", timeout, payload=request_payload, auth_token=auth_token
+        )
     if status in (401, 403) or _body_indicates_auth_required(body):
         return None, "authentication required"
     if status != 200:
@@ -369,6 +381,7 @@ def _stream_dump_v3_all(
     batch: int,
     delay_ms: int,
     limit: int | None = None,
+    auth_token: str | None = None,
 ) -> tuple[list[dict[str, str | None]] | None, str | None]:
     """Dump the whole v3 keyspace gradually, one range page at a time.
 
@@ -397,7 +410,18 @@ def _stream_dump_v3_all(
             "range_end": _ETCD_V3_ALL_RANGE_KEY_B64,
             "limit": page_limit,
         }
-        status, body = _http_json_request(host, port, "POST", "/v3/kv/range", timeout, payload=request_payload)
+        if auth_token is None:
+            status, body = _http_json_request(host, port, "POST", "/v3/kv/range", timeout, payload=request_payload)
+        else:
+            status, body = _http_json_request(
+                host,
+                port,
+                "POST",
+                "/v3/kv/range",
+                timeout,
+                payload=request_payload,
+                auth_token=auth_token,
+            )
         if status in (401, 403) or _body_indicates_auth_required(body):
             return (entries if entries else None), "authentication required"
         if status != 200:
@@ -433,15 +457,16 @@ def _stream_dump_v3_all(
     return entries, None
 
 
-def _dump_v3_key(host: str, port: int, key: str, timeout: float) -> tuple[dict[str, str | None] | None, str | None]:
-    status, body = _http_json_request(
-        host,
-        port,
-        "POST",
-        "/v3/kv/range",
-        timeout,
-        payload={"key": _b64_encode_text(key)},
-    )
+def _dump_v3_key(
+    host: str, port: int, key: str, timeout: float, *, auth_token: str | None = None
+) -> tuple[dict[str, str | None] | None, str | None]:
+    request_payload = {"key": _b64_encode_text(key)}
+    if auth_token is None:
+        status, body = _http_json_request(host, port, "POST", "/v3/kv/range", timeout, payload=request_payload)
+    else:
+        status, body = _http_json_request(
+            host, port, "POST", "/v3/kv/range", timeout, payload=request_payload, auth_token=auth_token
+        )
     if status in (401, 403) or _body_indicates_auth_required(body):
         return None, "authentication required"
     if status != 200:
@@ -503,6 +528,7 @@ def _audit_etcd_host(
             v2_supported = False
             v2_auth_required: bool | None = None
             key_count_v2: int | None = None
+            key_count_v2_error: str | None = None
             v2_error: str | None = None
 
             v2_status, v2_body = _http_json_request(host, port, "GET", "/v2/keys?recursive=true", timeout)
@@ -511,6 +537,8 @@ def _audit_etcd_host(
                 if v2_status == 200:
                     v2_auth_required = False
                     key_count_v2 = _count_v2_keys(v2_body)
+                    if key_count_v2 is None:
+                        key_count_v2_error = "v2 key count response returned invalid JSON"
                 else:
                     v2_auth_required = True
             elif _body_indicates_auth_required(v2_body):
@@ -521,6 +549,7 @@ def _audit_etcd_host(
 
             v3_auth_required: bool | None = None
             key_count_v3: int | None = None
+            key_count_v3_error: str | None = None
             v3_error: str | None = None
 
             if v3_supported:
@@ -546,16 +575,22 @@ def _audit_etcd_host(
                     )
                     if range_status == 200:
                         v3_auth_required = False
-                        key_count_v3 = _count_v3_keys(range_body)
+                        key_count_v3, key_count_v3_error = _parse_v3_key_count(range_body)
                     elif range_status in (401, 403) or _body_indicates_auth_required(range_body):
                         v3_auth_required = True
                     elif v3_auth_required is None:
                         v3_error = f"/v3/kv/range returned status {range_status}"
 
-            auth_candidates = [value for value in (v2_auth_required, v3_auth_required) if isinstance(value, bool)]
+            api_auth_required = {
+                "v2": v2_auth_required if v2_supported else None,
+                "v3": v3_auth_required if v3_supported else None,
+            }
+            auth_candidates = [value for value in api_auth_required.values() if isinstance(value, bool)]
             auth_required: bool | None
-            if auth_candidates:
-                auth_required = any(auth_candidates)
+            if False in auth_candidates:
+                auth_required = False
+            elif True in auth_candidates:
+                auth_required = True
             else:
                 auth_required = None
 
@@ -565,6 +600,7 @@ def _audit_etcd_host(
             credential_attempts: list[dict[str, Any]] = []
             selected_credential: dict[str, Any] | None = None
             effective_username: str | None = None
+            effective_password: str | None = None
 
             if v3_supported and auth_required is True and (provided_credentials or defcreds):
                 candidate_pairs: list[tuple[str, str, bool]] = []
@@ -588,6 +624,7 @@ def _audit_etcd_host(
                         auth_token = token
                         selected_credential = {"username": user, "password": secret, "default": is_default}
                         effective_username = user
+                        effective_password = secret
                         break
 
             # If we successfully authenticated, re-run the /v3/kv/range probe with
@@ -608,7 +645,7 @@ def _audit_etcd_host(
                 )
                 if range_status == 200:
                     v3_auth_required = True  # confirmed auth-gated
-                    key_count_v3 = _count_v3_keys(range_body)
+                    key_count_v3, key_count_v3_error = _parse_v3_key_count(range_body)
                     auth_required = True
 
             key_count: int | None = None
@@ -618,9 +655,12 @@ def _audit_etcd_host(
             query_key_value: str | None = None
             query_key_entry: dict[str, str | None] | None = None
             key_dump_error: str | None = None
+            key_count_error: str | None = None
             has_access = auth_required is False or auth_token is not None
             if has_access:
                 key_count = key_count_v2 if key_count_v2 is not None else key_count_v3
+                if key_count is None:
+                    key_count_error = key_count_v2_error if v2_auth_required is False else key_count_v3_error
                 if show_keys or dump_keys:
                     all_key_values: list[dict[str, str | None]] | None = None
                     if v2_supported:
@@ -639,6 +679,7 @@ def _audit_etcd_host(
                                 batch=dump_batch,
                                 delay_ms=dump_delay,
                                 limit=dump_keys_limit,
+                                auth_token=auth_token,
                             )
                         else:
                             all_key_values, key_dump_error = _dump_v3_all(
@@ -646,6 +687,7 @@ def _audit_etcd_host(
                                 port,
                                 timeout,
                                 limit=show_keys_limit,
+                                auth_token=auth_token,
                             )
 
                     if isinstance(all_key_values, list):
@@ -665,7 +707,7 @@ def _audit_etcd_host(
                     if v2_supported:
                         key_entry, one_key_error = _dump_v2_key(host, port, query_key, timeout)
                     elif v3_supported:
-                        key_entry, one_key_error = _dump_v3_key(host, port, query_key, timeout)
+                        key_entry, one_key_error = _dump_v3_key(host, port, query_key, timeout, auth_token=auth_token)
                     else:
                         key_entry, one_key_error = None, "no supported API for key dump"
 
@@ -694,7 +736,10 @@ def _audit_etcd_host(
                     "api_versions": "-",
                     "server_version": None,
                     "auth_required": None,
+                    "api_auth_required": {"v2": None, "v3": None},
                     "key_count": None,
+                    "key_count_state": "unknown",
+                    "key_count_error": "service is not etcd",
                     "show_keys": show_keys,
                     "show_keys_limit": show_keys_limit,
                     "dump_keys": dump_keys,
@@ -726,6 +771,7 @@ def _audit_etcd_host(
                 "api_versions": api_versions,
                 "server_version": server_version,
                 "auth_required": auth_required,
+                "api_auth_required": api_auth_required,
                 "provided_credentials": provided_credentials,
                 "provided_username": username if provided_credentials else None,
                 "provided_password": password if provided_credentials else None,
@@ -736,8 +782,11 @@ def _audit_etcd_host(
                 ),
                 "defcreds_enabled": defcreds,
                 "effective_username": effective_username,
+                "effective_password": effective_password,
                 "credential_attempts": credential_attempts,
                 "key_count": key_count,
+                "key_count_state": "known" if isinstance(key_count, int) else "unknown",
+                "key_count_error": key_count_error,
                 "show_keys": show_keys,
                 "show_keys_limit": show_keys_limit,
                 "dump_keys": dump_keys,
@@ -765,7 +814,10 @@ def _audit_etcd_host(
         "api_versions": "-",
         "server_version": None,
         "auth_required": None,
+        "api_auth_required": {"v2": None, "v3": None},
         "key_count": None,
+        "key_count_state": "unknown",
+        "key_count_error": last_error or "connection failed",
         "show_keys": show_keys,
         "show_keys_limit": show_keys_limit,
         "dump_keys": dump_keys,
@@ -824,18 +876,19 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if status == "open_no_auth":
         key_count = record.get("key_count")
         if isinstance(key_count, int):
-            return f"{prefix} [+] anonymous access (keys:{key_count})"
-        return f"{prefix} [+] anonymous access (keys:-)"
+            return f"{prefix} [+] anonymous access (keys:{format_count_value(key_count)})"
+        count_error = _clip(str(record.get("key_count_error") or "unknown count"), 72)
+        return f"{prefix} [+] anonymous access (keys:unknown) err={count_error}"
 
     if status in {"weak_default_creds", "valid_credentials"}:
         user = str(record.get("effective_username") or "-")
-        pw = record.get("provided_password") if status == "valid_credentials" else None
-        # For default creds render just user:user pair (matching the tried default);
-        # for user-supplied creds echo the actual password since it validated.
-        password_text = str(pw) if pw is not None else user
+        pw = record.get("provided_password") if status == "valid_credentials" else record.get("effective_password")
+        password_text = str(pw) if pw is not None else "<none>"
         key_count = record.get("key_count")
-        count_text = f"(keys:{key_count})" if isinstance(key_count, int) else "(keys:-)"
-        return f"{prefix} [+] {user}:{password_text} {count_text}"
+        if isinstance(key_count, int):
+            return f"{prefix} [+] {user}:{password_text} (keys:{format_count_value(key_count)})"
+        count_error = _clip(str(record.get("key_count_error") or "unknown count"), 72)
+        return f"{prefix} [+] {user}:{password_text} (keys:unknown) err={count_error}"
 
     if status == "auth_required":
         return f"{prefix} [-] authentication required"

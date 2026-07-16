@@ -23,6 +23,7 @@ MODULES = {
     "oracle": ("ORACLE", 1521),
     "grpc": ("GRPC", 50051),
     "clickhouse": ("CLICKHOUSE", 9000),
+    "keeper": ("KEEPER", 9181),
     "zookeeper": ("ZOOKEEPER", 2181),
 }
 

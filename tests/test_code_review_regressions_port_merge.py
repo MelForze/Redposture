@@ -39,6 +39,7 @@ from redposture_core.stage_runtime import build_basic_audit_plan
         ("postgres", 5432),
         ("kafka", 9092),
         ("registry", 5000),
+        ("keeper", 9181),
         ("zookeeper", 2181),
     ],
 )
@@ -110,7 +111,7 @@ def test_ports_flag_is_hidden_from_help_for_all_port_modules() -> None:
     from redposture_core.cli_args import build_parser
 
     parser = build_parser()
-    for module in ("redis", "etcd", "mongodb", "postgres", "kafka", "registry", "zookeeper"):
+    for module in ("redis", "etcd", "mongodb", "postgres", "kafka", "registry", "keeper", "zookeeper"):
         # argparse doesn't expose subparser help directly; format and grep.
         subparsers_action = next(
             (a for a in parser._actions if isinstance(a, argparse._SubParsersAction)),

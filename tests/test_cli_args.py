@@ -311,6 +311,7 @@ def test_help_documents_implicit_target_file_precedence() -> None:
         ("elastic", ["Common", "Auth", "Actions"]),
         ("grpc", ["Common", "Auth", "Invoke / Metadata", "Schema", "Export"]),
         ("kafka", ["Common", "Auth", "Actions"]),
+        ("keeper", ["Common", "Transport", "Auth", "Actions"]),
         ("zookeeper", ["Common", "Auth", "Actions"]),
     ],
 )
@@ -1824,6 +1825,41 @@ def test_zookeeper_rejects_profiles_file_flag() -> None:
     with pytest.raises(SystemExit) as exc:
         parse_args(["zookeeper", "-t", "10.0.0.9", "--profiles-file", "profiles.json"])
     assert exc.value.code == 2
+
+
+def test_keeper_flags_and_auto_tls_defaults_are_parsed() -> None:
+    args = parse_args(
+        [
+            "keeper",
+            "-t",
+            "10.0.0.41",
+            "--port",
+            "19181,29181",
+            "--insecure",
+            "--tls-cert",
+            "client.pem",
+            "--tls-key",
+            "client.key",
+            "--show-znodes",
+            "20",
+            "--dump",
+            "10",
+            "--enum-workers",
+            "4",
+        ]
+    )
+    assert args.command == "keeper"
+    assert args.port == 19181
+    assert args.ports == "19181,29181"
+    assert args.tls is False
+    assert args.no_tls is False
+    assert args.insecure is True
+    assert args.tls_cert == "client.pem"
+    assert args.tls_key == "client.key"
+    assert args.show_znodes == 20
+    assert args.dump == 10
+    assert args.enum_workers == 4
+    assert args.timeout == 5.0
 
 
 def test_zookeeper_dump_legacy_alias_is_parsed() -> None:

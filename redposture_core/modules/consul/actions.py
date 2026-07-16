@@ -19,7 +19,7 @@ from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig
 from ...console import Console
-from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     DEFAULT_MAX_NETWORK_HOSTS,
     as_dict,
@@ -488,11 +488,7 @@ def _scope_counts_suffix(scopes: dict[str, Any]) -> str:
     parts: list[str] = []
     for name in _CONSUL_SCOPE_NAMES:
         entry = scopes.get(name) or {}
-        count = entry.get("count")
-        if isinstance(count, int):
-            parts.append(f"({name}:{count})")
-        else:
-            parts.append(f"({name}:-)")
+        parts.append(f"({name}:{format_count_value(entry.get('count'))})")
     return " ".join(parts)
 
 

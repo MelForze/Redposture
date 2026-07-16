@@ -319,6 +319,11 @@ def test_postgres_protocol_helpers_and_startup_auth_paths(monkeypatch: pytest.Mo
     assert session == postgres._PgSession(auth_required=True, auth_method="cleartext", server_version="16.1")
     assert ("password", "secret") in sends
 
+    ready_messages = iter([(b"Z", b"I")])
+    monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(ready_messages))
+    trusted_session = postgres._pg_startup_and_auth(_ProtocolSocket(), "alice", None, "appdb")
+    assert trusted_session.auth_required is False
+
     md5_messages = iter([(b"R", struct.pack(">i", 5) + b"salt")])
     monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(md5_messages))
     with pytest.raises(_PgAuditError, match="md5 authentication required") as excinfo:
@@ -337,6 +342,17 @@ def test_postgres_protocol_helpers_and_startup_auth_paths(monkeypatch: pytest.Mo
         postgres._pg_startup_and_auth(_ProtocolSocket(), "alice", "secret", "postgres")
     assert error_info.value.sqlstate == "28P01"
     assert error_info.value.auth_required is True
+    assert error_info.value.error_kind == "authentication_failed"
+
+    pgbouncer_messages = iter([(b"E", b"C08P01\x00Mno authentication method is found\x00\x00")])
+    monkeypatch.setattr(postgres, "_pg_read_message", lambda *_args: next(pgbouncer_messages))
+    with pytest.raises(_PgAuditError, match="no authentication method is found") as pgbouncer_error:
+        postgres._pg_startup_and_auth(_ProtocolSocket(), "postgres", None, "postgres")
+    assert pgbouncer_error.value.detected is True
+    assert pgbouncer_error.value.auth_required is None
+    assert pgbouncer_error.value.sqlstate == "08P01"
+    assert pgbouncer_error.value.failure_phase == "startup"
+    assert pgbouncer_error.value.error_kind == "auth_configuration_error"
 
 
 def test_collect_postgres_privileges_and_query_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1886,6 +1902,49 @@ def test_audit_postgres_handles_pg_audit_error_paths(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "redposture_core.stage_postgres._pg_startup_and_auth",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            _PgAuditError(
+                "no authentication method is found",
+                detected=True,
+                sqlstate="08P01",
+                failure_phase="startup",
+                error_kind="auth_configuration_error",
+            )
+        ),
+    )
+    pgbouncer_record = _audit_postgres_host(
+        host="127.0.0.1",
+        port=6432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=False,
+        database="postgres",
+        show_databases=False,
+        show_tables=False,
+        show_row_counts=False,
+        show_columns=False,
+        table_targets=[],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=False,
+        dump_row_limit=None,
+        execute_command=None,
+        sql_command=None,
+    )
+    assert pgbouncer_record["is_postgres"] is True
+    assert pgbouncer_record["status"] == "unknown_auth"
+    assert pgbouncer_record["auth_required"] is None
+    assert pgbouncer_record["sqlstate"] == "08P01"
+    assert pgbouncer_record["failure_phase"] == "startup"
+    assert pgbouncer_record["error_kind"] == "auth_configuration_error"
+    pgbouncer_line = _format_record(pgbouncer_record, "txt")
+    assert "authentication unavailable" in pgbouncer_line
+    assert "connection failed" not in pgbouncer_line
+
+    monkeypatch.setattr(
+        "redposture_core.stage_postgres._pg_startup_and_auth",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(_PgAuditError("not postgres", detected=False)),
     )
     fail_record = _audit_postgres_host(
@@ -1912,6 +1971,52 @@ def test_audit_postgres_handles_pg_audit_error_paths(monkeypatch) -> None:
     assert fail_record["status"] == "fail"
     assert fail_record["is_postgres"] is False
     assert fail_record["error"] == "not postgres"
+
+
+def test_postgres_startup_rejection_marks_auth_telemetry_partial(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        postgres,
+        "_audit_postgres_host",
+        lambda *_args, **_kwargs: {
+            "host": "127.0.0.1",
+            "port": 6432,
+            "is_postgres": True,
+            "status": "unknown_auth",
+            "auth_required": None,
+            "error_kind": "auth_configuration_error",
+            "error": "no authentication method is found",
+        },
+    )
+    record = postgres._call_audit_postgres_host_with_stage_debug(
+        host="127.0.0.1",
+        port=6432,
+        timeout=1.0,
+        retries=0,
+        username=None,
+        password=None,
+        defcreds=False,
+        database=None,
+        show_databases=True,
+        show_tables=True,
+        show_row_counts=True,
+        show_columns=True,
+        table_targets=[],
+        table_targets_by_database={},
+        table_columns=[],
+        dump_table_rows=False,
+        dump_row_limit=None,
+        execute_command=None,
+        sql_command=None,
+        run_deep_checks=True,
+        debug=False,
+        debug_emit=None,
+    )
+
+    stage_results = {item["stage_name"]: item["result"] for item in record["stages"] if isinstance(item, dict)}
+    assert stage_results["detect_protocol"] == "ok"
+    assert stage_results["auth_inference_credentials"] == "partial"
+    assert stage_results["access_capabilities"] == "skip"
+    assert stage_results["data"] == "skip"
 
 
 def test_audit_postgres_collects_execute_and_sql_outputs(monkeypatch) -> None:
