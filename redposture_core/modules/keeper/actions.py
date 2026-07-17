@@ -364,7 +364,6 @@ def detect_keeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
         if selected_config is not None and selected_config.mode in {"plaintext", "tls"}
         else "plaintext"
     )
-    selected_transport = cast(Literal["plaintext", "tls"], selected_transport)
     fingerprint = options["keeper_probe_cache"].get_or_probe(
         (
             str(ctx.host),
