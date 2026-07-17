@@ -36,8 +36,6 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
         "max_znodes": int(getattr(args, "max_znodes", 2000) or 2000),
         "enum_workers": int(getattr(args, "enum_workers", 3) or 3),
         "keeper_probe_cache": getattr(args, "keeper_probe_cache", None) or KeeperFingerprintCache(),
-        "tls": bool(getattr(args, "tls", False)),
-        "no_tls": bool(getattr(args, "no_tls", False)),
         "insecure": bool(getattr(args, "insecure", False)),
         "ca_file": getattr(args, "ca_file", None),
         "tls_cert": getattr(args, "tls_cert", None),
@@ -53,8 +51,6 @@ def build_keeper_spec(args: Any) -> ModuleAuditSpec:
     def _state_factory(_ctx: Any) -> actions.KeeperLifecycleState:
         return actions.KeeperLifecycleState(
             requested_config=actions._transport_config(
-                tls=bool(options["tls"]),
-                no_tls=bool(options["no_tls"]),
                 insecure=bool(options["insecure"]),
                 ca_file=options["ca_file"],
                 tls_cert=options["tls_cert"],

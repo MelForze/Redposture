@@ -420,8 +420,10 @@ run_negative_cli_cases() {
   run_raw_case zookeeper fuzz_zookeeper_zero_max_znodes 2 zookeeper -t 127.0.0.1 --max-znodes 0
   run_raw_case zookeeper fuzz_zookeeper_zero_enum_workers 2 zookeeper -t 127.0.0.1 --enum-workers 0
   run_raw_case keeper fuzz_keeper_incomplete_mtls 2 keeper -t 127.0.0.1 --tls-cert client.pem
-  run_raw_case keeper fuzz_keeper_tls_conflict 2 keeper -t 127.0.0.1 --tls --no-tls
-  run_raw_case keeper fuzz_keeper_tls_options_plaintext 2 keeper -t 127.0.0.1 --no-tls --ca-file ca.pem --tls-cert client.pem --tls-key client.key
+  run_raw_case keeper fuzz_keeper_incomplete_mtls_key 2 keeper -t 127.0.0.1 --tls-key client.key
+  run_raw_case keeper fuzz_keeper_ca_insecure_conflict 2 keeper -t 127.0.0.1 --ca-file ca.pem --insecure
+  run_raw_case keeper fuzz_keeper_removed_tls_flag 2 keeper -t 127.0.0.1 --tls
+  run_raw_case keeper fuzz_keeper_removed_no_tls_flag 2 keeper -t 127.0.0.1 --no-tls
 }
 
 run_exporters_cases() {
@@ -832,12 +834,12 @@ run_zookeeper_cases() {
 run_keeper_cases() {
   run_case keeper keeper_cluster 0 keeper -t 127.0.0.1 --ports "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3
   run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
-  run_case keeper keeper_no4lw 0 keeper -t 127.0.0.1 --port 39181 -u lab -p lab --show-znodes 10 --dump 10 -znode /keeper/api_version
+  run_case keeper keeper_no4lw 0 keeper -t 127.0.0.1 --port 39181 -u lab -p lab --show-znodes 10 --dump 10 --znode /keeper/api_version
   run_case keeper keeper_apache_control 0 keeper -t 127.0.0.1 --port 12181 --show-znodes 5
   if is_extended_matrix; then
     run_text_case keeper keeper_debug_smoke 0 keeper -t 127.0.0.1 --port 9181 --debug
-    run_case keeper keeper_force_plaintext 0 keeper -t 127.0.0.1 --port 9181 --no-tls --show-znodes 5
-    run_case keeper keeper_force_tls 0 keeper -t 127.0.0.1 --port 19281 --tls --insecure --show-znodes 5
+    run_case keeper keeper_force_plaintext 0 keeper -t 127.0.0.1 --port 9181 --show-znodes 5
+    run_case keeper keeper_force_tls 0 keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 5
   fi
 }
 

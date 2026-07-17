@@ -17,11 +17,6 @@ def validate_args(args: Any, console: Any) -> int | None:
     if bool(getattr(args, "ca_file", None)) and bool(getattr(args, "insecure", False)):
         console.error("--ca-file cannot be combined with --insecure")
         return 2
-    if bool(getattr(args, "no_tls", False)) and any(
-        bool(getattr(args, name, None)) for name in ("ca_file", "insecure", "tls_cert", "tls_key")
-    ):
-        console.error("TLS options cannot be combined with --no-tls")
-        return 2
     max_znodes = getattr(args, "max_znodes", None)
     if max_znodes is not None and int(max_znodes) <= 0:
         console.error("--max-znodes must be > 0")

@@ -20,7 +20,7 @@ def configure_keeper_parser(
     positive_int: Callable[[str], int],
 ) -> None:
     common = parser.add_argument_group("Common")
-    transport = parser.add_argument_group("Transport")
+    transport = parser.add_argument_group("TLS (transport auto-detected)")
     auth = parser.add_argument_group("Auth")
     actions = parser.add_argument_group("Actions")
 
@@ -53,11 +53,14 @@ def configure_keeper_parser(
         help="Parallel workers for znode enumeration during deep checks.",
     )
 
-    mode = transport.add_mutually_exclusive_group()
-    mode.add_argument("--tls", action="store_true", help="Force TLS for the Keeper client connection.")
-    mode.add_argument("--no-tls", action="store_true", help="Force plaintext; by default transport is detected.")
-    transport.add_argument("--ca-file", default=None, metavar="file", help="CA certificate used to verify Keeper TLS.")
-    transport.add_argument("--insecure", action="store_true", help="Disable Keeper TLS certificate verification.")
+    transport.add_argument(
+        "--ca-file", default=None, metavar="file", help="CA certificate for Keeper TLS verification."
+    )
+    transport.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Allow an untrusted or self-signed Keeper TLS certificate.",
+    )
     transport.add_argument(
         "--tls-cert", dest="tls_cert", default=None, metavar="file", help="TLS client certificate for mTLS."
     )
@@ -93,7 +96,6 @@ def configure_keeper_parser(
         ),
     )
     actions.add_argument(
-        "-znode",
         "--znode",
         dest="znode",
         default=None,

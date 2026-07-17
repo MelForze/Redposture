@@ -44,16 +44,13 @@ class KeeperLifecycleState:
 
 def _transport_config(
     *,
-    tls: bool,
-    no_tls: bool,
     insecure: bool,
     ca_file: str | None,
     tls_cert: str | None,
     tls_key: str | None,
 ) -> ZkTransportConfig:
-    mode: Literal["auto", "plaintext", "tls"] = "tls" if tls else "plaintext" if no_tls else "auto"
     return ZkTransportConfig(
-        mode=mode,
+        mode="auto",
         insecure=bool(insecure),
         ca_file=str(ca_file).strip() if ca_file else None,
         cert_file=str(tls_cert).strip() if tls_cert else None,
@@ -143,8 +140,6 @@ def _audit_keeper_host(
     run_deep_checks: bool,
     enum_workers: int,
     debug_emit: Any,
-    tls: bool,
-    no_tls: bool,
     insecure: bool,
     ca_file: str | None,
     tls_cert: str | None,
@@ -153,8 +148,6 @@ def _audit_keeper_host(
     dump_limit: int | None = None,
 ) -> dict[str, Any]:
     config = _transport_config(
-        tls=tls,
-        no_tls=no_tls,
         insecure=insecure,
         ca_file=ca_file,
         tls_cert=tls_cert,
