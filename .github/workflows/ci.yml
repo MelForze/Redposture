@@ -70,7 +70,10 @@ jobs:
           python -m compileall -q redposture_core tests
 
       - name: Pytest
-        run: pytest -q --cov=redposture_core --cov-report=term-missing
+        run: pytest -q --cov=redposture_core --cov-report=term-missing --cov-report=json:coverage.json
+
+      - name: Per-file coverage floor
+        run: python scripts/check_coverage_per_file.py coverage.json --min 70
 
       - name: CLI version smoke
         run: redposture --version

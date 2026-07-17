@@ -317,7 +317,7 @@ def test_help_documents_implicit_target_file_precedence() -> None:
         ("elastic", ["Common", "Auth", "Actions"]),
         ("grpc", ["Common", "Auth", "Invoke / Metadata", "Schema", "Export"]),
         ("kafka", ["Common", "Auth", "Actions"]),
-        ("keeper", ["Common", "Transport", "Auth", "Actions"]),
+        ("keeper", ["Common", "TLS (transport auto-detected)", "Auth", "Actions"]),
         ("zookeeper", ["Common", "Auth", "Actions"]),
     ],
 )
@@ -1797,7 +1797,7 @@ def test_zookeeper_flags_are_parsed() -> None:
             "zk-pass",
             "--show-znodes",
             "--dump",
-            "-znode",
+            "--znode",
             "/brokers/ids/1",
             "--max-znodes",
             "500",
@@ -1825,6 +1825,21 @@ def test_zookeeper_flags_are_parsed() -> None:
     assert args.enum_workers == 7
     assert args.output_format == "json"
     assert args.output == "zookeeper_audit.jsonl"
+
+
+@pytest.mark.parametrize("command", ["zookeeper", "keeper"])
+def test_znode_flag_uses_long_option_only(command: str) -> None:
+    args = parse_args([command, "-t", "10.0.0.9", "--znode", "/clickhouse/tables"])
+    assert args.znode == "/clickhouse/tables"
+
+    help_text = _command_help(command)
+    assert "\n  --znode path" in help_text
+    assert "\n  -znode" not in help_text
+    assert "[-znode path]" not in help_text
+
+    with pytest.raises(SystemExit) as exc:
+        parse_args([command, "-t", "10.0.0.9", "-znode", "/clickhouse/tables"])
+    assert exc.value.code == 2
 
 
 def test_zookeeper_rejects_profiles_file_flag() -> None:
@@ -1857,8 +1872,8 @@ def test_keeper_flags_and_auto_tls_defaults_are_parsed() -> None:
     assert args.command == "keeper"
     assert args.port == 19181
     assert args.ports == "19181,29181"
-    assert args.tls is False
-    assert args.no_tls is False
+    assert not hasattr(args, "tls")
+    assert not hasattr(args, "no_tls")
     assert args.insecure is True
     assert args.tls_cert == "client.pem"
     assert args.tls_key == "client.key"
@@ -1866,6 +1881,22 @@ def test_keeper_flags_and_auto_tls_defaults_are_parsed() -> None:
     assert args.dump == 10
     assert args.enum_workers == 4
     assert args.timeout == 5.0
+
+
+@pytest.mark.parametrize("removed_flag", ["--tls", "--no-tls"])
+def test_keeper_transport_is_auto_detected_without_manual_mode_flags(removed_flag: str) -> None:
+    help_text = _command_help("keeper")
+    assert "\nTLS (transport auto-detected):\n" in help_text
+    assert re.search(r"(?m)^  --tls\s", help_text) is None
+    assert re.search(r"(?m)^  --no-tls\s", help_text) is None
+    assert "--ca-file file" in help_text
+    assert "--insecure" in help_text
+    assert "--tls-cert file" in help_text
+    assert "--tls-key file" in help_text
+
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["keeper", "-t", "10.0.0.41", removed_flag])
+    assert exc.value.code == 2
 
 
 def test_zookeeper_dump_legacy_alias_is_parsed() -> None:

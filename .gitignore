@@ -17,6 +17,7 @@ env/
 .ci-venvs/
 .coverage
 .coverage.*
+coverage.json
 htmlcov/
 
 # Editors/OS

@@ -358,6 +358,103 @@ def test_run_oracle_stage_validation_and_json(monkeypatch: pytest.MonkeyPatch, t
     assert oracle.run_oracle_stage(_args(download="badpair"), logger=object()) == 2
 
 
+def test_run_oracle_stage_reports_credential_and_plan_errors(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert oracle.run_oracle_stage(_args(user_list="scott"), logger=object()) == 2
+    assert oracle.run_oracle_stage(_args(ports="not-a-port"), logger=object()) == 2
+
+    stderr = capsys.readouterr().err
+    assert "--user-list and --pass-list must be provided together" in stderr
+    assert "failed to parse --port" in stderr
+
+
+def test_run_oracle_stage_reports_runner_os_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FailingRunner:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = (args, kwargs)
+
+        def run_plan(self, plan):
+            _ = plan
+            raise OSError("output path is unavailable")
+
+    monkeypatch.setattr(oracle, "AuditCommandRunner", FailingRunner)
+
+    assert oracle.run_oracle_stage(_args(), logger=object()) == 2
+    assert "failed to process oracle output: output path is unavailable" in capsys.readouterr().err
+
+
+def test_run_oracle_stage_credential_file_debug_and_unreachable_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    creds = tmp_path / "creds.txt"
+    creds.write_text("system:oracle\n", encoding="utf-8")
+    output = tmp_path / "oracle.jsonl"
+    captured: dict[str, Any] = {}
+
+    class ZeroDetectionRunner:
+        def __init__(self, *args, **kwargs) -> None:
+            captured.update(kwargs)
+            captured["positional_args"] = args
+
+        def run_plan(self, plan):
+            captured["plan"] = plan
+            return type("Result", (), {"detected_count": 0})()
+
+    monkeypatch.setattr(oracle, "AuditCommandRunner", ZeroDetectionRunner)
+    args = _args(
+        username=str(creds),
+        debug=True,
+        output=str(output),
+        output_format="json",
+    )
+
+    assert oracle.run_oracle_stage(args, logger=object()) == 0
+
+    plan = captured["plan"]
+    assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [("system", "oracle", "file")]
+    assert callable(args.debug_emit)
+    assert captured["console"].structured_output is True
+    stderr = capsys.readouterr().err
+    assert f"oracle audit started: format=json output={output}" in stderr
+    assert "all oracle targets are unreachable" in stderr
+
+
+def test_run_oracle_stage_accepts_console_without_optional_methods(monkeypatch: pytest.MonkeyPatch) -> None:
+    messages: list[str] = []
+
+    class MinimalConsole:
+        def __init__(self, debug: bool = False) -> None:
+            self.debug = debug
+
+        def info(self, message: str) -> None:
+            messages.append(message)
+
+        def error(self, message: str) -> None:
+            messages.append(message)
+
+    class ZeroDetectionRunner:
+        def __init__(self, *args, **kwargs) -> None:
+            _ = (args, kwargs)
+
+        def run_plan(self, plan):
+            _ = plan
+            return type("Result", (), {"detected_count": 0})()
+
+    monkeypatch.setattr(oracle, "Console", MinimalConsole)
+    monkeypatch.setattr(oracle, "AuditCommandRunner", ZeroDetectionRunner)
+
+    args = _args(debug=True)
+    assert oracle.run_oracle_stage(args, logger=object()) == 0
+    assert callable(args.debug_emit)
+    assert messages == ["oracle audit started: format=txt"]
+
+
 def test_oracle_helpers_parse_credentials_and_targets(tmp_path: Path) -> None:
     combo = tmp_path / "combo.txt"
     combo.write_text("system:oracle\n", encoding="utf-8")

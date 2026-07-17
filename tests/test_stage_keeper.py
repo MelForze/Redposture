@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import redposture_core.stage_keeper as keeper_facade
+from redposture_core import stage_runtime
 from redposture_core.cli_args import parse_args
 from redposture_core.clients import zookeeper as zk_client
 from redposture_core.clients.zookeeper import (
@@ -17,6 +19,7 @@ from redposture_core.clients.zookeeper import (
     query_four_letter_word,
 )
 from redposture_core.modules.keeper import actions, policy, render
+from redposture_core.modules.keeper import stage as keeper_stage
 from redposture_core.modules.keeper.stage import build_keeper_plan, build_keeper_spec
 from redposture_core.modules.keeper.types import KeeperFingerprintCache
 from redposture_core.stage_runtime import AuditCommandRunner, AuditCredentialRun, AuditHookContext
@@ -278,8 +281,6 @@ def test_keeper_adapter_classifies_and_renders_keeper(monkeypatch: pytest.Monkey
         1,
         None,
         False,
-        False,
-        False,
         None,
         None,
         None,
@@ -310,11 +311,11 @@ def test_keeper_policy_and_stage_contract() -> None:
     assert policy.validate_args(args, Console()) is None
 
     invalid = SimpleNamespace(**vars(args))
-    invalid.no_tls = True
     invalid.insecure = True
+    invalid.ca_file = "keeper-ca.pem"
     console = Console()
     assert policy.validate_args(invalid, console) == 2
-    assert "TLS options" in console.errors[0]
+    assert "--ca-file cannot be combined with --insecure" in console.errors[0]
 
 
 def test_keeper_lifecycle_classifies_anonymously_before_credentials_and_runs_deep_once(
@@ -634,3 +635,148 @@ def test_keeper_failed_detect_preserves_zookeeper_retry_telemetry(monkeypatch: p
     assert record["attempts"] == 3
     assert record["max_attempts"] == 3
     assert record["connect_error"] == retry_error
+
+
+class _RecordingKeeperConsole:
+    def __init__(self) -> None:
+        self.structured_modes: list[bool] = []
+        self.errors: list[str] = []
+        self.infos: list[str] = []
+        self.warns: list[str] = []
+
+    def set_structured_output(self, enabled: bool) -> None:
+        self.structured_modes.append(enabled)
+
+    def error(self, message: str) -> None:
+        self.errors.append(message)
+
+    def info(self, message: str) -> None:
+        self.infos.append(message)
+
+    def warn(self, message: str) -> None:
+        self.warns.append(message)
+
+
+def test_run_keeper_stage_normalizes_empty_credentials_and_reports_debug_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    console = _RecordingKeeperConsole()
+    captured: dict[str, object] = {}
+
+    class _Runner:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        def run_plan(self, plan: object) -> SimpleNamespace:
+            captured["plan"] = plan
+            return SimpleNamespace(detected_count=0)
+
+    monkeypatch.setattr(keeper_stage, "Console", lambda debug=False: console)
+    monkeypatch.setattr(keeper_stage, "AuditCommandRunner", _Runner)
+    args = parse_args(
+        [
+            "keeper",
+            "-t",
+            "127.0.0.1",
+            "--debug",
+            "-f",
+            "json",
+            "-o",
+            "keeper.json",
+            "-u",
+            " ",
+            "-p",
+            "",
+        ]
+    )
+
+    rc = keeper_stage.run_keeper_stage(args, logger=object())
+
+    assert rc == 0
+    assert args.username is None
+    assert args.password is None
+    assert isinstance(args.keeper_probe_cache, KeeperFingerprintCache)
+    assert args.debug_emit == console.info
+    assert console.structured_modes == [True]
+    assert console.infos == ["keeper audit started: format=json output=keeper.json"]
+    assert console.warns == ["all keeper targets are unreachable or not ClickHouse Keeper"]
+    assert captured["args"] is args
+    assert captured["console"] is console
+    assert captured["plan"].ports == (9181,)
+    assert captured["spec"].module == "keeper"
+
+
+def test_run_keeper_stage_reports_plan_and_output_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    plan_console = _RecordingKeeperConsole()
+    monkeypatch.setattr(keeper_stage, "Console", lambda debug=False: plan_console)
+    monkeypatch.setattr(
+        keeper_stage,
+        "build_keeper_plan",
+        lambda _args: (_ for _ in ()).throw(ValueError("invalid Keeper port")),
+    )
+    args = parse_args(["keeper", "-t", "127.0.0.1"])
+
+    assert keeper_stage.run_keeper_stage(args, logger=object()) == 2
+    assert plan_console.errors == ["invalid Keeper port"]
+
+    class _ConsoleWithoutStructuredOutput:
+        def __init__(self) -> None:
+            self.errors: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+    output_console = _ConsoleWithoutStructuredOutput()
+
+    class _FailingRunner:
+        def __init__(self, **_kwargs: object) -> None:
+            return
+
+        def run_plan(self, _plan: object) -> None:
+            raise OSError("disk full")
+
+    monkeypatch.setattr(keeper_stage, "Console", lambda debug=False: output_console)
+    monkeypatch.setattr(keeper_stage, "build_keeper_plan", build_keeper_plan)
+    monkeypatch.setattr(keeper_stage, "AuditCommandRunner", _FailingRunner)
+
+    assert keeper_stage.run_keeper_stage(args, logger=object()) == 2
+    assert output_console.errors == ["failed to process keeper output: disk full"]
+
+
+def test_keeper_compatibility_facade_resolves_and_propagates_runtime_attributes() -> None:
+    runtime_name = "collect_scan_ports"
+    original_runtime = stage_runtime.collect_scan_ports
+    had_local_runtime = runtime_name in keeper_facade.__dict__
+    original_local_runtime = keeper_facade.__dict__.get(runtime_name)
+
+    def replacement_runtime(_ports: object) -> list[int]:
+        return [19181]
+
+    assert keeper_facade.__getattr__(runtime_name) is original_runtime
+    with pytest.raises(AttributeError):
+        keeper_facade.__getattr__("missing_keeper_compat_name")
+
+    try:
+        setattr(keeper_facade, runtime_name, replacement_runtime)
+        assert stage_runtime.collect_scan_ports is replacement_runtime
+        assert keeper_facade.collect_scan_ports("ignored") == [19181]
+    finally:
+        stage_runtime.collect_scan_ports = original_runtime
+        if had_local_runtime:
+            keeper_facade.__dict__[runtime_name] = original_local_runtime
+        else:
+            keeper_facade.__dict__.pop(runtime_name, None)
+
+    original_facade_host_stage = keeper_facade.host_stage
+    original_action_host_stage = actions.host_stage
+
+    def replacement_host_stage(**_kwargs: object) -> dict[str, object]:
+        return {}
+
+    try:
+        keeper_facade.host_stage = replacement_host_stage
+        assert keeper_facade.host_stage is replacement_host_stage
+        assert actions.host_stage is replacement_host_stage
+    finally:
+        keeper_facade.host_stage = original_facade_host_stage
+        actions.host_stage = original_action_host_stage

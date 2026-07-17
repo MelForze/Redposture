@@ -240,7 +240,7 @@ Run high-signal plaintext, TLS, unconfirmed-fallback, and negative-control audit
 ```bash
 redposture keeper -t 127.0.0.1 --port 9181,19181,29181 --show-znodes 20 --dump 20 --enum-workers 3 -d -f json
 redposture keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10 -d -f json
-redposture keeper -t 127.0.0.1 --port 39181 --show-znodes 10 --dump 10 -znode /keeper/api_version -f json
+redposture keeper -t 127.0.0.1 --port 39181 --show-znodes 10 --dump 10 --znode /keeper/api_version -f json
 redposture keeper -t 127.0.0.1 --port 12181 --show-znodes 5 -d -f json
 ```
 

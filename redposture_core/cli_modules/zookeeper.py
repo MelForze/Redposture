@@ -83,7 +83,6 @@ def configure_zookeeper_parser(
         ),
     )
     actions.add_argument(
-        "-znode",
         "--znode",
         dest="znode",
         default=None,
