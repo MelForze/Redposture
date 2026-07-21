@@ -26,7 +26,7 @@ Use it only on systems you own or are explicitly authorized to assess.
 
 - Exporter workflows: discover, collect, and trigger Prometheus-style exporters and debug endpoints.
 - Service audit modules: `registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `kubeapi`, `postgres`, `mongodb`, `docker`, `oracle`, `clickhouse`, `redis`, `etcd`, `qdrant`, `elastic`, `grpc`, `kafka`, `zookeeper`, `keeper`.
-- Multi-target and multi-port scans from comma-separated values, CIDR/ranges where supported, or target files.
+- Multi-target and multi-port scans from comma-separated values, per-target `host:port` entries, CIDR/ranges where supported, or target files.
 - Authentication checks with explicit credentials, default-credential checks where implemented, and credential-file workflows in supported modules.
 - Optional data enumeration and bounded dumps for data-store modules.
 - JSON and text output, file output, debug traces, progress bars, and proxy support.
@@ -113,10 +113,14 @@ Target examples:
 
 ```bash
 redposture redis -t 127.0.0.1
-redposture redis -t 127.0.0.1,10.0.0.5 --ports 6379,16379
+redposture redis -t 127.0.0.1,10.0.0.5 --port 6379,16379
 redposture elastic -t http://127.0.0.1:9200/
 redposture grpc -t targets.txt --port 50051
 ```
+
+Targets and target files accept `IPv4:port`, `DNS:port`, and `[IPv6]:port` entries. A target-specific port
+replaces module defaults for that target. If `--port` is supplied explicitly, its port or port set is added
+to every bare `host:port` target; it does not replace the port stored in the target file.
 
 Proxy examples:
 
@@ -255,8 +259,23 @@ Elasticsearch and gRPC:
 ```bash
 redposture elastic -t http://127.0.0.1:9200/ --endpoints --cluster --discover
 redposture grpc -t 127.0.0.1 --port 50051
+redposture grpc -t 127.0.0.1 --port 50051 --analyze
 redposture grpc -t 127.0.0.1 --port 50051 --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
 ```
+
+The default gRPC scan only fingerprints transport, protocol, Reflection availability, and separate
+Health/Reflection access policies. Public Health is not treated as endpoint-wide anonymous access.
+`--analyze` enables service, method, descriptor, and per-service Health enumeration. `--invoke` and
+`--openapi` enable that analysis automatically.
+
+`--openapi` merges and deduplicates descriptors discovered across every target. The artifact is still
+written when no descriptors are available; `x-redposture.descriptors_obtained` and
+`x-redposture.targets_without_descriptors` make complete and partial exports explicit. Generated schemas
+follow protobuf JSON rules for maps and 64-bit integers, preserve oneof/optional semantics, and model the
+protobuf well-known JSON types. Conflicting same-name descriptor variants are reported in
+`x-redposture.descriptor_conflicts`; selection uses the lowest normalized schema SHA-256 and ignores
+source-location-only differences. Malformed inputs are listed in `descriptor_errors`, while duplicate
+message, enum, or service symbols from different files are listed in `descriptor_symbol_conflicts`.
 
 ## License
 

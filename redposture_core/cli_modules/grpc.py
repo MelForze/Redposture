@@ -18,6 +18,7 @@ def configure_grpc_parser(
 ) -> None:
     common = parser.add_argument_group("Common")
     auth = parser.add_argument_group("Auth")
+    analysis = parser.add_argument_group("Analysis")
     invoke = parser.add_argument_group("Invoke / Metadata")
     schema = parser.add_argument_group("Schema")
     export = parser.add_argument_group("Export")
@@ -73,6 +74,15 @@ def configure_grpc_parser(
         help="Try compact default basic/token credentials when auth is required.",
     )
 
+    analysis.add_argument(
+        "--analyze",
+        action="store_true",
+        help=(
+            "After detection, enumerate Reflection services/descriptors and run per-service Health checks. "
+            "Implied by --invoke and --openapi."
+        ),
+    )
+
     invoke.add_argument(
         "--invoke",
         dest="invoke",
@@ -126,7 +136,7 @@ def configure_grpc_parser(
         dest="openapi",
         default=None,
         metavar="path",
-        help="Write an OpenAPI 3.1 JSON representation of discovered/schema gRPC methods.",
+        help="Write one merged OpenAPI 3.1 JSON artifact for all targets, including descriptor diagnostics.",
     )
 
 

@@ -284,11 +284,28 @@ def test_render_colored_proxmox_colors_capabilities_and_finding_payload() -> Non
 
 def test_render_colored_grpc_colors_status_and_protocol() -> None:
     console = _RecordingConsole()
-    line = "GRPC\t127.0.0.1\t50051\t [*] gRPC Service (auth required:False) (transport:plaintext) (protocol:grpc-web)"
+    line = (
+        "GRPC\t127.0.0.1\t50051\t [*] gRPC Service "
+        "(transport:plaintext) (protocol:grpc-web) (reflection:enabled) "
+        "(health_access:anonymous) (reflection_access:auth_required) (invoke_access:not_tested)"
+    )
     assert _render_colored_grpc_line(console, line) is True
-    assert _contains_paint(console.paint_calls, "(auth required:False)", "red")
     assert _contains_paint(console.paint_calls, "(transport:plaintext)", "yellow")
     assert _contains_paint(console.paint_calls, "(protocol:grpc-web)", "orange")
+    assert _contains_paint(console.paint_calls, "(reflection:enabled)", "red")
+    assert _contains_paint(console.paint_calls, "(health_access:anonymous)", "red")
+    assert _contains_paint(console.paint_calls, "(reflection_access:auth_required)", "bright_green")
+    assert _contains_paint(console.paint_calls, "(invoke_access:not_tested)", "yellow")
+
+    disabled_console = _RecordingConsole()
+    disabled_line = line.replace("reflection:enabled", "reflection:disable")
+    assert _render_colored_grpc_line(disabled_console, disabled_line) is True
+    assert _contains_paint(disabled_console.paint_calls, "(reflection:disable)", "bright_green")
+
+    unknown_console = _RecordingConsole()
+    unknown_line = line.replace("reflection:enabled", "reflection:unknown")
+    assert _render_colored_grpc_line(unknown_console, unknown_line) is True
+    assert _contains_paint(unknown_console.paint_calls, "(reflection:unknown)", "yellow")
 
 
 def test_render_colored_grpc_detail_lines_color_entities_precisely() -> None:

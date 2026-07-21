@@ -262,6 +262,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     except ValueError as exc:
         console.error(f"failed to parse --ports: {exc}")
         return 2
+    target_plan = target_plan.with_additional_ports_for_bare_explicit_targets(bool(custom_ports))
     try:
         selected_collect_exporters = _parse_collect_exporter_filter(
             getattr(args, "collect_exporters_filter", None),
@@ -612,6 +613,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             target_specs,
             custom_ports or default_ports,
             include_scheme_in_key=False,
+            include_matrix_ports_for_bare_explicit_targets=bool(custom_ports),
         )
         scan_checks = 0
         scan_found = 0

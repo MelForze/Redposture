@@ -35,6 +35,7 @@ from ...clients.grpc import (
     _grpc_web_call,
     _grpc_web_health_check_call,
     _GrpcCallResult,
+    _GrpcH2Session,
     _GrpcWebCallResult,
     _health_check_call,
     _HealthResult,
@@ -49,8 +50,10 @@ from ...clients.grpc import (
     _parse_http1_response,
     _parse_json_payload_source,
     _parse_metadata_items,
+    _reflection_capability_call,
     _reflection_file_descriptors_call,
     _reflection_list_services_call,
+    _ReflectionCapabilityResult,
     _ReflectionDescriptorResult,
     _ReflectionListResult,
     _split_grpc_method_path,
@@ -75,6 +78,25 @@ _is_connection_refused_error = transport.is_connection_refused
 class GrpcLifecycleState:
     detect_result: dict[str, Any] | None = None
     deep_records: dict[tuple[str | None, str | None, str | None, str], dict[str, Any]] = field(default_factory=dict)
+    sessions: dict[tuple[str, int, bool], _GrpcH2Session] = field(default_factory=dict)
+    health_auth_used: dict[str, Any] | None = None
+    reflection_auth_used: dict[str, Any] | None = None
+    health_deep_auth_required: bool = False
+    reflection_deep_auth_required: bool = False
+
+    def session_for(self, host: str, port: int, *, timeout: float, use_tls: bool) -> _GrpcH2Session:
+        key = (str(host), int(port), bool(use_tls))
+        session = self.sessions.get(key)
+        if session is None:
+            session = _GrpcH2Session(key[0], key[1], timeout=timeout, use_tls=key[2])
+            self.sessions[key] = session
+        return session
+
+    def close(self) -> None:
+        sessions = list(self.sessions.values())
+        self.sessions.clear()
+        for session in sessions:
+            session.close()
 
 
 def _grpc_lifecycle_key(ctx: Any) -> tuple[str | None, str | None, str | None, str]:
@@ -90,10 +112,12 @@ __all__ = [
     "grpc_health_pb2",
     "grpc_reflection_pb2",
     "_GrpcCallResult",
+    "_GrpcH2Session",
     "_GrpcWebCallResult",
     "_HealthResult",
     "_InvokeResult",
     "_ReflectionDescriptorResult",
+    "_ReflectionCapabilityResult",
     "_ReflectionListResult",
     "_build_auth_header",
     "_build_basic_auth_header",
@@ -124,6 +148,7 @@ __all__ = [
     "_parse_http1_response",
     "_parse_json_payload_source",
     "_parse_metadata_items",
+    "_reflection_capability_call",
     "_reflection_file_descriptors_call",
     "_reflection_list_services_call",
     "_split_grpc_method_path",
@@ -163,6 +188,24 @@ _DEFAULT_BEARER_TOKENS: tuple[str, ...] = (
 _GRPC_AUTH_CODES = {7, 16}
 _GRPC_OK = 0
 _GRPC_UNIMPLEMENTED = 12
+
+_ACCESS_ANONYMOUS = "anonymous"
+_ACCESS_AUTHENTICATED = "authenticated"
+_ACCESS_AUTH_REQUIRED = "auth_required"
+_ACCESS_MIXED = "mixed"
+_ACCESS_NOT_TESTED = "not_tested"
+_ACCESS_UNKNOWN = "unknown"
+_ACCESS_UNSUPPORTED = "unsupported"
+
+_ACCESS_COLORS: dict[str, str] = {
+    _ACCESS_ANONYMOUS: "red",
+    _ACCESS_AUTHENTICATED: "bright_green",
+    _ACCESS_AUTH_REQUIRED: "bright_green",
+    _ACCESS_MIXED: "orange",
+    _ACCESS_NOT_TESTED: "yellow",
+    _ACCESS_UNKNOWN: "yellow",
+    _ACCESS_UNSUPPORTED: "yellow",
+}
 
 
 def _clip(text: str, width: int = 96) -> str:
@@ -207,6 +250,45 @@ def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
     return str(record.get("status") or "") == "fail"
 
 
+def grpc_deep_gate(record: Any) -> tuple[bool, str]:
+    """Keep trying credentials until the requested gRPC action is usable."""
+
+    if isinstance(record, dict):
+        payload = record
+        status = str(payload.get("status") or "unknown")
+    else:
+        extra = getattr(record, "extra", {})
+        payload = extra if isinstance(extra, dict) else {}
+        status = str(getattr(record, "status", None) or payload.get("status") or "unknown")
+
+    action_access_satisfied = payload.get("action_access_satisfied")
+    if action_access_satisfied is True:
+        return True, "grpc action access satisfied"
+    if action_access_satisfied is False:
+        return False, "grpc action access unresolved"
+
+    allowed = {
+        "ok",
+        "open",
+        "open_no_auth",
+        "anonymous_access",
+        "detected",
+        "token_ok",
+        "valid_credentials",
+        "auth_valid",
+        "weak_default_creds",
+        "invalid_credentials_anonymous",
+        "valid_token",
+        "token_accepted",
+        "insufficient_privileges",
+    }
+    if status in allowed:
+        return True, f"status={status}"
+    if status.startswith("not_"):
+        return False, status
+    return False, f"status={status}"
+
+
 def _auth_required_from_grpc_status(grpc_status: int | None) -> bool | None:
     if grpc_status in _GRPC_AUTH_CODES:
         return True
@@ -215,12 +297,69 @@ def _auth_required_from_grpc_status(grpc_status: int | None) -> bool | None:
     return False
 
 
+def _effective_grpc_status(result: dict[str, Any]) -> int | None:
+    """Prefer a Reflection response's embedded status over transport OK."""
+
+    embedded = result.get("embedded_error_code")
+    if isinstance(embedded, int) and not isinstance(embedded, bool):
+        return embedded
+    grpc_status = result.get("grpc_status")
+    if isinstance(grpc_status, int) and not isinstance(grpc_status, bool):
+        return grpc_status
+    return None
+
+
+def _access_from_grpc_status(
+    grpc_status: int | None,
+    *,
+    supported: bool | None = None,
+    used_credentials: bool = False,
+) -> str:
+    """Classify access to one concrete gRPC capability.
+
+    This deliberately does not infer endpoint-wide authentication policy.  A
+    successful Health or Reflection call only proves access to that service.
+    """
+
+    if grpc_status in _GRPC_AUTH_CODES:
+        return _ACCESS_AUTH_REQUIRED
+    if supported is False or grpc_status == _GRPC_UNIMPLEMENTED:
+        return _ACCESS_UNSUPPORTED
+    if grpc_status is None:
+        return _ACCESS_UNKNOWN
+    return _ACCESS_AUTHENTICATED if used_credentials else _ACCESS_ANONYMOUS
+
+
+def _merge_access(current: str, observed: str) -> str:
+    """Merge per-call observations without widening anonymous access."""
+
+    current = str(current or _ACCESS_UNKNOWN)
+    observed = str(observed or _ACCESS_UNKNOWN)
+    if current == observed:
+        return current
+    ignored = {_ACCESS_UNKNOWN, _ACCESS_NOT_TESTED}
+    if current in ignored:
+        return observed
+    if observed in ignored:
+        return current
+    # An anonymous auth challenge followed by a successful credentialed call
+    # is one capability transitioning to authenticated access, not mixed ACLs.
+    if current == _ACCESS_AUTH_REQUIRED and observed == _ACCESS_AUTHENTICATED:
+        return _ACCESS_AUTHENTICATED
+    if current == _ACCESS_UNSUPPORTED:
+        return observed
+    if observed == _ACCESS_UNSUPPORTED:
+        return current
+    return _ACCESS_MIXED
+
+
 def _detect_grpc_target(
     host: str,
     port: int,
     *,
     timeout: float,
     preferred_scheme: str | None,
+    _session_state: GrpcLifecycleState | None = None,
 ) -> dict[str, Any]:
     scheme_hint = str(preferred_scheme or "").strip().lower()
     if scheme_hint == "http":
@@ -230,23 +369,59 @@ def _detect_grpc_target(
     else:
         transport_order = [True, False]
 
-    calls: list[_HealthResult | _ReflectionListResult] = []
+    calls: list[dict[str, Any]] = []
     transport_errors: list[str] = []
     non_grpc_seen = False
 
     for use_tls in transport_order:
-        health = _health_check_call(host, port, timeout=timeout, use_tls=use_tls, authorization=None, service_name="")
+        session = (
+            _session_state.session_for(host, port, timeout=timeout, use_tls=use_tls)
+            if _session_state is not None
+            else None
+        )
+        health = _health_check_call(
+            host,
+            port,
+            timeout=timeout,
+            use_tls=use_tls,
+            authorization=None,
+            service_name="",
+            session=session,
+        )
         calls.append(health)
         health_call = health["call"]
         if bool(health_call.get("is_grpc")):
+            # Reflection availability belongs to the lightweight fingerprint.
+            # Only the full service/descriptor inventory is gated by --analyze.
+            reflection = _reflection_capability_call(
+                host,
+                port,
+                timeout=timeout,
+                use_tls=use_tls,
+                authorization=None,
+                session=session,
+            )
+            calls.append(reflection)
+            raw_reflection_call = reflection.get("call")
+            reflection_call: dict[str, Any] = raw_reflection_call if isinstance(raw_reflection_call, dict) else {}
             return {
                 "is_grpc": True,
                 "protocol_flavor": "grpc",
                 "grpc_web_detected": False,
                 "transport_mode": "tls" if use_tls else "plaintext",
-                "auth_required": _auth_required_from_grpc_status(health.get("grpc_status")),
+                # Health is a separate gRPC service.  Its public availability
+                # cannot establish endpoint-wide anonymous access.
+                "auth_required": None,
+                "health_access": _access_from_grpc_status(
+                    health.get("grpc_status"), supported=health.get("health_supported")
+                ),
+                "reflection_access": _access_from_grpc_status(
+                    _effective_grpc_status(reflection), supported=reflection.get("reflection_enabled")
+                ),
+                "invoke_access": _ACCESS_NOT_TESTED,
                 "health_supported": health.get("health_supported"),
-                "reflection_enabled": None,
+                "reflection_enabled": reflection.get("reflection_enabled"),
+                "reflection_version": reflection.get("reflection_version"),
                 "detect_error": health.get("error"),
                 "detect_probe_trace": [
                     {
@@ -254,8 +429,21 @@ def _detect_grpc_target(
                         "scheme": "https" if use_tls else "http",
                         "http_status": health_call.get("http_status"),
                         "grpc_status": health.get("grpc_status"),
+                        "access": _access_from_grpc_status(
+                            health.get("grpc_status"), supported=health.get("health_supported")
+                        ),
                         "error": health.get("error"),
-                    }
+                    },
+                    {
+                        "probe": "reflection",
+                        "scheme": "https" if use_tls else "http",
+                        "http_status": reflection_call.get("http_status"),
+                        "grpc_status": reflection.get("grpc_status"),
+                        "access": _access_from_grpc_status(
+                            _effective_grpc_status(reflection), supported=reflection.get("reflection_enabled")
+                        ),
+                        "error": reflection.get("error"),
+                    },
                 ],
             }
 
@@ -264,12 +452,13 @@ def _detect_grpc_target(
         if health.get("error"):
             transport_errors.append(str(health.get("error")))
 
-        reflection = _reflection_list_services_call(
+        reflection = _reflection_capability_call(
             host,
             port,
             timeout=timeout,
             use_tls=use_tls,
             authorization=None,
+            session=session,
         )
         calls.append(reflection)
         reflection_call = reflection["call"]
@@ -279,9 +468,17 @@ def _detect_grpc_target(
                 "protocol_flavor": "grpc",
                 "grpc_web_detected": False,
                 "transport_mode": "tls" if use_tls else "plaintext",
-                "auth_required": _auth_required_from_grpc_status(reflection.get("grpc_status")),
+                "auth_required": None,
+                "health_access": _access_from_grpc_status(
+                    health.get("grpc_status"), supported=health.get("health_supported")
+                ),
+                "reflection_access": _access_from_grpc_status(
+                    _effective_grpc_status(reflection), supported=reflection.get("reflection_enabled")
+                ),
+                "invoke_access": _ACCESS_NOT_TESTED,
                 "health_supported": health.get("health_supported"),
                 "reflection_enabled": reflection.get("reflection_enabled"),
+                "reflection_version": reflection.get("reflection_version"),
                 "detect_error": reflection.get("error"),
                 "detect_probe_trace": [
                     {
@@ -289,6 +486,9 @@ def _detect_grpc_target(
                         "scheme": "https" if use_tls else "http",
                         "http_status": health_call.get("http_status"),
                         "grpc_status": health.get("grpc_status"),
+                        "access": _access_from_grpc_status(
+                            health.get("grpc_status"), supported=health.get("health_supported")
+                        ),
                         "error": health.get("error"),
                     },
                     {
@@ -296,6 +496,9 @@ def _detect_grpc_target(
                         "scheme": "https" if use_tls else "http",
                         "http_status": reflection_call.get("http_status"),
                         "grpc_status": reflection.get("grpc_status"),
+                        "access": _access_from_grpc_status(
+                            _effective_grpc_status(reflection), supported=reflection.get("reflection_enabled")
+                        ),
                         "error": reflection.get("error"),
                     },
                 ],
@@ -323,9 +526,17 @@ def _detect_grpc_target(
                 "protocol_flavor": "grpc-web",
                 "grpc_web_detected": True,
                 "transport_mode": "tls" if use_tls else "plaintext",
-                "auth_required": _auth_required_from_grpc_status(web_health.get("grpc_status")),
+                "auth_required": None,
+                "health_access": _access_from_grpc_status(
+                    web_health.get("grpc_status"), supported=web_health.get("health_supported")
+                ),
+                "reflection_access": _ACCESS_NOT_TESTED,
+                "invoke_access": _ACCESS_NOT_TESTED,
                 "health_supported": web_health.get("health_supported"),
-                "reflection_enabled": False,
+                # Native server reflection was not probed on the gRPC-Web
+                # endpoint. Do not present "not probed" as securely disabled.
+                "reflection_enabled": None,
+                "reflection_version": None,
                 "detect_error": web_health.get("error"),
                 "detect_probe_trace": [
                     {
@@ -333,6 +544,9 @@ def _detect_grpc_target(
                         "scheme": "https" if use_tls else "http",
                         "http_status": web_call.get("http_status"),
                         "grpc_status": web_health.get("grpc_status"),
+                        "access": _access_from_grpc_status(
+                            web_health.get("grpc_status"), supported=web_health.get("health_supported")
+                        ),
                         "error": web_health.get("error"),
                     }
                 ],
@@ -350,8 +564,12 @@ def _detect_grpc_target(
             "status": "not_grpc",
             "transport_mode": None,
             "auth_required": None,
+            "health_access": _ACCESS_UNKNOWN,
+            "reflection_access": _ACCESS_UNKNOWN,
+            "invoke_access": _ACCESS_NOT_TESTED,
             "health_supported": None,
             "reflection_enabled": None,
+            "reflection_version": None,
             "detect_error": "not a gRPC endpoint",
             "detect_probe_trace": [
                 {
@@ -373,8 +591,12 @@ def _detect_grpc_target(
         "status": "fail",
         "transport_mode": None,
         "auth_required": None,
+        "health_access": _ACCESS_UNKNOWN,
+        "reflection_access": _ACCESS_UNKNOWN,
+        "invoke_access": _ACCESS_NOT_TESTED,
         "health_supported": None,
         "reflection_enabled": None,
+        "reflection_version": None,
         "detect_error": error_text,
         "detect_probe_trace": [
             {
@@ -400,6 +622,24 @@ def _credential_label(entry: dict[str, Any]) -> str:
             password = "<empty>"
         return f"{username}:{password}"
     return "credentials"
+
+
+def _credential_auth_header(candidate: dict[str, Any] | None) -> str | None:
+    if not isinstance(candidate, dict):
+        return None
+    return _build_auth_header(
+        token=str(candidate.get("token") or "") if candidate.get("type") == "token" else None,
+        username=str(candidate.get("username") or "") if candidate.get("type") == "basic" else None,
+        password=str(candidate.get("password") or "") if candidate.get("type") == "basic" else None,
+    )
+
+
+def _provided_credential_type(*, token: str | None, username: str | None, password: str | None) -> str | None:
+    if token:
+        return "token"
+    if username is not None and password is not None:
+        return "basic"
+    return None
 
 
 def _auth_attempt_entries(
@@ -458,14 +698,16 @@ def _try_credentials(
     use_tls: bool,
     protocol_flavor: str,
     candidates: list[dict[str, Any]],
+    health_access: str = _ACCESS_AUTH_REQUIRED,
+    reflection_access: str = _ACCESS_AUTH_REQUIRED,
+    required_capability: str = "any",
+    session: _GrpcH2Session | None = None,
 ) -> tuple[bool, dict[str, Any] | None, dict[str, Any] | None]:
     last_attempt: dict[str, Any] | None = None
+    health_candidate: dict[str, Any] | None = None
+    reflection_candidate: dict[str, Any] | None = None
     for candidate in candidates:
-        auth_header = _build_auth_header(
-            token=str(candidate.get("token") or "") if candidate.get("type") == "token" else None,
-            username=str(candidate.get("username") or "") if candidate.get("type") == "basic" else None,
-            password=str(candidate.get("password") or "") if candidate.get("type") == "basic" else None,
-        )
+        auth_header = _credential_auth_header(candidate)
         if protocol_flavor == "grpc-web":
             health = _grpc_web_health_check_call(
                 host,
@@ -483,30 +725,52 @@ def _try_credentials(
                 use_tls=use_tls,
                 authorization=auth_header,
                 service_name="",
+                session=session,
             )
         last_attempt = {
             "candidate": candidate,
             "health": health,
         }
-        if _auth_attempt_success(health.get("grpc_status"), bool(health.get("call", {}).get("is_grpc"))):
-            return True, candidate, last_attempt
+        health_ok = health_access == _ACCESS_AUTH_REQUIRED and _auth_attempt_success(
+            health.get("grpc_status"), bool(health.get("call", {}).get("is_grpc"))
+        )
+        if health_ok and health_candidate is None:
+            health_candidate = dict(candidate)
 
         if protocol_flavor == "grpc-web":
-            continue
+            reflection = None
+            reflection_ok = False
+        else:
+            reflection = _reflection_capability_call(
+                host,
+                port,
+                timeout=timeout,
+                use_tls=use_tls,
+                authorization=auth_header,
+                session=session,
+            )
+            reflection_ok = reflection_access == _ACCESS_AUTH_REQUIRED and _auth_attempt_success(
+                _effective_grpc_status(reflection), bool(reflection.get("call", {}).get("is_grpc"))
+            )
+            if reflection_ok and reflection_candidate is None:
+                reflection_candidate = dict(candidate)
 
-        reflection = _reflection_list_services_call(
-            host,
-            port,
-            timeout=timeout,
-            use_tls=use_tls,
-            authorization=auth_header,
-        )
         last_attempt = {
             "candidate": candidate,
             "health": health,
             "reflection": reflection,
+            "health_ok": health_ok,
+            "reflection_ok": reflection_ok,
+            "health_candidate": health_candidate,
+            "reflection_candidate": reflection_candidate,
         }
-        if _auth_attempt_success(reflection.get("grpc_status"), bool(reflection.get("call", {}).get("is_grpc"))):
+        if required_capability == "health":
+            candidate_ok = health_ok
+        elif required_capability == "reflection":
+            candidate_ok = reflection_ok
+        else:
+            candidate_ok = health_ok or reflection_ok
+        if candidate_ok:
             return True, candidate, last_attempt
 
     return False, None, last_attempt
@@ -521,6 +785,8 @@ def _format_status_label(status: str) -> str:
         return "authentication required"
     if status == "invalid_credentials_anonymous":
         return "invalid credentials (anonymous works)"
+    if status == "invalid_credentials":
+        return "invalid credentials"
     if status == "not_grpc":
         return "not grpc"
     if status == "fail":
@@ -540,14 +806,42 @@ def _audit_grpc_host(
     defcreds: bool,
     preferred_scheme: str | None,
     run_deep_checks: bool,
+    analyze: bool = True,
     schema_descriptor_bytes: list[bytes] | None = None,
     invoke_path: str | None = None,
     invoke_request_json: dict[str, Any] | None = None,
     metadata: list[tuple[str, str]] | None = None,
     _lifecycle_detect_result: dict[str, Any] | None = None,
+    _session_state: GrpcLifecycleState | None = None,
 ) -> dict[str, Any]:
+    if _session_state is None:
+        owned_session_state = GrpcLifecycleState()
+        try:
+            return _audit_grpc_host(
+                host,
+                port,
+                timeout,
+                retries,
+                token=token,
+                username=username,
+                password=password,
+                defcreds=defcreds,
+                preferred_scheme=preferred_scheme,
+                run_deep_checks=run_deep_checks,
+                analyze=analyze,
+                schema_descriptor_bytes=schema_descriptor_bytes,
+                invoke_path=invoke_path,
+                invoke_request_json=invoke_request_json,
+                metadata=metadata,
+                _lifecycle_detect_result=_lifecycle_detect_result,
+                _session_state=owned_session_state,
+            )
+        finally:
+            owned_session_state.close()
+
     attempts = max(1, retries + 1)
     provided_credentials = bool(token or (username is not None and password is not None))
+    provided_credential_type = _provided_credential_type(token=token, username=username, password=password)
     auth_candidates = _auth_attempt_entries(token=token, username=username, password=password, defcreds=defcreds)
 
     last_error: str | None = None
@@ -558,6 +852,7 @@ def _audit_grpc_host(
     capability_duration_ms = 0
     data_duration_ms = 0
     stage_attempts_used = 1
+    perform_analysis = bool(run_deep_checks and analyze)
 
     detect_result: dict[str, Any] = dict(_lifecycle_detect_result or {})
 
@@ -570,6 +865,7 @@ def _audit_grpc_host(
                 port,
                 timeout=timeout,
                 preferred_scheme=preferred_scheme,
+                _session_state=_session_state,
             )
             detect_duration_ms = int((time.monotonic() - detect_started) * 1000)
             detect_probe_trace = list(detect_result.get("detect_probe_trace") or [])
@@ -597,13 +893,19 @@ def _audit_grpc_host(
             "grpc_web_detected": bool(detect_result.get("grpc_web_detected")),
             "status": "fail",
             "auth_required": None,
+            "health_access": _ACCESS_UNKNOWN,
+            "reflection_access": _ACCESS_UNKNOWN,
+            "invoke_access": _ACCESS_NOT_TESTED,
             "provided_credentials": provided_credentials,
+            "provided_credential_type": provided_credential_type,
             "provided_username": username,
             "provided_password": password if username is not None and password is not None else None,
             "provided_credentials_ok": None,
             "auth_used": None,
             "defcreds_used": bool(defcreds),
             "reflection_enabled": None,
+            "reflection_version": None,
+            "analysis_performed": False,
             "health_supported": None,
             "services": None,
             "methods": None,
@@ -631,13 +933,19 @@ def _audit_grpc_host(
             "grpc_web_detected": bool(detect_result.get("grpc_web_detected")),
             "status": "not_grpc",
             "auth_required": None,
+            "health_access": _ACCESS_UNKNOWN,
+            "reflection_access": _ACCESS_UNKNOWN,
+            "invoke_access": _ACCESS_NOT_TESTED,
             "provided_credentials": provided_credentials,
+            "provided_credential_type": provided_credential_type,
             "provided_username": username,
             "provided_password": password if username is not None and password is not None else None,
             "provided_credentials_ok": None,
             "auth_used": None,
             "defcreds_used": bool(defcreds),
             "reflection_enabled": None,
+            "reflection_version": None,
+            "analysis_performed": False,
             "health_supported": None,
             "services": None,
             "methods": None,
@@ -657,14 +965,63 @@ def _audit_grpc_host(
     transport_mode = str(detect_result.get("transport_mode") or "plaintext")
     protocol_flavor = str(detect_result.get("protocol_flavor") or "grpc")
     use_tls = transport_mode == "tls"
+    native_session = (
+        _session_state.session_for(host, port, timeout=timeout, use_tls=use_tls)
+        if _session_state is not None and protocol_flavor != "grpc-web"
+        else None
+    )
+
+    health_supported = detect_result.get("health_supported")
+    reflection_enabled = detect_result.get("reflection_enabled")
+    reflection_version = detect_result.get("reflection_version")
+    legacy_auth_required = detect_result.get("auth_required")
+    raw_health_access = detect_result.get("health_access")
+    if isinstance(raw_health_access, str) and raw_health_access:
+        health_access = raw_health_access
+    elif legacy_auth_required is True:
+        health_access = _ACCESS_AUTH_REQUIRED
+    elif legacy_auth_required is False:
+        # Compatibility for old callers: narrow the legacy endpoint-wide value
+        # to the Health probe instead of perpetuating the unsafe inference.
+        health_access = _ACCESS_ANONYMOUS
+    else:
+        health_access = _ACCESS_UNKNOWN
+    raw_reflection_access = detect_result.get("reflection_access")
+    reflection_access = (
+        str(raw_reflection_access)
+        if isinstance(raw_reflection_access, str) and raw_reflection_access
+        else _ACCESS_UNKNOWN
+    )
+    raw_invoke_access = detect_result.get("invoke_access")
+    invoke_access = (
+        str(raw_invoke_access) if isinstance(raw_invoke_access, str) and raw_invoke_access else _ACCESS_NOT_TESTED
+    )
+    health_auth_used = _session_state.health_auth_used
+    reflection_auth_used = _session_state.reflection_auth_used
+    if health_auth_used is not None and health_access == _ACCESS_AUTH_REQUIRED:
+        health_access = _ACCESS_AUTHENTICATED
+    if reflection_auth_used is not None and reflection_access == _ACCESS_AUTH_REQUIRED:
+        reflection_access = _ACCESS_AUTHENTICATED
 
     auth_started = time.monotonic()
-    auth_required = detect_result.get("auth_required")
+    # This legacy field is endpoint-wide.  Health and Reflection can never set
+    # it: only an explicitly requested application method may provide evidence.
+    auth_required: bool | None = None
     provided_credentials_ok: bool | None = None
     auth_used: dict[str, Any] | None = None
     auth_error: str | None = None
 
-    should_try_auth = bool(auth_candidates) and (auth_required is not False or provided_credentials)
+    if perform_analysis and protocol_flavor != "grpc-web" and reflection_access == _ACCESS_AUTH_REQUIRED:
+        required_credential_capability = "reflection"
+    elif health_access == _ACCESS_AUTH_REQUIRED:
+        required_credential_capability = "health"
+    elif reflection_access == _ACCESS_AUTH_REQUIRED:
+        required_credential_capability = "reflection"
+    else:
+        required_credential_capability = "any"
+
+    protected_probe_seen = _ACCESS_AUTH_REQUIRED in {health_access, reflection_access}
+    should_try_auth = bool(auth_candidates) and protected_probe_seen
     if should_try_auth:
         success, matched_candidate, last_attempt = _try_credentials(
             host,
@@ -673,11 +1030,25 @@ def _audit_grpc_host(
             use_tls=use_tls,
             protocol_flavor=protocol_flavor,
             candidates=auth_candidates,
+            health_access=health_access,
+            reflection_access=reflection_access,
+            required_capability=required_credential_capability,
+            session=native_session,
         )
+        if isinstance(last_attempt, dict):
+            attempted_health_candidate = last_attempt.get("health_candidate")
+            attempted_reflection_candidate = last_attempt.get("reflection_candidate")
+            if isinstance(attempted_health_candidate, dict):
+                health_auth_used = dict(attempted_health_candidate)
+                _session_state.health_auth_used = dict(attempted_health_candidate)
+                health_access = _ACCESS_AUTHENTICATED
+            if isinstance(attempted_reflection_candidate, dict):
+                reflection_auth_used = dict(attempted_reflection_candidate)
+                _session_state.reflection_auth_used = dict(attempted_reflection_candidate)
+                reflection_access = _ACCESS_AUTHENTICATED
         if success:
             provided_credentials_ok = True
             auth_used = matched_candidate
-            auth_required = True if auth_required is not False else False
         else:
             provided_credentials_ok = False if bool(auth_candidates) else None
             if isinstance(last_attempt, dict):
@@ -687,25 +1058,16 @@ def _audit_grpc_host(
                     auth_error = str(health.get("error"))
                 if not auth_error and isinstance(reflection, dict) and reflection.get("error"):
                     auth_error = str(reflection.get("error"))
-            if auth_required is None and provided_credentials:
-                auth_required = True
 
     auth_duration_ms = int((time.monotonic() - auth_started) * 1000)
 
-    if auth_required is False:
-        if provided_credentials and provided_credentials_ok is False:
-            status = "invalid_credentials_anonymous"
-        elif provided_credentials_ok is True:
-            status = "valid_credentials"
-        else:
-            status = "open_no_auth"
-    elif provided_credentials_ok is True:
+    if provided_credentials_ok is True:
         status = "valid_credentials"
+    elif provided_credentials_ok is False:
+        status = "invalid_credentials"
     else:
-        status = "auth_required"
+        status = "detected"
 
-    reflection_enabled = detect_result.get("reflection_enabled")
-    health_supported = detect_result.get("health_supported")
     services: list[str] = []
     methods: list[dict[str, Any]] = []
     descriptors: list[dict[str, Any]] = []
@@ -713,45 +1075,125 @@ def _audit_grpc_host(
     descriptor_blobs: list[bytes] = _dedup_descriptor_bytes(list(schema_descriptor_bytes or []))
     invoke_result: dict[str, Any] | None = None
 
-    if run_deep_checks and status in {"open_no_auth", "valid_credentials"}:
+    # Invoke is the only probe that can validate access to the selected
+    # application method. Pass the current explicit/default credential even
+    # when public Health/Reflection could not validate it first.
+    allow_unvalidated_invoke = bool(invoke_path and provided_credentials)
+    analysis_performed = bool(
+        perform_analysis and (status in {"detected", "valid_credentials"} or allow_unvalidated_invoke)
+    )
+    reflection_analysis_satisfied = False
+    health_analysis_satisfied = False
+    reflection_deep_challenge_seen = False
+    health_deep_challenge_seen = False
+    if analysis_performed:
         cap_started = time.monotonic()
-        auth_header = None
-        if isinstance(auth_used, dict):
-            auth_header = _build_auth_header(
-                token=str(auth_used.get("token") or "") if auth_used.get("type") == "token" else None,
-                username=str(auth_used.get("username") or "") if auth_used.get("type") == "basic" else None,
-                password=str(auth_used.get("password") or "") if auth_used.get("type") == "basic" else None,
+        current_auth_candidate = auth_used
+        if current_auth_candidate is None and auth_candidates:
+            current_auth_candidate = auth_candidates[0]
+        reflection_provisional_auth = (
+            current_auth_candidate
+            if _session_state.reflection_deep_auth_required and current_auth_candidate is not None
+            else None
+        )
+        health_provisional_auth = (
+            current_auth_candidate
+            if (
+                protocol_flavor == "grpc-web"
+                and _session_state.health_deep_auth_required
+                and current_auth_candidate is not None
             )
+            else None
+        )
+        health_deep_auth_used = health_provisional_auth or health_auth_used
+        reflection_deep_auth_used = reflection_provisional_auth or reflection_auth_used
+        health_auth_header = _credential_auth_header(health_deep_auth_used)
+        reflection_auth_header = _credential_auth_header(reflection_deep_auth_used)
+        invoke_auth_used = auth_used
+        if invoke_auth_used is None and allow_unvalidated_invoke and auth_candidates:
+            invoke_auth_used = auth_candidates[0]
+        invoke_auth_header = _credential_auth_header(invoke_auth_used)
 
         if protocol_flavor == "grpc-web":
-            reflection_enabled = False
+            reflection_enabled = None
+            reflection_version = None
         else:
             reflection = _reflection_list_services_call(
                 host,
                 port,
                 timeout=timeout,
                 use_tls=use_tls,
-                authorization=auth_header,
+                authorization=reflection_auth_header,
+                session=native_session,
             )
             reflection_enabled = reflection.get("reflection_enabled")
+            reflection_version = reflection.get("reflection_version")
+            reflection_status = _effective_grpc_status(reflection)
+            reflection_observation = _access_from_grpc_status(
+                reflection_status,
+                supported=reflection_enabled,
+                used_credentials=bool(
+                    reflection_auth_header
+                    and (reflection_access != _ACCESS_ANONYMOUS or reflection_provisional_auth is not None)
+                ),
+            )
+            reflection_access = _merge_access(reflection_access, reflection_observation)
+            reflection_analysis_satisfied = reflection_observation in {
+                _ACCESS_ANONYMOUS,
+                _ACCESS_AUTHENTICATED,
+                _ACCESS_UNSUPPORTED,
+            }
+            if reflection_status in _GRPC_AUTH_CODES:
+                reflection_deep_challenge_seen = True
+                _session_state.reflection_deep_auth_required = True
+                _session_state.reflection_auth_used = None
             services = list(reflection.get("services") or [])
 
-        health_call = _grpc_web_health_check_call if protocol_flavor == "grpc-web" else _health_check_call
-        primary_health = health_call(
-            host,
-            port,
-            timeout=timeout,
-            use_tls=use_tls,
-            authorization=auth_header,
-            service_name="",
-        )
+        if protocol_flavor == "grpc-web":
+            primary_health = _grpc_web_health_check_call(
+                host,
+                port,
+                timeout=timeout,
+                use_tls=use_tls,
+                authorization=health_auth_header,
+                service_name="",
+            )
+        else:
+            primary_health = _health_check_call(
+                host,
+                port,
+                timeout=timeout,
+                use_tls=use_tls,
+                authorization=health_auth_header,
+                service_name="",
+                session=native_session,
+            )
         health_supported = primary_health.get("health_supported")
+        primary_health_status = primary_health.get("grpc_status")
+        primary_health_access = _access_from_grpc_status(
+            primary_health_status,
+            supported=health_supported,
+            used_credentials=bool(
+                health_auth_header and (health_access != _ACCESS_ANONYMOUS or health_provisional_auth is not None)
+            ),
+        )
+        health_access = _merge_access(health_access, primary_health_access)
+        health_analysis_satisfied = primary_health_access in {
+            _ACCESS_ANONYMOUS,
+            _ACCESS_AUTHENTICATED,
+            _ACCESS_UNSUPPORTED,
+        }
+        if protocol_flavor == "grpc-web" and primary_health_status in _GRPC_AUTH_CODES:
+            health_deep_challenge_seen = True
+            _session_state.health_deep_auth_required = True
+            _session_state.health_auth_used = None
         health_checks.append(
             {
                 "service": "",
                 "grpc_status": primary_health.get("grpc_status"),
                 "grpc_status_name": primary_health.get("grpc_status_name"),
                 "serving_status": primary_health.get("serving_status"),
+                "access": primary_health_access,
                 "error": primary_health.get("error"),
             }
         )
@@ -766,9 +1208,25 @@ def _audit_grpc_host(
                     port,
                     timeout=timeout,
                     use_tls=use_tls,
-                    authorization=auth_header,
+                    authorization=reflection_auth_header,
                     symbol=service_name,
+                    session=native_session,
                 )
+                descriptor_status = _effective_grpc_status(response)
+                descriptor_access = _access_from_grpc_status(
+                    descriptor_status,
+                    used_credentials=bool(reflection_auth_header),
+                )
+                reflection_access = _merge_access(reflection_access, descriptor_access)
+                reflection_analysis_satisfied = reflection_analysis_satisfied and descriptor_access in {
+                    _ACCESS_ANONYMOUS,
+                    _ACCESS_AUTHENTICATED,
+                    _ACCESS_UNSUPPORTED,
+                }
+                if descriptor_status in _GRPC_AUTH_CODES:
+                    reflection_deep_challenge_seen = True
+                    _session_state.reflection_deep_auth_required = True
+                    _session_state.reflection_auth_used = None
                 descriptor_blobs.extend(
                     blob for blob in response.get("descriptor_bytes") or [] if isinstance(blob, bytes)
                 )
@@ -780,23 +1238,74 @@ def _audit_grpc_host(
 
         if services:
             for service_name in services:
-                health_entry = health_call(
-                    host,
-                    port,
-                    timeout=timeout,
-                    use_tls=use_tls,
-                    authorization=auth_header,
-                    service_name=service_name,
+                if protocol_flavor == "grpc-web":
+                    health_entry = _grpc_web_health_check_call(
+                        host,
+                        port,
+                        timeout=timeout,
+                        use_tls=use_tls,
+                        authorization=health_auth_header,
+                        service_name=service_name,
+                    )
+                else:
+                    health_entry = _health_check_call(
+                        host,
+                        port,
+                        timeout=timeout,
+                        use_tls=use_tls,
+                        authorization=health_auth_header,
+                        service_name=service_name,
+                        session=native_session,
+                    )
+                service_health_access = _access_from_grpc_status(
+                    health_entry.get("grpc_status"),
+                    supported=health_entry.get("health_supported"),
+                    used_credentials=bool(health_auth_header),
                 )
+                health_access = _merge_access(health_access, service_health_access)
+                health_analysis_satisfied = health_analysis_satisfied and service_health_access in {
+                    _ACCESS_ANONYMOUS,
+                    _ACCESS_AUTHENTICATED,
+                    _ACCESS_UNSUPPORTED,
+                }
+                if protocol_flavor == "grpc-web" and health_entry.get("grpc_status") in _GRPC_AUTH_CODES:
+                    health_deep_challenge_seen = True
+                    _session_state.health_deep_auth_required = True
+                    _session_state.health_auth_used = None
                 health_checks.append(
                     {
                         "service": service_name,
                         "grpc_status": health_entry.get("grpc_status"),
                         "grpc_status_name": health_entry.get("grpc_status_name"),
                         "serving_status": health_entry.get("serving_status"),
+                        "access": service_health_access,
                         "error": health_entry.get("error"),
                     }
                 )
+
+        if reflection_provisional_auth is not None:
+            if reflection_analysis_satisfied:
+                reflection_auth_used = dict(reflection_provisional_auth)
+                _session_state.reflection_auth_used = dict(reflection_provisional_auth)
+                _session_state.reflection_deep_auth_required = False
+                provided_credentials_ok = True
+                auth_used = dict(reflection_provisional_auth)
+                status = "valid_credentials"
+            elif reflection_deep_challenge_seen:
+                provided_credentials_ok = False
+                status = "invalid_credentials"
+
+        if health_provisional_auth is not None:
+            if health_analysis_satisfied:
+                health_auth_used = dict(health_provisional_auth)
+                _session_state.health_auth_used = dict(health_provisional_auth)
+                _session_state.health_deep_auth_required = False
+                provided_credentials_ok = True
+                auth_used = dict(health_provisional_auth)
+                status = "valid_credentials"
+            elif health_deep_challenge_seen:
+                provided_credentials_ok = False
+                status = "invalid_credentials"
 
         if invoke_path:
             invoke_result = _invoke_unary_method(
@@ -805,19 +1314,50 @@ def _audit_grpc_host(
                 timeout=timeout,
                 use_tls=use_tls,
                 protocol_flavor=protocol_flavor,
-                authorization=auth_header,
+                authorization=invoke_auth_header,
                 metadata=list(metadata or []),
                 descriptor_bytes=descriptor_blobs,
                 invoke_path=invoke_path,
                 request_json=dict(invoke_request_json or {}),
+                session=native_session,
             )
+            if str(invoke_result.get("status") or "") == "unsupported":
+                invoke_access = _ACCESS_UNSUPPORTED
+            else:
+                invoke_access = _access_from_grpc_status(
+                    invoke_result.get("grpc_status"),
+                    used_credentials=bool(invoke_auth_header),
+                )
+            if invoke_access == _ACCESS_AUTH_REQUIRED:
+                if invoke_auth_header:
+                    provided_credentials_ok = False
+                    status = "invalid_credentials"
+            elif invoke_access == _ACCESS_AUTHENTICATED:
+                provided_credentials_ok = True
+                auth_used = invoke_auth_used
+                status = "valid_credentials"
 
         data_duration_ms = int((time.monotonic() - data_started) * 1000)
+
+    resolved_access = {_ACCESS_ANONYMOUS, _ACCESS_AUTHENTICATED, _ACCESS_UNSUPPORTED}
+    if invoke_path:
+        action_access_satisfied = invoke_access in resolved_access
+    elif perform_analysis and protocol_flavor == "grpc-web":
+        action_access_satisfied = analysis_performed and health_analysis_satisfied
+    elif perform_analysis:
+        action_access_satisfied = analysis_performed and reflection_analysis_satisfied
+    else:
+        action_access_satisfied = provided_credentials_ok is not False
+
+    if not action_access_satisfied and reflection_access == _ACCESS_MIXED:
+        _session_state.reflection_auth_used = None
+    if not action_access_satisfied and health_access == _ACCESS_MIXED:
+        _session_state.health_auth_used = None
 
     error_parts: list[str] = []
     if detect_result.get("detect_error") and status in {"fail", "not_grpc"}:
         error_parts.append(str(detect_result.get("detect_error")))
-    if auth_error and status in {"auth_required", "invalid_credentials_anonymous"}:
+    if auth_error and status in {"auth_required", "invalid_credentials", "invalid_credentials_anonymous"}:
         error_parts.append(auth_error)
 
     return {
@@ -830,13 +1370,20 @@ def _audit_grpc_host(
         "grpc_web_detected": protocol_flavor == "grpc-web",
         "status": status,
         "auth_required": auth_required,
+        "health_access": health_access,
+        "reflection_access": reflection_access,
+        "invoke_access": invoke_access,
         "provided_credentials": provided_credentials,
+        "provided_credential_type": provided_credential_type,
         "provided_username": username,
         "provided_password": password if username is not None and password is not None else None,
         "provided_credentials_ok": provided_credentials_ok,
         "auth_used": auth_used,
         "defcreds_used": bool(defcreds),
         "reflection_enabled": reflection_enabled,
+        "reflection_version": reflection_version,
+        "analysis_performed": analysis_performed,
+        "action_access_satisfied": action_access_satisfied,
         "health_supported": health_supported,
         "services": services or None,
         "methods": methods or None,
@@ -871,6 +1418,29 @@ def _auth_required_text(value: Any) -> str:
     return "unknown"
 
 
+def _reflection_status_text(value: Any) -> str:
+    if value is True:
+        return "enabled"
+    if value is False:
+        return "disable"
+    return "unknown"
+
+
+def _access_text(value: Any, *, default: str = _ACCESS_UNKNOWN) -> str:
+    text = str(value or "").strip().lower()
+    if text in {
+        _ACCESS_ANONYMOUS,
+        _ACCESS_AUTHENTICATED,
+        _ACCESS_AUTH_REQUIRED,
+        _ACCESS_MIXED,
+        _ACCESS_NOT_TESTED,
+        _ACCESS_UNKNOWN,
+        _ACCESS_UNSUPPORTED,
+    }:
+        return text
+    return default if default in {_ACCESS_NOT_TESTED, _ACCESS_UNKNOWN} else _ACCESS_UNKNOWN
+
+
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     status = str(record.get("status") or "fail")
     if output_format == "json":
@@ -884,9 +1454,14 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "detected": bool(record.get("is_grpc")),
                 "status": status,
                 "auth_required": record.get("auth_required"),
+                "health_access": _access_text(record.get("health_access")),
+                "reflection_access": _access_text(record.get("reflection_access")),
+                "invoke_access": _access_text(record.get("invoke_access"), default=_ACCESS_NOT_TESTED),
                 "transport_mode": record.get("transport_mode"),
                 "protocol_flavor": record.get("protocol_flavor"),
                 "grpc_web_detected": bool(record.get("grpc_web_detected")),
+                "reflection_enabled": record.get("reflection_enabled"),
+                "reflection_version": record.get("reflection_version"),
             },
             ensure_ascii=False,
         )
@@ -903,8 +1478,11 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     transport = str(record.get("transport_mode") or "-")
     protocol = str(record.get("protocol_flavor") or "grpc")
     return (
-        f"{prefix} [*] gRPC Service (auth required:{_auth_required_text(record.get('auth_required'))}) "
-        f"(transport:{transport}) (protocol:{protocol})"
+        f"{prefix} [*] gRPC Service (transport:{transport}) (protocol:{protocol}) "
+        f"(reflection:{_reflection_status_text(record.get('reflection_enabled'))}) "
+        f"(health_access:{_access_text(record.get('health_access'))}) "
+        f"(reflection_access:{_access_text(record.get('reflection_access'))}) "
+        f"(invoke_access:{_access_text(record.get('invoke_access'), default=_ACCESS_NOT_TESTED)})"
     )
 
 
@@ -922,10 +1500,13 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     health_supported = record.get("health_supported")
     _ = (services_count, methods_count, reflection_enabled, health_supported)
 
-    if status == "open_no_auth":
-        return f"{prefix} [+] anonymous access"
+    if status in {"detected", "open_no_auth"}:
+        return ""
 
-    if status == "invalid_credentials_anonymous":
+    if status in {"invalid_credentials", "invalid_credentials_anonymous"}:
+        if record.get("provided_credential_type") == "token":
+            source = str(record.get("provided_credential_source") or "provided").strip() or "provided"
+            return f"{prefix} [-] token (source:{source})"
         username = str(record.get("provided_username") or "user").strip() or "user"
         provided_password = record.get("provided_password")
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
@@ -941,10 +1522,14 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     if status == "auth_required":
         if record.get("provided_credentials"):
-            username = str(record.get("provided_username") or "user").strip() or "user"
-            provided_password = record.get("provided_password")
-            password_text = "<empty>" if provided_password == "" else str(provided_password or "")
-            base = f"{prefix} [-] {username}:{password_text}"
+            if record.get("provided_credential_type") == "token":
+                source = str(record.get("provided_credential_source") or "provided").strip() or "provided"
+                base = f"{prefix} [-] token (source:{source})"
+            else:
+                username = str(record.get("provided_username") or "user").strip() or "user"
+                provided_password = record.get("provided_password")
+                password_text = "<empty>" if provided_password == "" else str(provided_password or "")
+                base = f"{prefix} [-] {username}:{password_text}"
         else:
             base = f"{prefix} [-] authentication required"
         if err != "-":
@@ -961,7 +1546,14 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
 
 def _format_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
-    if str(record.get("status") or "") not in {"open_no_auth", "valid_credentials"}:
+    if str(record.get("status") or "") not in {
+        "detected",
+        "invalid_credentials",
+        "open_no_auth",
+        "valid_credentials",
+    }:
+        return []
+    if record.get("analysis_performed") is False:
         return []
 
     services = [str(item).strip() for item in (record.get("services") or []) if str(item).strip()]
@@ -986,6 +1578,8 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     "host": record.get("host"),
                     "port": record.get("port"),
                     "reflection_enabled": record.get("reflection_enabled"),
+                    "reflection_version": record.get("reflection_version"),
+                    "reflection_access": _access_text(record.get("reflection_access")),
                     "services": services,
                 },
                 ensure_ascii=False,
@@ -1026,6 +1620,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                     "host": record.get("host"),
                     "port": record.get("port"),
                     "health_supported": record.get("health_supported"),
+                    "health_access": _access_text(record.get("health_access")),
                     "checks": health_checks,
                 },
                 ensure_ascii=False,
@@ -1040,6 +1635,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                         "service": "grpc",
                         "host": record.get("host"),
                         "port": record.get("port"),
+                        "invoke_access": _access_text(record.get("invoke_access"), default=_ACCESS_NOT_TESTED),
                         "result": invoke_result,
                     },
                     ensure_ascii=False,
@@ -1050,7 +1646,6 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
     prefix = _nxc_prefix(record)
     lines = []
 
-    lines.append(f"{prefix} [*] Reflection (enabled:{_auth_required_text(reflection_enabled)})")
     if reflection_enabled is True:
         if services:
             lines.append(f"{prefix} [*] {len(services)} Services")
@@ -1058,10 +1653,6 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                 lines.append(f"{prefix} service={service_name}")
         else:
             lines.append(f"{prefix} <no services>")
-    elif reflection_enabled is False:
-        lines.append(f"{prefix} reflection disabled/unimplemented")
-    else:
-        lines.append(f"{prefix} reflection unavailable")
 
     if methods:
         lines.append(f"{prefix} [*] {len(methods)} Methods")
@@ -1092,7 +1683,8 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
             serving = str(entry.get("serving_status") or "-")
             grpc_status_name = str(entry.get("grpc_status_name") or "-")
             err = str(entry.get("error") or "").strip()
-            line = f"{prefix} service={service_name} grpc={grpc_status_name} status={serving}"
+            access = _access_text(entry.get("access"))
+            line = f"{prefix} service={service_name} grpc={grpc_status_name} status={serving} access={access}"
             if err:
                 line = f"{line} err={_clip(err, 60)}"
             lines.append(line)
@@ -1105,7 +1697,10 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         status = str(invoke_result.get("status") or "-")
         grpc_status_name = str(invoke_result.get("grpc_status_name") or "-")
         elapsed_ms = invoke_result.get("elapsed_ms")
-        line = f"{prefix} method={invoke_path} result={status} grpc={grpc_status_name}"
+        line = (
+            f"{prefix} method={invoke_path} result={status} grpc={grpc_status_name} "
+            f"access={_access_text(record.get('invoke_access'), default=_ACCESS_NOT_TESTED)}"
+        )
         if elapsed_ms is not None:
             line = f"{line} elapsed_ms={elapsed_ms}"
         lines.append(line)
@@ -1136,8 +1731,15 @@ def _grpc_marker_color_spans(payload: str) -> list[tuple[int, int, str]]:
             ("(transport:-)", "yellow"),
             ("(protocol:grpc)", "bright_green"),
             ("(protocol:grpc-web)", "orange"),
-            ("anonymous access", "bright_green"),
+            ("(reflection:enabled)", "red"),
+            ("(reflection:disable)", "bright_green"),
+            ("(reflection:unknown)", "yellow"),
             ("authentication required", "red"),
+        )
+        + tuple(
+            (f"({field}:{access})", color)
+            for field in ("health_access", "reflection_access", "invoke_access")
+            for access, color in _ACCESS_COLORS.items()
         ),
         regexes=(
             RegexColorRule(r"\((services|methods|descriptors|checks):(\d+)\)", "orange", skip_zero_group=2),
@@ -1218,6 +1820,7 @@ def _call_audit_grpc_host_with_thread_debug(
     preferred_scheme: str | None,
     debug: bool,
     run_deep_checks: bool,
+    analyze: bool = True,
     schema_descriptor_bytes: list[bytes] | None = None,
     invoke_path: str | None = None,
     invoke_request_json: dict[str, Any] | None = None,
@@ -1237,6 +1840,7 @@ def _call_audit_grpc_host_with_thread_debug(
             preferred_scheme=preferred_scheme,
             debug=debug,
             run_deep_checks=run_deep_checks,
+            analyze=analyze,
             schema_descriptor_bytes=schema_descriptor_bytes,
             invoke_path=invoke_path,
             invoke_request_json=invoke_request_json,
@@ -1272,6 +1876,7 @@ def _call_audit_grpc_host_with_stage_debug(
     preferred_scheme: str | None,
     debug: bool,
     run_deep_checks: bool,
+    analyze: bool = True,
     schema_descriptor_bytes: list[bytes] | None = None,
     invoke_path: str | None = None,
     invoke_request_json: dict[str, Any] | None = None,
@@ -1279,22 +1884,29 @@ def _call_audit_grpc_host_with_stage_debug(
     debug_emit: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    record = _audit_grpc_host(
-        host,
-        port,
-        timeout,
-        retries,
-        token=token,
-        username=username,
-        password=password,
-        defcreds=defcreds,
-        preferred_scheme=preferred_scheme,
-        run_deep_checks=run_deep_checks,
-        schema_descriptor_bytes=schema_descriptor_bytes,
-        invoke_path=invoke_path,
-        invoke_request_json=invoke_request_json,
-        metadata=metadata,
-    )
+    effective_deep_checks = bool(run_deep_checks and analyze)
+    session_state = GrpcLifecycleState()
+    try:
+        record = _audit_grpc_host(
+            host,
+            port,
+            timeout,
+            retries,
+            token=token,
+            username=username,
+            password=password,
+            defcreds=defcreds,
+            preferred_scheme=preferred_scheme,
+            run_deep_checks=effective_deep_checks,
+            analyze=analyze,
+            schema_descriptor_bytes=schema_descriptor_bytes,
+            invoke_path=invoke_path,
+            invoke_request_json=invoke_request_json,
+            metadata=metadata,
+            _session_state=session_state,
+        )
+    finally:
+        session_state.close()
 
     result: dict[str, Any] = dict(record)
     debug_events: list[str] = []
@@ -1329,7 +1941,15 @@ def _call_audit_grpc_host_with_stage_debug(
             "attempt": attempts_used,
             "duration_ms": int(result.get("stage_auth_ms") or 0),
             "result": "ok"
-            if status in {"open_no_auth", "valid_credentials", "auth_required", "invalid_credentials_anonymous"}
+            if status
+            in {
+                "detected",
+                "open_no_auth",
+                "valid_credentials",
+                "auth_required",
+                "invalid_credentials",
+                "invalid_credentials_anonymous",
+            }
             else "skip",
             "error": None,
         },
@@ -1337,14 +1957,14 @@ def _call_audit_grpc_host_with_stage_debug(
             "stage_name": _STAGE_ACCESS_CAPABILITIES,
             "attempt": 1,
             "duration_ms": int(result.get("stage_capabilities_ms") or 0),
-            "result": "ok" if run_deep_checks and status in {"open_no_auth", "valid_credentials"} else "skip",
+            "result": "ok" if effective_deep_checks and bool(result.get("analysis_performed")) else "skip",
             "error": None,
         },
         {
             "stage_name": _STAGE_DATA,
             "attempt": 1,
             "duration_ms": int(result.get("stage_data_ms") or 0),
-            "result": "ok" if run_deep_checks and status in {"open_no_auth", "valid_credentials"} else "skip",
+            "result": "ok" if effective_deep_checks and bool(result.get("analysis_performed")) else "skip",
             "error": None,
         },
     ]
@@ -1385,6 +2005,9 @@ def _call_audit_grpc_host_with_stage_debug(
     result["transport_mode"] = result.get("transport_mode")
     result["health_supported"] = result.get("health_supported")
     result["reflection_enabled"] = result.get("reflection_enabled")
+    result["health_access"] = _access_text(result.get("health_access"))
+    result["reflection_access"] = _access_text(result.get("reflection_access"))
+    result["invoke_access"] = _access_text(result.get("invoke_access"), default=_ACCESS_NOT_TESTED)
     return result
 
 
@@ -1413,13 +2036,21 @@ def _grpc_lifecycle_audit(
         defcreds=False,
         preferred_scheme=(str(ctx.target.scheme) if ctx.target is not None and ctx.target.scheme else None),
         run_deep_checks=run_deep_checks,
+        analyze=bool(options.get("analyze", False)),
         schema_descriptor_bytes=list(options["schema_descriptor_bytes"]),
         invoke_path=options["invoke_path"],
         invoke_request_json=options["invoke_request_json"],
         metadata=list(options["metadata"]),
         _lifecycle_detect_result=state.detect_result,
+        _session_state=state,
     )
-    if credential.source == "default":
+    credential_source = str(credential.source or "anonymous")
+    if credential_source == "anonymous" and (
+        credential.token or (credential.username is not None and credential.password is not None)
+    ):
+        credential_source = "provided"
+    record["provided_credential_source"] = credential_source
+    if credential_source == "default":
         record["defcreds_used"] = True
         auth_used = record.get("auth_used")
         if isinstance(auth_used, dict):
@@ -1438,6 +2069,7 @@ def detect_grpc(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             int(ctx.port),
             timeout=float(getattr(ctx.args, "timeout", 5.0)),
             preferred_scheme=(str(ctx.target.scheme) if ctx.target is not None and ctx.target.scheme else None),
+            _session_state=state,
         )
         state.detect_result = dict(result)
         error = str(result.get("detect_error") or "")
@@ -1462,7 +2094,30 @@ def authenticate_grpc(ctx: Any, _detect_record: Any, options: dict[str, Any]) ->
     state = ctx.lifecycle_state
     if not isinstance(state, GrpcLifecycleState):
         raise TypeError("grpc lifecycle state is unavailable")
-    record = _grpc_lifecycle_audit(ctx, options, run_deep_checks=True)
+    run_deep_checks = bool(options.get("analyze", False))
+    reflection_challenge_before = state.reflection_deep_auth_required
+    health_challenge_before = state.health_deep_auth_required
+    record = _grpc_lifecycle_audit(ctx, options, run_deep_checks=run_deep_checks)
+
+    credential = ctx.credential
+    has_credentials = bool(credential.token or (credential.username is not None and credential.password is not None))
+    protocol_flavor = str(record.get("protocol_flavor") or "grpc")
+    if protocol_flavor == "grpc-web":
+        new_action_challenge = not health_challenge_before and state.health_deep_auth_required
+    else:
+        new_action_challenge = not reflection_challenge_before and state.reflection_deep_auth_required
+
+    # A public lightweight probe can reveal the protected deep operation only
+    # during this credential's sole runtime run. Retry exactly once, now with
+    # that credential; a merely public success never enables this path.
+    if (
+        run_deep_checks
+        and options.get("invoke_path") is None
+        and has_credentials
+        and record.get("action_access_satisfied") is False
+        and new_action_challenge
+    ):
+        record = _grpc_lifecycle_audit(ctx, options, run_deep_checks=True)
     state.deep_records[_grpc_lifecycle_key(ctx)] = record
     return record
 
@@ -1474,7 +2129,7 @@ def collect_grpc_data(ctx: Any, _record: Any, options: dict[str, Any]) -> dict[s
     cached = state.deep_records.get(_grpc_lifecycle_key(ctx))
     if cached is not None:
         return cached
-    return _grpc_lifecycle_audit(ctx, options, run_deep_checks=True)
+    return _grpc_lifecycle_audit(ctx, options, run_deep_checks=bool(options.get("analyze", False)))
 
 
 # Typed runner boundary -----------------------------------------------------

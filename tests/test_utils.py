@@ -173,6 +173,61 @@ def test_collect_scan_target_specs_handles_mixed_hosts_and_file(tmp_path: Path) 
     ]
 
 
+def test_collect_scan_target_specs_preserves_bare_host_ports_from_file(tmp_path: Path) -> None:
+    targets_file = tmp_path / "targets.txt"
+    targets_file.write_text(
+        "# per-target ports\n10.38.15.200:8085\ngrpc.internal:8001\n[2001:db8::20]:50051\n",
+        encoding="utf-8",
+    )
+
+    specs = collect_scan_target_specs(str(targets_file))
+
+    assert [(spec.host, spec.scheme, spec.explicit_port, spec.normalized_key) for spec in specs] == [
+        ("10.38.15.200", None, 8085, "10.38.15.200:8085"),
+        ("grpc.internal", None, 8001, "grpc.internal:8001"),
+        ("2001:db8::20", None, 50051, "[2001:db8::20]:50051"),
+    ]
+    assert [spec.source for spec in specs] == [
+        f"{targets_file.resolve()}:2",
+        f"{targets_file.resolve()}:3",
+        f"{targets_file.resolve()}:4",
+    ]
+
+
+def test_collect_scan_target_specs_keeps_distinct_bare_host_port_pairs() -> None:
+    specs = collect_scan_target_specs("10.0.0.1:8080,10.0.0.1:8081,10.0.0.1:8080,2001:db8::1")
+
+    assert [(spec.host, spec.explicit_port) for spec in specs] == [
+        ("10.0.0.1", 8080),
+        ("10.0.0.1", 8081),
+        ("2001:db8::1", None),
+    ]
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "10.0.0.1:0",
+        "10.0.0.1:65536",
+        "grpc.internal:not-a-port",
+        "grpc.internal:",
+    ],
+)
+def test_collect_scan_target_specs_rejects_invalid_bare_host_ports(target: str) -> None:
+    with pytest.raises(ValueError, match="port"):
+        collect_scan_target_specs(target)
+
+
+def test_collect_scan_target_specs_reports_file_line_for_invalid_bare_port(tmp_path: Path) -> None:
+    targets_file = tmp_path / "targets.txt"
+    targets_file.write_text("10.0.0.1:8080\n10.0.0.2:invalid\n", encoding="utf-8")
+
+    with pytest.raises(ValueError) as exc_info:
+        collect_scan_target_specs(str(targets_file))
+
+    assert f"{targets_file.resolve()}:2" in str(exc_info.value)
+
+
 def test_collect_scan_target_specs_rejects_unsupported_url_scheme() -> None:
     with pytest.raises(ValueError, match="unsupported target URL scheme"):
         collect_scan_target_specs("redis://10.0.0.1:6379")

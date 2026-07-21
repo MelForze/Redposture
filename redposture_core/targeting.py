@@ -115,8 +115,10 @@ class StreamingTargetPlan:
     target_count: int
     no_port_count: int
     explicit_port_counts: dict[int, int] = field(default_factory=dict)
+    bare_explicit_port_counts: dict[int, int] = field(default_factory=dict)
     explicit_ports: tuple[int, ...] = ()
     schemes: tuple[str, ...] = ()
+    include_matrix_ports_for_bare_explicit_targets: bool = False
 
     def __bool__(self) -> bool:
         return self.target_count > 0
@@ -133,20 +135,57 @@ class StreamingTargetPlan:
         for spec in self.iter_specs():
             yield spec.host
 
-    def iter_specs_for_port(self, port: int, matrix_ports: tuple[int, ...]) -> Iterator[ScanTargetSpec]:
-        """Yield specs whose effective port matches `port`. A spec with an explicit port
-        matches only when it equals `port`; a spec without one matches when `port` is in
-        the per-run matrix. Single source of truth for the per-port filter previously
-        copy-pasted across stage_collect, stage_scan, and stage_runtime."""
-        matrix_port_set = set(matrix_ports)
+    def _spec_matches_port(
+        self,
+        spec: ScanTargetSpec,
+        port: int,
+        matrix_port_set: set[int],
+    ) -> bool:
         port_int = int(port)
-        for spec in self.iter_specs():
-            if spec.explicit_port is not None:
-                if int(spec.explicit_port) != port_int:
+        if spec.explicit_port is None:
+            return port_int in matrix_port_set
+        if int(spec.explicit_port) == port_int:
+            return True
+        return (
+            self.include_matrix_ports_for_bare_explicit_targets and spec.scheme is None and port_int in matrix_port_set
+        )
+
+    def iter_specs_for_port(self, port: int, matrix_ports: tuple[int, ...]) -> Iterator[ScanTargetSpec]:
+        """Yield specs whose effective port matches ``port``.
+
+        Target-specific ports override the module matrix by default. When the
+        command line explicitly supplied a port option, bare ``host:port``
+        targets also inherit that matrix as additional ports. URL ports keep
+        their existing override-only semantics.
+        """
+        matrix_port_set = {int(matrix_port) for matrix_port in matrix_ports}
+        port_int = int(port)
+        literal_bare_hosts = {
+            spec.host
+            for entry in self._entries
+            if isinstance(entry, _ListTargetEntry)
+            for spec in entry.specs
+            if spec.scheme is None and self._spec_matches_port(spec, port_int, matrix_port_set)
+        }
+        seen_bare_hosts: set[str] = set()
+        for entry in self._entries:
+            if isinstance(entry, _IPv4RangeTargetEntry):
+                if port_int not in matrix_port_set:
                     continue
-            elif port_int not in matrix_port_set:
+                for spec in entry.iter_specs():
+                    if spec.host in literal_bare_hosts:
+                        continue
+                    yield spec
                 continue
-            yield spec
+
+            for spec in entry.specs:
+                if not self._spec_matches_port(spec, port_int, matrix_port_set):
+                    continue
+                if spec.scheme is None:
+                    if spec.host in seen_bare_hosts:
+                        continue
+                    seen_bare_hosts.add(spec.host)
+                yield spec
 
     def iter_hosts_for_port(self, port: int, matrix_ports: tuple[int, ...]) -> Iterator[str]:
         for spec in self.iter_specs_for_port(port, matrix_ports):
@@ -164,10 +203,72 @@ class StreamingTargetPlan:
         return tuple(dict.fromkeys((*default_ports, *self.explicit_ports)))
 
     def count_for_ports(self, default_ports: tuple[int, ...]) -> int:
-        total = self.no_port_count * len(default_ports)
+        matrix_ports = tuple(dict.fromkeys(int(port) for port in default_ports))
+        total = self.no_port_count * len(matrix_ports)
         for count in self.explicit_port_counts.values():
             total += count
+        if self.include_matrix_ports_for_bare_explicit_targets:
+            for target_port, count in self.bare_explicit_port_counts.items():
+                total += count * sum(1 for port in matrix_ports if port != target_port)
+
+        # The parser intentionally keeps distinct source pairs such as
+        # ``host:8001`` and ``host:50051``. An additive CLI port can make both
+        # resolve to the same effective host:port, which must execute once.
+        # Correct the O(1) baseline using only materialized literal targets;
+        # large CIDR ranges remain represented as intervals.
+        ipv4_ranges = sorted(
+            target_range
+            for entry in self._entries
+            if isinstance(entry, _IPv4RangeTargetEntry)
+            for target_range in entry.ranges
+        )
+        bare_no_port_hosts: set[str] = set()
+        bare_explicit_ports_by_host: dict[str, set[int]] = {}
+        for entry in self._entries:
+            if not isinstance(entry, _ListTargetEntry):
+                continue
+            for spec in entry.specs:
+                if spec.scheme is not None:
+                    continue
+                if spec.explicit_port is None:
+                    bare_no_port_hosts.add(spec.host)
+                else:
+                    bare_explicit_ports_by_host.setdefault(spec.host, set()).add(int(spec.explicit_port))
+
+        def _host_has_matrix_target(host: str) -> bool:
+            if host in bare_no_port_hosts:
+                return True
+            if not ipv4_ranges:
+                return False
+            try:
+                ip_value = ipaddress.ip_address(host)
+            except ValueError:
+                return False
+            return isinstance(ip_value, ipaddress.IPv4Address) and _range_contains(
+                ipv4_ranges,
+                int(ip_value),
+            )
+
+        matrix_port_set = set(matrix_ports)
+        for host, target_ports in bare_explicit_ports_by_host.items():
+            has_matrix_target = _host_has_matrix_target(host)
+            if self.include_matrix_ports_for_bare_explicit_targets:
+                occurrences_per_matrix_port = len(target_ports) + int(has_matrix_target)
+                total -= max(0, occurrences_per_matrix_port - 1) * len(matrix_ports)
+            elif has_matrix_target:
+                total -= len(target_ports & matrix_port_set)
         return total
+
+    def with_additional_ports_for_bare_explicit_targets(
+        self,
+        enabled: bool = True,
+    ) -> StreamingTargetPlan:
+        """Apply the run's explicit CLI port matrix to bare ``host:port`` targets."""
+
+        enabled_bool = bool(enabled)
+        if enabled_bool == self.include_matrix_ports_for_bare_explicit_targets:
+            return self
+        return replace(self, include_matrix_ports_for_bare_explicit_targets=enabled_bool)
 
     def hosts_sample(self, limit: int) -> list[str]:
         result: list[str] = []
@@ -204,6 +305,7 @@ class StreamingTargetPlan:
         target_count = 0
         no_port_count = 0
         explicit_port_counts: dict[int, int] = {}
+        bare_explicit_port_counts: dict[int, int] = {}
         explicit_ports: list[int] = []
         schemes: list[str] = []
 
@@ -254,6 +356,8 @@ class StreamingTargetPlan:
                     if port not in explicit_port_counts:
                         explicit_ports.append(port)
                     explicit_port_counts[port] = explicit_port_counts.get(port, 0) + 1
+                    if mapped.scheme is None:
+                        bare_explicit_port_counts[port] = bare_explicit_port_counts.get(port, 0) + 1
                 if scheme and scheme not in schemes:
                     schemes.append(scheme)
 
@@ -265,8 +369,10 @@ class StreamingTargetPlan:
             target_count=target_count,
             no_port_count=no_port_count,
             explicit_port_counts=explicit_port_counts,
+            bare_explicit_port_counts=bare_explicit_port_counts,
             explicit_ports=tuple(explicit_ports),
             schemes=tuple(schemes),
+            include_matrix_ports_for_bare_explicit_targets=(self.include_matrix_ports_for_bare_explicit_targets),
         )
 
 
@@ -310,8 +416,71 @@ def _make_normalized_key(
                 netloc = f"[{host}]:{int(port)}"
         return urlunsplit((scheme, netloc, path or "", query or "", fragment or ""))
     if port is not None:
-        return f"{host}:{int(port)}"
+        bare_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        return f"{bare_host}:{int(port)}"
     return host
+
+
+def _parse_bare_target_authority(item: str, *, source: str | None = None) -> tuple[str, int | None]:
+    """Parse ``host[:port]`` without confusing an unbracketed IPv6 literal.
+
+    IPv6 ports are deliberately accepted only in the unambiguous
+    ``[address]:port`` form. This helper is shared by eager and streaming
+    target parsing through ``_consume_target_tokens``.
+    """
+
+    def _error(reason: str) -> ValueError:
+        location = f" at {source}" if source else ""
+        return ValueError(f"invalid target '{item}'{location}: {reason}")
+
+    def _parse_port(raw_port: str) -> int:
+        if not raw_port:
+            raise _error("missing port")
+        if not raw_port.isdecimal():
+            raise _error(f"port '{raw_port}' must be an integer")
+        port = int(raw_port)
+        if port < 1 or port > 65535:
+            raise _error(f"port '{raw_port}' must be within 1..65535")
+        return port
+
+    if item.startswith("[") or "]" in item:
+        if not item.startswith("["):
+            raise _error("malformed bracketed IPv6 address")
+        closing = item.find("]")
+        if closing < 0:
+            raise _error("missing closing ']' in IPv6 address")
+        raw_host = item[1:closing]
+        suffix = item[closing + 1 :]
+        if not raw_host:
+            raise _error("missing IPv6 address")
+        try:
+            host = str(ipaddress.IPv6Address(raw_host))
+        except ValueError as exc:
+            raise _error(f"invalid IPv6 address '{raw_host}'") from exc
+        if not suffix:
+            return host, None
+        if not suffix.startswith(":"):
+            raise _error("unexpected text after bracketed IPv6 address")
+        return host, _parse_port(suffix[1:])
+
+    colon_count = item.count(":")
+    if colon_count >= 2:
+        try:
+            return str(ipaddress.IPv6Address(item)), None
+        except ValueError as exc:
+            raise _error("invalid IPv6 address; use '[address]:port' when specifying a port") from exc
+
+    if colon_count == 1:
+        raw_host, raw_port = item.rsplit(":", 1)
+        host = normalize_scan_host(raw_host) or ""
+        if not host:
+            raise _error("missing host")
+        return host, _parse_port(raw_port)
+
+    host = normalize_scan_host(item) or ""
+    if not host:
+        raise _error("missing host")
+    return host, None
 
 
 def _expand_network_targets(token: str, max_hosts: int) -> list[str]:
@@ -500,17 +669,19 @@ def _consume_target_tokens(
             handle_network(item, source)
             return
 
-        host = normalize_scan_host(item) or ""
-        if not host:
-            return
+        host, explicit_port = _parse_bare_target_authority(item, source=source or policy.source)
         append_spec(
             ScanTargetSpec(
                 host=host,
                 scheme=None,
-                explicit_port=None,
+                explicit_port=explicit_port,
                 raw=item,
                 source=source or policy.source,
-                normalized_key=host,
+                normalized_key=_make_normalized_key(
+                    host=host,
+                    scheme=None,
+                    port=explicit_port,
+                ),
             )
         )
 
@@ -539,6 +710,7 @@ def stream_scan_target_specs(
     target_count = 0
     no_port_count = 0
     explicit_port_counts: dict[int, int] = {}
+    bare_explicit_port_counts: dict[int, int] = {}
     explicit_ports: list[int] = []
     schemes: list[str] = []
 
@@ -551,6 +723,8 @@ def stream_scan_target_specs(
             if port not in explicit_port_counts:
                 explicit_ports.append(port)
             explicit_port_counts[port] = explicit_port_counts.get(port, 0) + count
+            if spec.scheme is None:
+                bare_explicit_port_counts[port] = bare_explicit_port_counts.get(port, 0) + count
         if spec.scheme:
             scheme = str(spec.scheme).lower()
             if scheme not in schemes:
@@ -640,6 +814,7 @@ def stream_scan_target_specs(
         target_count=target_count,
         no_port_count=no_port_count,
         explicit_port_counts=dict(explicit_port_counts),
+        bare_explicit_port_counts=dict(bare_explicit_port_counts),
         explicit_ports=tuple(explicit_ports),
         schemes=tuple(schemes),
     )
@@ -805,6 +980,7 @@ def build_scan_execution_groups(
     port_matrix: list[int],
     *,
     include_scheme_in_key: bool = True,
+    include_matrix_ports_for_bare_explicit_targets: bool = False,
 ) -> list[ScanExecutionGroup]:
     if not target_specs:
         return []
@@ -815,7 +991,12 @@ def build_scan_execution_groups(
     seen_group_hosts: set[tuple[int, str | None, str]] = set()
 
     for spec in target_specs:
-        ports = [int(spec.explicit_port)] if spec.explicit_port is not None else unique_ports
+        if spec.explicit_port is None:
+            ports = unique_ports
+        elif include_matrix_ports_for_bare_explicit_targets and spec.scheme is None:
+            ports = list(dict.fromkeys((int(spec.explicit_port), *unique_ports)))
+        else:
+            ports = [int(spec.explicit_port)]
         for port in ports:
             scheme_hint = spec.scheme if include_scheme_in_key else None
             group_key = (int(port), scheme_hint)

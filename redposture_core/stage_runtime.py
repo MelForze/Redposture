@@ -719,6 +719,14 @@ def build_basic_audit_plan(
     if not target_plan:
         raise ValueError("targets are required")
 
+    port_option_provided = getattr(args, "_port_option_provided", None)
+    if port_option_provided is None:
+        # Programmatic callers that construct Namespace/SimpleNamespace by
+        # hand have no argv provenance. Treat any supplied port value as an
+        # explicit override; normal CLI parsing always sets the marker above.
+        port_option_provided = port_value is not None or ports_raw is not None
+    target_plan = target_plan.with_additional_ports_for_bare_explicit_targets(bool(port_option_provided))
+
     credential_runs = build_basic_credential_runs(args)
     port_tuple = tuple(int(port) for port in ports)
 

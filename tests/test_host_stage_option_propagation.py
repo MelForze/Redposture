@@ -317,6 +317,7 @@ def test_grpc_real_stage_parses_metadata_request_and_descriptors_once(
     assert _deep_calls(calls)
     for call in calls:
         assert call["preferred_scheme"] == "https"
+        assert call["analyze"] is True
         assert call["schema_descriptor_bytes"] == [b"descriptor"]
         assert call["invoke_path"] == "/lab.Service/Call"
         assert call["invoke_request_json"] == {"message": "hello"}

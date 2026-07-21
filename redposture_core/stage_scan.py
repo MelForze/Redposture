@@ -198,6 +198,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
     except ValueError as exc:
         console.error(f"failed to parse --ports: {exc}")
         return 2
+    target_plan = target_plan.with_additional_ports_for_bare_explicit_targets(bool(custom_ports))
 
     try:
         profiles = load_profiles(args.profiles_file)
@@ -311,6 +312,7 @@ def run_scan_stage(args: argparse.Namespace, logger: AttemptLogger | None = None
             target_specs,
             custom_ports or default_ports,
             include_scheme_in_key=False,
+            include_matrix_ports_for_bare_explicit_targets=bool(custom_ports),
         )
         checks = 0
         found = 0

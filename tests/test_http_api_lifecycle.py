@@ -378,6 +378,7 @@ def test_grpc_defcreds_are_one_candidate_per_runtime_run_and_stop_on_success(
             "--token",
             "bad",
             "--defcreds",
+            "--analyze",
             "--format",
             "json",
         ]
@@ -391,3 +392,446 @@ def test_grpc_defcreds_are_one_candidate_per_runtime_run_and_stop_on_success(
     assert capability_calls == 1
     assert result.records[0]["status"] == "valid_credentials"
     assert result.records[0]["defcreds_used"] is True
+
+
+def test_grpc_analyze_continues_until_reflection_credential_and_reuses_health_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    health_headers: list[str | None] = []
+    reflection_probe_headers: list[str | None] = []
+    reflection_inventory_headers: list[str | None] = []
+    descriptor_headers: list[str | None] = []
+
+    monkeypatch.setattr(
+        grpc,
+        "_detect_grpc_target",
+        lambda *_args, **_kwargs: {
+            "status": "detected",
+            "is_grpc": True,
+            "transport_mode": "plaintext",
+            "protocol_flavor": "grpc",
+            "auth_required": None,
+            "health_access": "auth_required",
+            "reflection_access": "auth_required",
+            "invoke_access": "not_tested",
+            "reflection_enabled": None,
+            "health_supported": None,
+            "detect_probe_trace": [],
+        },
+    )
+
+    def fake_health(*_args, authorization=None, **_kwargs):
+        health_headers.append(authorization)
+        accepted = authorization == "Bearer health-only"
+        return {
+            "call": {"is_grpc": True},
+            "health_supported": True,
+            "grpc_status": 0 if accepted else 16,
+            "grpc_status_name": "OK" if accepted else "UNAUTHENTICATED",
+            "serving_status": "SERVING" if accepted else None,
+            "error": None,
+        }
+
+    def fake_reflection_probe(*_args, authorization=None, **_kwargs):
+        reflection_probe_headers.append(authorization)
+        accepted = authorization == "Bearer admin"
+        return {
+            "call": {"is_grpc": True},
+            "reflection_enabled": True if accepted else None,
+            "grpc_status": 0 if accepted else 16,
+            "error": None,
+        }
+
+    def fake_reflection_inventory(*_args, authorization=None, **_kwargs):
+        reflection_inventory_headers.append(authorization)
+        assert authorization == "Bearer admin"
+        return {
+            "call": {"is_grpc": True},
+            "reflection_enabled": True,
+            "reflection_version": "v1",
+            "grpc_status": 0,
+            "services": ["demo.Service"],
+            "error": None,
+        }
+
+    def fake_descriptors(*_args, authorization=None, **_kwargs):
+        descriptor_headers.append(authorization)
+        assert authorization == "Bearer admin"
+        return {
+            "call": {"is_grpc": True},
+            "grpc_status": 0,
+            "descriptor_bytes": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(grpc, "_health_check_call", fake_health)
+    monkeypatch.setattr(grpc, "_reflection_capability_call", fake_reflection_probe)
+    monkeypatch.setattr(grpc, "_reflection_list_services_call", fake_reflection_inventory)
+    monkeypatch.setattr(grpc, "_reflection_file_descriptors_call", fake_descriptors)
+
+    args = parse_args(
+        [
+            "grpc",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "50051",
+            "--token",
+            "health-only",
+            "--defcreds",
+            "--analyze",
+            "--format",
+            "json",
+        ]
+    )
+    plan = grpc.build_grpc_plan(args)
+    runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(plan)
+
+    assert reflection_probe_headers == ["Bearer health-only", "Bearer admin"]
+    assert reflection_inventory_headers == ["Bearer admin"]
+    assert descriptor_headers == ["Bearer admin"]
+    assert health_headers == [
+        "Bearer health-only",
+        "Bearer admin",
+        "Bearer health-only",
+        "Bearer health-only",
+    ]
+    assert result.records[0]["status"] == "valid_credentials"
+    assert result.records[0]["health_access"] == "authenticated"
+    assert result.records[0]["reflection_access"] == "authenticated"
+    assert result.records[0]["auth_required"] is None
+    assert result.records[0]["action_access_satisfied"] is True
+    assert result.records[0]["provided_credential_source"] == "default"
+
+
+def test_grpc_invoke_continues_candidates_until_the_requested_method_is_accessible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invoke_headers: list[str | None] = []
+
+    monkeypatch.setattr(
+        grpc,
+        "_detect_grpc_target",
+        lambda *_args, **_kwargs: {
+            "status": "detected",
+            "is_grpc": True,
+            "transport_mode": "plaintext",
+            "protocol_flavor": "grpc",
+            "auth_required": None,
+            "health_access": "anonymous",
+            "reflection_access": "anonymous",
+            "invoke_access": "not_tested",
+            "reflection_enabled": False,
+            "health_supported": True,
+            "detect_probe_trace": [],
+        },
+    )
+    monkeypatch.setattr(
+        grpc,
+        "_reflection_list_services_call",
+        lambda *_args, **_kwargs: {
+            "call": {"is_grpc": True},
+            "reflection_enabled": False,
+            "grpc_status": 12,
+            "services": [],
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        grpc,
+        "_health_check_call",
+        lambda *_args, **_kwargs: {
+            "call": {"is_grpc": True},
+            "health_supported": True,
+            "grpc_status": 0,
+            "grpc_status_name": "OK",
+            "serving_status": "SERVING",
+            "error": None,
+        },
+    )
+
+    def fake_invoke(*_args, authorization=None, **_kwargs):
+        invoke_headers.append(authorization)
+        accepted = authorization == "Bearer admin"
+        return {
+            "path": "/demo.Service/Get",
+            "status": "ok" if accepted else "grpc_error",
+            "grpc_status": 0 if accepted else 16,
+            "grpc_status_name": "OK" if accepted else "UNAUTHENTICATED",
+        }
+
+    monkeypatch.setattr(grpc, "_invoke_unary_method", fake_invoke)
+    args = parse_args(
+        [
+            "grpc",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "50051",
+            "--token",
+            "bad",
+            "--defcreds",
+            "--invoke",
+            "/demo.Service/Get",
+            "--format",
+            "json",
+        ]
+    )
+    plan = grpc.build_grpc_plan(args)
+    runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(plan)
+
+    assert invoke_headers == ["Bearer bad", "Bearer admin"]
+    assert result.records[0]["status"] == "valid_credentials"
+    assert result.records[0]["invoke_access"] == "authenticated"
+    assert result.records[0]["auth_required"] is None
+    assert result.records[0]["action_access_satisfied"] is True
+    assert result.records[0]["provided_credential_source"] == "default"
+
+
+@pytest.mark.parametrize(
+    ("token", "use_defcreds", "expected_headers", "expected_source"),
+    [
+        ("admin", False, [None, "Bearer admin"], "provided"),
+        ("bad", True, [None, "Bearer bad", "Bearer admin"], "default"),
+    ],
+)
+def test_grpc_public_reflection_probe_retries_deep_descriptors_with_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    token: str,
+    use_defcreds: bool,
+    expected_headers: list[str | None],
+    expected_source: str,
+) -> None:
+    list_headers: list[str | None] = []
+    descriptor_headers: list[str | None] = []
+
+    monkeypatch.setattr(
+        grpc,
+        "_detect_grpc_target",
+        lambda *_args, **_kwargs: {
+            "status": "detected",
+            "is_grpc": True,
+            "transport_mode": "plaintext",
+            "protocol_flavor": "grpc",
+            "auth_required": None,
+            "health_access": "anonymous",
+            "reflection_access": "anonymous",
+            "invoke_access": "not_tested",
+            "reflection_enabled": True,
+            "health_supported": True,
+            "detect_probe_trace": [],
+        },
+    )
+
+    def fake_reflection_inventory(*_args, authorization=None, **_kwargs):
+        list_headers.append(authorization)
+        return {
+            "call": {"is_grpc": True},
+            "reflection_enabled": True,
+            "reflection_version": "v1",
+            "grpc_status": 0,
+            "services": ["demo.Service"],
+            "error": None,
+        }
+
+    def fake_descriptors(*_args, authorization=None, **_kwargs):
+        descriptor_headers.append(authorization)
+        accepted = authorization == "Bearer admin"
+        return {
+            "call": {"is_grpc": True},
+            "grpc_status": 0 if accepted else 16,
+            "descriptor_bytes": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(grpc, "_reflection_list_services_call", fake_reflection_inventory)
+    monkeypatch.setattr(grpc, "_reflection_file_descriptors_call", fake_descriptors)
+    monkeypatch.setattr(
+        grpc,
+        "_health_check_call",
+        lambda *_args, **_kwargs: {
+            "call": {"is_grpc": True},
+            "health_supported": True,
+            "grpc_status": 0,
+            "grpc_status_name": "OK",
+            "serving_status": "SERVING",
+            "error": None,
+        },
+    )
+
+    argv = [
+        "grpc",
+        "-t",
+        "127.0.0.1",
+        "--port",
+        "50051",
+        "--token",
+        token,
+        "--analyze",
+        "--format",
+        "json",
+    ]
+    if use_defcreds:
+        argv.append("--defcreds")
+    args = parse_args(argv)
+    plan = grpc.build_grpc_plan(args)
+    runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(plan)
+
+    assert list_headers == expected_headers
+    assert descriptor_headers == expected_headers
+    assert result.records[0]["status"] == "valid_credentials"
+    assert result.records[0]["reflection_access"] == "mixed"
+    assert result.records[0]["action_access_satisfied"] is True
+    assert result.records[0]["auth_used"]["token"] == "admin"
+    assert result.records[0]["provided_credential_source"] == expected_source
+
+
+def test_grpc_public_deep_reflection_does_not_falsely_validate_explicit_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    list_headers: list[str | None] = []
+
+    monkeypatch.setattr(
+        grpc,
+        "_detect_grpc_target",
+        lambda *_args, **_kwargs: {
+            "status": "detected",
+            "is_grpc": True,
+            "transport_mode": "plaintext",
+            "protocol_flavor": "grpc",
+            "auth_required": None,
+            "health_access": "anonymous",
+            "reflection_access": "anonymous",
+            "invoke_access": "not_tested",
+            "reflection_enabled": True,
+            "health_supported": True,
+            "detect_probe_trace": [],
+        },
+    )
+
+    def fake_reflection_inventory(*_args, authorization=None, **_kwargs):
+        list_headers.append(authorization)
+        return {
+            "call": {"is_grpc": True},
+            "reflection_enabled": True,
+            "reflection_version": "v1",
+            "grpc_status": 0,
+            "services": [],
+            "error": None,
+        }
+
+    monkeypatch.setattr(grpc, "_reflection_list_services_call", fake_reflection_inventory)
+    monkeypatch.setattr(
+        grpc,
+        "_health_check_call",
+        lambda *_args, **_kwargs: {
+            "call": {"is_grpc": True},
+            "health_supported": True,
+            "grpc_status": 0,
+            "grpc_status_name": "OK",
+            "serving_status": "SERVING",
+            "error": None,
+        },
+    )
+
+    args = parse_args(
+        [
+            "grpc",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "50051",
+            "--token",
+            "admin",
+            "--analyze",
+            "--format",
+            "json",
+        ]
+    )
+    result = _run(grpc, "grpc", args)
+
+    assert list_headers == [None]
+    assert result.records[0]["status"] == "detected"
+    assert result.records[0]["provided_credentials_ok"] is None
+    assert result.records[0]["auth_used"] is None
+    assert result.records[0]["action_access_satisfied"] is True
+    assert result.records[0]["provided_credential_source"] == "provided"
+
+
+def test_grpc_web_public_overall_health_retries_protected_service_health_with_next_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    health_calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        grpc,
+        "_detect_grpc_target",
+        lambda *_args, **_kwargs: {
+            "status": "detected",
+            "is_grpc": True,
+            "transport_mode": "plaintext",
+            "protocol_flavor": "grpc-web",
+            "auth_required": None,
+            "health_access": "anonymous",
+            "reflection_access": "not_tested",
+            "invoke_access": "not_tested",
+            "reflection_enabled": None,
+            "health_supported": True,
+            "detect_probe_trace": [],
+        },
+    )
+
+    def fake_web_health(*_args, authorization=None, service_name="", **_kwargs):
+        health_calls.append((service_name, authorization))
+        accepted = service_name == "" or authorization == "Bearer admin"
+        return {
+            "call": {"is_grpc": True},
+            "health_supported": True,
+            "grpc_status": 0 if accepted else 16,
+            "grpc_status_name": "OK" if accepted else "UNAUTHENTICATED",
+            "serving_status": "SERVING" if accepted else None,
+            "error": None,
+        }
+
+    monkeypatch.setattr(grpc, "_grpc_web_health_check_call", fake_web_health)
+    monkeypatch.setattr(
+        grpc,
+        "_extract_descriptors",
+        lambda _blobs: ([{"service": "demo.Service", "method": "Get"}], []),
+    )
+
+    args = parse_args(
+        [
+            "grpc",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "50051",
+            "--token",
+            "bad",
+            "--defcreds",
+            "--analyze",
+            "--format",
+            "json",
+        ]
+    )
+    plan = grpc.build_grpc_plan(args)
+    runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
+    result = runner.run_plan(plan)
+
+    assert health_calls == [
+        ("", None),
+        ("demo.Service", None),
+        ("", "Bearer bad"),
+        ("demo.Service", "Bearer bad"),
+        ("", "Bearer admin"),
+        ("demo.Service", "Bearer admin"),
+    ]
+    assert result.records[0]["status"] == "valid_credentials"
+    assert result.records[0]["health_access"] == "mixed"
+    assert result.records[0]["action_access_satisfied"] is True
+    assert result.records[0]["auth_used"]["token"] == "admin"
+    assert result.records[0]["provided_credential_source"] == "default"

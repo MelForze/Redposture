@@ -288,9 +288,100 @@ def test_reflection_list_and_descriptor_fetch(monkeypatch) -> None:
     )
 
     assert list_result["reflection_enabled"] is True
+    assert list_result["reflection_version"] == "v1"
     assert list_result["services"] == ["demo.Greeter", "grpc.health.v1.Health"]
     assert descriptor_result["descriptor_bytes"] == [grpc_health_pb2.DESCRIPTOR.serialized_pb]
+    assert descriptor_result["reflection_version"] == "v1"
     assert seen_paths == [
+        "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+        "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+    ]
+
+
+def test_reflection_v1alpha_fallback_is_cached_for_session(monkeypatch) -> None:
+    list_response = grpc_reflection_pb2.ServerReflectionResponse(
+        list_services_response=grpc_reflection_pb2.ListServiceResponse(
+            service=[grpc_reflection_pb2.ServiceResponse(name="demo.Greeter")]
+        )
+    )
+    descriptor_response = grpc_reflection_pb2.ServerReflectionResponse(
+        file_descriptor_response=grpc_reflection_pb2.FileDescriptorResponse(
+            file_descriptor_proto=[grpc_health_pb2.DESCRIPTOR.serialized_pb]
+        )
+    )
+    seen_paths: list[str] = []
+
+    def fake_call(*_args, **kwargs):
+        path = str(kwargs["path"])
+        seen_paths.append(path)
+        if ".v1.ServerReflection" in path:
+            return {**_grpc_ok_call(), "grpc_status": 12}
+        request = grpc_reflection_pb2.ServerReflectionRequest()
+        request.ParseFromString(kwargs["payload"])
+        if request.HasField("list_services"):
+            return _grpc_ok_call([list_response.SerializeToString()])
+        return _grpc_ok_call([descriptor_response.SerializeToString()])
+
+    monkeypatch.setattr(grpc_client, "_grpc_call", fake_call)
+    session = grpc_client._GrpcH2Session("127.0.0.1", 50051, timeout=1.0, use_tls=False)
+
+    listed = grpc_client._reflection_list_services_call(
+        "127.0.0.1", 50051, timeout=1.0, use_tls=False, authorization=None, session=session
+    )
+    described = grpc_client._reflection_file_descriptors_call(
+        "127.0.0.1",
+        50051,
+        timeout=1.0,
+        use_tls=False,
+        authorization=None,
+        symbol="demo.Greeter",
+        session=session,
+    )
+
+    assert listed["reflection_version"] == "v1alpha"
+    assert described["reflection_version"] == "v1alpha"
+    assert seen_paths == [
+        "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
+        "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+        "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+    ]
+
+
+def test_reflection_v1alpha_fallback_accepts_plain_http_404(monkeypatch) -> None:
+    seen_paths: list[str] = []
+
+    def fake_call(*_args, **kwargs):
+        path = str(kwargs["path"])
+        seen_paths.append(path)
+        if ".v1.ServerReflection" in path:
+            return {
+                **_grpc_ok_call(),
+                "grpc_status": None,
+                "http_status": 404,
+                "is_grpc": False,
+            }
+        return _grpc_ok_call()
+
+    monkeypatch.setattr(grpc_client, "_grpc_call", fake_call)
+    session = grpc_client._GrpcH2Session("127.0.0.1", 50051, timeout=1.0, use_tls=False)
+
+    listed = grpc_client._reflection_list_services_call(
+        "127.0.0.1", 50051, timeout=1.0, use_tls=False, authorization=None, session=session
+    )
+    described = grpc_client._reflection_file_descriptors_call(
+        "127.0.0.1",
+        50051,
+        timeout=1.0,
+        use_tls=False,
+        authorization=None,
+        symbol="demo.Greeter",
+        session=session,
+    )
+
+    assert listed["reflection_version"] == "v1alpha"
+    assert described["reflection_version"] == "v1alpha"
+    assert seen_paths == [
+        "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo",
         "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
         "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
     ]
@@ -325,6 +416,62 @@ def test_reflection_error_and_invalid_message_branches(monkeypatch) -> None:
     )
     assert descriptor_result["descriptor_bytes"] == []
     assert descriptor_result["error"] == "5:missing"
+
+
+def test_reflection_capability_probe_does_not_request_service_list(monkeypatch) -> None:
+    error_response = grpc_reflection_pb2.ServerReflectionResponse(
+        error_response=grpc_reflection_pb2.ErrorResponse(error_code=5, error_message="missing")
+    )
+    requests: list[grpc_reflection_pb2.ServerReflectionRequest] = []
+
+    def fake_call(*_args, **kwargs):
+        request = grpc_reflection_pb2.ServerReflectionRequest()
+        request.ParseFromString(kwargs["payload"])
+        requests.append(request)
+        return _grpc_ok_call([error_response.SerializeToString()])
+
+    monkeypatch.setattr(grpc_client, "_grpc_call", fake_call)
+
+    result = grpc_client._reflection_capability_call(
+        "127.0.0.1",
+        50051,
+        timeout=1.0,
+        use_tls=False,
+        authorization=None,
+    )
+
+    assert result["reflection_enabled"] is True
+    assert result["embedded_error_code"] == 5
+    assert len(requests) == 1
+    assert requests[0].HasField("file_containing_symbol")
+    assert not requests[0].HasField("list_services")
+
+
+@pytest.mark.parametrize(("grpc_status", "expected"), [(12, False), (16, None)])
+def test_reflection_capability_probe_classifies_outer_status(monkeypatch, grpc_status, expected) -> None:
+    monkeypatch.setattr(
+        grpc_client,
+        "_grpc_call",
+        lambda *_args, **_kwargs: {
+            "grpc_status": grpc_status,
+            "grpc_message": "",
+            "messages": [],
+            "is_grpc": True,
+            "transport_ok": True,
+            "http_status": 200,
+            "error": None,
+        },
+    )
+
+    result = grpc_client._reflection_capability_call(
+        "127.0.0.1",
+        50051,
+        timeout=1.0,
+        use_tls=False,
+        authorization=None,
+    )
+
+    assert result["reflection_enabled"] is expected
 
 
 def test_descriptor_pool_invoke_and_openapi_generation(monkeypatch) -> None:
@@ -512,6 +659,138 @@ def test_grpc_http2_call_success_path_with_fake_h2(monkeypatch) -> None:
     assert fake_sock.closed is True
 
 
+def test_grpc_http2_session_reuses_socket_streams_and_brackets_ipv6(monkeypatch) -> None:
+    class FakeResponseReceived:
+        def __init__(self, stream_id: int) -> None:
+            self.stream_id = stream_id
+            self.headers = [(b":status", b"200"), (b"content-type", b"application/grpc")]
+
+    class FakeTrailersReceived:
+        def __init__(self, stream_id: int) -> None:
+            self.stream_id = stream_id
+            self.headers = [(b"grpc-status", b"0")]
+
+    class FakeDataReceived:
+        def __init__(self, stream_id: int) -> None:
+            self.stream_id = stream_id
+            self.data = grpc_client._encode_grpc_frame(f"response-{stream_id}".encode())
+            self.flow_controlled_length = len(self.data)
+
+    class FakeStreamEnded:
+        def __init__(self, stream_id: int) -> None:
+            self.stream_id = stream_id
+
+    class FakeH2Connection:
+        instances: list[FakeH2Connection] = []
+
+        def __init__(self) -> None:
+            self.next_stream_id = 1
+            self.current_stream_id = 0
+            self.sent_headers: list[tuple[int, list[tuple[str, str]], bool]] = []
+            self.initiated = 0
+            self.closed = 0
+            self.__class__.instances.append(self)
+
+        def initiate_connection(self) -> None:
+            self.initiated += 1
+
+        def close_connection(self) -> None:
+            self.closed += 1
+
+        def data_to_send(self) -> bytes:
+            return b""
+
+        def get_next_available_stream_id(self) -> int:
+            stream_id = self.next_stream_id
+            self.next_stream_id += 2
+            return stream_id
+
+        def send_headers(self, stream_id, headers, end_stream=False):  # noqa: ANN001
+            self.current_stream_id = stream_id
+            self.sent_headers.append((stream_id, headers, end_stream))
+
+        def send_data(self, _stream_id, _data, end_stream=False):  # noqa: ANN001
+            assert end_stream is True
+
+        def receive_data(self, _chunk: bytes):  # noqa: ANN001
+            stream_id = self.current_stream_id
+            return [
+                FakeResponseReceived(stream_id),
+                FakeDataReceived(stream_id),
+                FakeTrailersReceived(stream_id),
+                FakeStreamEnded(stream_id),
+            ]
+
+        def acknowledge_received_data(self, *_args) -> None:  # noqa: ANN002
+            return None
+
+    class FakeSocket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.timeouts: list[float] = []
+
+        def settimeout(self, timeout: float) -> None:
+            self.timeouts.append(timeout)
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, _size: int) -> bytes:
+            return b"server-bytes"
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_sock = FakeSocket()
+    open_calls: list[tuple[str, int]] = []
+
+    def fake_open(host: str, port: int, *_args, **_kwargs):
+        open_calls.append((host, port))
+        return fake_sock
+
+    monkeypatch.setattr(grpc_client, "H2Connection", FakeH2Connection)
+    monkeypatch.setattr(grpc_client, "ResponseReceived", FakeResponseReceived)
+    monkeypatch.setattr(grpc_client, "TrailersReceived", FakeTrailersReceived)
+    monkeypatch.setattr(grpc_client, "DataReceived", FakeDataReceived)
+    monkeypatch.setattr(grpc_client, "StreamEnded", FakeStreamEnded)
+    monkeypatch.setattr(grpc_client, "_open_grpc_socket", fake_open)
+
+    with grpc_client._GrpcH2Session("2001:db8::1", 50051, timeout=1.0, use_tls=False) as session:
+        first = grpc_client._grpc_call(
+            "2001:db8::1",
+            50051,
+            path="/demo.Service/First",
+            payload=b"one",
+            timeout=1.0,
+            use_tls=False,
+            authorization=None,
+            session=session,
+        )
+        second = grpc_client._grpc_call(
+            "2001:db8::1",
+            50051,
+            path="/demo.Service/Second",
+            payload=b"two",
+            timeout=2.0,
+            use_tls=False,
+            authorization=None,
+            session=session,
+        )
+        assert fake_sock.closed is False
+
+    connection = FakeH2Connection.instances[0]
+    assert first["messages"] == [b"response-1"]
+    assert second["messages"] == [b"response-3"]
+    assert open_calls == [("2001:db8::1", 50051)]
+    assert connection.initiated == 1
+    assert [item[0] for item in connection.sent_headers] == [1, 3]
+    assert [(":authority", "[2001:db8::1]:50051")] == [
+        header for header in connection.sent_headers[0][1] if header[0] == ":authority"
+    ]
+    assert fake_sock.timeouts == [2.0]
+    assert fake_sock.closed is True
+
+
 def test_grpc_web_call_success_and_helpers(monkeypatch, tmp_path) -> None:
     trailer = b"grpc-status: 0\r\ngrpc-message: OK\r\n"
     body = b"\x00" + (3).to_bytes(4, "big") + b"abc" + b"\x80" + len(trailer).to_bytes(4, "big") + trailer
@@ -562,6 +841,8 @@ def test_grpc_web_call_success_and_helpers(monkeypatch, tmp_path) -> None:
     assert grpc_client._parse_json_payload_source("@" + str(data_file)) == {"service": "demo"}
     assert grpc_client._parse_json_payload_source(None) == {}
     assert grpc_client._parse_metadata_items(["x-token=abc"]) == [("x-token", "abc")]
+    assert grpc_client._parse_metadata_items(["trace-bin=YWJjZA"]) == [("trace-bin", "YWJjZA==")]
+    assert grpc_client._normalize_metadata([("trace-bin", b"raw\x00")]) == [("trace-bin", "cmF3AA==")]
     assert grpc_client._split_grpc_method_path("/pkg.Service/Method") == ("pkg.Service", "Method")
     with pytest.raises(ValueError, match="JSON object"):
         grpc_client._parse_json_payload_source("[1]")
@@ -573,12 +854,75 @@ def test_grpc_web_call_success_and_helpers(monkeypatch, tmp_path) -> None:
         grpc_client._parse_metadata_items([":path=/x"])
     with pytest.raises(ValueError, match="reserved header"):
         grpc_client._parse_metadata_items(["authorization=Bearer x"])
+    with pytest.raises(ValueError, match="CR or LF"):
+        grpc_client._parse_metadata_items(["x-token=line1\r\nInjected: yes"])
+    with pytest.raises(ValueError, match="CR or LF"):
+        grpc_client._parse_metadata_items(["x-token\r=value"])
+    with pytest.raises(ValueError, match="printable ASCII"):
+        grpc_client._parse_metadata_items(["x-token=\x00"])
+    with pytest.raises(ValueError, match="valid base64"):
+        grpc_client._parse_metadata_items(["trace-bin=not%base64"])
+    with pytest.raises(ValueError, match="cannot contain bytes"):
+        grpc_client._normalize_metadata([("x-token", b"raw")])
     with pytest.raises(ValueError, match="/package.Service/Method"):
         grpc_client._split_grpc_method_path("pkg.Service/Method")
     written = grpc_client._write_openapi_document(
         str(tmp_path / "openapi.json"), [grpc_health_pb2.DESCRIPTOR.serialized_pb]
     )
     assert written >= 1
+
+
+def test_grpc_call_revalidates_metadata_before_opening_socket(monkeypatch) -> None:
+    def unexpected_open(*_args, **_kwargs):
+        raise AssertionError("invalid metadata must be rejected before network I/O")
+
+    monkeypatch.setattr(grpc_client, "_open_grpc_socket", unexpected_open)
+    result = grpc_client._grpc_call(
+        "127.0.0.1",
+        50051,
+        path="/demo.Service/Call",
+        payload=b"",
+        timeout=1.0,
+        use_tls=False,
+        authorization=None,
+        metadata=[("x-token", "safe\nInjected: yes")],
+    )
+
+    assert result["transport_ok"] is False
+    assert result["error"] == "gRPC metadata values cannot contain CR or LF"
+
+
+@pytest.mark.parametrize("use_grpc_web", [False, True])
+def test_grpc_calls_reject_unsafe_authorization_before_network_io(monkeypatch, use_grpc_web: bool) -> None:
+    def unexpected_open(*_args, **_kwargs):
+        raise AssertionError("invalid authorization metadata must be rejected before network I/O")
+
+    result: grpc_client._GrpcWebCallResult | grpc_client._GrpcCallResult
+    if use_grpc_web:
+        monkeypatch.setattr(grpc_client, "_open_http_socket", unexpected_open)
+        result = grpc_client._grpc_web_call(
+            "127.0.0.1",
+            8080,
+            path="/demo.Service/Call",
+            payload=b"",
+            timeout=1.0,
+            use_tls=False,
+            authorization="Bearer safe\r\nInjected: yes",
+        )
+    else:
+        monkeypatch.setattr(grpc_client, "_open_grpc_socket", unexpected_open)
+        result = grpc_client._grpc_call(
+            "127.0.0.1",
+            50051,
+            path="/demo.Service/Call",
+            payload=b"",
+            timeout=1.0,
+            use_tls=False,
+            authorization="Bearer safe\r\nInjected: yes",
+        )
+
+    assert result["transport_ok"] is False
+    assert result["error"] == "gRPC authorization metadata cannot contain CR or LF"
 
 
 def test_grpc_error_parsing_and_stream_reset_branches(monkeypatch) -> None:

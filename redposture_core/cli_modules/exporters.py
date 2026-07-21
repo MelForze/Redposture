@@ -56,6 +56,7 @@ def configure_scan_parser(
     )
     actions.add_argument(
         "-p",
+        "--port",
         "--ports",
         dest="ports",
         default=None,
@@ -91,6 +92,7 @@ def configure_trigger_parser(
     )
     common.add_argument(
         "-p",
+        "--port",
         "--ports",
         dest="ports",
         default=None,
@@ -189,6 +191,7 @@ def configure_collect_parser(
     )
     common.add_argument(
         "-p",
+        "--port",
         "--ports",
         dest="ports",
         default=None,
