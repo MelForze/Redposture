@@ -766,10 +766,10 @@ run_elastic_cases() {
 }
 
 run_grpc_cases() {
-  run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051
-  run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --token "grpc-lab-token-2026"
-  run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --defcreds
-  run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055"
+  run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051 --analyze
+  run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --token "grpc-lab-token-2026" --analyze
+  run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --defcreds --analyze
+  run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055" --analyze
   run_text_case grpc grpc_debug_smoke 0 grpc -t 127.0.0.1 --port 50051 --debug
   local grpc_protoset="${OUT_DIR}/grpc_health.protoset"
   "${PYTHON_BIN}" -c 'import sys; from google.protobuf import descriptor_pb2; from redposture_core.proto import grpc_health_pb2; ds=descriptor_pb2.FileDescriptorSet(); fd=ds.file.add(); fd.ParseFromString(grpc_health_pb2.DESCRIPTOR.serialized_pb); open(sys.argv[1], "wb").write(ds.SerializeToString())' "${grpc_protoset}"

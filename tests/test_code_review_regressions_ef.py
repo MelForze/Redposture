@@ -107,7 +107,7 @@ def test_fix_e2_password_only_credential_flows_through() -> None:
 def test_fix_e3_open_no_auth_fast_path_opt_in() -> None:
     """The G-batch extended E3 to more modules. Every audit module whose
     detect probe genuinely confirms "no credentials needed" (redis/docker/
-    elastic/clickhouse/grpc/mongodb/postgres/qdrant/etcd/registry/zookeeper/
+    elastic/clickhouse/mongodb/postgres/qdrant/etcd/registry/zookeeper/
     kubeapi) opts in. Kafka keeps its hardcoded shortcut. Consul/proxmox/
     gitlab/oracle stay opted out — their auth model doesn't have a clean
     'anonymous' probe that guarantees future creds would be redundant."""
@@ -115,7 +115,6 @@ def test_fix_e3_open_no_auth_fast_path_opt_in() -> None:
     from redposture_core.modules.docker.stage import build_docker_spec
     from redposture_core.modules.elastic.stage import build_elastic_spec
     from redposture_core.modules.etcd.stage import build_etcd_spec
-    from redposture_core.modules.grpc.stage import build_grpc_spec
     from redposture_core.modules.kubeapi.stage import build_kubeapi_spec
     from redposture_core.modules.mongodb.stage import build_mongodb_spec
     from redposture_core.modules.postgres.stage import build_postgres_spec
@@ -129,7 +128,6 @@ def test_fix_e3_open_no_auth_fast_path_opt_in() -> None:
         build_docker_spec,
         build_elastic_spec,
         build_clickhouse_spec,
-        build_grpc_spec,
         build_mongodb_spec,
         build_postgres_spec,
         build_qdrant_spec,
@@ -144,10 +142,14 @@ def test_fix_e3_open_no_auth_fast_path_opt_in() -> None:
         )
 
     # Consul/proxmox stay opted OUT to avoid breaking their token-based flows.
+    # gRPC also stays opted out: public Health is not proof that application
+    # methods accept anonymous calls.
     from redposture_core.modules.consul.stage import build_consul_spec
+    from redposture_core.modules.grpc.stage import build_grpc_spec
     from redposture_core.modules.proxmox.stage import build_proxmox_spec
 
     assert getattr(build_consul_spec(SimpleNamespace()), "keep_anonymous_open_no_auth", False) is False
+    assert getattr(build_grpc_spec(SimpleNamespace()), "keep_anonymous_open_no_auth", False) is False
     assert getattr(build_proxmox_spec(SimpleNamespace()), "keep_anonymous_open_no_auth", False) is False
 
 

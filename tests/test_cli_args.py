@@ -103,6 +103,22 @@ def test_normalize_multi_port_port_flag_variants() -> None:
     assert _normalize_multi_port_port_flag(["redis", "--port=ports.txt"]) == ["redis", "--ports=ports.txt"]
 
 
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["grpc", "-t", "grpc.internal:8085"], False),
+        (["grpc", "-t", "grpc.internal:8085", "--port", "50052"], True),
+        (["grpc", "-t", "grpc.internal:8085", "--port=50052"], True),
+        (["grpc", "-t", "grpc.internal:8085", "--port", "50052,50053"], True),
+        (["grpc", "-t", "grpc.internal:8085", "--ports", "50052,50053"], True),
+    ],
+)
+def test_parse_args_marks_whether_a_port_option_was_provided(argv: list[str], expected: bool) -> None:
+    args = parse_args(argv)
+
+    assert args._port_option_provided is expected
+
+
 def test_parse_args_legacy_top_level_modes_and_selfcert_paths() -> None:
     args = parse_args(["--selfcert", "--cert-out", "cert.pem", "--key-out", "key.pem", "--force"])
     assert args.command == COMMAND_SELFCERT
@@ -272,11 +288,13 @@ def test_grpc_help_sections_are_present() -> None:
     help_text = _command_help(COMMAND_GRPC)
     assert "\nCommon:\n" in help_text
     assert "\nAuth:\n" in help_text
+    assert "\nAnalysis:\n" in help_text
     assert "\nInvoke / Metadata:\n" in help_text
     assert "\nSchema:\n" in help_text
     assert "\nExport:\n" in help_text
     assert "--token value" in help_text
     assert "--defcreds" in help_text
+    assert "--analyze" in help_text
     assert "--invoke /package.Service/Method" in help_text
     assert "--proto file" in help_text
     assert "--protoset file" in help_text
@@ -586,6 +604,10 @@ def test_grpc_auth_flags_are_parsed() -> None:
     assert args.port == 50061
     assert args.token == "grpc-lab-token-2026"
     assert args.defcreds is True
+    assert args.analyze is False
+
+    analyze_args = parse_args(["grpc", "-t", "127.0.0.1", "--analyze"])
+    assert analyze_args.analyze is True
 
 
 def test_grpc_invoke_schema_export_flags_are_parsed() -> None:
@@ -686,6 +708,13 @@ def test_exporters_scan_flags_are_parsed() -> None:
     assert args.exporters_action == "scan"
     assert args.targets == "10.0.0.1"
     assert args.ports == "9100,9115"
+
+
+@pytest.mark.parametrize("action", ["scan", "collect", "trigger"])
+def test_exporter_actions_accept_singular_port_alias(action: str) -> None:
+    args = parse_args(["exporters", action, "-t", "10.0.0.1:8085", "--port", "9100"])
+
+    assert args.ports == "9100"
 
 
 def test_trigger_listener_defaults_have_tls_enabled() -> None:

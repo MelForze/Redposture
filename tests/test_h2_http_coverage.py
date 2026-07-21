@@ -131,6 +131,7 @@ def _qdrant_options(
 
 def _grpc_options() -> dict[str, Any]:
     return {
+        "analyze": False,
         "schema_descriptor_bytes": [],
         "invoke_path": None,
         "invoke_request_json": None,
@@ -917,6 +918,102 @@ def test_grpc_detect_retries_retryable_failure_once(
     assert record == {"status": "detected", "deep": False}
 
 
+def test_grpc_lifecycle_reuses_one_native_h2_session_and_closes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_sessions: list[Any] = []
+
+    def remember(session: Any) -> None:
+        assert session is not None
+        observed_sessions.append(session)
+
+    def fake_health(*_args: Any, session: Any = None, service_name: str = "", **_kwargs: Any) -> dict[str, Any]:
+        remember(session)
+        return {
+            "call": {"is_grpc": True, "transport_ok": True, "http_status": 200},
+            "grpc_status": 0,
+            "grpc_status_name": "OK",
+            "serving_status": "SERVING",
+            "health_supported": True,
+            "service": service_name,
+            "error": None,
+        }
+
+    def fake_capability(*_args: Any, session: Any = None, **_kwargs: Any) -> dict[str, Any]:
+        remember(session)
+        return {
+            "call": {"is_grpc": True, "transport_ok": True, "http_status": 200},
+            "grpc_status": 0,
+            "reflection_enabled": True,
+            "reflection_version": "v1",
+            "error": None,
+        }
+
+    def fake_list(*_args: Any, session: Any = None, **_kwargs: Any) -> dict[str, Any]:
+        remember(session)
+        return {
+            "call": {"is_grpc": True},
+            "grpc_status": 0,
+            "reflection_enabled": True,
+            "reflection_version": "v1",
+            "services": ["grpc.health.v1.Health"],
+            "error": None,
+        }
+
+    def fake_descriptors(*_args: Any, session: Any = None, **_kwargs: Any) -> dict[str, Any]:
+        remember(session)
+        return {
+            "call": {"is_grpc": True},
+            "grpc_status": 0,
+            "descriptor_bytes": [grpc.grpc_health_pb2.DESCRIPTOR.serialized_pb],
+            "error": None,
+        }
+
+    def fake_invoke(*_args: Any, session: Any = None, **_kwargs: Any) -> dict[str, Any]:
+        remember(session)
+        return {"status": "ok", "grpc_status": 0, "grpc_status_name": "OK"}
+
+    monkeypatch.setattr(grpc, "_health_check_call", fake_health)
+    monkeypatch.setattr(grpc, "_reflection_capability_call", fake_capability)
+    monkeypatch.setattr(grpc, "_reflection_list_services_call", fake_list)
+    monkeypatch.setattr(grpc, "_reflection_file_descriptors_call", fake_descriptors)
+    monkeypatch.setattr(grpc, "_invoke_unary_method", fake_invoke)
+
+    state = grpc.GrpcLifecycleState()
+    detected = grpc._detect_grpc_target(
+        "service.example",
+        50051,
+        timeout=0.1,
+        preferred_scheme="http",
+        _session_state=state,
+    )
+    record = grpc._audit_grpc_host(
+        "service.example",
+        50051,
+        0.1,
+        0,
+        token=None,
+        username=None,
+        password=None,
+        defcreds=False,
+        preferred_scheme="http",
+        run_deep_checks=True,
+        analyze=True,
+        invoke_path="/grpc.health.v1.Health/Check",
+        invoke_request_json={"service": ""},
+        _lifecycle_detect_result=detected,
+        _session_state=state,
+    )
+
+    assert record["invoke_access"] == "anonymous"
+    assert len(observed_sessions) >= 6
+    assert all(session is observed_sessions[0] for session in observed_sessions)
+    selected_session = observed_sessions[0]
+    state.close()
+    assert state.sessions == {}
+    assert selected_session._closed is True
+
+
 def test_grpc_default_credential_relabels_auth_source(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -938,6 +1035,7 @@ def test_grpc_default_credential_relabels_auth_source(monkeypatch: pytest.Monkey
     assert captured["defcreds"] is False
     assert captured["preferred_scheme"] == "https"
     assert captured["_lifecycle_detect_result"] is state.detect_result
+    assert captured["_session_state"] is state
     assert record["defcreds_used"] is True
     assert record["auth_used"]["source"] == "defcreds"
 
@@ -970,4 +1068,4 @@ def test_grpc_auth_result_is_cached_per_credential_and_data_has_fallback(
 
     assert cached is auth_record
     assert fallback["token"] == "second"
-    assert calls == [("first", True), ("second", True)]
+    assert calls == [("first", False), ("second", False)]

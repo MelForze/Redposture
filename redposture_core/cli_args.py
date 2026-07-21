@@ -303,8 +303,10 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         default=None,
         metavar="targets",
         help=(
-            "Targets list: dns/ip/cidr/http(s)://host[:port]/file (comma-separated). "
-            "URL scheme/path/query are preserved for URL-aware modules and host/port are used for TCP modules. "
+            "Targets list: dns[:port]/ipv4[:port]/[ipv6]:port/cidr/http(s)://host[:port]/file "
+            "(comma-separated). A target-specific port overrides module defaults; an explicitly supplied "
+            "port option adds ports to bare host:port targets. URL scheme/path/query are preserved for "
+            "URL-aware modules and host/port are used for TCP modules. "
             "Existing local file paths are treated as target files. "
             "Files may contain targets per line."
         ),
@@ -414,6 +416,17 @@ def _normalize_multi_port_port_flag(raw_argv: list[str]) -> list[str]:
     return argv
 
 
+def _port_option_provided(raw_argv: list[str]) -> bool:
+    """Return whether the user explicitly supplied an audit port option.
+
+    This must inspect argv before normalization because several modules expose
+    numeric parser defaults, while ``--port`` list/range/file forms may be
+    rewritten to the hidden ``--ports`` compatibility option.
+    """
+
+    return any(token in {"--port", "--ports"} or token.startswith(("--port=", "--ports=")) for token in raw_argv)
+
+
 def _build_selfcert_option_parser() -> argparse.ArgumentParser:
     parser = _NoColorArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -462,6 +475,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_package_version()}")
+    parser.set_defaults(_port_option_provided=False)
     subparsers = parser.add_subparsers(dest="command", parser_class=_NoColorArgumentParser)
     configure_cli_subcommands(
         subparsers,
@@ -485,6 +499,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
+    port_option_was_provided = _port_option_provided(raw_argv)
     raw_argv = _normalize_multi_port_port_flag(raw_argv)
     parser = build_parser()
 
@@ -523,4 +538,5 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(f"module command is required: {command_names_for_error()}")
 
     parsed = parser.parse_args(raw_argv)
+    parsed._port_option_provided = port_option_was_provided
     return parsed

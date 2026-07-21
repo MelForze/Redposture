@@ -297,10 +297,10 @@ run_case elastic elastic_url_hint_https 0 elastic -t "http://127.0.0.1:19201/" -
 run_case elastic elastic_plugins_edge 0 elastic -t 127.0.0.1 --port 19201 -u elastic -p changeme --plugins
 run_case elastic elastic_multi_instance_urls 0 elastic -t "http://127.0.0.1:19200/,http://127.0.0.1:19202/,http://127.0.0.1:19203/,http://127.0.0.1:19204/,http://127.0.0.1:19205/" --endpoints
 
-run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051
-run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --token "grpc-lab-token-2026"
-run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --defcreds
-run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055"
+run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051 --analyze
+run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --token "grpc-lab-token-2026" --analyze
+run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --defcreds --analyze
+run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055" --analyze
 run_text_case grpc grpc_debug_smoke 0 grpc -t 127.0.0.1 --port 50051 --debug
 GRPC_PROTOSET="${OUT_DIR}/grpc_health.protoset"
 "${PYTHON_BIN}" -c 'import sys; from google.protobuf import descriptor_pb2; from redposture_core.proto import grpc_health_pb2; ds=descriptor_pb2.FileDescriptorSet(); fd=ds.file.add(); fd.ParseFromString(grpc_health_pb2.DESCRIPTOR.serialized_pb); open(sys.argv[1], "wb").write(ds.SerializeToString())' "${GRPC_PROTOSET}"

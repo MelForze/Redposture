@@ -771,6 +771,82 @@ def test_build_basic_audit_plan_explicit_ports_disables_fallback() -> None:
     assert set(plan.ports) == {5432, 9999}
 
 
+def test_build_basic_audit_plan_target_port_wins_over_implicit_defaults() -> None:
+    args = SimpleNamespace(
+        targets="grpc-a.internal:8085,grpc-b.internal",
+        hosts=None,
+        hosts_file=None,
+        port=None,
+        ports=None,
+        _port_option_provided=False,
+        timeout=0.1,
+        retries=0,
+        workers=1,
+        output=None,
+        output_format="txt",
+        debug=False,
+    )
+
+    plan = build_basic_audit_plan(args, default_port=50051, default_ports=(50051, 50052))
+
+    assert {(host, port) for _idx, host, port, _spec in plan.iter_target_specs()} == {
+        ("grpc-a.internal", 8085),
+        ("grpc-b.internal", 50051),
+        ("grpc-b.internal", 50052),
+    }
+    assert plan.target_count == 3
+
+
+def test_build_basic_audit_plan_explicit_cli_port_is_additive_for_bare_host_ports() -> None:
+    args = SimpleNamespace(
+        targets="grpc-a.internal:8085,grpc-b.internal:8001,grpc-b.internal:50051",
+        hosts=None,
+        hosts_file=None,
+        port=50051,
+        ports=None,
+        _port_option_provided=True,
+        timeout=0.1,
+        retries=0,
+        workers=1,
+        output=None,
+        output_format="txt",
+        debug=False,
+    )
+
+    plan = build_basic_audit_plan(args, default_port=50051, default_ports=(50051, 50052))
+    pairs = [(host, port) for _idx, host, port, _spec in plan.iter_target_specs()]
+
+    assert set(pairs) == {
+        ("grpc-a.internal", 8085),
+        ("grpc-a.internal", 50051),
+        ("grpc-b.internal", 8001),
+        ("grpc-b.internal", 50051),
+    }
+    assert len(pairs) == len(set(pairs)) == 4
+    assert plan.target_count == 4
+
+
+def test_build_basic_audit_plan_url_port_still_overrides_explicit_cli_port() -> None:
+    args = SimpleNamespace(
+        targets="http://grpc.internal:8085/service",
+        hosts=None,
+        hosts_file=None,
+        port=50051,
+        ports=None,
+        _port_option_provided=True,
+        timeout=0.1,
+        retries=0,
+        workers=1,
+        output=None,
+        output_format="txt",
+        debug=False,
+    )
+
+    plan = build_basic_audit_plan(args, default_port=50051)
+
+    assert [(host, port) for _idx, host, port, _spec in plan.iter_target_specs()] == [("grpc.internal", 8085)]
+
+
 def test_zero_record_json_emits_structured_summary() -> None:
     emitted: list[str] = []
     spec = ModuleAuditSpec(module="redis", label="REDIS", default_port=6379, render=lambda _record: [])

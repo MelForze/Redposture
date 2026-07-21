@@ -842,28 +842,42 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         )
 
     plain_hosts: list[str] = []
-    explicit_port_groups: dict[int, list[str]] = {}
+    additional_port_hosts: list[str] = []
+    explicit_port_groups: dict[int, list[tuple[str, bool]]] = {}
     for spec in target_specs:
+        is_bare_target = spec.scheme is None
+        if (spec.explicit_port is None or is_bare_target) and spec.host not in additional_port_hosts:
+            additional_port_hosts.append(spec.host)
         if spec.explicit_port is None:
             if spec.host not in plain_hosts:
                 plain_hosts.append(spec.host)
             continue
         port_key = int(spec.explicit_port)
-        explicit_hosts = explicit_port_groups.setdefault(port_key, [])
-        if spec.host not in explicit_hosts:
-            explicit_hosts.append(spec.host)
+        explicit_targets = explicit_port_groups.setdefault(port_key, [])
+        target_key = (spec.host, is_bare_target)
+        if target_key not in explicit_targets:
+            explicit_targets.append(target_key)
 
     run_batches: list[tuple[list[str], list[dict[str, Any]]]] = []
-    if plain_hosts:
-        plain_trigger_exporters = trigger_exporters
-        if custom_ports:
-            plain_trigger_exporters = _override_trigger_exporter_ports(plain_trigger_exporters, custom_ports)
-            console.debug("trigger custom ports=" + ",".join(str(int(port)) for port in dict.fromkeys(custom_ports)))
-        run_batches.append((plain_hosts, plain_trigger_exporters))
-    for explicit_port, explicit_hosts in explicit_port_groups.items():
+    if custom_ports and additional_port_hosts:
+        custom_trigger_exporters = _override_trigger_exporter_ports(trigger_exporters, custom_ports)
+        run_batches.append((additional_port_hosts, custom_trigger_exporters))
+        console.debug("trigger custom ports=" + ",".join(str(int(port)) for port in dict.fromkeys(custom_ports)))
+    elif plain_hosts:
+        run_batches.append((plain_hosts, trigger_exporters))
+    custom_port_set = {int(port) for port in custom_ports}
+    for explicit_port, explicit_targets in explicit_port_groups.items():
+        explicit_hosts = [
+            host
+            for host, is_bare_target in explicit_targets
+            if not (is_bare_target and explicit_port in custom_port_set)
+        ]
+        explicit_hosts = list(dict.fromkeys(explicit_hosts))
+        if not explicit_hosts:
+            continue
         batch_exporters = _override_trigger_exporter_ports(trigger_exporters, [explicit_port])
         run_batches.append((explicit_hosts, batch_exporters))
-        console.debug("trigger target URL explicit port=" + str(explicit_port) + " hosts=" + str(len(explicit_hosts)))
+        console.debug("trigger target explicit port=" + str(explicit_port) + " hosts=" + str(len(explicit_hosts)))
     if not run_batches:
         console.error("trigger requires at least one valid target")
         return 2

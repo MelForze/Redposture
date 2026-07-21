@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -10,14 +11,16 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from google.protobuf import descriptor_pb2, descriptor_pool, json_format, message_factory
 from google.protobuf.message import DecodeError
 from h2.connection import H2Connection
-from h2.events import DataReceived, ResponseReceived, StreamEnded, StreamReset, TrailersReceived
+from h2.events import ConnectionTerminated, DataReceived, ResponseReceived, StreamEnded, StreamReset, TrailersReceived
 
 from redposture_core.proto import grpc_health_pb2, grpc_reflection_pb2
 from redposture_core.utils import utc_now_iso
@@ -26,6 +29,11 @@ _GRPC_AUTH_CODES = {7, 16}
 _GRPC_OK = 0
 _GRPC_UNIMPLEMENTED = 12
 _GRPC_METADATA_KEY_RE = re.compile(r"[0-9a-z!#$%&'*+\-.^_`|~]+", re.ASCII)
+_GRPC_RESERVED_METADATA_KEYS = {"authorization", "content-type", "te", "user-agent"}
+_GRPC_REFLECTION_PATHS = (
+    ("v1", "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo"),
+    ("v1alpha", "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo"),
+)
 
 
 def _friendly_error_text(value: str) -> str:
@@ -48,6 +56,10 @@ class _ReflectionListResult(dict):
     """Typed map wrapper for reflection list result."""
 
 
+class _ReflectionCapabilityResult(dict):
+    """Typed map wrapper for a reflection capability probe."""
+
+
 class _ReflectionDescriptorResult(dict):
     """Typed map wrapper for reflection descriptor result."""
 
@@ -62,6 +74,96 @@ class _InvokeResult(dict):
 
 class _GrpcWebCallResult(dict):
     """Typed map wrapper for gRPC-Web call results."""
+
+
+def _grpc_authority(host: str, port: int) -> str:
+    """Return an RFC 3986 authority, including brackets for IPv6 literals."""
+
+    text = str(host).strip()
+    if text.startswith("[") and text.endswith("]"):
+        literal = text
+    elif ":" in text:
+        literal = f"[{text}]"
+    else:
+        literal = text
+    return f"{literal}:{int(port)}"
+
+
+def _canonical_binary_metadata_value(value: str) -> str:
+    try:
+        value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("binary gRPC metadata must be base64 encoded ASCII") from exc
+    if any(char in value for char in "\r\n"):
+        raise ValueError("gRPC metadata values cannot contain CR or LF")
+    if len(value) % 4 == 1:
+        raise ValueError("binary gRPC metadata must contain valid base64")
+    padded = value + ("=" * (-len(value) % 4))
+    try:
+        decoded = base64.b64decode(padded, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("binary gRPC metadata must contain valid base64") from exc
+    return base64.b64encode(decoded).decode("ascii")
+
+
+def _normalize_metadata(
+    metadata: Sequence[tuple[str, str | bytes]] | None,
+    *,
+    reject_reserved: bool = True,
+) -> list[tuple[str, str]]:
+    """Validate gRPC metadata and normalize binary values for HTTP headers."""
+
+    result: list[tuple[str, str]] = []
+    for raw_key, raw_value in metadata or []:
+        raw_key_text = str(raw_key)
+        if "\r" in raw_key_text or "\n" in raw_key_text:
+            raise ValueError("gRPC metadata keys cannot contain CR or LF")
+        key = raw_key_text.strip().lower()
+        if not key:
+            raise ValueError("gRPC metadata keys cannot be empty")
+        if key.startswith(":"):
+            raise ValueError("gRPC metadata cannot set HTTP/2 pseudo headers")
+        if _GRPC_METADATA_KEY_RE.fullmatch(key) is None:
+            raise ValueError(f"invalid gRPC metadata key {key!r}")
+        if reject_reserved and key in _GRPC_RESERVED_METADATA_KEYS:
+            raise ValueError(f"gRPC metadata cannot override reserved header {key}")
+
+        if key.endswith("-bin"):
+            if isinstance(raw_value, bytes):
+                value = base64.b64encode(raw_value).decode("ascii")
+            else:
+                value = _canonical_binary_metadata_value(str(raw_value))
+        else:
+            if isinstance(raw_value, bytes):
+                raise ValueError(f"non-binary gRPC metadata {key!r} cannot contain bytes")
+            value = str(raw_value)
+            if "\r" in value or "\n" in value:
+                raise ValueError("gRPC metadata values cannot contain CR or LF")
+            try:
+                encoded_value = value.encode("ascii")
+            except UnicodeEncodeError as exc:
+                raise ValueError(f"non-binary gRPC metadata {key!r} must contain printable ASCII") from exc
+            if any(char < 0x20 or char > 0x7E for char in encoded_value):
+                raise ValueError(f"non-binary gRPC metadata {key!r} must contain printable ASCII")
+        result.append((key, value))
+    return result
+
+
+def _normalize_authorization(authorization: str | None) -> str | None:
+    """Validate the reserved authorization metadata before HTTP serialization."""
+
+    if authorization is None or authorization == "":
+        return None
+    value = str(authorization)
+    if "\r" in value or "\n" in value:
+        raise ValueError("gRPC authorization metadata cannot contain CR or LF")
+    try:
+        encoded_value = value.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("gRPC authorization metadata must contain printable ASCII") from exc
+    if any(char < 0x20 or char > 0x7E for char in encoded_value):
+        raise ValueError("gRPC authorization metadata must contain printable ASCII")
+    return value
 
 
 def _grpc_status_name(code: int | None) -> str:
@@ -200,19 +302,8 @@ def _open_grpc_socket(host: str, port: int, timeout: float, *, use_tls: bool) ->
         raise
 
 
-def _grpc_call(
-    host: str,
-    port: int,
-    *,
-    path: str,
-    payload: bytes,
-    timeout: float,
-    use_tls: bool,
-    authorization: str | None,
-    metadata: list[tuple[str, str]] | None = None,
-) -> _GrpcCallResult:
-    started = time.monotonic()
-    result: _GrpcCallResult = _GrpcCallResult(
+def _new_grpc_call_result(host: str, port: int, path: str, use_tls: bool) -> _GrpcCallResult:
+    return _GrpcCallResult(
         {
             "timestamp": utc_now_iso(),
             "host": host,
@@ -232,114 +323,238 @@ def _grpc_call(
         }
     )
 
-    sock: socket.socket | None = None
-    try:
-        sock = _open_grpc_socket(host, port, timeout, use_tls=use_tls)
-        result["transport_ok"] = True
-        conn = H2Connection()
-        conn.initiate_connection()
-        pending = conn.data_to_send()
-        if pending:
-            sock.sendall(pending)
 
-        stream_id = conn.get_next_available_stream_id()
-        headers: list[tuple[str, str]] = [
-            (":method", "POST"),
-            (":scheme", "https" if use_tls else "http"),
-            (":authority", f"{host}:{port}"),
-            (":path", path),
-            ("content-type", "application/grpc"),
-            ("te", "trailers"),
-            ("user-agent", "RedPosture/1.0"),
-        ]
-        for key, value in metadata or []:
-            headers.append((str(key).lower(), str(value)))
-        if authorization:
-            headers.append(("authorization", authorization))
+def _finish_grpc_call_result(
+    result: _GrpcCallResult,
+    response_headers: dict[str, str],
+    response_trailers: dict[str, str],
+    body: bytes,
+) -> None:
+    result["response_headers"] = response_headers
+    result["response_trailers"] = response_trailers
 
-        conn.send_headers(stream_id, headers, end_stream=False)
-        conn.send_data(stream_id, _encode_grpc_frame(payload), end_stream=True)
-        pending = conn.data_to_send()
-        if pending:
-            sock.sendall(pending)
+    status_raw = response_headers.get(":status")
+    if status_raw is not None:
+        try:
+            result["http_status"] = int(status_raw)
+        except ValueError:
+            result["http_status"] = None
 
-        response_headers: dict[str, str] = {}
-        response_trailers: dict[str, str] = {}
-        body = bytearray()
-        stream_closed = False
+    grpc_status_raw = _metadata_value(response_headers, response_trailers, "grpc-status")
+    if grpc_status_raw is not None:
+        try:
+            result["grpc_status"] = int(str(grpc_status_raw).strip())
+        except ValueError:
+            result["grpc_status"] = None
 
-        while not stream_closed:
-            chunk = sock.recv(64 * 1024)
-            if not chunk:
-                break
-            events = conn.receive_data(chunk)
-            for event in events:
-                if isinstance(event, ResponseReceived):
-                    response_headers.update(_http2_headers_to_map(list(event.headers)))
-                elif isinstance(event, TrailersReceived):
-                    response_trailers.update(_http2_headers_to_map(list(event.headers)))
-                elif isinstance(event, DataReceived):
-                    body.extend(event.data)
-                    conn.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
-                elif isinstance(event, StreamEnded):
-                    stream_closed = True
-                elif isinstance(event, StreamReset):
-                    result["error"] = f"stream reset by peer (code={int(event.error_code)})"
-                    stream_closed = True
+    grpc_message_raw = _metadata_value(response_headers, response_trailers, "grpc-message")
+    if grpc_message_raw is not None:
+        result["grpc_message"] = str(grpc_message_raw)
 
-            pending = conn.data_to_send()
-            if pending:
-                sock.sendall(pending)
+    messages, frame_error = _decode_grpc_frames(body)
+    result["messages"] = messages
+    content_type = str(response_headers.get("content-type") or "")
+    result["is_grpc"] = (
+        ("application/grpc" in content_type.lower())
+        or (result["grpc_status"] is not None)
+        or (len(messages) > 0 and result.get("http_status") == 200)
+    )
+    if frame_error and result.get("error") is None:
+        result["error"] = frame_error
+    if not result["is_grpc"] and result.get("error") is None and result.get("http_status") is None:
+        result["error"] = "not a gRPC endpoint"
 
-        result["response_headers"] = response_headers
-        result["response_trailers"] = response_trailers
 
-        status_raw = response_headers.get(":status")
-        if status_raw is not None:
-            try:
-                result["http_status"] = int(status_raw)
-            except ValueError:
-                result["http_status"] = None
+class _GrpcH2Session:
+    """A reusable, sequential HTTP/2 connection for calls to one gRPC target."""
 
-        grpc_status_raw = _metadata_value(response_headers, response_trailers, "grpc-status")
-        if grpc_status_raw is not None:
-            try:
-                result["grpc_status"] = int(str(grpc_status_raw).strip())
-            except ValueError:
-                result["grpc_status"] = None
+    def __init__(self, host: str, port: int, *, timeout: float, use_tls: bool) -> None:
+        self.host = host
+        self.port = int(port)
+        self.timeout = float(timeout)
+        self.use_tls = bool(use_tls)
+        self._sock: socket.socket | None = None
+        self._conn: H2Connection | None = None
+        self._closed = False
+        self._lock = threading.RLock()
+        self._reflection_version: str | None = None
 
-        grpc_message_raw = _metadata_value(response_headers, response_trailers, "grpc-message")
-        if grpc_message_raw is not None:
-            result["grpc_message"] = str(grpc_message_raw)
+    def __enter__(self) -> _GrpcH2Session:
+        return self
 
-        messages, frame_error = _decode_grpc_frames(bytes(body))
-        result["messages"] = messages
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> None:
+        self.close()
 
-        content_type = str(response_headers.get("content-type") or "")
-        result["is_grpc"] = (
-            ("application/grpc" in content_type.lower())
-            or (result["grpc_status"] is not None)
-            or (len(messages) > 0 and result.get("http_status") == 200)
-        )
-
-        if frame_error and result.get("error") is None:
-            result["error"] = frame_error
-
-        if not result["is_grpc"] and result.get("error") is None and result.get("http_status") is None:
-            result["error"] = "not a gRPC endpoint"
-
-    except (OSError, TimeoutError, ValueError, ssl.SSLError) as exc:
-        result["transport_ok"] = False
-        result["error"] = _friendly_error_from_exception(exc)
-    finally:
+    def _drop_connection(self) -> None:
+        sock = self._sock
+        self._sock = None
+        self._conn = None
         if sock is not None:
             try:
                 sock.close()
             except OSError:
                 pass
-        result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
 
-    return result
+    def _ensure_connection(self, timeout: float) -> tuple[socket.socket, H2Connection]:
+        if self._closed:
+            raise OSError("gRPC HTTP/2 session is closed")
+        if self._sock is not None and self._conn is not None:
+            self._sock.settimeout(timeout)
+            return self._sock, self._conn
+
+        sock = _open_grpc_socket(self.host, self.port, timeout, use_tls=self.use_tls)
+        conn = H2Connection()
+        try:
+            conn.initiate_connection()
+            pending = conn.data_to_send()
+            if pending:
+                sock.sendall(pending)
+        except BaseException:
+            sock.close()
+            raise
+        self._sock = sock
+        self._conn = conn
+        return sock, conn
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._sock is not None and self._conn is not None:
+                close_connection = getattr(self._conn, "close_connection", None)
+                if callable(close_connection):
+                    try:
+                        close_connection()
+                        pending = self._conn.data_to_send()
+                        if pending:
+                            self._sock.sendall(pending)
+                    except (OSError, ssl.SSLError):
+                        pass
+            self._drop_connection()
+
+    def call(
+        self,
+        *,
+        path: str,
+        payload: bytes,
+        timeout: float | None = None,
+        authorization: str | None,
+        metadata: Sequence[tuple[str, str | bytes]] | None = None,
+    ) -> _GrpcCallResult:
+        started = time.monotonic()
+        result = _new_grpc_call_result(self.host, self.port, path, self.use_tls)
+        call_timeout = self.timeout if timeout is None else float(timeout)
+        try:
+            normalized_metadata = _normalize_metadata(metadata)
+            normalized_authorization = _normalize_authorization(authorization)
+        except ValueError as exc:
+            result["error"] = str(exc)
+            result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+            return result
+
+        with self._lock:
+            response_headers: dict[str, str] = {}
+            response_trailers: dict[str, str] = {}
+            body = bytearray()
+            connection_terminated = False
+            try:
+                sock, conn = self._ensure_connection(call_timeout)
+                result["transport_ok"] = True
+                stream_id = conn.get_next_available_stream_id()
+                headers: list[tuple[str, str]] = [
+                    (":method", "POST"),
+                    (":scheme", "https" if self.use_tls else "http"),
+                    (":authority", _grpc_authority(self.host, self.port)),
+                    (":path", path),
+                    ("content-type", "application/grpc"),
+                    ("te", "trailers"),
+                    ("user-agent", "RedPosture/1.0"),
+                ]
+                headers.extend(normalized_metadata)
+                if normalized_authorization:
+                    headers.append(("authorization", normalized_authorization))
+
+                conn.send_headers(stream_id, headers, end_stream=False)
+                conn.send_data(stream_id, _encode_grpc_frame(payload), end_stream=True)
+                pending = conn.data_to_send()
+                if pending:
+                    sock.sendall(pending)
+
+                stream_closed = False
+                while not stream_closed and not connection_terminated:
+                    chunk = sock.recv(64 * 1024)
+                    if not chunk:
+                        result["error"] = "connection closed before gRPC stream ended"
+                        connection_terminated = True
+                        break
+                    events = conn.receive_data(chunk)
+                    for event in events:
+                        event_stream_id = getattr(event, "stream_id", stream_id)
+                        if isinstance(event, DataReceived):
+                            conn.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
+                            if event_stream_id == stream_id:
+                                body.extend(event.data)
+                        elif isinstance(event, ResponseReceived) and event_stream_id == stream_id:
+                            response_headers.update(_http2_headers_to_map(list(event.headers)))
+                        elif isinstance(event, TrailersReceived) and event_stream_id == stream_id:
+                            response_trailers.update(_http2_headers_to_map(list(event.headers)))
+                        elif isinstance(event, StreamEnded) and event_stream_id == stream_id:
+                            stream_closed = True
+                        elif isinstance(event, StreamReset) and event_stream_id == stream_id:
+                            result["error"] = f"stream reset by peer (code={int(event.error_code)})"
+                            stream_closed = True
+                        elif isinstance(event, ConnectionTerminated):
+                            connection_terminated = True
+                            if not stream_closed and result.get("error") is None:
+                                result["error"] = f"HTTP/2 connection terminated (code={event.error_code})"
+
+                    pending = conn.data_to_send()
+                    if pending:
+                        sock.sendall(pending)
+
+                _finish_grpc_call_result(result, response_headers, response_trailers, bytes(body))
+                if connection_terminated:
+                    self._drop_connection()
+            except (OSError, TimeoutError, ValueError, ssl.SSLError) as exc:
+                result["transport_ok"] = False
+                result["error"] = _friendly_error_from_exception(exc)
+                self._drop_connection()
+            finally:
+                result["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        return result
+
+
+def _grpc_call(
+    host: str,
+    port: int,
+    *,
+    path: str,
+    payload: bytes,
+    timeout: float,
+    use_tls: bool,
+    authorization: str | None,
+    metadata: Sequence[tuple[str, str | bytes]] | None = None,
+    session: _GrpcH2Session | None = None,
+) -> _GrpcCallResult:
+    if session is not None:
+        if (session.host, session.port, session.use_tls) != (host, int(port), bool(use_tls)):
+            raise ValueError("gRPC HTTP/2 session target or transport does not match the call")
+        return session.call(
+            path=path,
+            payload=payload,
+            timeout=timeout,
+            authorization=authorization,
+            metadata=metadata,
+        )
+    with _GrpcH2Session(host, port, timeout=timeout, use_tls=use_tls) as owned_session:
+        return owned_session.call(
+            path=path,
+            payload=payload,
+            timeout=timeout,
+            authorization=authorization,
+            metadata=metadata,
+        )
 
 
 def _open_http_socket(host: str, port: int, timeout: float, *, use_tls: bool) -> socket.socket:
@@ -418,7 +633,7 @@ def _grpc_web_call(
     timeout: float,
     use_tls: bool,
     authorization: str | None,
-    metadata: list[tuple[str, str]] | None = None,
+    metadata: Sequence[tuple[str, str | bytes]] | None = None,
 ) -> _GrpcWebCallResult:
     started = time.monotonic()
     result: _GrpcWebCallResult = _GrpcWebCallResult(
@@ -443,12 +658,14 @@ def _grpc_web_call(
     )
     sock: socket.socket | None = None
     try:
+        normalized_metadata = _normalize_metadata(metadata)
+        normalized_authorization = _normalize_authorization(authorization)
         sock = _open_http_socket(host, port, timeout, use_tls=use_tls)
         result["transport_ok"] = True
         body = _encode_grpc_frame(payload)
         header_lines = [
             f"POST {path} HTTP/1.1",
-            f"Host: {host}:{port}",
+            f"Host: {_grpc_authority(host, port)}",
             "User-Agent: RedPosture/1.0",
             "Content-Type: application/grpc-web+proto",
             "Accept: application/grpc-web+proto",
@@ -456,10 +673,10 @@ def _grpc_web_call(
             "Connection: close",
             f"Content-Length: {len(body)}",
         ]
-        for key, value in metadata or []:
-            header_lines.append(f"{str(key)}: {str(value)}")
-        if authorization:
-            header_lines.append(f"Authorization: {authorization}")
+        for key, value in normalized_metadata:
+            header_lines.append(f"{key}: {value}")
+        if normalized_authorization:
+            header_lines.append(f"Authorization: {normalized_authorization}")
         request = ("\r\n".join(header_lines) + "\r\n\r\n").encode("ascii", errors="replace") + body
         sock.sendall(request)
         response = bytearray()
@@ -515,6 +732,7 @@ def _health_check_call(
     use_tls: bool,
     authorization: str | None,
     service_name: str = "",
+    session: _GrpcH2Session | None = None,
 ) -> _HealthResult:
     call = _grpc_call(
         host,
@@ -524,6 +742,7 @@ def _health_check_call(
         timeout=timeout,
         use_tls=use_tls,
         authorization=authorization,
+        session=session,
     )
 
     grpc_status = call.get("grpc_status")
@@ -594,6 +813,53 @@ def _grpc_web_health_check_call(
     )
 
 
+def _reflection_call_with_fallback(
+    host: str,
+    port: int,
+    *,
+    payload: bytes,
+    timeout: float,
+    use_tls: bool,
+    authorization: str | None,
+    session: _GrpcH2Session | None = None,
+) -> tuple[_GrpcCallResult, str]:
+    """Prefer stable Reflection v1 and retry v1alpha only when v1 is unavailable."""
+
+    paths: Sequence[tuple[str, str]] = _GRPC_REFLECTION_PATHS
+    if session is not None and session._reflection_version == "v1alpha":
+        paths = (_GRPC_REFLECTION_PATHS[1],)
+
+    last_call: _GrpcCallResult | None = None
+    for version, path in paths:
+        call = _grpc_call(
+            host,
+            port,
+            path=path,
+            payload=payload,
+            timeout=timeout,
+            use_tls=use_tls,
+            authorization=authorization,
+            session=session,
+        )
+        last_call = call
+        grpc_status = call.get("grpc_status")
+        # A conforming gRPC server reports UNIMPLEMENTED for the unknown v1
+        # method. Some HTTP-aware proxies instead terminate routing with a
+        # plain 404 before the request reaches gRPC, which proves the v1 path
+        # is unavailable just as clearly and should retain the v1alpha
+        # compatibility fallback.
+        version_unavailable = grpc_status == _GRPC_UNIMPLEMENTED or (
+            grpc_status is None and call.get("http_status") == 404
+        )
+        if not version_unavailable or version == "v1alpha":
+            if session is not None:
+                session._reflection_version = version
+            return call, version
+    # Both entries are static and the loop always returns on v1alpha.
+    assert last_call is not None
+    return last_call, "v1alpha"
+
+
 def _reflection_list_services_call(
     host: str,
     port: int,
@@ -601,19 +867,21 @@ def _reflection_list_services_call(
     timeout: float,
     use_tls: bool,
     authorization: str | None,
+    session: _GrpcH2Session | None = None,
 ) -> _ReflectionListResult:
-    call = _grpc_call(
+    call, reflection_version = _reflection_call_with_fallback(
         host,
         port,
-        path="/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
         payload=_grpc_reflection_list_payload(),
         timeout=timeout,
         use_tls=use_tls,
         authorization=authorization,
+        session=session,
     )
 
     services: list[str] = []
     reflection_enabled: bool | None = None
+    embedded_code: int | None = None
     error_message: str | None = None
 
     grpc_status = call.get("grpc_status")
@@ -636,8 +904,15 @@ def _reflection_list_services_call(
                 continue
             if response.HasField("list_services_response"):
                 services.extend(item.name for item in response.list_services_response.service if item.name)
-            if response.HasField("error_response") and not error_message:
-                error_message = f"{response.error_response.error_code}:{response.error_response.error_message}"
+            if response.HasField("error_response"):
+                embedded_code = int(response.error_response.error_code)
+                if not error_message:
+                    error_message = f"{embedded_code}:{response.error_response.error_message}"
+
+    if embedded_code == _GRPC_UNIMPLEMENTED:
+        reflection_enabled = False
+    elif embedded_code in _GRPC_AUTH_CODES:
+        reflection_enabled = None
 
     dedup_services = sorted(dict.fromkeys(str(item).strip() for item in services if str(item).strip()))
 
@@ -646,8 +921,77 @@ def _reflection_list_services_call(
             "call": call,
             "services": dedup_services,
             "reflection_enabled": reflection_enabled,
+            "reflection_version": reflection_version,
             "grpc_status": grpc_status,
             "grpc_status_name": _grpc_status_name(grpc_status),
+            "embedded_error_code": embedded_code,
+            "error": error_message or call.get("error"),
+        }
+    )
+
+
+def _reflection_capability_call(
+    host: str,
+    port: int,
+    *,
+    timeout: float,
+    use_tls: bool,
+    authorization: str | None,
+    session: _GrpcH2Session | None = None,
+) -> _ReflectionCapabilityResult:
+    """Check Reflection without requesting the server's service inventory."""
+
+    probe_symbol = "redposture.probe.__ReflectionCapabilityProbe__"
+    call, reflection_version = _reflection_call_with_fallback(
+        host,
+        port,
+        payload=_grpc_reflection_symbol_payload(probe_symbol),
+        timeout=timeout,
+        use_tls=use_tls,
+        authorization=authorization,
+        session=session,
+    )
+
+    grpc_status = call.get("grpc_status")
+    reflection_enabled: bool | None = None
+    embedded_code: int | None = None
+    error_message: str | None = None
+
+    messages = call.get("messages") or []
+    if isinstance(messages, list):
+        for msg_bytes in messages:
+            if not isinstance(msg_bytes, (bytes, bytearray)):
+                continue
+            try:
+                response = grpc_reflection_pb2.ServerReflectionResponse()
+                response.ParseFromString(bytes(msg_bytes))
+            except Exception:
+                continue
+            if response.HasField("file_descriptor_response"):
+                reflection_enabled = True
+            if response.HasField("error_response"):
+                embedded_code = int(response.error_response.error_code)
+                if not error_message:
+                    error_message = f"{embedded_code}:{response.error_response.error_message}"
+
+    effective_code = embedded_code if embedded_code is not None else grpc_status
+    if effective_code == _GRPC_UNIMPLEMENTED:
+        reflection_enabled = False
+    elif effective_code in _GRPC_AUTH_CODES:
+        reflection_enabled = None
+    elif grpc_status == _GRPC_OK:
+        # NOT_FOUND for the deliberately absent symbol proves that the
+        # Reflection method handled the request without disclosing inventory.
+        reflection_enabled = True
+
+    return _ReflectionCapabilityResult(
+        {
+            "call": call,
+            "reflection_enabled": reflection_enabled,
+            "reflection_version": reflection_version,
+            "grpc_status": grpc_status,
+            "grpc_status_name": _grpc_status_name(grpc_status),
+            "embedded_error_code": embedded_code,
             "error": error_message or call.get("error"),
         }
     )
@@ -661,18 +1005,20 @@ def _reflection_file_descriptors_call(
     use_tls: bool,
     authorization: str | None,
     symbol: str,
+    session: _GrpcH2Session | None = None,
 ) -> _ReflectionDescriptorResult:
-    call = _grpc_call(
+    call, reflection_version = _reflection_call_with_fallback(
         host,
         port,
-        path="/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
         payload=_grpc_reflection_symbol_payload(symbol),
         timeout=timeout,
         use_tls=use_tls,
         authorization=authorization,
+        session=session,
     )
 
     descriptor_bytes: list[bytes] = []
+    embedded_code: int | None = None
     error_message: str | None = None
 
     messages = call.get("messages") or []
@@ -691,16 +1037,20 @@ def _reflection_file_descriptors_call(
                     for blob in response.file_descriptor_response.file_descriptor_proto
                     if isinstance(blob, (bytes, bytearray)) and blob
                 )
-            if response.HasField("error_response") and not error_message:
-                error_message = f"{response.error_response.error_code}:{response.error_response.error_message}"
+            if response.HasField("error_response"):
+                embedded_code = int(response.error_response.error_code)
+                if not error_message:
+                    error_message = f"{embedded_code}:{response.error_response.error_message}"
 
     return _ReflectionDescriptorResult(
         {
             "call": call,
             "symbol": symbol,
             "descriptor_bytes": descriptor_bytes,
+            "reflection_version": reflection_version,
             "grpc_status": call.get("grpc_status"),
             "grpc_status_name": _grpc_status_name(call.get("grpc_status")),
+            "embedded_error_code": embedded_code,
             "error": error_message or call.get("error"),
         }
     )
@@ -775,22 +1125,138 @@ def _extract_descriptors(descriptor_bytes: list[bytes]) -> tuple[list[dict[str, 
 
 
 def _dedup_descriptor_bytes(descriptor_bytes: list[bytes]) -> list[bytes]:
-    result: list[bytes] = []
-    seen: set[str] = set()
+    # Keep this shared helper deterministic too: explicit schemas and invoke
+    # paths use it before OpenAPI generation gets a chance to inspect inputs.
+    return _analyze_descriptor_bytes(descriptor_bytes)[0]
+
+
+def _normalized_descriptor_bytes(fd: descriptor_pb2.FileDescriptorProto) -> bytes:
+    """Serialize schema-relevant descriptor content for stable comparison."""
+
+    normalized = descriptor_pb2.FileDescriptorProto()
+    normalized.CopyFrom(fd)
+    # Source locations differ between Reflection and --proto builds but do not
+    # change protobuf symbols or their wire/JSON schema.
+    normalized.ClearField("source_code_info")
+    return normalized.SerializeToString(deterministic=True)
+
+
+def _analyze_descriptor_bytes(
+    descriptor_bytes: list[bytes],
+    *,
+    select_conflicts: bool = True,
+) -> tuple[list[bytes], list[str], list[dict[str, Any]]]:
+    """Validate and deterministically select one schema per descriptor file."""
+
+    variants_by_name: dict[str, dict[str, tuple[bytes, int, str]]] = {}
+    invalid_errors: set[str] = set()
     for blob in descriptor_bytes:
-        if not blob:
+        raw = bytes(blob)
+        raw_digest = hashlib.sha256(raw).hexdigest()
+        if not raw:
+            invalid_errors.add(f"invalid descriptor sha256={raw_digest}: empty payload")
             continue
+        fd = descriptor_pb2.FileDescriptorProto()
+        try:
+            fd.ParseFromString(raw)
+        except Exception:
+            invalid_errors.add(f"invalid descriptor sha256={raw_digest}: malformed FileDescriptorProto")
+            continue
+        if not fd.name:
+            invalid_errors.add(f"invalid descriptor sha256={raw_digest}: missing file name")
+            continue
+
+        canonical = fd.SerializeToString(deterministic=True)
+        normalized = _normalized_descriptor_bytes(fd)
+        schema_digest = hashlib.sha256(normalized).hexdigest()
+        wire_digest = hashlib.sha256(canonical).hexdigest()
+        name = str(fd.name)
+        variants = variants_by_name.setdefault(name, {})
+        current = variants.get(schema_digest)
+        # Multiple payloads that differ only in source information are the
+        # same schema. Pick their canonical bytes deterministically as well.
+        if current is None or wire_digest < current[2]:
+            variants[schema_digest] = (canonical, len(normalized), wire_digest)
+
+    selected: list[tuple[str, str, bytes]] = []
+    conflicts: list[dict[str, Any]] = []
+    for name, variants in sorted(variants_by_name.items()):
+        selected_digest = min(variants)
+        selected_digests = [selected_digest] if select_conflicts else sorted(variants)
+        selected.extend((name, digest, variants[digest][0]) for digest in selected_digests)
+        if len(variants) < 2:
+            continue
+        conflicts.append(
+            {
+                "file": name,
+                "variants": [{"sha256": digest, "size": variants[digest][1]} for digest in sorted(variants)],
+                "selected_sha256": selected_digest,
+                "selection_policy": "lowest_normalized_sha256",
+            }
+        )
+
+    return [blob for _name, _digest, blob in selected], sorted(invalid_errors), conflicts
+
+
+def _descriptor_conflicts(descriptor_bytes: list[bytes]) -> list[dict[str, Any]]:
+    """Describe same-name descriptor variants that cannot share one protobuf pool."""
+
+    return _analyze_descriptor_bytes(descriptor_bytes)[2]
+
+
+def _descriptor_defined_symbols(fd: descriptor_pb2.FileDescriptorProto) -> list[tuple[str, str]]:
+    symbols: list[tuple[str, str]] = []
+
+    def _qualified(prefix: str, name: str) -> str:
+        return f"{prefix}.{name}" if prefix else name
+
+    def _walk_message(message: descriptor_pb2.DescriptorProto, prefix: str) -> None:
+        full_name = _qualified(prefix, str(message.name))
+        if message.name:
+            symbols.append((full_name, "message"))
+        for enum in message.enum_type:
+            if enum.name:
+                symbols.append((_qualified(full_name, str(enum.name)), "enum"))
+        for nested in message.nested_type:
+            _walk_message(nested, full_name)
+
+    package = str(fd.package or "")
+    for message in fd.message_type:
+        _walk_message(message, package)
+    for enum in fd.enum_type:
+        if enum.name:
+            symbols.append((_qualified(package, str(enum.name)), "enum"))
+    for service in fd.service:
+        if service.name:
+            symbols.append((_qualified(package, str(service.name)), "service"))
+    return symbols
+
+
+def _descriptor_symbol_conflicts(descriptor_bytes: list[bytes]) -> list[dict[str, Any]]:
+    definitions: dict[str, dict[str, set[str]]] = {}
+    for blob in descriptor_bytes:
         fd = descriptor_pb2.FileDescriptorProto()
         try:
             fd.ParseFromString(blob)
         except Exception:
             continue
-        key = str(fd.name or blob.hex())
-        if key in seen:
+        file_name = str(fd.name or "<unnamed>")
+        for symbol, kind in _descriptor_defined_symbols(fd):
+            definitions.setdefault(symbol, {}).setdefault(kind, set()).add(file_name)
+
+    conflicts: list[dict[str, Any]] = []
+    for symbol, kind_files in sorted(definitions.items()):
+        files = sorted({file_name for names in kind_files.values() for file_name in names})
+        if len(files) < 2:
             continue
-        seen.add(key)
-        result.append(fd.SerializeToString())
-    return result
+        conflicts.append(
+            {
+                "symbol": symbol,
+                "kinds": sorted(kind_files),
+                "files": files,
+            }
+        )
+    return conflicts
 
 
 def _descriptor_bytes_to_pool(descriptor_bytes: list[bytes]) -> tuple[descriptor_pool.DescriptorPool, list[str]]:
@@ -905,7 +1371,10 @@ def _load_explicit_descriptor_bytes(
         descriptor_bytes.extend(_descriptor_bytes_from_protoset(protoset))
     if proto_files:
         descriptor_bytes.extend(_compile_proto_files(proto_files, proto_paths or []))
-    return _dedup_descriptor_bytes(descriptor_bytes)
+    variants, errors, _conflicts = _analyze_descriptor_bytes(descriptor_bytes, select_conflicts=False)
+    if errors:
+        raise ValueError("invalid explicit protobuf descriptor: " + "; ".join(errors))
+    return variants
 
 
 def _parse_json_payload_source(value: str | None) -> dict[str, Any]:
@@ -923,7 +1392,10 @@ def _parse_json_payload_source(value: str | None) -> dict[str, Any]:
 def _parse_metadata_items(values: list[str] | None) -> list[tuple[str, str]]:
     result: list[tuple[str, str]] = []
     for raw in values or []:
-        key, sep, value = str(raw).partition("=")
+        raw_key, sep, value = str(raw).partition("=")
+        if "\r" in raw_key or "\n" in raw_key:
+            raise ValueError("gRPC metadata keys cannot contain CR or LF")
+        key = raw_key
         key = key.strip().lower()
         if not sep or not key:
             raise ValueError("--meta must use key=value")
@@ -931,9 +1403,9 @@ def _parse_metadata_items(values: list[str] | None) -> list[tuple[str, str]]:
             raise ValueError("--meta cannot set HTTP/2 pseudo headers")
         if _GRPC_METADATA_KEY_RE.fullmatch(key) is None:
             raise ValueError(f"--meta contains invalid metadata key {key!r}")
-        if key in {"content-type", "te", "user-agent", "authorization"}:
+        if key in _GRPC_RESERVED_METADATA_KEYS:
             raise ValueError(f"--meta cannot override reserved header {key}")
-        result.append((key, value))
+        result.extend(_normalize_metadata([(key, value)]))
     return result
 
 
@@ -968,6 +1440,7 @@ def _invoke_unary_method(
     descriptor_bytes: list[bytes],
     invoke_path: str,
     request_json: dict[str, Any],
+    session: _GrpcH2Session | None = None,
 ) -> _InvokeResult:
     started = time.monotonic()
     result: _InvokeResult = _InvokeResult(
@@ -1026,6 +1499,7 @@ def _invoke_unary_method(
                 use_tls=use_tls,
                 authorization=authorization,
                 metadata=metadata,
+                session=session,
             )
         grpc_status = call.get("grpc_status")
         result["grpc_status"] = grpc_status
@@ -1053,49 +1527,348 @@ def _invoke_unary_method(
     return result
 
 
+_SIGNED_64_TYPES = {
+    descriptor_pb2.FieldDescriptorProto.TYPE_INT64,
+    descriptor_pb2.FieldDescriptorProto.TYPE_SFIXED64,
+    descriptor_pb2.FieldDescriptorProto.TYPE_SINT64,
+}
+_UNSIGNED_64_TYPES = {
+    descriptor_pb2.FieldDescriptorProto.TYPE_UINT64,
+    descriptor_pb2.FieldDescriptorProto.TYPE_FIXED64,
+}
+_SIGNED_32_TYPES = {
+    descriptor_pb2.FieldDescriptorProto.TYPE_INT32,
+    descriptor_pb2.FieldDescriptorProto.TYPE_SFIXED32,
+    descriptor_pb2.FieldDescriptorProto.TYPE_SINT32,
+}
+_UNSIGNED_32_TYPES = {
+    descriptor_pb2.FieldDescriptorProto.TYPE_UINT32,
+    descriptor_pb2.FieldDescriptorProto.TYPE_FIXED32,
+}
+_PROTOBUF_WRAPPER_TYPES: dict[str, dict[str, Any]] = {
+    "google.protobuf.DoubleValue": {
+        "oneOf": [
+            {"type": "number", "format": "double"},
+            {"type": "string", "enum": ["NaN", "Infinity", "-Infinity"]},
+            {"type": "null"},
+        ]
+    },
+    "google.protobuf.FloatValue": {
+        "oneOf": [
+            {"type": "number", "format": "float"},
+            {"type": "string", "enum": ["NaN", "Infinity", "-Infinity"]},
+            {"type": "null"},
+        ]
+    },
+    "google.protobuf.Int64Value": {
+        "type": ["string", "null"],
+        "pattern": r"^-?[0-9]+$",
+        "x-protobuf-type": "int64",
+    },
+    "google.protobuf.UInt64Value": {
+        "type": ["string", "null"],
+        "pattern": r"^[0-9]+$",
+        "x-protobuf-type": "uint64",
+    },
+    "google.protobuf.Int32Value": {
+        "type": ["integer", "null"],
+        "format": "int32",
+        "minimum": -(2**31),
+        "maximum": 2**31 - 1,
+    },
+    "google.protobuf.UInt32Value": {
+        "type": ["integer", "null"],
+        "format": "int64",
+        "minimum": 0,
+        "maximum": 2**32 - 1,
+        "x-protobuf-type": "uint32",
+    },
+    "google.protobuf.BoolValue": {"type": ["boolean", "null"]},
+    "google.protobuf.StringValue": {"type": ["string", "null"]},
+    "google.protobuf.BytesValue": {
+        "type": ["string", "null"],
+        "format": "byte",
+        "contentEncoding": "base64",
+    },
+}
+
+
+def _protobuf_type_name(field_type: int) -> str:
+    try:
+        name = descriptor_pb2.FieldDescriptorProto.Type.Name(field_type)
+    except ValueError:
+        return str(field_type)
+    return str(name).removeprefix("TYPE_").lower()
+
+
+def _protobuf_scalar_schema(field_type: int) -> dict[str, Any]:
+    if field_type == descriptor_pb2.FieldDescriptorProto.TYPE_DOUBLE:
+        return {
+            "oneOf": [
+                {"type": "number", "format": "double"},
+                {"type": "string", "enum": ["NaN", "Infinity", "-Infinity"]},
+            ]
+        }
+    if field_type == descriptor_pb2.FieldDescriptorProto.TYPE_FLOAT:
+        return {
+            "oneOf": [
+                {"type": "number", "format": "float"},
+                {"type": "string", "enum": ["NaN", "Infinity", "-Infinity"]},
+            ]
+        }
+    if field_type in _SIGNED_64_TYPES:
+        return {"type": "string", "pattern": r"^-?[0-9]+$", "x-protobuf-type": "int64"}
+    if field_type in _UNSIGNED_64_TYPES:
+        return {"type": "string", "pattern": r"^[0-9]+$", "x-protobuf-type": "uint64"}
+    if field_type in _SIGNED_32_TYPES:
+        return {"type": "integer", "format": "int32", "minimum": -(2**31), "maximum": 2**31 - 1}
+    if field_type in _UNSIGNED_32_TYPES:
+        return {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 2**32 - 1,
+            "x-protobuf-type": "uint32",
+        }
+    if field_type == descriptor_pb2.FieldDescriptorProto.TYPE_BOOL:
+        return {"type": "boolean"}
+    if field_type == descriptor_pb2.FieldDescriptorProto.TYPE_BYTES:
+        return {"type": "string", "format": "byte", "contentEncoding": "base64"}
+    return {"type": "string"}
+
+
+def _protobuf_map_key_schema(field_type: int) -> dict[str, Any] | None:
+    if field_type in _SIGNED_32_TYPES | _SIGNED_64_TYPES:
+        return {"pattern": r"^-?[0-9]+$"}
+    if field_type in _UNSIGNED_32_TYPES | _UNSIGNED_64_TYPES:
+        return {"pattern": r"^[0-9]+$"}
+    if field_type == descriptor_pb2.FieldDescriptorProto.TYPE_BOOL:
+        return {"enum": ["false", "true"]}
+    return None
+
+
+def _proto3_optional_field_numbers(msg_desc: Any) -> set[int]:
+    """Recover proto3 optional markers hidden by the upb runtime descriptor API."""
+
+    file_proto = descriptor_pb2.FileDescriptorProto()
+    try:
+        file_proto.ParseFromString(bytes(msg_desc.file.serialized_pb))
+    except Exception:
+        return set()
+
+    names: list[str] = []
+    current = msg_desc
+    while current is not None:
+        names.append(str(current.name))
+        current = getattr(current, "containing_type", None)
+    names.reverse()
+
+    messages = file_proto.message_type
+    message_proto: Any = None
+    for name in names:
+        message_proto = next((item for item in messages if item.name == name), None)
+        if message_proto is None:
+            return set()
+        messages = message_proto.nested_type
+    return {int(field.number) for field in message_proto.field if field.proto3_optional}
+
+
+def _well_known_message_schema(
+    msg_desc: Any,
+    components: dict[str, Any],
+    visiting: set[str],
+) -> dict[str, Any] | None:
+    full_name = str(msg_desc.full_name)
+
+    def _related_message_ref(name: str) -> dict[str, Any]:
+        related = msg_desc.file.pool.FindMessageTypeByName(name)
+        return _json_schema_for_message(related, components, visiting)
+
+    wrapper_schema = _PROTOBUF_WRAPPER_TYPES.get(full_name)
+    if wrapper_schema is not None:
+        return {**wrapper_schema, "x-protobuf-well-known-type": full_name}
+    if full_name == "google.protobuf.Timestamp":
+        return {"type": "string", "format": "date-time", "x-protobuf-well-known-type": full_name}
+    if full_name == "google.protobuf.Duration":
+        return {
+            "type": "string",
+            "pattern": r"^-?(?:[0-9]+)(?:\.[0-9]{1,9})?s$",
+            "x-protobuf-well-known-type": full_name,
+        }
+    if full_name == "google.protobuf.FieldMask":
+        return {"type": "string", "x-protobuf-well-known-type": full_name}
+    if full_name == "google.protobuf.Empty":
+        return {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+            "x-protobuf-well-known-type": full_name,
+        }
+    if full_name == "google.protobuf.Any":
+        return {
+            "type": "object",
+            "properties": {"@type": {"type": "string"}},
+            "required": ["@type"],
+            "additionalProperties": True,
+            "x-protobuf-well-known-type": full_name,
+        }
+    if full_name == "google.protobuf.Struct":
+        return {
+            "type": "object",
+            "additionalProperties": _related_message_ref("google.protobuf.Value"),
+            "x-protobuf-well-known-type": full_name,
+        }
+    if full_name == "google.protobuf.Value":
+        return {
+            "oneOf": [
+                {"type": "null"},
+                {"type": "number"},
+                {"type": "string"},
+                {"type": "boolean"},
+                _related_message_ref("google.protobuf.Struct"),
+                _related_message_ref("google.protobuf.ListValue"),
+            ],
+            "x-protobuf-well-known-type": full_name,
+        }
+    if full_name == "google.protobuf.ListValue":
+        return {
+            "type": "array",
+            "items": _related_message_ref("google.protobuf.Value"),
+            "x-protobuf-well-known-type": full_name,
+        }
+    return None
+
+
+def _json_schema_for_field(field: Any, components: dict[str, Any], visiting: set[str]) -> dict[str, Any]:
+    message_type = getattr(field, "message_type", None)
+    if message_type is not None:
+        if bool(message_type.GetOptions().map_entry):
+            value_field = message_type.fields_by_name["value"]
+            key_field = message_type.fields_by_name["key"]
+            value_schema = _json_schema_for_field(value_field, components, visiting)
+            map_schema: dict[str, Any] = {
+                "type": "object",
+                "additionalProperties": value_schema,
+                "x-protobuf-map-key-type": _protobuf_type_name(int(key_field.type)),
+            }
+            key_schema = _protobuf_map_key_schema(int(key_field.type))
+            if key_schema is not None:
+                map_schema["propertyNames"] = key_schema
+            return map_schema
+        return _json_schema_for_message(message_type, components, visiting)
+
+    enum_type = getattr(field, "enum_type", None)
+    if enum_type is not None:
+        if str(enum_type.full_name) == "google.protobuf.NullValue":
+            return {"type": "null"}
+        return {"type": "string", "enum": [str(value.name) for value in enum_type.values]}
+    return _protobuf_scalar_schema(int(field.type))
+
+
 def _json_schema_for_message(
     msg_desc: Any,
     components: dict[str, Any],
     visiting: set[str] | None = None,
 ) -> dict[str, Any]:
-    visiting = visiting or set()
+    visiting = visiting if visiting is not None else set()
     full_name = str(msg_desc.full_name)
-    component_name = full_name.replace(".", "_")
-    if component_name in components:
-        return {"$ref": f"#/components/schemas/{component_name}"}
-    if full_name in visiting:
-        return {"$ref": f"#/components/schemas/{component_name}"}
+    # Protobuf full names are valid OpenAPI component keys.  Keeping the dots
+    # also avoids collisions such as ``a.b_c.Request`` vs ``a_b.c.Request``
+    # that occur when every separator is flattened to an underscore.
+    component_name = full_name
+    component_ref = {"$ref": f"#/components/schemas/{component_name}"}
+    if component_name in components or full_name in visiting:
+        return component_ref
+
     visiting.add(full_name)
-    schema: dict[str, Any] = {"type": "object", "properties": {}}
-    components[component_name] = schema
+    components[component_name] = {}
+    well_known_schema = _well_known_message_schema(msg_desc, components, visiting)
+    if well_known_schema is not None:
+        components[component_name].update(well_known_schema)
+        visiting.discard(full_name)
+        return component_ref
+
+    schema = components[component_name]
+    schema.update({"type": "object", "properties": {}})
+    proto3_optional_numbers = _proto3_optional_field_numbers(msg_desc)
+    required_fields: list[str] = []
+    oneof_fields: dict[str, list[str]] = {}
+
     for field in msg_desc.fields:
-        field_schema: dict[str, Any]
-        if getattr(field, "message_type", None) is not None:
-            field_schema = _json_schema_for_message(field.message_type, components, visiting)
-        elif getattr(field, "enum_type", None) is not None:
-            field_schema = {"type": "string", "enum": [str(v.name) for v in field.enum_type.values]}
-        else:
-            field_type = int(field.type)
-            if field_type in {1, 2}:  # double, float
-                field_schema = {"type": "number"}
-            elif field_type in {3, 4, 5, 6, 13, 15, 16, 17, 18}:  # int/uint/fixed/sint
-                field_schema = {"type": "integer"}
-            elif field_type == 8:
-                field_schema = {"type": "boolean"}
-            elif field_type == 12:
-                field_schema = {"type": "string", "format": "byte"}
-            else:
-                field_schema = {"type": "string"}
-        if getattr(field, "is_repeated", False):
+        field_schema = _json_schema_for_field(field, components, visiting)
+        is_map = bool(getattr(field, "message_type", None) is not None and field.message_type.GetOptions().map_entry)
+        if getattr(field, "is_repeated", False) and not is_map:
             field_schema = {"type": "array", "items": field_schema}
-        schema["properties"][str(field.name)] = field_schema
+
+        json_name = str(getattr(field, "json_name", None) or field.name)
+        proto_name = str(field.name)
+        if json_name != proto_name:
+            field_schema["x-protobuf-field-name"] = proto_name
+        if int(field.number) in proto3_optional_numbers:
+            field_schema["x-protobuf-optional"] = True
+        elif getattr(field, "containing_oneof", None) is not None:
+            oneof_name = str(field.containing_oneof.name)
+            field_schema["x-protobuf-oneof"] = oneof_name
+            oneof_fields.setdefault(oneof_name, []).append(json_name)
+        if bool(getattr(field, "is_required", False)):
+            required_fields.append(json_name)
+        schema["properties"][json_name] = field_schema
+
+    if required_fields:
+        schema["required"] = required_fields
+    if oneof_fields:
+        schema["x-protobuf-oneofs"] = oneof_fields
+        constraints: list[dict[str, Any]] = []
+        for field_names in oneof_fields.values():
+            required_variants = [{"required": [field_name]} for field_name in field_names]
+            constraints.append(
+                {
+                    "oneOf": [
+                        {"not": {"anyOf": required_variants}},
+                        *required_variants,
+                    ]
+                }
+            )
+        if len(constraints) == 1:
+            schema.update(constraints[0])
+        else:
+            schema["allOf"] = constraints
+
     visiting.discard(full_name)
-    return {"$ref": f"#/components/schemas/{component_name}"}
+    return component_ref
 
 
-def _generate_openapi_document(descriptor_bytes: list[bytes]) -> dict[str, Any]:
-    pool, errors = _descriptor_bytes_to_pool(descriptor_bytes)
-    methods, _descriptors = _extract_descriptors(descriptor_bytes)
+def _openapi_operation_id(full_method: str, *, disambiguate: bool = False) -> str:
+    service_name, method_name = _split_grpc_method_path(full_method)
+    legacy_id = full_method.strip("/").replace("/", "_").replace(".", "_")
+    if not disambiguate:
+        return legacy_id
+    # Length prefixes make the separator unambiguous even when protobuf
+    # identifiers themselves contain underscores or package separators.
+    return f"{legacy_id}__grpc_{len(service_name)}_{service_name}_{len(method_name)}_{method_name}"
+
+
+def _generate_openapi_document(
+    descriptor_bytes: list[bytes],
+    *,
+    descriptor_targets: dict[str, bool] | None = None,
+) -> dict[str, Any]:
+    unique_descriptor_bytes, input_errors, descriptor_conflicts = _analyze_descriptor_bytes(descriptor_bytes)
+    symbol_conflicts = _descriptor_symbol_conflicts(unique_descriptor_bytes)
+    pool, pool_errors = _descriptor_bytes_to_pool(unique_descriptor_bytes)
+    symbol_errors = [
+        f"duplicate protobuf symbol {item['symbol']} ({'/'.join(item['kinds'])}) in files: {', '.join(item['files'])}"
+        for item in symbol_conflicts
+    ]
+    errors = sorted(dict.fromkeys([*input_errors, *pool_errors, *symbol_errors]))
+    methods, _descriptors = _extract_descriptors(unique_descriptor_bytes)
+    operation_id_counts: dict[str, int] = {}
+    for method in methods:
+        full_method = str(method.get("full_method") or "")
+        if not full_method:
+            continue
+        legacy_operation_id = _openapi_operation_id(full_method)
+        operation_id_counts[legacy_operation_id] = operation_id_counts.get(legacy_operation_id, 0) + 1
     components: dict[str, Any] = {}
     paths: dict[str, Any] = {}
     for method in methods:
@@ -1111,7 +1884,10 @@ def _generate_openapi_document(descriptor_bytes: list[bytes]) -> dict[str, Any]:
             response_schema = {"type": "object"}
         paths[full_method] = {
             "post": {
-                "operationId": full_method.strip("/").replace("/", "_").replace(".", "_"),
+                "operationId": _openapi_operation_id(
+                    full_method,
+                    disambiguate=operation_id_counts[_openapi_operation_id(full_method)] > 1,
+                ),
                 "summary": full_method,
                 "requestBody": {
                     "required": True,
@@ -1133,17 +1909,37 @@ def _generate_openapi_document(descriptor_bytes: list[bytes]) -> dict[str, Any]:
                 },
             }
         }
+    targets = dict(sorted((descriptor_targets or {}).items()))
+    targets_without_descriptors = [target for target, obtained in targets.items() if not obtained]
+    descriptor_metadata: dict[str, Any] = {
+        "descriptors_obtained": bool(unique_descriptor_bytes),
+        "descriptor_count": len(unique_descriptor_bytes),
+        "descriptor_errors": errors,
+    }
+    if targets:
+        descriptor_metadata["descriptor_targets"] = targets
+        descriptor_metadata["targets_without_descriptors"] = targets_without_descriptors
+    if descriptor_conflicts:
+        descriptor_metadata["descriptor_conflicts"] = descriptor_conflicts
+    if symbol_conflicts:
+        descriptor_metadata["descriptor_symbol_conflicts"] = symbol_conflicts
+
     return {
         "openapi": "3.1.0",
         "info": {"title": "RedPosture gRPC export", "version": "1.0.0"},
         "paths": paths,
         "components": {"schemas": components},
-        "x-redposture": {"descriptor_errors": errors},
+        "x-redposture": descriptor_metadata,
     }
 
 
-def _write_openapi_document(path: str, descriptor_bytes: list[bytes]) -> int:
-    document = _generate_openapi_document(descriptor_bytes)
+def _write_openapi_document(
+    path: str,
+    descriptor_bytes: list[bytes],
+    *,
+    descriptor_targets: dict[str, bool] | None = None,
+) -> int:
+    document = _generate_openapi_document(descriptor_bytes, descriptor_targets=descriptor_targets)
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")

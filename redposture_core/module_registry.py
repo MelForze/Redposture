@@ -361,8 +361,8 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         name=COMMAND_GRPC,
         help="Audit gRPC services with transport/auth/reflection/health checks.",
         description=(
-            "gRPC module fingerprints service transport (TLS/plaintext), checks auth requirements, "
-            "queries reflection services/method descriptors, and runs grpc.health.v1.Health checks."
+            "gRPC module fingerprints service transport (TLS/plaintext), auth requirements, and Reflection. "
+            "Use --analyze to enumerate services/method descriptors and run per-service Health checks."
         ),
         runner_attr="run_grpc_stage",
         configure_parser=_make_configurator(configure_grpc_parser, _HTTP_MODULE_HELPERS),

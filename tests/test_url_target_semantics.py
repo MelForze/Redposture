@@ -132,6 +132,106 @@ def test_scan_uses_explicit_url_port_over_ports_flag(monkeypatch: pytest.MonkeyP
     assert captured_custom_ports == [[19100]]
 
 
+@pytest.mark.parametrize(
+    ("port_flag", "custom_port", "expected_ports"),
+    [
+        ("-p", "9100", [9100, 19100]),
+        ("--port", "9100", [9100, 19100]),
+        ("--ports", "19100", [19100]),
+    ],
+)
+def test_scan_adds_custom_ports_to_bare_explicit_target_without_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+    port_flag: str,
+    custom_port: str,
+    expected_ports: list[int],
+) -> None:
+    scanned_pairs: list[tuple[str, int]] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        hosts = [str(host) for host in kwargs.get("hosts") or []]
+        ports = [int(port) for port in kwargs.get("custom_ports") or []]
+        scanned_pairs.extend((host, port) for host in hosts for port in ports)
+        return len(hosts) * len(ports), 0, {host: [] for host in hosts}
+
+    monkeypatch.setattr(
+        "redposture_core.stage_scan.load_profiles",
+        lambda *_args, **_kwargs: {"discovery_exporters": [{"name": "node_exporter", "port": 9100}]},
+    )
+    monkeypatch.setattr("redposture_core.stage_scan.scan_exporter_presence", fake_scan)
+
+    args = parse_args(["exporters", "scan", "-t", "127.0.0.1:19100", port_flag, custom_port])
+    rc = run_scan_stage(args)
+
+    assert rc == 0
+    assert sorted(scanned_pairs) == [("127.0.0.1", port) for port in expected_ports]
+
+
+@pytest.mark.parametrize(
+    ("port_flag", "custom_port", "expected_ports"),
+    [
+        ("-p", "9100", [9100, 19100]),
+        ("--port", "9100", [9100, 19100]),
+        ("--ports", "19100", [19100]),
+    ],
+)
+def test_collect_adds_custom_ports_to_bare_explicit_target_without_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+    port_flag: str,
+    custom_port: str,
+    expected_ports: list[int],
+) -> None:
+    scanned_pairs: list[tuple[str, int]] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        hosts = [str(host) for host in kwargs.get("hosts") or []]
+        ports = [int(port) for port in kwargs.get("custom_ports") or []]
+        scanned_pairs.extend((host, port) for host in hosts for port in ports)
+        return len(hosts) * len(ports), 0, {host: [] for host in hosts}
+
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.load_profiles",
+        lambda *_args, **_kwargs: {
+            "discovery_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_exporters": [],
+            "collect_debug_endpoints": [],
+        },
+    )
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+
+    args = parse_args(["exporters", "collect", "-t", "127.0.0.1:19100", port_flag, custom_port])
+    rc = run_collect_stage(args, AttemptLogger())
+
+    assert rc == 0
+    assert sorted(scanned_pairs) == [("127.0.0.1", port) for port in expected_ports]
+
+
+def test_collect_explicit_url_port_still_overrides_ports_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    scanned_pairs: list[tuple[str, int]] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        hosts = [str(host) for host in kwargs.get("hosts") or []]
+        ports = [int(port) for port in kwargs.get("custom_ports") or []]
+        scanned_pairs.extend((host, port) for host in hosts for port in ports)
+        return len(hosts) * len(ports), 0, {host: [] for host in hosts}
+
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.load_profiles",
+        lambda *_args, **_kwargs: {
+            "discovery_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_exporters": [],
+            "collect_debug_endpoints": [],
+        },
+    )
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+
+    args = parse_args(["exporters", "collect", "-t", "http://127.0.0.1:19100/metrics", "--ports", "9100"])
+    rc = run_collect_stage(args, AttemptLogger())
+
+    assert rc == 0
+    assert scanned_pairs == [("127.0.0.1", 19100)]
+
+
 def test_trigger_uses_explicit_port_batches(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[list[str], list[int]]] = []
 
@@ -172,6 +272,61 @@ def test_trigger_uses_explicit_port_batches(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert rc == 0
     assert calls == [(["10.0.0.1"], [19150]), (["10.0.0.2"], [19121])]
+
+
+@pytest.mark.parametrize(
+    ("port_flag", "custom_port", "expected_ports"),
+    [
+        ("-p", "19150", [19121, 19150]),
+        ("--port", "19150", [19121, 19150]),
+        ("--ports", "19121", [19121]),
+    ],
+)
+def test_trigger_adds_custom_ports_to_bare_explicit_target_without_duplicates(
+    monkeypatch: pytest.MonkeyPatch,
+    port_flag: str,
+    custom_port: str,
+    expected_ports: list[int],
+) -> None:
+    attempted_pairs: list[tuple[str, int]] = []
+
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.load_profiles",
+        lambda *_args, **_kwargs: {
+            "trigger_exporters": [{"name": "redis_exporter", "port": 9121, "target_fmt": "redis://{our_host}:6379"}]
+        },
+    )
+
+    def fake_run_trigger_requests(
+        _args,
+        _logger,
+        _console,
+        hosts,
+        _callback_targets,
+        trigger_exporters,
+        **_kwargs,
+    ) -> None:
+        attempted_pairs.extend((str(host), int(item.get("port") or 0)) for host in hosts for item in trigger_exporters)
+
+    monkeypatch.setattr("redposture_core.stage_trigger._run_trigger_requests", fake_run_trigger_requests)
+
+    args = parse_args(
+        [
+            "exporters",
+            "trigger",
+            "-t",
+            "10.0.0.2:19121",
+            "--callback-dns",
+            "host.docker.internal",
+            "--no-with-listen",
+            port_flag,
+            custom_port,
+        ]
+    )
+    rc = run_trigger_stage(args, AttemptLogger())
+
+    assert rc == 0
+    assert sorted(attempted_pairs) == [("10.0.0.2", port) for port in expected_ports]
 
 
 def test_gitlab_url_scheme_overrides_global_https(monkeypatch: pytest.MonkeyPatch) -> None:

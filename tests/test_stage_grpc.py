@@ -68,11 +68,15 @@ def test_record_formatters_cover_core_statuses() -> None:
     record = {
         "host": "127.0.0.1",
         "port": 50051,
-        "status": "open_no_auth",
+        "status": "detected",
         "is_grpc": True,
-        "auth_required": False,
+        "auth_required": None,
+        "health_access": "anonymous",
+        "reflection_access": "anonymous",
+        "invoke_access": "not_tested",
         "transport_mode": "plaintext",
         "reflection_enabled": True,
+        "analysis_performed": True,
         "health_supported": True,
         "services": ["grpc.health.v1.Health"],
         "methods": [{"full_method": "/grpc.health.v1.Health/Check"}],
@@ -86,7 +90,13 @@ def test_record_formatters_cover_core_statuses() -> None:
 
     assert detect_line.startswith(_nxc_prefix(record))
     assert "gRPC Service" in detect_line
-    assert "anonymous access" in status_line
+    assert "(reflection:enabled)" in detect_line
+    assert "(health_access:anonymous)" in detect_line
+    assert "(reflection_access:anonymous)" in detect_line
+    assert "(invoke_access:not_tested)" in detect_line
+    assert status_line == ""
+    assert "anonymous access" not in "\n".join([detect_line, status_line, *detail_lines])
+    assert not any("Reflection (" in line for line in detail_lines)
     assert "(services:" not in status_line
     assert "(methods:" not in status_line
     assert any("[*] 1 Services" in line for line in detail_lines)
@@ -166,7 +176,7 @@ def test_call_with_stage_debug_adds_stage_telemetry(monkeypatch: pytest.MonkeyPa
 
 
 def test_audit_grpc_targets_two_pass_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[tuple[str, bool]] = []
+    calls: list[tuple[str, bool, bool]] = []
 
     def fake_call(
         host: str,
@@ -181,6 +191,7 @@ def test_audit_grpc_targets_two_pass_gate(monkeypatch: pytest.MonkeyPatch) -> No
         preferred_scheme: str | None,
         debug: bool,
         run_deep_checks: bool,
+        analyze: bool,
         schema_descriptor_bytes=None,
         invoke_path=None,
         invoke_request_json=None,
@@ -203,8 +214,8 @@ def test_audit_grpc_targets_two_pass_gate(monkeypatch: pytest.MonkeyPatch) -> No
             metadata,
             debug_emit,
         )
-        calls.append((host, run_deep_checks))
-        if not run_deep_checks:
+        calls.append((host, run_deep_checks, analyze))
+        if not (run_deep_checks and analyze):
             if host == "a":
                 return {"host": host, "port": 50051, "status": "open_no_auth", "is_grpc": True}
             if host == "b":
@@ -250,9 +261,7 @@ def test_audit_grpc_targets_two_pass_gate(monkeypatch: pytest.MonkeyPatch) -> No
     assert auth_required == 1
     assert not_grpc == 1
     assert failed == 0
-    assert ("a", True) in calls
-    assert ("b", True) not in calls
-    assert ("c", True) not in calls
+    assert not any(run_deep and analyze for _host, run_deep, analyze in calls)
     assert any("gRPC Service" in line for line in lines)
 
 
@@ -336,6 +345,37 @@ def test_run_grpc_stage_rejects_missing_targets() -> None:
     )
     rc = run_grpc_stage(args, logger=SimpleNamespace(log=lambda *a, **k: None))
     assert rc == 2
+
+
+@pytest.mark.parametrize(
+    ("analyze", "invoke", "openapi", "expected"),
+    [
+        (False, None, None, False),
+        (True, None, None, True),
+        (False, "/pkg.Service/Method", None, True),
+        (False, None, "grpc.openapi.json", True),
+    ],
+)
+def test_grpc_analysis_is_explicit_or_implied_by_actions(
+    analyze: bool,
+    invoke: str | None,
+    openapi: str | None,
+    expected: bool,
+) -> None:
+    options = grpc_stage._build_grpc_host_stage_options(
+        SimpleNamespace(
+            analyze=analyze,
+            invoke=invoke,
+            openapi=openapi,
+            data=None,
+            meta=None,
+            proto=None,
+            proto_path=None,
+            protoset=None,
+        )
+    )
+
+    assert options["analyze"] is expected
 
 
 @pytest.mark.parametrize(
@@ -458,6 +498,7 @@ def test_run_grpc_stage_prints_non_marker_lines_in_non_debug(monkeypatch: pytest
             return None
 
     def fake_host_stage(**kwargs):
+        analysis_performed = bool(kwargs["run_deep_checks"] and kwargs["analyze"])
         return {
             "host": kwargs["host"],
             "port": kwargs["port"],
@@ -465,6 +506,7 @@ def test_run_grpc_stage_prints_non_marker_lines_in_non_debug(monkeypatch: pytest
             "status": "open_no_auth",
             "auth_required": False,
             "reflection_enabled": True,
+            "analysis_performed": analysis_performed,
             "services": ["grpc.health.v1.Health"],
             "methods": [],
             "descriptors": [],
@@ -485,6 +527,7 @@ def test_run_grpc_stage_prints_non_marker_lines_in_non_debug(monkeypatch: pytest
         username=None,
         password=None,
         defcreds=False,
+        analyze=True,
         port=50051,
         ports="",
         targets="127.0.0.1",
@@ -632,7 +675,7 @@ def test_detect_grpc_web_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
         }
 
     monkeypatch.setattr(grpc_stage, "_health_check_call", native_health)
-    monkeypatch.setattr(grpc_stage, "_reflection_list_services_call", native_reflection)
+    monkeypatch.setattr(grpc_stage, "_reflection_capability_call", native_reflection)
     monkeypatch.setattr(grpc_stage, "_grpc_web_health_check_call", web_health)
 
     result = grpc_stage._detect_grpc_target("127.0.0.1", 50071, timeout=1.0, preferred_scheme="http")
