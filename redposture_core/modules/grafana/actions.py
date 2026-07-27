@@ -906,7 +906,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        return _with_optional_datasources(record, f"{prefix} [+] anonymous access")
+        return ""
     if status == "invalid_credentials_anonymous":
         return _with_optional_datasources(record, f"{prefix} [-] credentials invalid (anonymous access)")
     if status == "valid_credentials":

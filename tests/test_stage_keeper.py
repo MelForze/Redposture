@@ -292,7 +292,8 @@ def test_keeper_adapter_classifies_and_renders_keeper(monkeypatch: pytest.Monkey
     assert record["is_keeper"] is True
     line = render._format_detect_record(record, "txt")
     assert line.startswith("KEEPER")
-    assert line.endswith("[*] ClickHouse Keeper version:v26.4")
+    assert line.endswith("[*] ClickHouse Keeper version:v26.4 (auth required:False)")
+    assert render._format_record(record, "txt") == ""
     assert "quorum:" not in line
     assert "transport:" not in line
 

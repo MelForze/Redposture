@@ -835,7 +835,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     status = str(record.get("status") or "fail")
     prefix = _nxc_prefix(record)
     if status == "open_no_auth":
-        return f"{prefix} [+] anonymous access {_caps_suffix(record)}"
+        return ""
     if status == "weak_default_creds":
         username = str(record.get("effective_username") or "-")
         password = str(record.get("provided_password") or "")

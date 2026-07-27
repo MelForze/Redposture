@@ -3258,9 +3258,7 @@ def _summary_line(record: dict[str, Any]) -> str | None:
     if _anonymous_acl_denied_with_filtered_empty(record, anonymous_scopes):
         return None
     if _all_scopes_ok(anonymous_scopes):
-        if bool(record.get("rce")):
-            return f"[+] anonymous access Pwned! {_scope_counts_suffix(anonymous_scopes)}"
-        return f"[+] anonymous access {_scope_counts_suffix(anonymous_scopes)}"
+        return None
     if _no_scopes_ok(anonymous_scopes):
         return None
 

@@ -134,9 +134,14 @@ def configure_grpc_parser(
     export.add_argument(
         "--openapi",
         dest="openapi",
+        nargs="?",
+        const="",
         default=None,
         metavar="path",
-        help="Write one merged OpenAPI 3.1 JSON artifact for all targets, including descriptor diagnostics.",
+        help=(
+            "Write one merged OpenAPI 3.1 JSON artifact for all targets, including descriptor diagnostics. "
+            "If path is omitted, use openapi_HOST_PORT.json for one endpoint or openapi_merged.json otherwise."
+        ),
     )
 
 

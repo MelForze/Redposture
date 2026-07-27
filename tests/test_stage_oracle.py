@@ -247,6 +247,24 @@ def test_audit_oracle_open_no_auth_with_details(monkeypatch: pytest.MonkeyPatch)
     assert record["file_results"][0]["ok"] is True
 
 
+def test_oracle_open_no_auth_is_reported_only_on_detect_line_in_txt() -> None:
+    record = {
+        "timestamp": "2026-01-01T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 1521,
+        "status": "open_no_auth",
+        "is_oracle": True,
+        "auth_required": False,
+        "transport_mode": "tcp",
+        "connect_service": "FREEPDB1",
+    }
+
+    detect_line = oracle._format_detect_record(record, "txt")
+    assert "[*] Oracle Database (auth required:False)" in detect_line
+    assert oracle._format_record(record, "txt") == ""
+    assert json.loads(oracle._format_record(record, "json"))["status"] == "open_no_auth"
+
+
 def test_audit_oracle_valid_default_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_open(monkeypatch, auth_required=True)
     record = oracle._audit_oracle_host(

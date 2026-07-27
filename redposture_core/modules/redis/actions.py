@@ -1101,7 +1101,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 64)
 
     if status == "open_no_auth":
-        return _with_optional_keys(record, f"{prefix} [+] anonymous access")
+        return ""
 
     if status == "weak_default_creds":
         return _with_optional_keys(record, f"{prefix} [+] redis:redis")

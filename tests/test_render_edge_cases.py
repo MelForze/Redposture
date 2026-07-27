@@ -49,10 +49,17 @@ def test_clickhouse_format_record_json_drops_credential_fields() -> None:
     assert payload["effective_username"] == "default"
 
 
-def test_clickhouse_format_record_open_no_auth_marker() -> None:
-    out = clickhouse_stage._format_record(_ch_record(status="open_no_auth"), "txt")
-    assert "[+]" in out
-    assert "anonymous access" in out
+def test_clickhouse_open_no_auth_uses_detect_marker_only() -> None:
+    record = _ch_record(
+        status="open_no_auth",
+        host="127.0.0.1",
+        is_clickhouse=True,
+        auth_required=False,
+    )
+    assert clickhouse_stage._format_record(record, "txt") == ""
+    detect_line = clickhouse_stage._format_detect_record(record, "txt")
+    assert "[*] ClickHouse Database" in detect_line
+    assert "(auth required:False)" in detect_line
 
 
 def test_clickhouse_format_record_weak_default_creds_uses_effective_user() -> None:

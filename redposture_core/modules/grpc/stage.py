@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import replace
 from typing import Any
 
@@ -24,6 +25,35 @@ _DEFAULT_PORT = 50051
 _DEFAULT_PORTS = None
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_grpc_host
+
+
+class _CompactOpenApiRender:
+    """Render discovery only while OpenAPI's implicit analysis runs."""
+
+    __all__ = ("_format_detect_record", "_format_record")
+    _format_detect_record = staticmethod(render._format_detect_record)
+    _format_record = staticmethod(render._format_record)
+
+
+def _openapi_requested(args: Any) -> bool:
+    return getattr(args, "openapi", None) is not None
+
+
+def _resolve_openapi_path(args: Any, plan: AuditCommandPlan) -> str:
+    raw_path = getattr(args, "openapi", None)
+    if raw_path is None:
+        return ""
+    explicit_path = str(raw_path).strip()
+    if explicit_path:
+        return explicit_path
+
+    target = plan.single_target_spec()
+    if target is None:
+        return "openapi_merged.json"
+    _index, host, port, _target_spec = target
+    unwrapped_host = str(host).strip().removeprefix("[").removesuffix("]")
+    safe_host = re.sub(r"[^A-Za-z0-9._-]+", "_", unwrapped_host).strip("._-") or "target"
+    return f"openapi_{safe_host}_{int(port)}.json"
 
 
 def build_grpc_plan(args: Any) -> AuditCommandPlan:
@@ -50,7 +80,6 @@ def build_grpc_plan(args: Any) -> AuditCommandPlan:
 
 def _build_grpc_host_stage_options(args: Any) -> dict[str, Any]:
     invoke_path = str(getattr(args, "invoke", "") or "").strip() or None
-    openapi_path = str(getattr(args, "openapi", "") or "").strip()
     if invoke_path is not None:
         actions._split_grpc_method_path(invoke_path)
     metadata = getattr(args, "_grpc_metadata", None)
@@ -60,7 +89,7 @@ def _build_grpc_host_stage_options(args: Any) -> dict[str, Any]:
         actions._parse_json_payload_source(getattr(args, "data", None)) if invoke_path is not None else None
     )
     return {
-        "analyze": bool(getattr(args, "analyze", False) or invoke_path is not None or openapi_path),
+        "analyze": bool(getattr(args, "analyze", False) or invoke_path is not None or _openapi_requested(args)),
         "schema_descriptor_bytes": actions._load_explicit_descriptor_bytes(
             getattr(args, "proto", None),
             getattr(args, "proto_path", None),
@@ -81,6 +110,11 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
         actions.host_stage is _PRODUCTION_HOST_STAGE
         and resolved_host_stage is _PRODUCTION_HOST_STAGE
         and actions._audit_grpc_host is _PRODUCTION_AUDIT_HOST
+    )
+    compact_openapi_output = bool(
+        _openapi_requested(args)
+        and not getattr(args, "analyze", False)
+        and not str(getattr(args, "invoke", "") or "").strip()
     )
 
     def _detect(ctx: Any) -> AuditRecord:
@@ -112,7 +146,7 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_factory=(lambda _ctx: actions.GrpcLifecycleState()) if use_lifecycle_hooks else None,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         deep_gate=actions.grpc_deep_gate,
-        render_module=render,
+        render_module=_CompactOpenApiRender if compact_openapi_output else render,
         colorize=render._render_colored_grpc_line,
     )
 
@@ -145,9 +179,10 @@ def run_grpc_stage(args: Any, logger: Any) -> int:
         if cfg.output:
             suffix += f" output={args.output}"
         console.info("grpc audit started:" + suffix)
-    openapi_path = str(getattr(args, "openapi", "") or "").strip()
+    openapi_path = _resolve_openapi_path(args, plan)
     descriptor_bytes = list(args._grpc_host_stage_options.get("schema_descriptor_bytes") or [])
     descriptor_targets: dict[str, bool] = {}
+    server_urls: set[str] = set()
     previous_record_callback = getattr(args, "_record_callback", None)
 
     def _target_label(record: dict[str, Any]) -> str | None:
@@ -179,6 +214,10 @@ def run_grpc_stage(args: Any, logger: Any) -> int:
         target = _target_label(record)
         if target is not None:
             descriptor_targets[target] = descriptor_targets.get(target, False) or obtained
+            transport_mode = str(record.get("transport_mode") or "").strip().lower()
+            if record.get("is_grpc") is True and transport_mode in {"plaintext", "tls"}:
+                scheme = "https" if transport_mode == "tls" else "http"
+                server_urls.add(f"{scheme}://{target}")
 
     def _capture_openapi_descriptor(record: dict[str, Any]) -> None:
         if callable(previous_record_callback):
@@ -215,16 +254,23 @@ def run_grpc_stage(args: Any, logger: Any) -> int:
             )
         try:
             if descriptor_targets:
-                actions._write_openapi_document(
+                operation_count = actions._write_openapi_document(
                     openapi_path,
                     descriptor_bytes,
                     descriptor_targets=descriptor_targets,
+                    server_urls=sorted(server_urls),
                 )
             else:
-                actions._write_openapi_document(openapi_path, descriptor_bytes)
+                operation_count = actions._write_openapi_document(
+                    openapi_path,
+                    descriptor_bytes,
+                    server_urls=sorted(server_urls),
+                )
         except OSError as exc:
             console.error(f"failed to write grpc OpenAPI artifact: {exc}")
             return 2
+        operation_label = "operation" if operation_count == 1 else "operations"
+        console.success(f"gRPC OpenAPI exported: {openapi_path} ({operation_count} {operation_label})")
     if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all grpc targets are unreachable")
     return 0
@@ -232,6 +278,8 @@ def run_grpc_stage(args: Any, logger: Any) -> int:
 
 __all__ = [
     "_build_grpc_host_stage_options",
+    "_openapi_requested",
+    "_resolve_openapi_path",
     "build_grpc_plan",
     "build_grpc_spec",
     "run_grpc_stage",

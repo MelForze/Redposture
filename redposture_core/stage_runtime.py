@@ -448,6 +448,25 @@ class ModuleAuditSpec:
     # `_should_keep_anonymous_detect_record`; other modules opt in via this
     # flag as their credential loop is proven safe to skip on anon-open.
     keep_anonymous_open_no_auth: bool = False
+    # Opt-in text-output policy for discovery-oriented modules. The runner
+    # retains matching records for callbacks, debug output, and JSON.
+    suppress_undetected_records_in_text: bool = False
+    # A module may distinguish successful identity verification from a record
+    # that merely remains usable through anonymous access.
+    credential_gate: Callable[[AuditCredentialRun, AuditRecord], tuple[bool, str]] | None = None
+    # Preserve every credential that was actually tried, including a
+    # successful final candidate. Default-off keeps other module payloads
+    # unchanged.
+    record_all_credential_attempts: bool = False
+    # If every supplied credential is rejected or unverified, continue data
+    # collection with a previously confirmed anonymous-open detect record.
+    fallback_to_anonymous_detect_record: bool = False
+    # Continue to the next credential candidate when one auth hook raises an
+    # operational exception. Default-off preserves existing module behavior.
+    continue_after_credential_error: bool = False
+    # Remove module-specific secrets from JSON lines without changing retained
+    # records or callbacks.
+    structured_output_redact_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1569,6 +1588,14 @@ class AuditCommandRunner:
             return render_with_plan(render_plan, record.to_dict(), output_format, debug=debug)
         return []
 
+    def _suppress_in_normal_text(self, record: AuditRecord) -> bool:
+        if is_pre_detect_network_noise(record):
+            return True
+        if not self.spec.suppress_undetected_records_in_text or self._is_detected(record):
+            return False
+        status = str(record.status or "").strip().lower()
+        return status == "fail" or status.startswith("not_")
+
     def run_plan(self, plan: AuditCommandPlan) -> AuditCommandResult:
         if self.console is not None and hasattr(self.console, "set_structured_output"):
             self.console.set_structured_output(plan.output_format == "json")
@@ -1625,12 +1652,15 @@ class AuditCommandRunner:
         def _emit_record(record: AuditRecord) -> None:
             nonlocal emitted_lines, suppressed_records
             if plan.output_format == "json":
+                payload = record.to_dict()
+                for field_name in self.spec.structured_output_redact_fields:
+                    payload.pop(field_name, None)
                 emitted_lines += 1
-                sink.emit_many((json.dumps(record.to_dict(), ensure_ascii=False),))
+                sink.emit_many((json.dumps(payload, ensure_ascii=False),))
                 return
             if self.spec.render is None and self.spec.render_module is None:
                 return
-            if not debug and is_pre_detect_network_noise(record):
+            if not debug and self._suppress_in_normal_text(record):
                 suppressed_records += 1
                 return
             lines = self._render_record(record, render_plan, plan.output_format, debug)
@@ -2094,7 +2124,13 @@ class AuditCommandRunner:
                             reason="deep checks disabled",
                             debug_emit=debug_emit,
                         )
-                    return self._preserve_detected_deep_failure(detect_record, auth_record)
+                    auth_records.append((credential, auth_record))
+                    if self.spec.continue_after_credential_error:
+                        continue
+                    failed_record = self._preserve_detected_deep_failure(detect_record, auth_record)
+                    if self.spec.record_all_credential_attempts:
+                        return self._with_attempted_credentials(failed_record, auth_records, force=True)
+                    return failed_record
                 if runtime_stage_telemetry:
                     result, error = _runtime_phase_outcome("auth", auth_record, detect_record)
                     auth_record, _added = _attach_runtime_phase_trace(
@@ -2107,42 +2143,18 @@ class AuditCommandRunner:
                         debug_emit=debug_emit,
                     )
                 auth_records.append((credential, auth_record))
-                if self._deep_gate(auth_record)[0]:
+                if self._credential_gate(credential, auth_record)[0]:
                     break
             selected_credential, selected_record, gate_reason = self._select_deep_record(detect_record, auth_records)
+        if self.spec.record_all_credential_attempts:
+            selected_record = self._with_attempted_credentials(selected_record, auth_records, force=True)
         gate = self._deep_gate(selected_record)
         if not gate[0]:
             # No credential gated (all attempts failed). Record every attempted credential
             # so renderers can surface all of them instead of only the last-tried one.
             # Generic + harmless: modules whose renderers ignore this key are unaffected.
-            if len(auth_records) > 1:
-                # E8 fix: when `_should_keep_anonymous_detect_record` returned
-                # `detect_record` unchanged, `selected_record IS detect_record`.
-                # Mutating its `extra` dict poisons every other structure that
-                # holds a reference to the same record. Return a shallow copy
-                # with the attempted_credentials annotation instead.
-                attempts_payload = [
-                    {
-                        "username": cred.username,
-                        "password": cred.password,
-                        "source": cred.source,
-                        "status": str(rec.status),
-                    }
-                    for cred, rec in auth_records
-                ]
-                if selected_record is detect_record:
-                    # Replace with a shallow copy sharing everything except a
-                    # fresh `extra` dict so we don't mutate the detect record
-                    # that other structures (auth_records, retained_records)
-                    # still reference.
-                    import dataclasses as _dc
-
-                    selected_record = _dc.replace(
-                        selected_record,
-                        extra={**selected_record.extra, "attempted_credentials": attempts_payload},
-                    )
-                else:
-                    selected_record.extra["attempted_credentials"] = attempts_payload
+            if not self.spec.record_all_credential_attempts:
+                selected_record = self._with_attempted_credentials(selected_record, auth_records, force=False)
             if debug_emit is not None:
                 debug_emit(format_stage2_gate(host, int(port), "skip", gate[1] or gate_reason))
             if runtime_stage_telemetry:
@@ -2190,7 +2202,10 @@ class AuditCommandRunner:
                     reason="deep checks disabled",
                     debug_emit=debug_emit,
                 )
-            return self._preserve_detected_deep_failure(detect_record, record)
+            failed_record = self._preserve_detected_deep_failure(detect_record, record)
+            if self.spec.record_all_credential_attempts:
+                return self._with_attempted_credentials(failed_record, auth_records, force=True)
+            return failed_record
         if runtime_stage_telemetry:
             result, error = _runtime_phase_outcome("capabilities", record, selected_record)
             record, _added = _attach_runtime_phase_trace(
@@ -2230,7 +2245,10 @@ class AuditCommandRunner:
                 exc=exc,
                 debug_emit=debug_emit,
             )
-            return self._preserve_detected_deep_failure(detect_record, record)
+            failed_record = self._preserve_detected_deep_failure(detect_record, record)
+            if self.spec.record_all_credential_attempts:
+                return self._with_attempted_credentials(failed_record, auth_records, force=True)
+            return failed_record
         if runtime_stage_telemetry:
             result, error = _runtime_phase_outcome("data", record, prior_data_record)
             record, _added = _attach_runtime_phase_trace(
@@ -2242,7 +2260,10 @@ class AuditCommandRunner:
                 error=error,
                 debug_emit=debug_emit,
             )
-        return self._preserve_detected_deep_failure(detect_record, record)
+        final_record = self._preserve_detected_deep_failure(detect_record, record)
+        if self.spec.record_all_credential_attempts:
+            return self._with_attempted_credentials(final_record, auth_records, force=True)
+        return final_record
 
     def _run_monolithic_deep_lifecycle(
         self,
@@ -2318,36 +2339,43 @@ class AuditCommandRunner:
             )
             record = self._host_stage(ctx, run_deep_checks=True)
             attempts.append((credential, record))
-            gate = self._deep_gate(record)
+            gate = self._credential_gate(credential, record)
             if gate[0]:
                 if debug_emit is not None:
                     debug_emit(format_stage2_gate(host, int(port), "run", gate[1]))
+                if self.spec.record_all_credential_attempts:
+                    return self._with_attempted_credentials(record, attempts, force=True)
                 return record
 
         if not attempts:
             return detect_record
-        selected_record = attempts[-1][1]
-        if len(attempts) > 1:
-            import dataclasses as _dc
-
-            selected_record = _dc.replace(
-                selected_record,
-                extra={
-                    **selected_record.extra,
-                    "attempted_credentials": [
-                        {
-                            "username": credential.username,
-                            "password": credential.password,
-                            "source": credential.source,
-                            "status": str(record.status),
-                        }
-                        for credential, record in attempts
-                    ],
-                },
+        selected_credential, selected_record, _reason = self._select_deep_record(detect_record, attempts)
+        if (
+            selected_credential.username is None
+            and selected_credential.password is None
+            and selected_credential.token is None
+            and selected_record is detect_record
+        ):
+            anonymous_ctx = self._ctx(
+                host,
+                port,
+                target,
+                selected_credential,
+                phase="data",
+                run_deep_checks=True,
+                debug_emit=debug_emit,
+                credential_runs=(selected_credential,),
+                lifecycle_state=lifecycle_state,
             )
+            selected_record = self._host_stage(anonymous_ctx, run_deep_checks=True)
+        selected_record = self._with_attempted_credentials(
+            selected_record,
+            attempts,
+            force=self.spec.record_all_credential_attempts,
+        )
         if debug_emit is not None:
             gate = self._deep_gate(selected_record)
-            debug_emit(format_stage2_gate(host, int(port), "skip", gate[1]))
+            debug_emit(format_stage2_gate(host, int(port), "run" if gate[0] else "skip", gate[1]))
         return self._preserve_detected_deep_failure(detect_record, selected_record)
 
     def _preserve_detected_deep_failure(
@@ -2498,12 +2526,82 @@ class AuditCommandRunner:
         if self._should_keep_anonymous_detect_record(detect_record):
             return AuditCredentialRun(source="anonymous"), detect_record, "status=open_no_auth"
         for credential, record in auth_records:
-            gate = self._deep_gate(record)
+            gate = self._credential_gate(credential, record)
             if gate[0]:
                 return credential, record, gate[1]
+        if (
+            self.spec.fallback_to_anonymous_detect_record
+            and str(detect_record.status or "") == "open_no_auth"
+            and self._deep_gate(detect_record)[0]
+        ):
+            fallback_record = detect_record
+            if auth_records:
+                import dataclasses as _dc
+
+                last_attempt = auth_records[-1][1]
+                diagnostic_fields = {
+                    key: last_attempt.extra.get(key)
+                    for key in (
+                        "auth_valid",
+                        "auth_probe_status",
+                        "auth_probe_http_status",
+                        "auth_probe_endpoint",
+                        "auth_error_detail",
+                        "effective_username",
+                        "error",
+                    )
+                    if key in last_attempt.extra
+                }
+                fallback_record = _dc.replace(
+                    detect_record,
+                    extra={**detect_record.extra, **diagnostic_fields},
+                )
+            return (
+                AuditCredentialRun(source="anonymous"),
+                fallback_record,
+                "anonymous fallback after credential attempts",
+            )
         if auth_records:
             return auth_records[-1][0], auth_records[-1][1], "no accepted credentials"
         return AuditCredentialRun(source="anonymous"), detect_record, "no credentials"
+
+    def _credential_gate(
+        self,
+        credential: AuditCredentialRun,
+        record: AuditRecord,
+    ) -> tuple[bool, str]:
+        if self.spec.credential_gate is not None:
+            return self.spec.credential_gate(credential, record)
+        return self._deep_gate(record)
+
+    @staticmethod
+    def _with_attempted_credentials(
+        record: AuditRecord,
+        auth_records: list[tuple[AuditCredentialRun, AuditRecord]],
+        *,
+        force: bool,
+    ) -> AuditRecord:
+        attempts_payload: list[dict[str, Any]] = []
+        for credential, attempt in auth_records:
+            if force and credential.username is None and credential.password is None and credential.token is None:
+                continue
+            payload: dict[str, Any] = {
+                "username": credential.username,
+                "password": credential.password,
+                "source": credential.source,
+                "status": str(attempt.status),
+            }
+            if force:
+                payload["error"] = attempt.extra.get("error")
+            attempts_payload.append(payload)
+        if not force and len(attempts_payload) <= 1:
+            return record
+        import dataclasses as _dc
+
+        return _dc.replace(
+            record,
+            extra={**record.extra, "attempted_credentials": attempts_payload},
+        )
 
     def _is_detected(self, record: AuditRecord) -> bool:
         if self.spec.is_detected is not None:

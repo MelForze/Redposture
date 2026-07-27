@@ -13,6 +13,7 @@ import pytest
 import redposture_core.stage_elastic as elastic_stage
 from redposture_core.audit_models import AuditRecord
 from redposture_core.stage_elastic import (
+    ElasticAuthProbeResult,
     _audit_elastic_host,
     _build_discover_query_string,
     _check_privileges,
@@ -145,7 +146,9 @@ def test_detect_and_discover_helpers() -> None:
     assert "aws_secret_access_key" in query
     assert "service_token" in query
     assert "jwt" in query
-    assert " OR " in query
+    assert " OR " not in query
+    assert " | " in query
+    assert r"\-\-\-\-\-BEGIN" in query
 
     endpoints = _extract_cat_endpoints(b"/ _cat\n/_cat/indices\n/_cat/health\n/_cat/indices\n")
     assert endpoints == ["/_cat/indices", "/_cat/health"]
@@ -165,14 +168,15 @@ def test_detect_and_discover_helpers() -> None:
     assert elastic_stage._extract_version_hint(b'{"nodes":{"n1":{"version":"8.17.3"}}}') == "8.17.3"
 
 
-def test_classify_detect_probe_rejects_opensearch_markers() -> None:
+def test_classify_detect_probe_accepts_opensearch_markers() -> None:
     payload = (
         b'{"name":"os-01","cluster_name":"opensearch-cluster","version":{"number":"2.14.0","distribution":"opensearch"},'
         b'"tagline":"The OpenSearch Project: https://opensearch.org/"}'
     )
     classified = _classify_detect_probe("/", 200, payload, {}, None)
-    assert classified["signal_kind"] == "hard_negative"
+    assert classified["signal_kind"] == "hard_positive"
     assert "vendor_opensearch_tagline" in classified["signals"]
+    assert classified["vendor"] == "opensearch"
 
 
 def test_detect_decision_policy_matrix() -> None:
@@ -185,7 +189,7 @@ def test_detect_decision_policy_matrix() -> None:
     hard_negative = {
         "path": "/",
         "signal_kind": "hard_negative",
-        "signals": ["vendor_opensearch_tagline"],
+        "signals": ["root_non_json_payload"],
         "version": None,
     }
     soft_cluster = {
@@ -215,7 +219,7 @@ def test_detect_decision_policy_matrix() -> None:
     assert decision["confidence"] == "low"
 
     decision = _evaluate_detect_decision([neutral])
-    assert decision["detected"] is True
+    assert decision["detected"] is False
     assert decision["confidence"] == "low"
 
 
@@ -357,8 +361,10 @@ def test_verify_authenticate_and_privileges(monkeypatch: pytest.MonkeyPatch) -> 
         headers: dict[str, str] | None = None,
         data: bytes | None = None,
     ) -> tuple[int, bytes, dict[str, str], str | None]:
-        _ = (host, port, timeout, use_https, insecure, ca_file, method, headers, data)
+        _ = (host, port, timeout, use_https, insecure, ca_file, method, data)
         if path == "/_security/_authenticate":
+            if not headers or "Authorization" not in headers:
+                return 401, b'{"error":"missing authentication credentials"}', {}, None
             return 200, b'{"username":"elastic-reader"}', {}, None
         if path == "/_security/user/_has_privileges":
             return (
@@ -545,11 +551,12 @@ def test_search_index_builds_query_and_returns_full_source(monkeypatch: pytest.M
 
     assert error is None
     assert total_hits == 250
-    assert hits == [{"id": "1", "source": {"password": "secret"}}]
-    assert str(captured["path"]).startswith("/.security/_search?size=10000")
+    assert hits == [{"index": ".security", "id": "1", "source": {"password": "secret"}}]
+    assert str(captured["path"]).startswith("/.security/_search?size=200&expand_wildcards=open")
     assert captured["method"] == "POST"
     assert captured["body"] == {
-        "size": 10000,
+        "size": 200,
+        "track_total_hits": True,
         "query": {
             "simple_query_string": {
                 "query": "password OR secret",
@@ -679,7 +686,7 @@ def test_audit_elastic_host_runs_extended_detect_pass_on_ambiguous_result(
     assert record["status"] == "open_no_auth"
     assert record["detect_confidence"] == "medium"
     assert isinstance(record["detect_probe_trace"], list)
-    assert len(record["detect_probe_trace"]) == 9
+    assert len(record["detect_probe_trace"]) == 11
     assert 2.5 in [timeout for _path, timeout in calls]
 
 
@@ -735,7 +742,7 @@ def test_audit_elastic_host_skips_extended_detect_pass_on_high_confidence(
 
     assert record["is_elastic"] is True
     assert record["detect_confidence"] == "high"
-    assert len(calls) == 4
+    assert len(calls) == 5
     assert all(timeout == 1.0 for _path, timeout in calls)
 
 
@@ -808,7 +815,18 @@ def test_audit_elastic_host_resolves_version_with_authenticated_probe(monkeypatc
             False,
         ),
     )
-    monkeypatch.setattr(elastic_stage, "_verify_authenticate", lambda *_args, **_kwargs: (True, None, "elastic"))
+    monkeypatch.setattr(
+        elastic_stage,
+        "_probe_authenticate",
+        lambda *_args, **_kwargs: ElasticAuthProbeResult(
+            valid=True,
+            error=None,
+            username="elastic",
+            status=200,
+            endpoint="/_security/_authenticate",
+            detail=None,
+        ),
+    )
     monkeypatch.setattr(elastic_stage, "_resolve_server_version_with_auth", lambda *_args, **_kwargs: ("8.13.4", None))
     monkeypatch.setattr(elastic_stage, "_verify_api_key_probe", lambda *_args, **_kwargs: ("ok", None))
     monkeypatch.setattr(elastic_stage, "_check_privileges", lambda *_args, **_kwargs: (True, False, False, False, None))
@@ -1033,7 +1051,18 @@ def test_audit_elastic_host_with_auth_and_features(monkeypatch: pytest.MonkeyPat
             False,
         ),
     )
-    monkeypatch.setattr(elastic_stage, "_verify_authenticate", lambda *_args, **_kwargs: (True, None, "elastic"))
+    monkeypatch.setattr(
+        elastic_stage,
+        "_probe_authenticate",
+        lambda *_args, **_kwargs: ElasticAuthProbeResult(
+            valid=True,
+            error=None,
+            username="elastic",
+            status=200,
+            endpoint="/_security/_authenticate",
+            detail=None,
+        ),
+    )
     monkeypatch.setattr(elastic_stage, "_check_privileges", lambda *_args, **_kwargs: (True, True, False, False, None))
     monkeypatch.setattr(elastic_stage, "_verify_api_key_probe", lambda *_args, **_kwargs: ("not_run", None))
     monkeypatch.setattr(elastic_stage, "_fetch_cat_endpoints", lambda *_args, **_kwargs: (["/_cat/health"], None, []))
@@ -1082,19 +1111,52 @@ def test_audit_elastic_host_with_auth_and_features(monkeypatch: pytest.MonkeyPat
     )
     monkeypatch.setattr(
         elastic_stage,
-        "_collect_discover_results",
-        lambda *_args, **_kwargs: (
-            [
-                {
-                    "index": ".security",
-                    "total_hits": 320,
-                    "shown_hits": 200,
-                    "truncated": True,
-                    "hits": [{"id": "1", "source": {"password": "secret"}}],
-                    "error": None,
-                }
-            ],
-            None,
+        "_collect_discover_report",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            error=None,
+            error_detail=None,
+            to_dict=lambda: {
+                "discover_results": [
+                    {
+                        "index": ".security",
+                        "total_hits": 320,
+                        "shown_hits": 200,
+                        "truncated": True,
+                        "hits": [{"id": "1", "source": {"password": "secret"}}],
+                        "error": None,
+                    }
+                ],
+                "discover_findings": [
+                    {
+                        "fingerprint": "sha256:test",
+                        "value": "secret",
+                        "secret_type": "password",
+                        "confidence": "high",
+                        "score": 85,
+                        "detectors": ["sensitive_field"],
+                        "occurrence_count": 1,
+                        "locations": [
+                            {
+                                "source_kind": "document",
+                                "object": ".security/1",
+                                "index": ".security",
+                                "id": "1",
+                                "path": "/password",
+                            }
+                        ],
+                    }
+                ],
+                "discover_coverage": {
+                    "complete": False,
+                    "status": "partial",
+                    "indices_enumerated": 1,
+                    "indices_scanned": 1,
+                    "pages_scanned": 2,
+                    "documents_scanned": 200,
+                    "source_bytes_scanned": 4096,
+                    "truncated_reasons": ["max_documents"],
+                },
+            },
         ),
     )
 
@@ -1137,8 +1199,10 @@ def test_audit_elastic_host_with_auth_and_features(monkeypatch: pytest.MonkeyPat
     assert "[*] Misconfig Findings" in detail_text
     assert "key=xpack.security.enabled value=false reason=security is disabled" in detail_text
     assert "[*] 1 Users" in detail_text
-    assert "[*] 320 Discover Hits" in detail_text
-    assert "showing first 200 of 320 hits" in detail_text
+    assert "[*] 1 Secret Findings (high:1)" in detail_text
+    assert 'value="secret"' in detail_text
+    assert "Discover coverage status=partial" in detail_text
+    assert '{"password": "secret"}' not in detail_text
 
     detail_json = [_json for _json in _format_detail_records(record, "json")]
     parsed_json = [json.loads(item) for item in detail_json]
@@ -1224,8 +1288,8 @@ def test_audit_targets_and_renderers(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     assert (total, open_no_auth, valid, auth_required, failed) == (1, 1, 0, 0, 0)
-    assert any("[*] Elasticsearch API" in line for line in lines)
-    assert any("[+] anonymous access" in line for line in lines)
+    assert any("[*] Elasticsearch-compatible API" in line for line in lines)
+    assert not any("[+] anonymous access" in line for line in lines)
     assert any("[*] 2 Endpoints" in line for line in lines)
 
     detect_json = json.loads(_format_detect_record(fake_audit(), "json"))
@@ -1266,7 +1330,10 @@ def test_run_elastic_stage_validation_and_apikey_precedence(monkeypatch: pytest.
     def fake_audit_targets(**kwargs):
         captured.append(dict(kwargs))
         status = "valid_credentials" if kwargs.get("api_token") else "auth_required"
-        return _elastic_stage_record(kwargs, status=status)
+        record = _elastic_stage_record(kwargs, status=status)
+        if status == "valid_credentials":
+            record.extra["auth_valid"] = True
+        return record
 
     patch_module_host_stage_for_test(monkeypatch, "elastic", fake_audit_targets)
 
@@ -2061,32 +2128,20 @@ def test_elastic_request_http_error_and_exception_paths(monkeypatch: pytest.Monk
 
 
 def test_collect_discover_results_mixed_and_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(elastic_stage, "_list_index_names", lambda *_args, **_kwargs: (["good", "denied", "big"], None))
-
-    def fake_search(
-        _host: str,
-        _port: int,
-        _timeout: float,
-        *,
-        scheme: str,
-        insecure: bool,
-        ca_file: str | None,
-        auth_headers: dict[str, str],
-        index_name: str,
-        query_string: str,
-    ) -> tuple[int, list[dict[str, object]] | None, str | None]:
-        _ = (scheme, insecure, ca_file, auth_headers, query_string)
-        if index_name == "denied":
-            return 0, None, "Access Denied"
-        if index_name == "big":
-            hits: list[dict[str, object]] = [
-                {"id": f"doc-{idx}", "source": {"k": idx}}
-                for idx in range(elastic_stage._DISCOVER_MAX_PRINT_PER_INDEX + 3)
-            ]
-            return len(hits), hits, None
-        return 2, [{"id": "doc-1", "source": {"password": "secret"}}, {"id": "doc-2", "source": {"token": "abc"}}], None
-
-    monkeypatch.setattr(elastic_stage, "_search_index", fake_search)
+    expected = [
+        {"index": "good", "shown_hits": 2, "truncated": False},
+        {"index": "denied", "shown_hits": 0, "truncated": True, "error": "Access Denied"},
+        {
+            "index": "big",
+            "shown_hits": elastic_stage._DISCOVER_MAX_PRINT_PER_INDEX,
+            "truncated": True,
+        },
+    ]
+    monkeypatch.setattr(
+        elastic_stage,
+        "_collect_discover_report",
+        lambda *_args, **_kwargs: SimpleNamespace(legacy_results=expected, error=None),
+    )
     results, error = elastic_stage._collect_discover_results(
         "127.0.0.1",
         9200,
@@ -2097,6 +2152,7 @@ def test_collect_discover_results_mixed_and_truncated(monkeypatch: pytest.Monkey
         auth_headers={},
     )
     assert error is None
+    assert results == expected
     assert isinstance(results, list) and len(results) == 3
     by_index = {str(item["index"]): item for item in results}
     assert by_index["good"]["shown_hits"] == 2
@@ -2193,7 +2249,7 @@ def test_run_elastic_stage_debug_emit_and_payload_rendering(
     console = _Console.instances[-1]
     assert any("elastic audit started" in message for message in console.infos)
     assert any("debug-event" in message for message in console.infos)
-    assert any("Elasticsearch API" in line for line in console.plains)
+    assert any("Elasticsearch-compatible API" in line for line in console.plains)
     assert any("/_cluster/health" in line for line in console.plains)
 
 
@@ -2430,7 +2486,10 @@ def test_elastic_record_and_renderer_variants() -> None:
     fail_line = _format_detect_record({"host": "h", "port": 1, "status": "fail", "error": "boom"}, "txt")
     assert "connection failed" in fail_line
     assert "boom" in fail_line
-    assert "not an Elasticsearch API" in _format_detect_record({"host": "h", "port": 1, "status": "not_elastic"}, "txt")
+    assert "not an Elasticsearch/OpenSearch API" in _format_detect_record(
+        {"host": "h", "port": 1, "status": "not_elastic"},
+        "txt",
+    )
 
     assert "authentication required" in _format_record({"host": "h", "port": 1, "status": "auth_required"}, "txt")
     assert "credentials invalid" in _format_record(
@@ -2441,7 +2500,7 @@ def test_elastic_record_and_renderer_variants() -> None:
         {"host": "h", "port": 1, "status": "unknown_auth", "error": "slow link"},
         "txt",
     )
-    assert "elastic:<none>" in _format_record(
+    assert "elastic:<verified-default>" in _format_record(
         {
             "host": "h",
             "port": 1,

@@ -43,6 +43,7 @@ class HttpResponse:
     body: bytes
     headers: dict[str, str]
     error: str | None = None
+    truncated: bool = False
 
     @property
     def text(self) -> str:
@@ -182,9 +183,9 @@ def _decode_chunked_body(body: bytes, *, allow_partial: bool = False) -> bytes:
     return bytes(output)
 
 
-def _parse_http_response_bytes(
+def _parse_http_response_bytes_detailed(
     raw: bytes, *, response_cap: int, truncated: bool = False
-) -> tuple[int, dict[str, str], bytes]:
+) -> tuple[int, dict[str, str], bytes, bool]:
     header_bytes, separator, body = raw.partition(b"\r\n\r\n")
     if not separator:
         raise OSError("invalid HTTP response from target")
@@ -205,7 +206,19 @@ def _parse_http_response_bytes(
     cap = max(0, int(response_cap))
     if len(body) > cap:
         body = body[:cap]
-    return int(parts[1]), headers, body
+        truncated = True
+    return int(parts[1]), headers, body, truncated
+
+
+def _parse_http_response_bytes(
+    raw: bytes, *, response_cap: int, truncated: bool = False
+) -> tuple[int, dict[str, str], bytes]:
+    status, headers, body, _body_truncated = _parse_http_response_bytes_detailed(
+        raw,
+        response_cap=response_cap,
+        truncated=truncated,
+    )
+    return status, headers, body
 
 
 class HttpApiClient:
@@ -335,35 +348,41 @@ class HttpApiClient:
                 request_kwargs["context"] = self._context
             open_response = urllib.request.urlopen(req, **request_kwargs)
             with open_response as resp:
-                read_size = max(0, int(self.config.response_size_cap)) + 1
+                response_cap = max(0, int(self.config.response_size_cap))
+                read_size = response_cap + 1
                 try:
                     payload = resp.read(read_size)
                 except TypeError:
                     payload = resp.read()
-                if len(payload) > int(self.config.response_size_cap):
-                    payload = payload[: int(self.config.response_size_cap)]
+                truncated = len(payload) > response_cap
+                if truncated:
+                    payload = payload[:response_cap]
                 return HttpResponse(
                     status=int(getattr(resp, "status", 0) or resp.getcode()),
                     body=payload,
                     headers={str(key): str(value) for key, value in getattr(resp, "headers", {}).items()},
                     error=None,
+                    truncated=truncated,
                 )
         except urllib.error.HTTPError as exc:
+            response_cap = max(0, int(self.config.response_size_cap))
             try:
-                read_size = max(0, int(self.config.response_size_cap)) + 1
+                read_size = response_cap + 1
                 try:
                     payload = exc.read(read_size)
                 except TypeError:
                     payload = exc.read()
             except Exception:
                 payload = b""
-            if len(payload) > int(self.config.response_size_cap):
-                payload = payload[: int(self.config.response_size_cap)]
+            truncated = len(payload) > response_cap
+            if truncated:
+                payload = payload[:response_cap]
             return HttpResponse(
                 status=int(exc.code),
                 body=payload,
                 headers={str(key): str(value) for key, value in exc.headers.items()},
                 error=None,
+                truncated=truncated,
             )
         except Exception as exc:
             return HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc))
@@ -430,12 +449,18 @@ class HttpApiClient:
                 request_payload=payload,
                 response_cap=max(0, int(self.config.response_size_cap)),
             )
-            status, response_headers, response_body = _parse_http_response_bytes(
+            status, response_headers, response_body, response_truncated = _parse_http_response_bytes_detailed(
                 response_raw,
                 response_cap=max(0, int(self.config.response_size_cap)),
                 truncated=response_truncated,
             )
-            return HttpResponse(status=status, body=response_body, headers=response_headers, error=None)
+            return HttpResponse(
+                status=status,
+                body=response_body,
+                headers=response_headers,
+                error=None,
+                truncated=response_truncated,
+            )
         except Exception as exc:
             return HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc))
         finally:

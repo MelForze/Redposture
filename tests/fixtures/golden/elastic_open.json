@@ -120,39 +120,10 @@
     "discover_results": [
       {
         "error": null,
-        "hits": [
-          {
-            "id": "txn-1001",
-            "source": {
-              "amount": 1299.5,
-              "currency": "USD",
-              "customer_id": "cust-4421",
-              "metadata": {
-                "payment_ref": "pi_redposture_2026",
-                "provider": "stripe"
-              },
-              "status": "settled",
-              "transaction_id": "txn-1001"
-            }
-          },
-          {
-            "id": "txn-1002",
-            "source": {
-              "amount": 88.1,
-              "currency": "EUR",
-              "customer_id": "cust-8842",
-              "metadata": {
-                "provider": "adyen",
-                "risk": "review"
-              },
-              "status": "pending",
-              "transaction_id": "txn-1002"
-            }
-          }
-        ],
+        "hits": [],
         "index": "finance-transactions-2026.05",
-        "shown_hits": 2,
-        "total_hits": 2,
+        "shown_hits": 0,
+        "total_hits": 0,
         "truncated": false
       },
       {

@@ -122,10 +122,10 @@ def test_format_detect_record_branches() -> None:
     }
     line = grpc._format_detect_record(detected, "txt")
     assert "gRPC Service" in line and "transport:h2c" in line
-    assert "(reflection:enabled)" in line
-    assert "(health_access:anonymous)" in line
-    assert "(reflection_access:anonymous)" in line
-    assert line.endswith("(invoke_access:not_tested)")
+    assert line.endswith("(reflection:enabled)")
+    assert "health_access:" not in line
+    assert "reflection_access:" not in line
+    assert "invoke_access:" not in line
     assert "(reflection:disable)" in grpc._format_detect_record({**detected, "reflection_enabled": False}, "txt")
     assert "(reflection:unknown)" in grpc._format_detect_record({**detected, "reflection_enabled": None}, "txt")
     json_line = grpc._format_detect_record(detected, "json")

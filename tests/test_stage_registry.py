@@ -148,8 +148,9 @@ def test_format_detect_record_service_labels() -> None:
 def test_format_record_statuses() -> None:
     base = {"host": "127.0.0.1", "port": 5000, "image_count": 2}
 
-    open_line = registry._format_record({**base, "status": "open_no_auth"}, "txt")
-    assert "[+] anonymous access (images:2)" in open_line
+    anonymous_record = {**base, "status": "open_no_auth"}
+    assert registry._format_record(anonymous_record, "txt") == ""
+    assert json.loads(registry._format_record(anonymous_record, "json"))["status"] == "open_no_auth"
 
     valid_token_line = registry._format_record({**base, "status": "valid_credentials", "token_provided": True}, "txt")
     assert "[+] token auth" in valid_token_line

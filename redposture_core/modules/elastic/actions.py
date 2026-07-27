@@ -12,7 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import zlib
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
@@ -24,16 +24,22 @@ from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
 )
+from .discover import DiscoverReport, DiscoverRequest, DiscoverResponse, run_discovery
 
 _ELASTIC_TAG = "ELASTIC"
-_DISCOVER_QUERY_SIZE = 10000
+_DISCOVER_QUERY_SIZE = 200
 _DISCOVER_MAX_PRINT_PER_INDEX = 200
+_DISCOVER_QUERY_CHUNK_SIZE = 8
+_DISCOVER_MAX_CHUNKS = 6
+_TRANSPORT_DIAGNOSTIC_HEADER = "__redposture_transport_error__"
+_RESPONSE_TRUNCATED_HEADER = "__redposture_response_truncated__"
 _DETECT_EXTENDED_TIMEOUT = 2.5
 _DETECT_CONFIRM_PATHS = (
     "/_cluster/health",
     "/_nodes?filter_path=nodes.*.version",
     "/_cat/health",
     "/_security/_authenticate",
+    "/_plugins/_security/authinfo",
 )
 
 _STAGE_DETECT_PROTOCOL = "detect_protocol"
@@ -108,6 +114,28 @@ class ElasticLifecycleState:
     auth_headers: dict[tuple[str | None, str | None, str | None, str], dict[str, str]] = dataclass_field(
         default_factory=dict
     )
+
+
+@dataclass(frozen=True)
+class ElasticAuthProbeResult:
+    """Identity-aware result of one Elasticsearch/OpenSearch auth probe."""
+
+    valid: bool | None
+    error: str | None
+    username: str | None
+    status: int
+    endpoint: str
+    detail: dict[str, Any] | None = None
+
+
+def _auth_probe_status(result: ElasticAuthProbeResult) -> str:
+    if result.valid is True:
+        return "verified"
+    if result.valid is False:
+        return "rejected"
+    if result.status == 0:
+        return "error"
+    return "unverified"
 
 
 def _clip(text: str, width: int = 96) -> str:
@@ -246,8 +274,11 @@ def _elastic_request(
         )
     ).request(method, url, headers=req_headers, body=data, timeout=timeout)
     if response.error:
-        return 0, b"", {}, _friendly_error_text(response.error)
-    return int(response.status), response.body, response.headers, None
+        return 0, b"", {}, str(response.error)
+    response_headers = dict(response.headers)
+    if response.truncated:
+        response_headers[_RESPONSE_TRUNCATED_HEADER] = "true"
+    return int(response.status), response.body, response_headers, None
 
 
 def _request_with_tls_fallback(
@@ -298,10 +329,13 @@ def _request_with_tls_fallback(
         data=data,
     )
     if fallback_status > 0:
+        diagnostic_headers = dict(fallback_headers)
+        if str(error or "").strip():
+            diagnostic_headers[_TRANSPORT_DIAGNOSTIC_HEADER] = f"{first_scheme}={error}"
         return (
             fallback_status,
             fallback_payload,
-            fallback_headers,
+            diagnostic_headers,
             fallback_error,
             second_scheme,
             second_use_https,
@@ -467,6 +501,153 @@ def _extract_version_hint(payload: bytes, headers: dict[str, str] | None = None)
     return None
 
 
+def _normalize_vendor(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"elasticsearch", "opensearch"}:
+        return normalized
+    return "compatible"
+
+
+def _api_label(record: Mapping[str, Any]) -> str:
+    vendor = _normalize_vendor(record.get("vendor"))
+    if vendor == "elasticsearch":
+        return "Elasticsearch API"
+    if vendor == "opensearch":
+        return "OpenSearch API"
+    return "Elasticsearch-compatible API"
+
+
+def _parse_elastic_error(status: int, payload: bytes) -> dict[str, Any]:
+    """Preserve an Elasticsearch/OpenSearch error without leaking whole bodies."""
+
+    parsed = _load_json_dict_loose(payload)
+    error_type: str | None = None
+    reason: str | None = None
+    root_causes: list[dict[str, str]] = []
+    if isinstance(parsed, dict):
+        error_obj = parsed.get("error")
+        if isinstance(error_obj, dict):
+            raw_type = error_obj.get("type")
+            raw_reason = error_obj.get("reason")
+            error_type = str(raw_type).strip() if raw_type is not None and str(raw_type).strip() else None
+            reason = str(raw_reason).strip() if raw_reason is not None and str(raw_reason).strip() else None
+            raw_causes = error_obj.get("root_cause")
+            if isinstance(raw_causes, list):
+                for raw_cause in raw_causes:
+                    if not isinstance(raw_cause, dict):
+                        continue
+                    cause_type = str(raw_cause.get("type") or "").strip()
+                    cause_reason = str(raw_cause.get("reason") or "").strip()
+                    if cause_type or cause_reason:
+                        root_causes.append(
+                            {
+                                "type": cause_type or "unknown",
+                                "reason": cause_reason or "-",
+                            }
+                        )
+        elif isinstance(error_obj, str) and error_obj.strip():
+            reason = error_obj.strip()
+        if reason is None:
+            message = parsed.get("message")
+            if isinstance(message, str) and message.strip():
+                reason = message.strip()
+
+    if reason is None and payload:
+        body_text = payload.decode("utf-8", errors="replace").strip()
+        if body_text:
+            reason = _clip(re.sub(r"\s+", " ", body_text), 240)
+
+    detail: dict[str, Any] = {
+        "status": int(status),
+        "type": error_type or "http_error",
+        "reason": reason or f"status={int(status)}",
+        "root_cause": root_causes,
+    }
+    return detail
+
+
+def _format_elastic_error_detail(detail: Mapping[str, Any] | None) -> str:
+    if not isinstance(detail, Mapping):
+        return ""
+    status = int(detail.get("status") or 0)
+    error_type = str(detail.get("type") or "http_error").strip()
+    reason = str(detail.get("reason") or f"status={status}").strip()
+    parts = []
+    if status:
+        parts.append(f"status={status}")
+    if error_type:
+        parts.append(f"type={error_type}")
+    if reason:
+        parts.append(f"reason={reason}")
+    root_causes = detail.get("root_cause")
+    if isinstance(root_causes, list):
+        formatted_causes: list[str] = []
+        for cause in root_causes[:3]:
+            if not isinstance(cause, Mapping):
+                continue
+            cause_type = str(cause.get("type") or "unknown").strip()
+            cause_reason = str(cause.get("reason") or "-").strip()
+            formatted_causes.append(f"{cause_type}:{cause_reason}")
+        if formatted_causes:
+            parts.append(f"root_cause={_clip(' | '.join(formatted_causes), 240)}")
+    return " ".join(parts)
+
+
+def _transport_errors_from_combined(error: str | None) -> dict[str, str]:
+    text = str(error or "").strip()
+    if not text:
+        return {}
+    matches = list(
+        re.finditer(
+            r"(?:^|;\s*)(https?)=(.*?)(?=;\s*https?=|$)",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+    )
+    if not matches:
+        return {"unknown": text}
+    return {match.group(1).lower(): match.group(2).strip() for match in matches}
+
+
+def _transport_error_kind(errors: Mapping[str, Any]) -> str | None:
+    text = " ".join(str(value) for value in errors.values()).lower()
+    if not text:
+        return None
+    peer_closed = any(
+        marker in text
+        for marker in (
+            "closed (eof)",
+            "unexpected eof",
+            "broken pipe",
+            "remote end closed",
+            "connection reset",
+        )
+    )
+    if peer_closed:
+        return "peer_closed_before_http_response"
+    if "timed out" in text or "timeout" in text:
+        return "timeout"
+    if "refused" in text:
+        return "connection_refused"
+    return "transport_error"
+
+
+def _collect_detect_transport_errors(probes: list[dict[str, Any]]) -> dict[str, str]:
+    collected: dict[str, str] = {}
+    for probe in probes:
+        error = probe.get("transport_error") or probe.get("error")
+        if not isinstance(error, str) or not error.strip():
+            continue
+        parsed = _transport_errors_from_combined(error)
+        if parsed:
+            for scheme, message in parsed.items():
+                collected.setdefault(str(scheme), str(message))
+            continue
+        scheme = str(probe.get("scheme") or "unknown")
+        collected.setdefault(scheme, error.strip())
+    return collected
+
+
 def _detect_opensearch_marker(headers: dict[str, str], body: dict[str, Any] | None) -> str | None:
     product_header = _header_lookup(headers, "X-Elastic-Product")
     if isinstance(product_header, str) and "opensearch" in product_header.strip().lower():
@@ -550,19 +731,27 @@ def _classify_detect_probe(
     signals: list[str] = []
     kind = "neutral"
     version: str | None = None
+    vendor: str | None = None
 
-    if error:
-        return {"signal_kind": kind, "signals": signals, "version": version}
+    if error and status <= 0:
+        return {"signal_kind": kind, "signals": signals, "version": version, "vendor": vendor}
 
     body = _load_json_dict_loose(payload, headers)
     opensearch_marker = _detect_opensearch_marker(headers, body)
     if opensearch_marker:
-        return {"signal_kind": "hard_negative", "signals": [opensearch_marker], "version": version}
+        version = _extract_version_from_body_dict(body) if isinstance(body, dict) else None
+        return {
+            "signal_kind": "hard_positive",
+            "signals": [opensearch_marker],
+            "version": version,
+            "vendor": "opensearch",
+        }
 
     product_header = _header_lookup(headers, "X-Elastic-Product")
     if isinstance(product_header, str) and product_header.strip().lower() == "elasticsearch":
         signals.append("header_x_elastic_product")
         kind = "hard_positive"
+        vendor = "elasticsearch"
 
     if isinstance(body, dict):
         version = _extract_version_from_body_dict(body)
@@ -573,6 +762,7 @@ def _classify_detect_probe(
                 if "root_tagline" not in signals:
                     signals.append("root_tagline")
                 kind = "hard_positive"
+                vendor = vendor or "elasticsearch"
             if version and (body.get("cluster_name") is not None or body.get("name") is not None):
                 if "root_version_shape" not in signals:
                     signals.append("root_version_shape")
@@ -581,6 +771,7 @@ def _classify_detect_probe(
                 if "security_exception_missing_auth" not in signals:
                     signals.append("security_exception_missing_auth")
                 kind = "hard_positive"
+                vendor = vendor or "elasticsearch"
 
             soft_fields = 0
             for field in ("cluster_name", "cluster_uuid", "name"):
@@ -627,11 +818,29 @@ def _classify_detect_probe(
             if status in {401, 403} and _is_elastic_auth_error_payload(body):
                 signals.append("security_exception_missing_auth")
                 kind = "hard_positive"
+                vendor = "elasticsearch"
             elif kind != "hard_positive":
                 username = body.get("username")
                 if isinstance(username, str) and username.strip():
                     signals.append("authenticate_username_shape")
                     kind = "soft_positive"
+                    vendor = "elasticsearch"
+
+        elif path == "/_plugins/_security/authinfo":
+            username = body.get("user_name")
+            user_repr = body.get("user")
+            if status == 200 and (
+                isinstance(username, str) and username.strip() or isinstance(user_repr, str) and user_repr.strip()
+            ):
+                signals.append("opensearch_authinfo_shape")
+                kind = "hard_positive"
+                vendor = "opensearch"
+            elif status in {401, 403}:
+                error_text = json.dumps(body, ensure_ascii=False).lower()
+                if "unauthorized" in error_text or "authentication" in error_text:
+                    signals.append("opensearch_authinfo_auth_required")
+                    kind = "soft_positive"
+                    vendor = "opensearch"
 
     elif path == "/_cat/health":
         text = payload.decode("utf-8", errors="replace").strip().lower()
@@ -643,7 +852,7 @@ def _classify_detect_probe(
         signals.append("root_non_json_payload")
         kind = "hard_negative"
 
-    return {"signal_kind": kind, "signals": signals, "version": version}
+    return {"signal_kind": kind, "signals": signals, "version": version, "vendor": vendor}
 
 
 def _request_detect_probe(
@@ -680,7 +889,10 @@ def _request_detect_probe(
         ca_file=ca_file if fallback_https else None,
     )
     if fallback_status > 0:
-        return fallback_status, fallback_payload, fallback_headers, fallback_error, fallback_scheme
+        diagnostic_headers = dict(fallback_headers)
+        if str(error or "").strip():
+            diagnostic_headers[_TRANSPORT_DIAGNOSTIC_HEADER] = f"{preferred_scheme}={error}"
+        return fallback_status, fallback_payload, diagnostic_headers, fallback_error, fallback_scheme
 
     primary_error = str(error or "").strip() or "connection failed"
     secondary_error = str(fallback_error or "").strip() or "connection failed"
@@ -763,11 +975,8 @@ def _evaluate_detect_decision(probes: list[dict[str, Any]]) -> dict[str, Any]:
     elif len(soft_paths) >= 2 and not hard_negative:
         detected = True
         confidence = "medium"
-    elif hard_negative and not soft_positive:
-        detected = False
-        confidence = "low"
     else:
-        detected = True
+        detected = False
         confidence = "low"
 
     primary_probe: dict[str, Any] | None = None
@@ -785,6 +994,38 @@ def _evaluate_detect_decision(probes: list[dict[str, Any]]) -> dict[str, Any]:
             version = probe_version.strip()
             break
 
+    vendors = {
+        str(probe.get("vendor") or "").strip().lower()
+        for probe in hard_positive + soft_positive + probes
+        if str(probe.get("vendor") or "").strip().lower() in {"elasticsearch", "opensearch"}
+    }
+    root_explicit_vendor: str | None = None
+    has_elasticsearch_product_marker = False
+    has_opensearch_specific_marker = False
+    for probe in probes:
+        probe_signals = {str(signal) for signal in (probe.get("signals") or [])}
+        path = str(probe.get("path") or "")
+        if path == "/" and any(signal.startswith("vendor_opensearch_") for signal in probe_signals):
+            root_explicit_vendor = "opensearch"
+            break
+        if path == "/" and {"header_x_elastic_product", "root_tagline"} & probe_signals:
+            root_explicit_vendor = "elasticsearch"
+        if "header_x_elastic_product" in probe_signals:
+            has_elasticsearch_product_marker = True
+        if any(signal.startswith("vendor_opensearch_") for signal in probe_signals) or any(
+            signal.startswith("opensearch_authinfo_") for signal in probe_signals
+        ):
+            has_opensearch_specific_marker = True
+
+    if root_explicit_vendor is not None:
+        vendor = root_explicit_vendor
+    elif has_elasticsearch_product_marker:
+        vendor = "elasticsearch"
+    elif has_opensearch_specific_marker:
+        vendor = "opensearch"
+    else:
+        vendor = next(iter(vendors)) if len(vendors) == 1 else "compatible"
+
     return {
         "detected": detected,
         "confidence": confidence,
@@ -793,6 +1034,7 @@ def _evaluate_detect_decision(probes: list[dict[str, Any]]) -> dict[str, Any]:
         "has_hard_negative": bool(hard_negative),
         "has_positive": bool(hard_positive or soft_positive),
         "version": version,
+        "vendor": vendor,
     }
 
 
@@ -822,20 +1064,20 @@ def _extract_discover_total(total_raw: Any) -> int:
     return 0
 
 
-def _build_discover_query_string() -> str:
+def _build_discover_query_string(keywords: Iterable[str] | None = None) -> str:
     tokens: list[str] = []
     seen: set[str] = set()
-    for keyword in _DISCOVER_KEYWORDS:
+    for keyword in keywords if keywords is not None else _DISCOVER_KEYWORDS:
         clean = str(keyword).strip()
         if not clean or clean in seen:
             continue
         seen.add(clean)
-        if re.search(r"[^A-Za-z0-9_.*-]", clean):
-            escaped = clean.replace("\\", "\\\\").replace('"', '\\"')
+        escaped = re.sub(r'([+\-=|><!(){}\[\]^"~*?:\\/])', r"\\\1", clean)
+        if re.search(r"\s", clean):
             tokens.append(f'"{escaped}"')
         else:
-            tokens.append(clean)
-    return " OR ".join(tokens)
+            tokens.append(escaped)
+    return " | ".join(tokens)
 
 
 def _extract_cat_endpoints(payload: bytes) -> list[str]:
@@ -1509,6 +1751,78 @@ def _check_privileges(
     return can_read, can_write, can_manage, can_manage_security, None
 
 
+def _list_index_names_detailed(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    ca_file: str | None,
+    auth_headers: dict[str, str],
+) -> tuple[list[str] | None, str | None, dict[str, Any] | None]:
+    paths = (
+        "/_cat/indices?format=json&expand_wildcards=open,hidden&h=index,status",
+        "/_cat/indices?format=json&expand_wildcards=all&h=index,status",
+    )
+    last_detail: dict[str, Any] | None = None
+    for path_index, path in enumerate(paths):
+        status, payload, _headers, error = _elastic_request(
+            host,
+            port,
+            path,
+            timeout,
+            use_https=scheme == "https",
+            insecure=insecure,
+            ca_file=ca_file,
+            headers=auth_headers,
+        )
+        if error:
+            detail = {
+                "status": 0,
+                "type": "transport_error",
+                "reason": error,
+                "root_cause": [],
+            }
+            return None, error, detail
+        if status in {401, 403}:
+            detail = _parse_elastic_error(status, payload)
+            return None, "Access Denied", detail
+        if status != 200:
+            last_detail = _parse_elastic_error(status, payload)
+            if path_index == 0 and status in {400, 404}:
+                continue
+            return None, _format_elastic_error_detail(last_detail), last_detail
+
+        payload_list = _load_json_list(payload)
+        if payload_list is None:
+            detail = {
+                "status": status,
+                "type": "invalid_indices_payload",
+                "reason": "invalid indices payload",
+                "root_cause": [],
+            }
+            return None, "invalid indices payload", detail
+
+        indices: list[str] = []
+        seen: set[str] = set()
+        for item in payload_list:
+            if not isinstance(item, dict):
+                continue
+            index_status = str(item.get("status") or "open").strip().lower()
+            if index_status in {"close", "closed"}:
+                continue
+            name = str(item.get("index") or "").strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            indices.append(name)
+        indices.sort()
+        return indices, None, None
+
+    return None, _format_elastic_error_detail(last_detail), last_detail
+
+
 def _list_index_names(
     host: str,
     port: int,
@@ -1519,42 +1833,19 @@ def _list_index_names(
     ca_file: str | None,
     auth_headers: dict[str, str],
 ) -> tuple[list[str] | None, str | None]:
-    status, payload, _headers, error = _elastic_request(
+    indices, error, _detail = _list_index_names_detailed(
         host,
         port,
-        "/_cat/indices?format=json&expand_wildcards=all&h=index",
         timeout,
-        use_https=scheme == "https",
+        scheme=scheme,
         insecure=insecure,
         ca_file=ca_file,
-        headers=auth_headers,
+        auth_headers=auth_headers,
     )
-    if error:
-        return None, error
-    if status in {401, 403}:
-        return None, "Access Denied"
-    if status != 200:
-        return None, f"status={status}"
-
-    payload_list = _load_json_list(payload)
-    if payload_list is None:
-        return None, "invalid indices payload"
-
-    indices: list[str] = []
-    seen: set[str] = set()
-    for item in payload_list:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("index") or "").strip()
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        indices.append(name)
-    indices.sort()
-    return indices, None
+    return indices, error
 
 
-def _search_index(
+def _search_index_once(
     host: str,
     port: int,
     timeout: float,
@@ -1565,10 +1856,11 @@ def _search_index(
     auth_headers: dict[str, str],
     index_name: str,
     query_string: str,
-) -> tuple[int, list[dict[str, Any]] | None, str | None]:
-    path = f"/{urllib.parse.quote(index_name, safe='')}/_search?size={_DISCOVER_QUERY_SIZE}&expand_wildcards=all"
+) -> dict[str, Any]:
+    path = f"/{urllib.parse.quote(index_name, safe='')}/_search?size={_DISCOVER_QUERY_SIZE}&expand_wildcards=open"
     body = {
         "size": _DISCOVER_QUERY_SIZE,
+        "track_total_hits": True,
         "query": {
             "simple_query_string": {
                 "query": query_string,
@@ -1595,19 +1887,60 @@ def _search_index(
         data=json.dumps(body).encode("utf-8"),
     )
     if error:
-        return 0, None, error
+        return {
+            "total_hits": 0,
+            "hits": [],
+            "error": error,
+            "error_detail": {
+                "status": 0,
+                "type": "transport_error",
+                "reason": error,
+                "root_cause": [],
+            },
+        }
     if status in {401, 403}:
-        return 0, None, "Access Denied"
+        return {
+            "total_hits": 0,
+            "hits": [],
+            "error": "Access Denied",
+            "error_detail": _parse_elastic_error(status, payload),
+        }
     if status != 200:
-        return 0, None, f"status={status}"
+        detail = _parse_elastic_error(status, payload)
+        return {
+            "total_hits": 0,
+            "hits": [],
+            "error": _format_elastic_error_detail(detail),
+            "error_detail": detail,
+        }
 
     parsed = _load_json_dict(payload)
     if parsed is None:
-        return 0, None, "invalid search payload"
+        return {
+            "total_hits": 0,
+            "hits": [],
+            "error": "invalid search payload",
+            "error_detail": {
+                "status": status,
+                "type": "invalid_search_payload",
+                "reason": "invalid search payload",
+                "root_cause": [],
+            },
+        }
 
     hits_obj = parsed.get("hits")
     if not isinstance(hits_obj, dict):
-        return 0, None, "invalid search hits payload"
+        return {
+            "total_hits": 0,
+            "hits": [],
+            "error": "invalid search hits payload",
+            "error_detail": {
+                "status": status,
+                "type": "invalid_search_hits_payload",
+                "reason": "invalid search hits payload",
+                "root_cause": [],
+            },
+        }
 
     total_hits = _extract_discover_total(hits_obj.get("total"))
 
@@ -1622,12 +1955,219 @@ def _search_index(
                 continue
             parsed_hits.append(
                 {
+                    "index": str(item.get("_index") or index_name),
                     "id": str(item.get("_id") or ""),
                     "source": source,
                 }
             )
 
-    return total_hits, parsed_hits, None
+    return {
+        "total_hits": int(total_hits),
+        "hits": parsed_hits,
+        "error": None,
+        "error_detail": None,
+    }
+
+
+def _is_retryable_discover_error(detail: Mapping[str, Any] | None) -> bool:
+    if not isinstance(detail, Mapping):
+        return False
+    retryable_types = {
+        "too_many_clauses",
+        "query_shard_exception",
+        "search_phase_execution_exception",
+        "circuit_breaking_exception",
+        "illegal_argument_exception",
+        "search_context_exception",
+    }
+    observed = {str(detail.get("type") or "").strip().lower()}
+    causes = detail.get("root_cause")
+    if isinstance(causes, list):
+        observed.update(str(cause.get("type") or "").strip().lower() for cause in causes if isinstance(cause, Mapping))
+    return bool(observed & retryable_types)
+
+
+def _search_index_detailed(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    ca_file: str | None,
+    auth_headers: dict[str, str],
+    index_name: str,
+    query_string: str,
+) -> dict[str, Any]:
+    primary = _search_index_once(
+        host,
+        port,
+        timeout,
+        scheme=scheme,
+        insecure=insecure,
+        ca_file=ca_file,
+        auth_headers=auth_headers,
+        index_name=index_name,
+        query_string=query_string,
+    )
+    if not primary.get("error") or not _is_retryable_discover_error(primary.get("error_detail")):
+        return {
+            **primary,
+            "retried": False,
+            "retry_chunks": 0,
+            "partial_error_details": [],
+            "total_hits_relation": "exact",
+        }
+
+    keywords: list[str] = []
+    seen_keywords: set[str] = set()
+    for raw_keyword in _DISCOVER_KEYWORDS:
+        keyword = str(raw_keyword).strip()
+        if not keyword or keyword in seen_keywords:
+            continue
+        seen_keywords.add(keyword)
+        keywords.append(keyword)
+    chunks = [
+        keywords[offset : offset + _DISCOVER_QUERY_CHUNK_SIZE]
+        for offset in range(0, len(keywords), _DISCOVER_QUERY_CHUNK_SIZE)
+    ][:_DISCOVER_MAX_CHUNKS]
+
+    unique_hits: dict[tuple[str, str], dict[str, Any]] = {}
+    primary_detail = primary.get("error_detail")
+    partial_errors: list[dict[str, Any]] = [dict(primary_detail)] if isinstance(primary_detail, Mapping) else []
+    any_success = False
+    truncated = False
+    for chunk in chunks:
+        chunk_result = _search_index_once(
+            host,
+            port,
+            timeout,
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=auth_headers,
+            index_name=index_name,
+            query_string=_build_discover_query_string(chunk),
+        )
+        if chunk_result.get("error"):
+            detail = chunk_result.get("error_detail")
+            if isinstance(detail, dict):
+                partial_errors.append(detail)
+            continue
+        any_success = True
+        chunk_hits = chunk_result.get("hits")
+        if not isinstance(chunk_hits, list):
+            continue
+        if int(chunk_result.get("total_hits") or 0) > len(chunk_hits):
+            truncated = True
+        for hit in chunk_hits:
+            if not isinstance(hit, dict):
+                continue
+            hit_index = str(hit.get("index") or index_name)
+            hit_id = str(hit.get("id") or "")
+            if not hit_id:
+                hit_id = json.dumps(hit.get("source") or {}, sort_keys=True, ensure_ascii=False)
+            unique_hits.setdefault((hit_index, hit_id), hit)
+            if len(unique_hits) >= _DISCOVER_MAX_PRINT_PER_INDEX:
+                truncated = True
+                break
+
+    if not any_success:
+        detail = partial_errors[0] if partial_errors else primary.get("error_detail")
+        return {
+            "total_hits": 0,
+            "hits": [],
+            "error": _format_elastic_error_detail(detail) or str(primary.get("error") or "discover failed"),
+            "error_detail": detail,
+            "retried": True,
+            "retry_chunks": len(chunks),
+            "partial_error_details": partial_errors,
+            "total_hits_relation": "unknown",
+        }
+
+    hits = list(unique_hits.values())[:_DISCOVER_MAX_PRINT_PER_INDEX]
+    return {
+        "total_hits": len(unique_hits),
+        "hits": hits,
+        "error": None,
+        "error_detail": None,
+        "retried": True,
+        "retry_chunks": len(chunks),
+        "partial_error_details": partial_errors,
+        "total_hits_relation": "lower_bound" if truncated or partial_errors else "exact",
+    }
+
+
+def _search_index(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    ca_file: str | None,
+    auth_headers: dict[str, str],
+    index_name: str,
+    query_string: str,
+) -> tuple[int, list[dict[str, Any]] | None, str | None]:
+    result = _search_index_detailed(
+        host,
+        port,
+        timeout,
+        scheme=scheme,
+        insecure=insecure,
+        ca_file=ca_file,
+        auth_headers=auth_headers,
+        index_name=index_name,
+        query_string=query_string,
+    )
+    hits = result.get("hits")
+    return (
+        int(result.get("total_hits") or 0),
+        [item for item in hits if isinstance(item, dict)] if isinstance(hits, list) else None,
+        str(result.get("error")) if result.get("error") else None,
+    )
+
+
+def _collect_discover_report(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    ca_file: str | None,
+    auth_headers: dict[str, str],
+    vendor: str | None = None,
+) -> DiscoverReport:
+    """Run the v2 discovery engine while preserving the module HTTP policy."""
+
+    def _request(request: DiscoverRequest) -> DiscoverResponse:
+        request_headers = dict(auth_headers)
+        request_headers.update(request.headers)
+        status, payload, response_headers, error = _elastic_request(
+            host,
+            port,
+            request.path,
+            timeout,
+            use_https=scheme == "https",
+            insecure=insecure,
+            ca_file=ca_file,
+            method=request.method,
+            headers=request_headers,
+            data=request.body,
+        )
+        normalized_headers = dict(response_headers)
+        truncated = normalized_headers.pop(_RESPONSE_TRUNCATED_HEADER, "").strip().lower() == "true"
+        return DiscoverResponse(
+            status=status,
+            payload=payload,
+            headers=normalized_headers,
+            error=error,
+            truncated=truncated,
+        )
+
+    return run_discovery(_request, vendor=_normalize_vendor(vendor))
 
 
 def _collect_discover_results(
@@ -1640,7 +2180,7 @@ def _collect_discover_results(
     ca_file: str | None,
     auth_headers: dict[str, str],
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
-    indices, indices_error = _list_index_names(
+    report = _collect_discover_report(
         host,
         port,
         timeout,
@@ -1649,50 +2189,265 @@ def _collect_discover_results(
         ca_file=ca_file,
         auth_headers=auth_headers,
     )
-    if indices is None:
-        return None, indices_error or "failed to list indices"
+    return report.legacy_results, report.error
 
-    query_string = _build_discover_query_string()
-    results: list[dict[str, Any]] = []
 
-    for index_name in indices:
-        total_hits, hits, search_error = _search_index(
+def _collect_discover_results_detailed(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    ca_file: str | None,
+    auth_headers: dict[str, str],
+) -> tuple[list[dict[str, Any]] | None, str | None, dict[str, Any] | None]:
+    report = _collect_discover_report(
+        host,
+        port,
+        timeout,
+        scheme=scheme,
+        insecure=insecure,
+        ca_file=ca_file,
+        auth_headers=auth_headers,
+    )
+    return report.legacy_results, report.error, report.error_detail
+
+
+def _auth_endpoint_candidates(vendor: str | None) -> tuple[str, ...]:
+    normalized = _normalize_vendor(vendor)
+    if normalized == "opensearch":
+        return ("/_plugins/_security/authinfo", "/_security/_authenticate")
+    if normalized == "elasticsearch":
+        return ("/_security/_authenticate",)
+    return ("/_security/_authenticate", "/_plugins/_security/authinfo")
+
+
+def _auth_username_from_body(body: dict[str, Any] | None) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    for field in ("username", "user_name"):
+        raw = body.get(field)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    raw_user = body.get("user")
+    if isinstance(raw_user, str) and raw_user.strip():
+        match = re.search(r"(?:name=|User \[name=)([^,\]]+)", raw_user)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _probe_authenticate(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    ca_file: str | None,
+    auth_headers: dict[str, str],
+    vendor: str | None = None,
+    anonymous_status: int | None = None,
+    expected_username: str | None = None,
+) -> ElasticAuthProbeResult:
+    last_result: ElasticAuthProbeResult | None = None
+    unsupported_statuses = {400, 404, 405}
+
+    for endpoint in _auth_endpoint_candidates(vendor):
+        status, payload, _headers, error = _elastic_request(
             host,
             port,
+            endpoint,
             timeout,
-            scheme=scheme,
+            use_https=scheme == "https",
             insecure=insecure,
             ca_file=ca_file,
-            auth_headers=auth_headers,
-            index_name=index_name,
-            query_string=query_string,
+            headers=auth_headers,
         )
-        if search_error:
-            results.append(
-                {
-                    "index": index_name,
-                    "total_hits": 0,
-                    "shown_hits": 0,
-                    "truncated": False,
-                    "hits": [],
-                    "error": search_error,
-                }
+        if error:
+            return ElasticAuthProbeResult(
+                valid=None,
+                error=error,
+                username=None,
+                status=0,
+                endpoint=endpoint,
+                detail={"status": 0, "type": "transport_error", "reason": error, "root_cause": []},
             )
-            continue
+        if status == 200:
+            body = _load_json_dict_loose(payload)
+            authenticated_username = _auth_username_from_body(body)
+            if expected_username is not None and authenticated_username != expected_username:
+                detail = {
+                    "status": 200,
+                    "type": "identity_mismatch",
+                    "reason": (
+                        f"expected username {expected_username!r}, endpoint returned {authenticated_username!r}"
+                    ),
+                    "root_cause": [],
+                }
+                return ElasticAuthProbeResult(
+                    valid=None,
+                    error=str(detail["reason"]),
+                    username=authenticated_username,
+                    status=status,
+                    endpoint=endpoint,
+                    detail=detail,
+                )
+            if authenticated_username is None:
+                detail = {
+                    "status": 200,
+                    "type": "identity_unavailable",
+                    "reason": "authentication endpoint did not return an identity",
+                    "root_cause": [],
+                }
+                return ElasticAuthProbeResult(
+                    valid=None,
+                    error=str(detail["reason"]),
+                    username=None,
+                    status=status,
+                    endpoint=endpoint,
+                    detail=detail,
+                )
+            authorization = str(_header_lookup(auth_headers, "Authorization") or "")
+            if expected_username is None and authorization.lower().startswith("apikey "):
+                anonymous_status_code, anonymous_payload, _anonymous_headers, anonymous_error = _elastic_request(
+                    host,
+                    port,
+                    endpoint,
+                    timeout,
+                    use_https=scheme == "https",
+                    insecure=insecure,
+                    ca_file=ca_file,
+                    headers=_elastic_headers(username=None, password=None, api_token=None),
+                )
+                anonymous_body = _load_json_dict_loose(anonymous_payload)
+                anonymous_username = _auth_username_from_body(anonymous_body)
+                token_changed_identity = (
+                    anonymous_status_code == 200
+                    and anonymous_username is not None
+                    and anonymous_username != authenticated_username
+                )
+                if anonymous_error or (anonymous_status_code not in {401, 403} and not token_changed_identity):
+                    detail = {
+                        "status": status,
+                        "type": "token_identity_unverified",
+                        "reason": (
+                            f"anonymous control failed: {anonymous_error}"
+                            if anonymous_error
+                            else "auth endpoint is anonymously accessible with the same identity"
+                        ),
+                        "root_cause": [],
+                        "anonymous_control_status": anonymous_status_code,
+                        "anonymous_control_username": anonymous_username,
+                    }
+                    return ElasticAuthProbeResult(
+                        valid=None,
+                        error=str(detail["reason"]),
+                        username=authenticated_username,
+                        status=status,
+                        endpoint=endpoint,
+                        detail=detail,
+                    )
+            return ElasticAuthProbeResult(
+                valid=True,
+                error=None,
+                username=authenticated_username,
+                status=status,
+                endpoint=endpoint,
+                detail=None,
+            )
+        if status in {401, 403}:
+            detail = _parse_elastic_error(status, payload)
+            return ElasticAuthProbeResult(
+                valid=False,
+                error="authentication failed",
+                username=None,
+                status=status,
+                endpoint=endpoint,
+                detail=detail,
+            )
 
-        shown = list(hits or [])[:_DISCOVER_MAX_PRINT_PER_INDEX]
-        results.append(
-            {
-                "index": index_name,
-                "total_hits": int(total_hits),
-                "shown_hits": len(shown),
-                "truncated": int(total_hits) > len(shown),
-                "hits": shown,
-                "error": None,
-            }
+        detail = _parse_elastic_error(status, payload)
+        last_result = ElasticAuthProbeResult(
+            valid=None,
+            error=_format_elastic_error_detail(detail),
+            username=None,
+            status=status,
+            endpoint=endpoint,
+            detail=detail,
+        )
+        if status not in unsupported_statuses:
+            return last_result
+
+    root_status, root_payload, root_headers, root_error = _elastic_request(
+        host,
+        port,
+        "/",
+        timeout,
+        use_https=scheme == "https",
+        insecure=insecure,
+        ca_file=ca_file,
+        headers=auth_headers,
+    )
+    auth_endpoint = last_result.endpoint if last_result is not None else None
+    fallback_detail: dict[str, Any]
+    if root_error:
+        fallback_detail = {
+            "status": 0,
+            "type": "auth_fallback_transport_error",
+            "reason": root_error,
+            "root_cause": [],
+            "fallback_endpoint": "/",
+        }
+        return ElasticAuthProbeResult(
+            valid=None,
+            error=root_error,
+            username=None,
+            status=0,
+            endpoint="/",
+            detail=fallback_detail,
+        )
+    if root_status in {401, 403}:
+        fallback_detail = _parse_elastic_error(root_status, root_payload)
+        fallback_detail["fallback"] = True
+        fallback_detail["fallback_endpoint"] = "/"
+        return ElasticAuthProbeResult(
+            valid=False,
+            error="authentication failed",
+            username=None,
+            status=root_status,
+            endpoint="/",
+            detail=fallback_detail,
         )
 
-    return results, None
+    root_classification = _classify_detect_probe("/", root_status, root_payload, root_headers, None)
+    root_is_service = str(root_classification.get("signal_kind") or "") in {"hard_positive", "soft_positive"}
+    if root_status == 200 and root_is_service and anonymous_status in {401, 403}:
+        fallback_reason = "authenticated root became accessible, but identity could not be confirmed"
+    elif root_status == 200 and anonymous_status == 200:
+        fallback_reason = "root endpoint is also anonymously accessible"
+    else:
+        fallback_reason = "authentication endpoint is unsupported and root fallback is inconclusive"
+    fallback_detail = {
+        "status": int(root_status),
+        "type": "authentication_unverified",
+        "reason": fallback_reason,
+        "root_cause": [],
+        "fallback": True,
+        "fallback_endpoint": "/",
+        "auth_endpoint": auth_endpoint,
+    }
+    if last_result is not None and isinstance(last_result.detail, dict):
+        fallback_detail["auth_endpoint_error"] = dict(last_result.detail)
+    return ElasticAuthProbeResult(
+        valid=None,
+        error=str(fallback_detail["reason"]),
+        username=None,
+        status=int(root_status),
+        endpoint="/",
+        detail=fallback_detail,
+    )
 
 
 def _verify_authenticate(
@@ -1705,29 +2460,18 @@ def _verify_authenticate(
     ca_file: str | None,
     auth_headers: dict[str, str],
 ) -> tuple[bool | None, str | None, str | None]:
-    status, payload, _headers, error = _elastic_request(
+    """Backward-compatible tuple wrapper around the identity-aware probe."""
+
+    result = _probe_authenticate(
         host,
         port,
-        "/_security/_authenticate",
         timeout,
-        use_https=scheme == "https",
+        scheme=scheme,
         insecure=insecure,
         ca_file=ca_file,
-        headers=auth_headers,
+        auth_headers=auth_headers,
     )
-    if error:
-        return None, error, None
-    if status == 200:
-        body = _load_json_dict(payload)
-        username = None
-        if isinstance(body, dict):
-            raw_user = body.get("username")
-            if isinstance(raw_user, str) and raw_user.strip():
-                username = raw_user.strip()
-        return True, None, username
-    if status in {401, 403}:
-        return False, "authentication failed", None
-    return None, f"status={status}", None
+    return result.valid, result.error, result.username
 
 
 def _call_audit_elastic_host_with_thread_debug(
@@ -1936,6 +2680,7 @@ def _audit_elastic_host(
             ca_file=ca_file,
             preferred_scheme=str(preferred_scheme or "https"),
         )
+        root_transport_error = root_headers.pop(_TRANSPORT_DIAGNOSTIC_HEADER, None)
         if error and status <= 0:
             last_error = error
             if attempt < attempts - 1:
@@ -2004,9 +2749,11 @@ def _audit_elastic_host(
                 "status": int(status),
                 "scheme": scheme,
                 "error": error,
+                "transport_error": root_transport_error,
                 "signal_kind": str(root_detection.get("signal_kind") or "neutral"),
                 "signals": list(root_detection.get("signals") or []),
                 "version": root_detection.get("version"),
+                "vendor": root_detection.get("vendor"),
                 "payload": payload,
                 "headers": root_headers,
                 "insecure_effective": effective_insecure,
@@ -2027,6 +2774,7 @@ def _audit_elastic_host(
                 preferred_scheme=preferred_scheme,
                 ca_file=ca_file,
             )
+            probe_transport_error = probe_headers.pop(_TRANSPORT_DIAGNOSTIC_HEADER, None)
             probe_detection = _classify_detect_probe(
                 probe_path, probe_status, probe_payload, probe_headers, probe_error
             )
@@ -2039,9 +2787,11 @@ def _audit_elastic_host(
                     "status": int(probe_status),
                     "scheme": probe_scheme,
                     "error": probe_error,
+                    "transport_error": probe_transport_error,
                     "signal_kind": str(probe_detection.get("signal_kind") or "neutral"),
                     "signals": list(probe_detection.get("signals") or []),
                     "version": probe_detection.get("version"),
+                    "vendor": probe_detection.get("vendor"),
                     "payload": probe_payload,
                     "headers": probe_headers,
                     "insecure_effective": probe_scheme == "https",
@@ -2064,6 +2814,7 @@ def _audit_elastic_host(
                     preferred_scheme=preferred_scheme,
                     ca_file=ca_file,
                 )
+                probe_transport_error = probe_headers.pop(_TRANSPORT_DIAGNOSTIC_HEADER, None)
                 probe_detection = _classify_detect_probe(
                     probe_path, probe_status, probe_payload, probe_headers, probe_error
                 )
@@ -2076,9 +2827,11 @@ def _audit_elastic_host(
                         "status": int(probe_status),
                         "scheme": probe_scheme,
                         "error": probe_error,
+                        "transport_error": probe_transport_error,
                         "signal_kind": str(probe_detection.get("signal_kind") or "neutral"),
                         "signals": list(probe_detection.get("signals") or []),
                         "version": probe_detection.get("version"),
+                        "vendor": probe_detection.get("vendor"),
                         "payload": probe_payload,
                         "headers": probe_headers,
                         "insecure_effective": probe_scheme == "https",
@@ -2097,11 +2850,19 @@ def _audit_elastic_host(
                 "path": str(probe.get("path") or "-"),
                 "status": int(probe.get("status") or 0),
                 "scheme": str(probe.get("scheme") or "-"),
+                "signal_kind": str(probe.get("signal_kind") or "neutral"),
+                "signals": list(probe.get("signals") or []),
+                "vendor": probe.get("vendor"),
+                "error": probe.get("error"),
+                "transport_error": probe.get("transport_error"),
             }
             for probe in detect_probes
         ]
+        transport_errors = _collect_detect_transport_errors(detect_probes)
+        transport_error_kind = _transport_error_kind(transport_errors)
 
         is_elastic = bool(detect_decision.get("detected"))
+        vendor = _normalize_vendor(detect_decision.get("vendor"))
         version_raw = detect_decision.get("version")
         version = str(version_raw).strip() if isinstance(version_raw, str) and version_raw.strip() else None
 
@@ -2177,12 +2938,17 @@ def _audit_elastic_host(
                     "cluster_error": None,
                     "users_error": None,
                     "discover_error": None,
+                    "discover_error_detail": None,
                     "scheme": scheme,
                     "insecure_effective": effective_insecure,
                     "tls_auto_plain": tls_auto_plain,
+                    "vendor": vendor,
                     "detect_confidence": detect_confidence,
                     "detect_signals": detect_signals,
                     "detect_probe_trace": detect_probe_trace,
+                    "transport_errors": transport_errors,
+                    "transport_error_kind": transport_error_kind,
+                    "anonymous_root_status": root_probe_status,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": None,
                 },
@@ -2224,8 +2990,12 @@ def _audit_elastic_host(
         auth_valid: bool | None = None
         effective_username: str | None = None
         auth_error: str | None = None
+        auth_probe_status: str | None = None
+        auth_probe_http_status: int | None = None
+        auth_probe_endpoint: str | None = None
+        auth_error_detail: dict[str, Any] | None = None
         if auth_provided:
-            auth_valid, auth_error, effective_username = _verify_authenticate(
+            auth_probe = _probe_authenticate(
                 host,
                 port,
                 timeout,
@@ -2233,8 +3003,21 @@ def _audit_elastic_host(
                 insecure=effective_insecure,
                 ca_file=ca_file,
                 auth_headers=auth_headers,
+                vendor=vendor,
+                anonymous_status=root_probe_status,
+                expected_username=username,
             )
+            auth_valid = auth_probe.valid
+            auth_error = auth_probe.error
+            effective_username = auth_probe.username
+            auth_probe_status = _auth_probe_status(auth_probe)
+            auth_probe_http_status = auth_probe.status
+            auth_probe_endpoint = auth_probe.endpoint
+            auth_error_detail = auth_probe.detail
 
+        deep_auth_headers = (
+            auth_headers if auth_valid is True else _elastic_headers(username=None, password=None, api_token=None)
+        )
         api_key_probe_status = "not_run"
         api_key_probe_error: str | None = None
         if provided_token:
@@ -2245,13 +3028,15 @@ def _audit_elastic_host(
                 scheme=scheme,
                 insecure=effective_insecure,
                 ca_file=ca_file,
-                auth_headers=auth_headers,
+                auth_headers=deep_auth_headers,
             )
 
         if auth_valid is True:
             service_status = "valid_credentials"
         elif auth_required is False and auth_provided and auth_valid is False:
             service_status = "invalid_credentials_anonymous"
+        elif auth_required is False and auth_provided and auth_valid is None:
+            service_status = "credentials_unverified_anonymous"
         elif auth_required is False:
             service_status = "open_no_auth"
         elif auth_required is True:
@@ -2267,7 +3052,7 @@ def _audit_elastic_host(
                 scheme=scheme,
                 insecure=effective_insecure,
                 ca_file=ca_file,
-                auth_headers=auth_headers,
+                auth_headers=deep_auth_headers,
             )
             if resolved_version:
                 version = resolved_version
@@ -2312,6 +3097,10 @@ def _audit_elastic_host(
             "api_key_probe_error": None,
             "effective_username": effective_username,
             "auth_valid": auth_valid,
+            "auth_probe_status": auth_probe_status,
+            "auth_probe_http_status": auth_probe_http_status,
+            "auth_probe_endpoint": auth_probe_endpoint,
+            "auth_error_detail": auth_error_detail,
             "show_endpoints": show_endpoints,
             "show_plugins": show_plugins,
             "show_cluster": show_cluster,
@@ -2337,12 +3126,17 @@ def _audit_elastic_host(
             "cluster_error": None,
             "users_error": None,
             "discover_error": None,
+            "discover_error_detail": None,
             "scheme": scheme,
             "insecure_effective": effective_insecure,
             "tls_auto_plain": tls_auto_plain,
+            "vendor": vendor,
             "detect_confidence": detect_confidence,
             "detect_signals": detect_signals,
             "detect_probe_trace": detect_probe_trace,
+            "transport_errors": transport_errors,
+            "transport_error_kind": transport_error_kind,
+            "anonymous_root_status": root_probe_status,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": None,
         }
@@ -2354,11 +3148,21 @@ def _audit_elastic_host(
             )
             return _record(base_record, attempts_done=attempt + 1, max_attempts=attempts)
 
-        if service_status not in {"open_no_auth", "valid_credentials"}:
+        if service_status not in {
+            "open_no_auth",
+            "valid_credentials",
+            "invalid_credentials_anonymous",
+            "credentials_unverified_anonymous",
+        }:
             _debug(f"stage2_gate=skip reason=status={service_status}")
             return _record(base_record, attempts_done=attempt + 1, max_attempts=attempts)
 
         _debug(f"stage2_gate=run reason=status={service_status}")
+        deep_auth_headers = (
+            auth_headers
+            if service_status == "valid_credentials"
+            else _elastic_headers(username=None, password=None, api_token=None)
+        )
         stage3_started = time.monotonic()
         can_read: bool | None = None
         can_write: bool | None = None
@@ -2376,7 +3180,7 @@ def _audit_elastic_host(
                 scheme=scheme,
                 insecure=effective_insecure,
                 ca_file=ca_file,
-                auth_headers=auth_headers,
+                auth_headers=deep_auth_headers,
             )
             access_level = _normalize_access_level(
                 can_read=can_read,
@@ -2392,7 +3196,7 @@ def _audit_elastic_host(
                     scheme=scheme,
                     insecure=effective_insecure,
                     ca_file=ca_file,
-                    auth_headers=auth_headers,
+                    auth_headers=deep_auth_headers,
                 )
             stage3_error = "; ".join(
                 str(item) for item in (rights_error, api_key_probe_error) if str(item or "").strip()
@@ -2428,6 +3232,9 @@ def _audit_elastic_host(
         users_error: str | None = None
         discover_results: list[dict[str, Any]] | None = None
         discover_error: str | None = None
+        discover_error_detail: dict[str, Any] | None = None
+        discover_findings: list[dict[str, Any]] | None = None
+        discover_coverage: dict[str, Any] | None = None
         if show_endpoints:
             cat_endpoints, endpoints_error, endpoint_diagnostics = _fetch_cat_endpoints(
                 host,
@@ -2436,7 +3243,7 @@ def _audit_elastic_host(
                 scheme=scheme,
                 insecure=effective_insecure,
                 ca_file=ca_file,
-                auth_headers=auth_headers,
+                auth_headers=deep_auth_headers,
             )
         if show_plugins:
             cat_plugins, plugins_error = _fetch_cat_plugins(
@@ -2446,7 +3253,7 @@ def _audit_elastic_host(
                 scheme=scheme,
                 insecure=effective_insecure,
                 ca_file=ca_file,
-                auth_headers=auth_headers,
+                auth_headers=deep_auth_headers,
             )
         if show_cluster:
             cluster_health, cluster_nodes, cluster_error = _fetch_cluster_data(
@@ -2456,7 +3263,7 @@ def _audit_elastic_host(
                 scheme=scheme,
                 insecure=effective_insecure,
                 ca_file=ca_file,
-                auth_headers=auth_headers,
+                auth_headers=deep_auth_headers,
             )
             misconfig_findings, misconfig_error = _fetch_cluster_misconfig_findings(
                 host,
@@ -2465,7 +3272,7 @@ def _audit_elastic_host(
                 scheme=scheme,
                 insecure=effective_insecure,
                 ca_file=ca_file,
-                auth_headers=auth_headers,
+                auth_headers=deep_auth_headers,
             )
         if show_users:
             users, users_error = _fetch_security_users(
@@ -2475,18 +3282,25 @@ def _audit_elastic_host(
                 scheme=scheme,
                 insecure=effective_insecure,
                 ca_file=ca_file,
-                auth_headers=auth_headers,
+                auth_headers=deep_auth_headers,
             )
         if discover:
-            discover_results, discover_error = _collect_discover_results(
+            discover_report = _collect_discover_report(
                 host,
                 port,
                 timeout,
                 scheme=scheme,
                 insecure=effective_insecure,
                 ca_file=ca_file,
-                auth_headers=auth_headers,
+                auth_headers=deep_auth_headers,
+                vendor=str(base_record.get("vendor") or "compatible"),
             )
+            serialized_discover_report = discover_report.to_dict()
+            discover_results = list(serialized_discover_report.get("discover_results") or [])
+            discover_error = discover_report.error
+            discover_error_detail = discover_report.error_detail
+            discover_findings = list(serialized_discover_report.get("discover_findings") or [])
+            discover_coverage = dict(serialized_discover_report.get("discover_coverage") or {})
         stage4_error = "; ".join(
             str(item)
             for item in (endpoints_error, plugins_error, cluster_error, misconfig_error, users_error, discover_error)
@@ -2543,17 +3357,26 @@ def _audit_elastic_host(
                 "cluster_error": cluster_error,
                 "users_error": users_error,
                 "discover_error": discover_error,
+                "discover_error_detail": discover_error_detail,
                 "error": "; ".join(errors) if errors else None,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
             }
         )
+        if discover:
+            final_record.update(
+                {
+                    "discover_schema_version": 2,
+                    "discover_findings": discover_findings or [],
+                    "discover_coverage": discover_coverage or {},
+                }
+            )
         _debug(
             f"attempt={attempt + 1}/{attempts} result={service_status} "
             f"total_ms={int((time.monotonic() - started) * 1000)}"
         )
         return _record(final_record, attempts_done=attempt + 1, max_attempts=attempts)
 
-    _debug(f"final fail attempts={attempts}/{attempts} error={_friendly_error_text(last_error or 'connection failed')}")
+    _debug(f"final fail attempts={attempts}/{attempts} error={last_error or 'connection failed'}")
     return _record(
         {
             "timestamp": utc_now_iso(),
@@ -2597,14 +3420,19 @@ def _audit_elastic_host(
             "cluster_error": None,
             "users_error": None,
             "discover_error": None,
+            "discover_error_detail": None,
             "scheme": None,
             "insecure_effective": None,
             "tls_auto_plain": None,
+            "vendor": None,
             "detect_confidence": None,
             "detect_signals": [],
             "detect_probe_trace": [],
+            "transport_errors": _transport_errors_from_combined(last_error),
+            "transport_error_kind": _transport_error_kind(_transport_errors_from_combined(last_error)),
+            "anonymous_root_status": None,
             "elapsed_ms": None,
-            "error": _friendly_error_text(last_error or "connection failed"),
+            "error": last_error or "connection failed",
         },
         attempts_done=attempts,
         max_attempts=attempts,
@@ -2670,7 +3498,7 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
     scheme = str(payload.get("scheme") or "https")
     insecure = bool(payload.get("insecure_effective"))
     ca_file = str(getattr(ctx.args, "ca_file", "") or "").strip() or None
-    auth_valid, auth_error, effective_username = _verify_authenticate(
+    auth_probe = _probe_authenticate(
         str(ctx.host),
         int(ctx.port),
         float(getattr(ctx.args, "timeout", 5.0)),
@@ -2678,14 +3506,22 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
         insecure=insecure,
         ca_file=ca_file,
         auth_headers=headers,
+        vendor=str(payload.get("vendor") or "compatible"),
+        anonymous_status=(
+            int(payload["anonymous_root_status"]) if isinstance(payload.get("anonymous_root_status"), int) else None
+        ),
+        expected_username=credential.username,
     )
+    auth_valid = auth_probe.valid
+    auth_error = auth_probe.error
+    effective_username = auth_probe.username
     auth_required = payload.get("auth_required")
     if auth_valid is True:
         status = "weak_default_creds" if credential.source == "default" else "valid_credentials"
     elif auth_valid is False and auth_required is False:
         status = "invalid_credentials_anonymous"
-    elif auth_required is False:
-        status = "open_no_auth"
+    elif auth_valid is None and auth_required is False:
+        status = "credentials_unverified_anonymous"
     elif auth_required is True:
         status = "auth_required"
     else:
@@ -2721,6 +3557,10 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
             "api_token": credential.token,
             "effective_username": effective_username,
             "auth_valid": auth_valid,
+            "auth_probe_status": _auth_probe_status(auth_probe),
+            "auth_probe_http_status": auth_probe.status,
+            "auth_probe_endpoint": auth_probe.endpoint,
+            "auth_error_detail": auth_probe.detail,
             "defcreds_enabled": credential.source == "default",
             "credentials_source": str(credential.source),
             "error": None if auth_valid is True or status == "invalid_credentials_anonymous" else auth_error,
@@ -2806,6 +3646,9 @@ def collect_elastic_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> d
     users_error: str | None = None
     discover_results: list[dict[str, Any]] | None = None
     discover_error: str | None = None
+    discover_error_detail: dict[str, Any] | None = None
+    discover_findings: list[dict[str, Any]] | None = None
+    discover_coverage: dict[str, Any] | None = None
 
     if bool(options["show_endpoints"]):
         cat_endpoints, endpoints_error, endpoint_diagnostics = _fetch_cat_endpoints(
@@ -2857,7 +3700,7 @@ def collect_elastic_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> d
             auth_headers=auth_headers,
         )
     if bool(options["discover"]):
-        discover_results, discover_error = _collect_discover_results(
+        discover_report = _collect_discover_report(
             host,
             port,
             timeout,
@@ -2865,7 +3708,14 @@ def collect_elastic_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> d
             insecure=insecure,
             ca_file=ca_file,
             auth_headers=auth_headers,
+            vendor=str(payload.get("vendor") or "compatible"),
         )
+        serialized_discover_report = discover_report.to_dict()
+        discover_results = list(serialized_discover_report.get("discover_results") or [])
+        discover_error = discover_report.error
+        discover_error_detail = discover_report.error_detail
+        discover_findings = list(serialized_discover_report.get("discover_findings") or [])
+        discover_coverage = dict(serialized_discover_report.get("discover_coverage") or {})
 
     errors: list[str] = []
     for item in (
@@ -2912,9 +3762,18 @@ def collect_elastic_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> d
             "cluster_error": cluster_error,
             "users_error": users_error,
             "discover_error": discover_error,
+            "discover_error_detail": discover_error_detail,
             "error": "; ".join(errors) if errors else None,
         }
     )
+    if bool(options["discover"]):
+        payload.update(
+            {
+                "discover_schema_version": 2,
+                "discover_findings": discover_findings or [],
+                "discover_coverage": discover_coverage or {},
+            }
+        )
     return payload
 
 
@@ -2954,6 +3813,9 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
         "misconfig_error",
         "users",
         "discover_results",
+        "discover_schema_version",
+        "discover_findings",
+        "discover_coverage",
         "can_read",
         "can_write",
         "can_manage",
@@ -2965,6 +3827,7 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
         "cluster_error",
         "users_error",
         "discover_error",
+        "discover_error_detail",
         "scheme",
         "insecure_effective",
         "tls_auto_plain",
@@ -3027,10 +3890,13 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "detected": bool(record.get("is_elastic")),
                 "auth_required": record.get("auth_required"),
                 "version": record.get("server_version"),
+                "vendor": _normalize_vendor(record.get("vendor")),
                 "scheme": record.get("scheme"),
                 "detect_confidence": record.get("detect_confidence"),
                 "detect_signals": record.get("detect_signals") or [],
                 "detect_probe_trace": record.get("detect_probe_trace") or [],
+                "transport_errors": record.get("transport_errors") or {},
+                "transport_error_kind": record.get("transport_error_kind"),
             },
             ensure_ascii=False,
         )
@@ -3041,11 +3907,11 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
         err = _clip(str(record.get("error") or "connection failed"), 96)
         return f"{prefix} [!] connection failed err={err}"
     if status == "not_elastic":
-        return f"{prefix} [-] not an Elasticsearch API"
+        return f"{prefix} [-] not an Elasticsearch/OpenSearch API"
 
     auth_required_text = _bool_text(record.get("auth_required"))
     version_text = str(record.get("server_version") or "-")
-    return f"{prefix} [*] Elasticsearch API (auth required:{auth_required_text}) (version:{version_text})"
+    return f"{prefix} [*] {_api_label(record)} (auth required:{auth_required_text}) (version:{version_text})"
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
@@ -3060,14 +3926,24 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 96)
     counts = _counts_suffix(record)
     caps = _caps_suffix(record)
+    attempted_credentials = record.get("attempted_credentials")
+    has_attempt_history = isinstance(attempted_credentials, list) and bool(attempted_credentials)
 
     if status == "open_no_auth":
-        return f"{prefix} [+] anonymous access{counts}"
+        return ""
 
     if status == "invalid_credentials_anonymous":
-        return f"{prefix} [-] credentials invalid (anonymous access){counts}"
+        return "" if has_attempt_history else f"{prefix} [-] credentials invalid{counts}"
 
-    if status == "valid_credentials":
+    if status == "credentials_unverified_anonymous":
+        if has_attempt_history:
+            return ""
+        line = f"{prefix} [!] credentials unverified{counts}"
+        return f"{line} err={err}" if err != "-" else line
+
+    if status in {"valid_credentials", "weak_default_creds"}:
+        if has_attempt_history:
+            return ""
         if bool(record.get("provided_token")):
             return f"{prefix} [+] apikey auth{counts}{caps}"
         username = str(record.get("provided_username") or record.get("effective_username") or "elastic")
@@ -3077,32 +3953,104 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             if provided_password == ""
             else str(provided_password)
             if provided_password is not None
-            else "<none>"
+            else "<verified-default>"
         )
         return f"{prefix} [+] {username}:{password_text}{counts}{caps}"
 
     if status == "auth_required":
+        if has_attempt_history:
+            return ""
         if bool(record.get("provided_credentials") or record.get("provided_token")):
             return f"{prefix} [-] authentication required (credentials invalid){counts}{caps}"
         return f"{prefix} [-] authentication required{counts}"
 
     if status == "unknown_auth":
+        if has_attempt_history:
+            return ""
         line = f"{prefix} [!] auth status unknown{counts}{caps}"
         if err != "-":
             return f"{line} err={err}"
         return line
 
     if status == "not_elastic":
-        return f"{prefix} [-] not an Elasticsearch API"
+        return f"{prefix} [-] not an Elasticsearch/OpenSearch API"
 
     line = f"{prefix} [!] connection failed"
     return f"{line} err={err}" if err != "-" else line
 
 
-def _format_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format == "json":
+        return []
+    attempts = record.get("attempted_credentials")
+    if not isinstance(attempts, list) or not attempts:
+        return []
+    prefix = _nxc_prefix(record)
+    lines: list[str] = []
+    accepted_statuses = {"valid_credentials", "weak_default_creds"}
+    rejected_statuses = {"auth_required", "invalid_credentials_anonymous"}
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        source = str(attempt.get("source") or "provided")
+        username = attempt.get("username")
+        password = attempt.get("password")
+        status = str(attempt.get("status") or "unknown_auth")
+        error = str(attempt.get("error") or "").strip()
+        if username is None and password is None:
+            credential_text = f"API token (source:{source})"
+        else:
+            username_text = str(username or "elastic")
+            if password is None:
+                password_text = "<no-password>"
+            elif password == "":
+                password_text = "<empty>"
+            else:
+                password_text = str(password)
+            credential_text = f"{username_text}:{password_text}"
+        if status in accepted_statuses:
+            marker = "[+]"
+        elif status in rejected_statuses:
+            marker = "[-]"
+        else:
+            marker = "[!]"
+        suffix = ""
+        if marker == "[!]" and error:
+            suffix = f" err={_clip(error, 120)}"
+        lines.append(f"{prefix} {marker} {credential_text}{suffix}")
+    return lines
+
+
+def _format_detail_records(record: dict[str, Any], output_format: str, *, debug: bool = False) -> list[str]:
     status = str(record.get("status") or "fail")
     if status in {"fail", "not_elastic"}:
-        return []
+        if output_format == "json" or not debug:
+            return []
+        prefix = _nxc_prefix(record)
+        debug_lines: list[str] = []
+        transport_errors = record.get("transport_errors")
+        if isinstance(transport_errors, dict):
+            for scheme, transport_error in transport_errors.items():
+                debug_lines.append(
+                    f"{prefix} [debug] transport scheme={scheme} error={_clip(str(transport_error), 240)}"
+                )
+        probe_trace = record.get("detect_probe_trace")
+        if isinstance(probe_trace, list):
+            for probe in probe_trace:
+                if not isinstance(probe, dict):
+                    continue
+                path = str(probe.get("path") or "-")
+                probe_status = int(probe.get("status") or 0)
+                scheme = str(probe.get("scheme") or "-")
+                signal_kind = str(probe.get("signal_kind") or "neutral")
+                signals = ",".join(str(signal) for signal in (probe.get("signals") or [])) or "-"
+                probe_error = str(probe.get("error") or "").strip()
+                suffix = f" error={_clip(probe_error, 240)}" if probe_error else ""
+                debug_lines.append(
+                    f"{prefix} [debug] probe path={path} status={probe_status} "
+                    f"scheme={scheme} signal={signal_kind} signals={signals}{suffix}"
+                )
+        return debug_lines
 
     prefix = _nxc_prefix(record)
 
@@ -3194,9 +4142,13 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
                         "host": record.get("host"),
                         "port": record.get("port"),
                         "results": record.get("discover_results") or [],
+                        "schema_version": record.get("discover_schema_version"),
+                        "findings": record.get("discover_findings") or [],
+                        "coverage": record.get("discover_coverage") or {},
                         "query_size": _DISCOVER_QUERY_SIZE,
                         "max_print_per_index": _DISCOVER_MAX_PRINT_PER_INDEX,
                         "error": record.get("discover_error"),
+                        "error_detail": record.get("discover_error_detail"),
                     },
                     ensure_ascii=False,
                 )
@@ -3308,43 +4260,164 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
 
     if bool(record.get("discover")):
         discover_results = record.get("discover_results")
-        total_hits = 0
-        if isinstance(discover_results, list):
-            for item in discover_results:
-                if not isinstance(item, dict):
-                    continue
-                total_hits += int(item.get("total_hits") or 0)
-        lines.append(f"{prefix} [*] {total_hits} Discover Hits")
+        discover_findings = record.get("discover_findings")
+        findings = (
+            [item for item in discover_findings if isinstance(item, dict)]
+            if isinstance(discover_findings, list)
+            else []
+        )
+        confidence_counts: dict[str, int] = {}
+        for finding in findings:
+            confidence = str(finding.get("confidence") or "unknown")
+            confidence_counts[confidence] = confidence_counts.get(confidence, 0) + 1
+        confidence_text = " ".join(
+            f"{name}:{confidence_counts[name]}"
+            for name in ("very_high", "high", "medium")
+            if confidence_counts.get(name)
+        )
+        coverage = record.get("discover_coverage")
+        complete = bool(coverage.get("complete")) if isinstance(coverage, dict) else False
+        if findings:
+            suffix = f" ({confidence_text})" if confidence_text else ""
+            lines.append(f"{prefix} [*] {len(findings)} Secret Findings{suffix}")
+            for finding in findings:
+                secret_type = str(finding.get("secret_type") or "secret")
+                confidence = str(finding.get("confidence") or "unknown")
+                score = int(finding.get("score") or 0)
+                occurrence_count = int(finding.get("occurrence_count") or 1)
+                encoded_value = json.dumps(finding.get("value"), ensure_ascii=False, separators=(",", ":"))
+                locations = finding.get("locations")
+                first_location = locations[0] if isinstance(locations, list) and locations else None
+                location_parts: list[str] = []
+                if isinstance(first_location, dict):
+                    for key in ("source_kind", "object", "index", "id", "path"):
+                        location_value = first_location.get(key)
+                        if location_value is not None and str(location_value).strip():
+                            location_parts.append(f"{key}={json.dumps(str(location_value), ensure_ascii=False)}")
+                location_text = " ".join(location_parts) or "location=unknown"
+                lines.append(
+                    f"{prefix} [+] secret_type={secret_type} confidence={confidence} score={score} "
+                    f"value={encoded_value} occurrences={occurrence_count} {location_text}"
+                )
+        elif complete:
+            lines.append(f"{prefix} [*] 0 Secret Findings")
+        else:
+            lines.append(f"{prefix} [*] 0 Secret Findings in scanned scope")
+
+        if isinstance(coverage, dict):
+            indices_discovered = int(
+                coverage.get("indices_discovered")
+                or coverage.get("inventory_total")
+                or coverage.get("indices_total")
+                or coverage.get("indices_enumerated")
+                or 0
+            )
+            indices_scanned = int(
+                coverage.get("indices_scanned")
+                or coverage.get("completed_indices")
+                or coverage.get("indices_completed")
+                or 0
+            )
+            documents_analyzed = int(
+                coverage.get("documents_analyzed")
+                or coverage.get("documents_examined")
+                or coverage.get("documents_fetched")
+                or coverage.get("documents_scanned")
+                or 0
+            )
+            pages = int(coverage.get("pages_scanned") or coverage.get("pages") or 0)
+            source_bytes = int(
+                coverage.get("source_bytes")
+                or coverage.get("source_bytes_analyzed")
+                or coverage.get("source_bytes_scanned")
+                or 0
+            )
+            reasons_raw = coverage.get("truncated_reasons")
+            reasons = ",".join(str(reason) for reason in reasons_raw) if isinstance(reasons_raw, list) else ""
+            coverage_status = str(coverage.get("status") or ("complete" if complete else "partial"))
+            reason_suffix = f" reasons={reasons}" if reasons else ""
+            lines.append(
+                f"{prefix} [*] Discover coverage status={coverage_status} "
+                f"indices={indices_scanned}/{indices_discovered} pages={pages} "
+                f"documents={documents_analyzed} source_bytes={source_bytes}{reason_suffix}"
+            )
+
         discover_error = str(record.get("discover_error") or "").strip()
         if isinstance(discover_results, list) and discover_results:
+            grouped_errors: dict[tuple[int, str, str, str], list[str]] = {}
             for item in discover_results:
                 if not isinstance(item, dict):
                     continue
                 index_name = str(item.get("index") or "-")
                 total_hits = int(item.get("total_hits") or 0)
                 shown_hits = int(item.get("shown_hits") or 0)
-                lines.append(f"{prefix} index={index_name} hits={total_hits} shown={shown_hits}")
                 item_error = str(item.get("error") or "").strip()
                 if item_error:
-                    lines.append(f"{prefix} [-] discover error: {_clip(item_error, 120)}")
+                    detail = item.get("error_detail")
+                    if isinstance(detail, dict):
+                        root_cause_signature = json.dumps(
+                            detail.get("root_cause") or [],
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        )
+                        error_key = (
+                            int(detail.get("status") or 0),
+                            str(detail.get("type") or "http_error"),
+                            str(detail.get("reason") or item_error),
+                            root_cause_signature,
+                        )
+                    else:
+                        error_key = (0, "discover_error", item_error, "[]")
+                    grouped_errors.setdefault(error_key, []).append(index_name)
+                    if debug:
+                        lines.append(
+                            f"{prefix} [!] discover error index={index_name}: "
+                            f"{_clip(_format_elastic_error_detail(detail) or item_error, 180)}"
+                        )
                     continue
-                if bool(item.get("truncated")):
-                    lines.append(
-                        f"{prefix} showing first {shown_hits} of {total_hits} hits (max_per_index={_DISCOVER_MAX_PRINT_PER_INDEX})"
+                if debug:
+                    lines.append(f"{prefix} [debug] candidate index={index_name} hits={total_hits} shown={shown_hits}")
+                    if bool(item.get("truncated")):
+                        relation = str(item.get("total_hits_relation") or "exact")
+                        lines.append(
+                            f"{prefix} [debug] showing first {shown_hits} of {total_hits} candidates "
+                            f"(relation:{relation}) (max_per_index={_DISCOVER_MAX_PRINT_PER_INDEX})"
+                        )
+                    hits = item.get("hits")
+                    if isinstance(hits, list):
+                        for hit in hits:
+                            if not isinstance(hit, dict):
+                                continue
+                            source = hit.get("source")
+                            if not isinstance(source, dict):
+                                continue
+                            lines.append(f"{prefix} [debug] candidate={json.dumps(source, ensure_ascii=False)}")
+                    partial_details = item.get("partial_error_details")
+                    if isinstance(partial_details, list):
+                        for partial_detail in partial_details:
+                            if not isinstance(partial_detail, dict):
+                                continue
+                            lines.append(
+                                f"{prefix} [debug] discover retry index={index_name}: "
+                                f"{_clip(_format_elastic_error_detail(partial_detail), 240)}"
+                            )
+            if not debug:
+                for (error_status, error_type, error_reason, root_cause_signature), indices in grouped_errors.items():
+                    index_preview = ",".join(indices[:4])
+                    if len(indices) > 4:
+                        index_preview += ",..."
+                    root_cause_suffix = (
+                        f" root_cause={_clip(root_cause_signature, 160)}" if root_cause_signature != "[]" else ""
                     )
-                hits = item.get("hits")
-                if isinstance(hits, list):
-                    for hit in hits:
-                        if not isinstance(hit, dict):
-                            continue
-                        source = hit.get("source")
-                        if not isinstance(source, dict):
-                            continue
-                        lines.append(f"{prefix} {json.dumps(source, ensure_ascii=False)}")
+                    lines.append(
+                        f"{prefix} [!] discover error: count={len(indices)} indices={index_preview} "
+                        f"status={error_status or '-'} type={error_type} reason={_clip(error_reason, 120)}"
+                        f"{root_cause_suffix}"
+                    )
         elif discover_error:
-            lines.append(f"{prefix} [-] discover unavailable: {_clip(discover_error, 120)}")
-        else:
-            lines.append(f"{prefix} <no discover hits>")
+            detail = record.get("discover_error_detail")
+            detail_text = _format_elastic_error_detail(detail) or discover_error
+            lines.append(f"{prefix} [!] discover unavailable: {_clip(detail_text, 180)}")
 
     return lines
 

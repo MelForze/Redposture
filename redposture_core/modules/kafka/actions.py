@@ -1196,7 +1196,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        return _with_optional_topics(record, f"{prefix} [+] anonymous access")
+        return ""
 
     if status == "invalid_credentials_anonymous":
         username = str(record.get("provided_username") or "user").strip() or "user"

@@ -140,7 +140,11 @@ def test_grpc_stage_debug_openapi_and_output_error_branches(monkeypatch, tmp_pat
 
     written: list[tuple[str, list[bytes]]] = []
     monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", fake_run_plan)
-    monkeypatch.setattr(stage.actions, "_write_openapi_document", lambda path, data: written.append((path, data)) or 1)
+    monkeypatch.setattr(
+        stage.actions,
+        "_write_openapi_document",
+        lambda path, data, **_kwargs: written.append((path, data)) or 1,
+    )
     args = parse_args(["grpc", "-t", "127.0.0.1", "--debug", "--openapi", str(tmp_path / "openapi.json")])
     rc = stage.run_grpc_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0

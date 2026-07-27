@@ -198,7 +198,7 @@ def test_format_detect_record_and_status_summary() -> None:
         },
         "txt",
     )
-    assert "[*] Kubernetes API" in detect
+    assert "[*] Kubernetes API (auth required:False)" in detect
 
     summary_anon = kube._status_summary_line(
         {
@@ -211,7 +211,7 @@ def test_format_detect_record_and_status_summary() -> None:
             "show_secrets": False,
         }
     )
-    assert summary_anon == "[+] anonymous access (namespaces:1)"
+    assert summary_anon is None
 
     summary_token_fail = kube._status_summary_line(
         {
@@ -1542,7 +1542,7 @@ def test_kube_status_summary_detail_and_renderer_branches() -> None:
     assert kube._status_summary_line({"status": "open_no_auth", "auth_mode": "none", "auth_required": True}) == (
         "[-] authentication required"
     )
-    assert "[+] anonymous access" in str(
+    assert (
         kube._status_summary_line(
             {
                 "status": "open_no_auth",
@@ -1552,6 +1552,7 @@ def test_kube_status_summary_detail_and_renderer_branches() -> None:
                 "namespaces": ["a"],
             }
         )
+        is None
     )
     assert "[+] token auth" in str(
         kube._status_summary_line({"status": "auth_valid", "auth_mode": "token", "auth_valid": True})

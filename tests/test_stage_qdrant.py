@@ -176,19 +176,18 @@ def test_format_detect_and_summary_records() -> None:
     assert "[*] Qdrant API" in detect
     assert "(auth required:False)" in detect
 
-    open_line = qdrant._format_record(
-        {
-            "host": "127.0.0.1",
-            "port": 6333,
-            "status": "open_no_auth",
-            "collections_count": 2,
-            "edit_probe": {"source": "anonymous", "ok": True},
-            "ghsa_f632_vm87_2m2f": {"assessment": "potentially_vulnerable"},
-        },
-        "txt",
-    )
-    assert "[+] anonymous access" in open_line
-    assert "RCE!" in open_line
+    anonymous_record = {
+        "host": "127.0.0.1",
+        "port": 6333,
+        "status": "open_no_auth",
+        "collections_count": 2,
+        "edit_probe": {"source": "anonymous", "ok": True},
+        "ghsa_f632_vm87_2m2f": {"assessment": "potentially_vulnerable"},
+    }
+    assert qdrant._format_record(anonymous_record, "txt") == ""
+    anonymous_json = json.loads(qdrant._format_record(anonymous_record, "json"))
+    assert anonymous_json["status"] == "open_no_auth"
+    assert anonymous_json["ghsa_f632_vm87_2m2f"]["assessment"] == "potentially_vulnerable"
 
     auth_line = qdrant._format_record(
         {

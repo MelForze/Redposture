@@ -1174,32 +1174,13 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 96)
     collections_count = record.get("collections_count")
     collections_text = format_count_value(collections_count)
-    edit_probe = record.get("edit_probe")
     ghsa_check = record.get("ghsa_f632_vm87_2m2f")
-    idor_text = "unknown"
-    if isinstance(edit_probe, dict):
-        probe_source = str(edit_probe.get("source") or "").strip().lower()
-        if probe_source == "anonymous":
-            if (
-                bool(edit_probe.get("ok"))
-                or bool(edit_probe.get("validation_only"))
-                or bool(edit_probe.get("reachable"))
-            ):
-                idor_text = "true"
-            else:
-                probe_status = edit_probe.get("status")
-                if probe_status in {401, 403}:
-                    idor_text = "false"
-                elif str(edit_probe.get("error") or "").strip():
-                    idor_text = "false"
-        elif probe_source:
-            idor_text = "false"
     rce_suffix = ""
     if isinstance(ghsa_check, dict) and str(ghsa_check.get("assessment") or "").strip() == "potentially_vulnerable":
         rce_suffix = " RCE!"
 
     if status == "open_no_auth":
-        return f"{prefix} [+] anonymous access{rce_suffix} (collections:{collections_text}) (idor:{idor_text})"
+        return ""
     if status == "open_auth":
         return (
             f"{prefix} [+] collections access with api-key{rce_suffix} "
