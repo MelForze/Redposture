@@ -579,13 +579,10 @@ def test_audit_zookeeper_emits_records_in_input_order(monkeypatch: pytest.Monkey
     detect_lines = [line for line in lines if "ZooKeeper Service" in line]
     status_lines = [line for line in lines if "anonymous access" in line]
     assert len(detect_lines) == 2
-    assert len(status_lines) == 2
+    assert status_lines == []
     assert "\thost-a\t" in detect_lines[0]
     assert "\thost-b\t" in detect_lines[1]
-    assert "\thost-a\t" in status_lines[0]
-    assert "\thost-b\t" in status_lines[1]
-    assert lines.index(detect_lines[0]) < lines.index(status_lines[0])
-    assert lines.index(detect_lines[1]) < lines.index(status_lines[1])
+    assert all("(auth required:False)" in line for line in detect_lines)
 
 
 def test_audit_zookeeper_two_pass_scope_and_policy_parity(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -690,7 +687,8 @@ def test_audit_zookeeper_two_pass_scope_and_policy_parity(monkeypatch: pytest.Mo
     assert {host for host, *_rest in deep_calls} == {"host-open", "host-valid"}
     assert all(timeout == 2.5 for _, _, timeout, _ in detect_calls + deep_calls)
     assert all(retries == 3 for _, _, _, retries in detect_calls + deep_calls)
-    assert any("host-open" in line and "(znodes:123)" in line for line in lines)
+    assert any("host-open" in line and "(auth required:False)" in line for line in lines)
+    assert not any("host-open" in line and "[+] anonymous access" in line for line in lines)
     assert any("host-valid" in line and "(znodes:321)" in line for line in lines)
     assert any("host-auth" in line and "(auth required:True)" in line for line in lines)
 
@@ -1185,9 +1183,8 @@ def test_audit_zookeeper_digest_on_open_target_is_unverified(monkeypatch) -> Non
     assert record["credential_verdict"] == "unverified_anonymous"
     assert record["auth_required"] is False
     rendered = _format_record(record, "txt")
-    assert "anonymous access" in rendered
-    assert "(credentials:unverified)" in rendered
-    assert "admin:admin" not in rendered
+    assert rendered == ""
+    assert "(auth required:False)" in zookeeper_stage._format_detect_record(record, "txt")
     assert any("/clickhouse:<Access Denied>" in line for line in _format_znodes_detail_records(record, "txt"))
 
 
@@ -1863,23 +1860,20 @@ def test_format_znodes_detail_records_cover_text_and_json_paths() -> None:
     assert any('"type": "znode_dump"' in line for line in json_lines)
 
 
-def test_format_record_shows_exact_znode_count_without_plus_and_capabilities() -> None:
-    line = _format_record(
-        {
-            "status": "open_no_auth",
-            "host": "127.0.0.1",
-            "port": 2181,
-            "znode_count": 2050,
-            "znodes_truncated": True,
-            "can_create_znode": True,
-            "can_delete_znode": False,
-        },
-        "txt",
-    )
-    assert "(znodes:2050)" in line
-    assert "(znodes:2050+)" not in line
-    assert "(create:True)" in line
-    assert "(delete:False)" in line
+def test_format_record_suppresses_open_no_auth_txt_but_preserves_json() -> None:
+    record = {
+        "status": "open_no_auth",
+        "host": "127.0.0.1",
+        "port": 2181,
+        "znode_count": 2050,
+        "znodes_truncated": True,
+        "can_create_znode": True,
+        "can_delete_znode": False,
+    }
+    assert _format_record(record, "txt") == ""
+    rendered_json = _format_record(record, "json")
+    assert '"status": "open_no_auth"' in rendered_json
+    assert '"znode_count": 2050' in rendered_json
 
 
 def test_format_znodes_detail_records_shows_truncation_note() -> None:

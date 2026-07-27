@@ -9,6 +9,7 @@ import pytest
 from redposture_core.clients.http_api import (
     HttpApiClient,
     HttpClientConfig,
+    HttpResponse,
     _decode_chunked_body,
     _flush_tls_outgoing,
     _parse_http_response_bytes,
@@ -62,6 +63,7 @@ def test_http_api_client_get_success(monkeypatch) -> None:
     assert response.status == 200
     assert response.json() == {"status": "ok"}
     assert response.headers["X-Test"] == "1"
+    assert response.truncated is False
     req, timeout = opener.requests[0]
     assert req.full_url == "http://127.0.0.1:8080/api"
     assert req.get_method() == "GET"
@@ -77,6 +79,7 @@ def test_http_api_client_post_json_and_response_cap(monkeypatch) -> None:
     response = client.post("http://127.0.0.1:8080/api", json_body={"a": 1})
 
     assert response.body == b"abc"
+    assert response.truncated is True
     req, _timeout = opener.requests[0]
     assert req.data == b'{"a":1}'
     assert req.get_header("Content-type") == "application/json"
@@ -98,6 +101,31 @@ def test_http_api_client_http_error_is_response(monkeypatch) -> None:
     assert response.status == 403
     assert response.body == b"denied"
     assert response.error is None
+    assert response.truncated is False
+
+
+def test_http_api_client_http_error_reports_response_cap_truncation(monkeypatch) -> None:
+    error = urllib.error.HTTPError(
+        "http://127.0.0.1/api",
+        403,
+        "Forbidden",
+        {"Content-Type": "text/plain"},
+        _FakeResponse(b"denied"),
+    )
+    opener = _FakeOpener(error)
+    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", opener.open)
+
+    response = HttpApiClient(HttpClientConfig(response_size_cap=3)).get("http://127.0.0.1/api")
+
+    assert response.status == 403
+    assert response.body == b"den"
+    assert response.truncated is True
+
+
+def test_http_response_truncated_defaults_false_for_compatible_construction() -> None:
+    response = HttpResponse(status=200, body=b"ok", headers={})
+
+    assert response.truncated is False
 
 
 def test_http_api_client_transport_error_is_normalized(monkeypatch) -> None:
@@ -147,6 +175,7 @@ def test_http_api_client_https_target_via_https_proxy_uses_manual_tunnel(monkeyp
 
     assert response.status == 200
     assert response.json() == {"ok": True}
+    assert response.truncated is False
     assert opened[0][1] == ("proxmox.internal", 8006)
     assert opened[0][2] == 4.0
     assert opened[0][0].scheme == "https"
@@ -154,6 +183,32 @@ def test_http_api_client_https_target_via_https_proxy_uses_manual_tunnel(monkeyp
     assert b"Host: proxmox.internal:8006" in exchanged[0]
     assert b"Accept: application/json" in exchanged[0]
     assert fake_socket.closed is True
+
+
+def test_https_target_via_https_proxy_reports_response_cap_truncation(monkeypatch) -> None:
+    class _FakeSocket:
+        def settimeout(self, _value: float) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def _fake_open_connection(_proxy: Any, _address: tuple[str, int], timeout: float) -> _FakeSocket:
+        _ = timeout
+        return _FakeSocket()
+
+    def _fake_exchange(_sock: Any, _context: Any, **_kwargs: Any) -> tuple[bytes, bool]:
+        return b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nabcdef", False
+
+    monkeypatch.setattr("redposture_core.clients.http_api.open_connection_via_proxy", _fake_open_connection)
+    monkeypatch.setattr("redposture_core.clients.http_api._tls_over_tls_exchange", _fake_exchange)
+
+    client = HttpApiClient(HttpClientConfig(proxy="https://127.0.0.1:18443", response_size_cap=3))
+    response = client.get("https://proxmox.internal:8006/api2/json/version")
+
+    assert response.status == 200
+    assert response.body == b"abc"
+    assert response.truncated is True
 
 
 def test_parse_http_response_bytes_dechunks_lowercase_transfer_encoding() -> None:

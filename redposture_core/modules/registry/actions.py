@@ -2789,7 +2789,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 96)
 
     if status == "open_no_auth":
-        return _with_optional_images(record, f"{prefix} [+] anonymous access")
+        return ""
 
     if status == "valid_credentials":
         if record.get("token_provided"):

@@ -1711,7 +1711,7 @@ def _status_summary_line(record: dict[str, Any]) -> str | None:
         if auth_required is True:
             return "[-] authentication required"
         if auth_required is False:
-            return f"[+] anonymous access{counts_text}"
+            return None
         return "[*] detected"
 
     if auth_valid is True:

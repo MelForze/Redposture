@@ -298,7 +298,7 @@ def test_grpc_help_sections_are_present() -> None:
     assert "--invoke /package.Service/Method" in help_text
     assert "--proto file" in help_text
     assert "--protoset file" in help_text
-    assert "--openapi path" in help_text
+    assert "--openapi [path]" in help_text
 
 
 def test_kafka_help_lists_every_runtime_default_port() -> None:
@@ -641,6 +641,9 @@ def test_grpc_invoke_schema_export_flags_are_parsed() -> None:
     assert args.proto_path == ["proto"]
     assert args.protoset == ["health.protoset"]
     assert args.openapi == "grpc.openapi.json"
+
+    automatic_path_args = parse_args(["grpc", "-t", "127.0.0.1", "--openapi"])
+    assert automatic_path_args.openapi == ""
 
 
 def test_grpc_username_password_pair_validation() -> None:

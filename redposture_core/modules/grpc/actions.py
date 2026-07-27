@@ -1479,10 +1479,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     protocol = str(record.get("protocol_flavor") or "grpc")
     return (
         f"{prefix} [*] gRPC Service (transport:{transport}) (protocol:{protocol}) "
-        f"(reflection:{_reflection_status_text(record.get('reflection_enabled'))}) "
-        f"(health_access:{_access_text(record.get('health_access'))}) "
-        f"(reflection_access:{_access_text(record.get('reflection_access'))}) "
-        f"(invoke_access:{_access_text(record.get('invoke_access'), default=_ACCESS_NOT_TESTED)})"
+        f"(reflection:{_reflection_status_text(record.get('reflection_enabled'))})"
     )
 
 

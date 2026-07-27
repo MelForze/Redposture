@@ -151,9 +151,14 @@ def test_all_audit_summary_renderers_use_unknown_instead_of_dash_for_counts() ->
     from redposture_core.modules.registry import actions as registry
     from redposture_core.modules.zookeeper import actions as zookeeper
 
+    suppressed_anonymous_summaries = [
+        etcd._format_record({"host": "h", "port": 2379, "status": "open_no_auth", "key_count": None}, "txt"),
+        qdrant._format_record({"host": "h", "port": 6333, "status": "open_no_auth", "collections_count": None}, "txt"),
+    ]
+    assert suppressed_anonymous_summaries == ["", ""]
+
     rendered = [
         redis._with_optional_keys({"key_count": None}, "line"),
-        etcd._format_record({"host": "h", "port": 2379, "status": "open_no_auth", "key_count": None}, "txt"),
         zookeeper._with_optional_znodes({"znode_count": None}, "line"),
         kafka._with_optional_topics({"topic_count": None}, "line"),
         registry._with_optional_images({"image_count": None}, "line"),
@@ -161,7 +166,6 @@ def test_all_audit_summary_renderers_use_unknown_instead_of_dash_for_counts() ->
         postgres._caps_suffix({}),
         mongodb._caps_suffix({}),
         clickhouse._caps_suffix({}),
-        qdrant._format_record({"host": "h", "port": 6333, "status": "open_no_auth", "collections_count": None}, "txt"),
         consul._scope_counts_suffix({}),
     ]
 

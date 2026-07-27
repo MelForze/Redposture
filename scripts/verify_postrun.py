@@ -515,7 +515,7 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     ),
     # A: rich-substring for modules that previously had no content check (elastic, kubeapi,
     # grafana). Substrings extracted from real matrix JSON artifacts; verified before use.
-    "elastic_open": ("finance-transactions-2026.05", '"discover_results"', '"server_version"'),
+    "elastic_open": ('"discover_schema_version": 2', '"discover_findings"', "elastic-prod-api-key-2026"),
     "elastic_auth": (".security-7", "user-observer", '"can_read": true'),
     "elastic_extended_all_actions": (".security-7", '"can_write": true', '"effective_username": "elastic"'),
     "elastic_extended_ports_defcreds": ('"discover_results"',),

@@ -107,13 +107,13 @@ def test_fix_e2_password_only_credential_flows_through() -> None:
 def test_fix_e3_open_no_auth_fast_path_opt_in() -> None:
     """The G-batch extended E3 to more modules. Every audit module whose
     detect probe genuinely confirms "no credentials needed" (redis/docker/
-    elastic/clickhouse/mongodb/postgres/qdrant/etcd/registry/zookeeper/
-    kubeapi) opts in. Kafka keeps its hardcoded shortcut. Consul/proxmox/
+    clickhouse/mongodb/postgres/qdrant/etcd/registry/zookeeper/kubeapi) opts
+    in. Elastic deliberately keeps probing requested credentials even when
+    anonymous access works. Kafka keeps its hardcoded shortcut. Consul/proxmox/
     gitlab/oracle stay opted out — their auth model doesn't have a clean
     'anonymous' probe that guarantees future creds would be redundant."""
     from redposture_core.modules.clickhouse.stage import build_clickhouse_spec
     from redposture_core.modules.docker.stage import build_docker_spec
-    from redposture_core.modules.elastic.stage import build_elastic_spec
     from redposture_core.modules.etcd.stage import build_etcd_spec
     from redposture_core.modules.kubeapi.stage import build_kubeapi_spec
     from redposture_core.modules.mongodb.stage import build_mongodb_spec
@@ -126,7 +126,6 @@ def test_fix_e3_open_no_auth_fast_path_opt_in() -> None:
     for build in (
         build_redis_spec,
         build_docker_spec,
-        build_elastic_spec,
         build_clickhouse_spec,
         build_mongodb_spec,
         build_postgres_spec,
@@ -140,6 +139,10 @@ def test_fix_e3_open_no_auth_fast_path_opt_in() -> None:
         assert spec.keep_anonymous_open_no_auth is True, (
             f"{build.__name__} spec did not opt in to keep_anonymous_open_no_auth"
         )
+
+    from redposture_core.modules.elastic.stage import build_elastic_spec
+
+    assert build_elastic_spec(SimpleNamespace()).keep_anonymous_open_no_auth is False
 
     # Consul/proxmox stay opted OUT to avoid breaking their token-based flows.
     # gRPC also stays opted out: public Health is not proof that application

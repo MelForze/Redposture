@@ -150,6 +150,22 @@ def test_postgres_weak_default_format_uses_effective_default_pair() -> None:
     assert "[+] pgbouncer:pgbouncer" in line
 
 
+def test_postgres_open_no_auth_is_reported_only_on_detect_line_in_txt() -> None:
+    record = {
+        "timestamp": "2026-01-01T00:00:00Z",
+        "host": "127.0.0.1",
+        "port": 5432,
+        "status": "open_no_auth",
+        "is_postgres": True,
+        "auth_required": False,
+    }
+
+    detect_line = postgres._format_detect_record(record, "txt")
+    assert "[*] Postgres Database (auth required:False)" in detect_line
+    assert postgres._format_record(record, "txt") == ""
+    assert json.loads(postgres._format_record(record, "json"))["status"] == "open_no_auth"
+
+
 class _ConsoleCapture:
     instances: list[_ConsoleCapture] = []
 

@@ -2347,7 +2347,7 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
         transport = str(record.get("transport") or "unknown")
         if keeper_match is True:
             version = str(record.get("version") or "unknown")
-            return f"{prefix} [*] ClickHouse Keeper version:{version}"
+            return f"{prefix} [*] ClickHouse Keeper version:{version} (auth required:{auth_required_text})"
         return (
             f"{prefix} [!] ZooKeeper-compatible service "
             f"(Keeper not confirmed, transport:{transport}, auth required:{auth_required_text})"
@@ -2367,13 +2367,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        credential_suffix = (
-            " (credentials:unverified)" if record.get("credential_verdict") == "unverified_anonymous" else ""
-        )
-        return _with_optional_znodes(
-            record,
-            f"{prefix} [+] anonymous access {_znode_caps_suffix(record)}{credential_suffix}",
-        )
+        return ""
 
     if status == "invalid_credentials_anonymous":
         return f"{prefix} [-] {_credentials_label(record)}"

@@ -277,7 +277,9 @@ def test_kafka_error_helpers_and_format_record_statuses() -> None:
     assert kafka._is_suppressed_fail_record({"status": "fail", "error": "connection timeout"}) is True
 
     base = {"host": "127.0.0.1", "port": 9092, "topic_count": 2}
-    assert "[+] anonymous access (topics:2)" in kafka._format_record({**base, "status": "open_no_auth"}, "txt")
+    open_record = {**base, "status": "open_no_auth"}
+    assert kafka._format_record(open_record, "txt") == ""
+    assert json.loads(kafka._format_record(open_record, "json"))["status"] == "open_no_auth"
     assert "[-] alice:bad" in kafka._format_record(
         {**base, "status": "invalid_credentials_anonymous", "provided_username": "alice", "provided_password": "bad"},
         "txt",
@@ -370,7 +372,8 @@ def test_run_kafka_stage_defcreds_keeps_no_auth_result_as_anonymous(monkeypatch:
 
     assert rc == 0
     plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
-    assert any("[+] anonymous access" in msg for msg in plains)
+    assert any("Kafka Broker (auth required:False)" in msg for msg in plains)
+    assert not any("[+] anonymous access" in msg for msg in plains)
     assert not any("[-] kafka:password" in msg for msg in plains)
     assert not any("[-] admin:admin" in msg for msg in plains)
     assert calls == [(None, None, False), (None, None, True)]
@@ -505,7 +508,8 @@ def test_kafka_malformed_frame_failure_does_not_abort_next_target(monkeypatch: p
 
     assert totals == (2, 1, 0, 0, 1)
     assert any("invalid Kafka frame size 1213486160" in line for line in emitted)
-    assert any("[+] anonymous access" in line and "\tok\t" in line for line in emitted)
+    assert any("Kafka Broker (auth required:False)" in line and "\tok\t" in line for line in emitted)
+    assert not any("[+] anonymous access" in line for line in emitted)
 
 
 def test_kafka_frame_reader_and_request_helpers_cover_edge_cases() -> None:

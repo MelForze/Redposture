@@ -14,8 +14,8 @@ from ...stage_runtime import (
     AuditHookContext,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    has_username_password_credential_file,
 )
+from ...utils import parse_username_password_credential_file
 from . import actions, policy, render
 
 _DEFAULT_PORT = 9200
@@ -24,7 +24,61 @@ _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_elastic_host
 
 
+def _build_elastic_credential_runs(args: Any) -> tuple[AuditCredentialRun, ...]:
+    """Merge Elastic credentials in deterministic priority order."""
+
+    runs: list[AuditCredentialRun] = []
+    seen_basic: set[tuple[str, str]] = set()
+
+    api_token = getattr(args, "apitoken", None) or getattr(args, "api_token", None) or getattr(args, "token", None)
+    if api_token:
+        runs.append(AuditCredentialRun(token=str(api_token), source="token"))
+
+    username = getattr(args, "username", None)
+    password = getattr(args, "password", None)
+    credential_file_entries = parse_username_password_credential_file(username, password)
+    basic_candidates: list[tuple[str, str, str]] = []
+    if credential_file_entries is not None:
+        basic_candidates.extend((str(entry.username), str(entry.password), "file") for entry in credential_file_entries)
+    elif username is not None and password is not None:
+        basic_candidates.append((str(username), str(password), "provided"))
+
+    for candidate_username, candidate_password, source in basic_candidates:
+        pair = (candidate_username, candidate_password)
+        if pair in seen_basic:
+            continue
+        seen_basic.add(pair)
+        runs.append(
+            AuditCredentialRun(
+                username=candidate_username,
+                password=candidate_password,
+                source=source,
+            )
+        )
+
+    if bool(getattr(args, "defcreds", False)):
+        for default_username, default_password in actions._build_credential_runs(None, None, True):
+            if default_username is None or default_password is None:
+                continue
+            pair = (default_username, default_password)
+            if pair in seen_basic:
+                continue
+            seen_basic.add(pair)
+            runs.append(
+                AuditCredentialRun(
+                    username=default_username,
+                    password=default_password,
+                    source="default",
+                )
+            )
+
+    if not runs:
+        runs.append(AuditCredentialRun(source="anonymous"))
+    return tuple(runs)
+
+
 def build_elastic_plan(args: Any) -> AuditCommandPlan:
+    args._audit_credential_runs = _build_elastic_credential_runs(args)
     return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
 
 
@@ -36,6 +90,21 @@ def _build_elastic_host_stage_options(args: Any) -> dict[str, Any]:
         "show_users": bool(getattr(args, "user", False)),
         "discover": bool(getattr(args, "discover", False)),
     }
+
+
+def _elastic_credential_gate(
+    credential: AuditCredentialRun,
+    record: AuditRecord,
+) -> tuple[bool, str]:
+    if credential.username is None and credential.password is None and credential.token is None:
+        status = str(record.status or "")
+        return status == "open_no_auth", f"status={status}"
+    auth_valid = record.extra.get("auth_valid")
+    verified = auth_valid is True
+    return (
+        verified,
+        "credential identity verified" if verified else "credential identity unverified",
+    )
 
 
 def build_elastic_spec(args: Any) -> ModuleAuditSpec:
@@ -83,8 +152,12 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_elastic_line,
-        # E3 opt-in: Elastic anon-open cluster never needs a credential probe.
-        keep_anonymous_open_no_auth=True,
+        suppress_undetected_records_in_text=True,
+        credential_gate=_elastic_credential_gate,
+        record_all_credential_attempts=True,
+        fallback_to_anonymous_detect_record=True,
+        continue_after_credential_error=True,
+        structured_output_redact_fields=("api_token", "provided_password"),
     )
 
 
@@ -96,34 +169,10 @@ def run_elastic_stage(args: Any, logger: Any) -> int:
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
-    if getattr(args, "apitoken", None):
-        args.api_token = args.apitoken
-        args.token = args.apitoken
-        args.username = None
-        args.password = None
-        args.defcreds = False
-    if (
-        not getattr(args, "api_token", None)
-        and not has_username_password_credential_file(args)
-        and not (getattr(args, "username", None) is not None and getattr(args, "password", None) is None)
-    ):
-        provided_pair = (getattr(args, "username", None), getattr(args, "password", None))
-        args._audit_credential_runs = tuple(
-            AuditCredentialRun(
-                username=user,
-                password=password,
-                source=(
-                    "provided"
-                    if (user, password) == provided_pair and provided_pair[0] is not None
-                    else "default"
-                    if user is not None
-                    else "anonymous"
-                ),
-            )
-            for user, password in actions._build_credential_runs(
-                getattr(args, "username", None), getattr(args, "password", None), bool(getattr(args, "defcreds", False))
-            )
-        )
+    api_token = getattr(args, "apitoken", None) or getattr(args, "api_token", None) or getattr(args, "token", None)
+    if api_token:
+        args.api_token = api_token
+        args.token = api_token
     try:
         plan = build_elastic_plan(args)
     except ValueError as exc:

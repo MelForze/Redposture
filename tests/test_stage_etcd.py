@@ -171,17 +171,11 @@ def test_dump_v2_all_from_body_returns_sorted_pairs() -> None:
 def test_format_record_for_main_statuses() -> None:
     base = {"host": "127.0.0.1", "port": 2379}
 
-    line_open = _format_record({**base, "status": "open_no_auth", "key_count": 3}, "txt")
-    assert "[+] anonymous access (keys:3)" in line_open
-
-    line_empty = _format_record({**base, "status": "open_no_auth", "key_count": 0}, "txt")
-    assert "(keys:0)" in line_empty
-
-    line_count_unknown = _format_record(
-        {**base, "status": "open_no_auth", "key_count": None, "key_count_error": "invalid count"}, "txt"
-    )
-    assert "(keys:unknown) err=invalid count" in line_count_unknown
-    assert "keys:-" not in line_count_unknown
+    anonymous_record = {**base, "status": "open_no_auth", "key_count": 3}
+    assert _format_record(anonymous_record, "txt") == ""
+    anonymous_json = json.loads(_format_record(anonymous_record, "json"))
+    assert anonymous_json["status"] == "open_no_auth"
+    assert anonymous_json["key_count"] == 3
 
     line_auth = _format_record({**base, "status": "auth_required"}, "txt")
     assert "[-] authentication required" in line_auth
@@ -448,7 +442,8 @@ def test_audit_etcd_malformed_v3_count_is_explicitly_unknown(monkeypatch) -> Non
     assert record["key_count"] is None
     assert record["key_count_state"] == "unknown"
     assert "invalid count" in str(record["key_count_error"])
-    assert "(keys:unknown) err=count response returned invalid count" in _format_record(record, "txt")
+    assert _format_record(record, "txt") == ""
+    assert "count response returned invalid count" in json.loads(_format_record(record, "json"))["key_count_error"]
 
 
 def test_audit_etcd_authenticated_reads_propagate_token_and_render_selected_default(monkeypatch) -> None:
@@ -621,8 +616,9 @@ def test_audit_etcd_targets_emits_detect_status_and_key_lines(monkeypatch) -> No
     )
 
     assert (total, open_no_auth, auth_required, failed) == (1, 1, 0, 0)
-    assert any("[*] etcd Database" in line for line in lines)
-    assert any("[+] anonymous access" in line for line in lines)
+    detect_line = next(line for line in lines if "[*] etcd Database" in line)
+    assert "(auth required:False)" in detect_line
+    assert not any("[+] anonymous access" in line for line in lines)
     assert any("[*] Show Keys" in line for line in lines)
     assert any("[*] Dump Keys" in line for line in lines)
 

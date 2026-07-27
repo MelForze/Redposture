@@ -187,7 +187,7 @@ def test_detect_line_for_fail_not_consul_and_detected() -> None:
     assert "(auth required:False)" in detected
 
 
-def test_summary_line_for_anonymous_access_and_partial() -> None:
+def test_summary_line_suppresses_full_anonymous_access_but_keeps_partial() -> None:
     full = consul._summary_line(
         {
             "is_consul": True,
@@ -197,7 +197,7 @@ def test_summary_line_for_anonymous_access_and_partial() -> None:
             "rce": False,
         }
     )
-    assert full is not None and full.startswith("[+] anonymous access")
+    assert full is None
 
     partial = consul._summary_line(
         {

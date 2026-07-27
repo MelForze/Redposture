@@ -21,7 +21,7 @@ from google.protobuf import (
 from redposture_core.cli_args import parse_args
 from redposture_core.clients import grpc as grpc_client
 from redposture_core.modules.grpc import stage as grpc_stage
-from redposture_core.stage_runtime import AuditCommandResult
+from redposture_core.stage_runtime import AuditCommandResult, AuditRecord, render_record_with_module
 
 
 def _add_field(
@@ -232,6 +232,23 @@ def test_openapi_models_proto_json_maps_int64_oneof_optional_and_well_known_type
     assert {variant["type"] for variant in properties["ratio"]["oneOf"]} == {"number", "string"}
 
 
+def test_openapi_servers_use_discovered_urls_without_localhost() -> None:
+    document = grpc_client._generate_openapi_document(
+        [_single_method_descriptor("servers.proto", "servers")],
+        server_urls=[
+            "https://10.17.216.154:50053",
+            "http://[2001:db8::3]:50051",
+            "https://10.17.216.154:50053",
+        ],
+    )
+
+    assert document["servers"] == [
+        {"url": "http://[2001:db8::3]:50051"},
+        {"url": "https://10.17.216.154:50053"},
+    ]
+    assert "localhost" not in json.dumps(document["servers"])
+
+
 def test_openapi_reports_conflicting_same_name_descriptor_variants() -> None:
     first = _single_method_descriptor("shared.proto", "first")
     second = _single_method_descriptor("shared.proto", "second")
@@ -369,14 +386,24 @@ def test_openapi_stage_aggregates_and_deduplicates_all_target_descriptors(
                 {
                     "host": "10.0.0.1",
                     "port": 50051,
+                    "is_grpc": True,
+                    "transport_mode": "plaintext",
                     "descriptor_protos_b64": _encoded_descriptors(first),
                 },
                 {
                     "host": "10.0.0.2",
                     "port": 50052,
+                    "is_grpc": True,
+                    "transport_mode": "tls",
                     "descriptor_protos_b64": _encoded_descriptors(first, second),
                 },
-                {"host": "2001:db8::3", "port": 50053, "descriptor_protos_b64": None},
+                {
+                    "host": "2001:db8::3",
+                    "port": 50053,
+                    "is_grpc": True,
+                    "transport_mode": "plaintext",
+                    "descriptor_protos_b64": None,
+                },
             ],
             detected_count=3,
             emitted_lines=0,
@@ -391,6 +418,11 @@ def test_openapi_stage_aggregates_and_deduplicates_all_target_descriptors(
 
     document = json.loads(output_path.read_text(encoding="utf-8"))
     assert set(document["paths"]) == {"/first.API/Call", "/second.API/Call"}
+    assert document["servers"] == [
+        {"url": "http://10.0.0.1:50051"},
+        {"url": "http://[2001:db8::3]:50053"},
+        {"url": "https://10.0.0.2:50052"},
+    ]
     assert document["x-redposture"] == {
         "descriptor_count": 2,
         "descriptor_errors": [],
@@ -402,7 +434,80 @@ def test_openapi_stage_aggregates_and_deduplicates_all_target_descriptors(
         "descriptors_obtained": True,
         "targets_without_descriptors": ["[2001:db8::3]:50053"],
     }
-    assert "descriptors were not obtained for targets: [2001:db8::3]:50053" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "descriptors were not obtained for targets: [2001:db8::3]:50053" in output
+    assert f"gRPC OpenAPI exported: {output_path} (2 operations)" in output
+
+
+def test_openapi_without_path_uses_endpoint_filename_and_compact_rendering(
+    monkeypatch: Any,
+    tmp_path: Path,
+    capsys: Any,
+) -> None:
+    descriptor = _single_method_descriptor("auto.proto", "auto")
+
+    def _run_plan(_self: Any, _plan: Any) -> AuditCommandResult:
+        return AuditCommandResult(
+            records=[
+                {
+                    "host": "10.17.216.154",
+                    "port": 50053,
+                    "is_grpc": True,
+                    "transport_mode": "tls",
+                    "descriptor_protos_b64": _encoded_descriptors(descriptor),
+                }
+            ],
+            detected_count=1,
+            emitted_lines=1,
+            typed_records=[],
+        )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("redposture_core.stage_runtime.AuditCommandRunner.run_plan", _run_plan)
+    args = parse_args(["grpc", "-t", "10.17.216.154", "--port", "50053", "--openapi"])
+
+    assert grpc_stage.run_grpc_stage(args, SimpleNamespace(log=lambda *_args, **_kwargs: None)) == 0
+
+    output_path = tmp_path / "openapi_10.17.216.154_50053.json"
+    assert output_path.is_file()
+    document = json.loads(output_path.read_text(encoding="utf-8"))
+    assert set(document["paths"]) == {"/auto.API/Call"}
+    assert document["servers"] == [{"url": "https://10.17.216.154:50053"}]
+    assert "gRPC OpenAPI exported: openapi_10.17.216.154_50053.json (1 operation)" in capsys.readouterr().out
+
+    record = AuditRecord.from_mapping(
+        {
+            "host": "10.17.216.154",
+            "port": 50053,
+            "status": "detected",
+            "is_grpc": True,
+            "transport_mode": "tls",
+            "protocol_flavor": "grpc",
+            "reflection_enabled": True,
+            "analysis_performed": True,
+            "services": ["auto.API"],
+        },
+        module="grpc",
+        service="grpc",
+    )
+    compact_lines = render_record_with_module(grpc_stage.build_grpc_spec(args).render_module, record, "txt")
+    assert any("gRPC Service" in line for line in compact_lines)
+    assert not any("Services" in line or "service=auto.API" in line for line in compact_lines)
+
+    analyzed_args = parse_args(["grpc", "-t", "10.17.216.154", "--port", "50053", "--analyze", "--openapi"])
+    analyzed_lines = render_record_with_module(
+        grpc_stage.build_grpc_spec(analyzed_args).render_module,
+        record,
+        "txt",
+    )
+    assert any("service=auto.API" in line for line in analyzed_lines)
+
+
+def test_openapi_without_path_uses_merged_filename_for_multiple_targets() -> None:
+    args = parse_args(["grpc", "-t", "10.0.0.1,10.0.0.2", "--openapi"])
+    plan = grpc_stage.build_grpc_plan(args)
+
+    assert grpc_stage._resolve_openapi_path(args, plan) == "openapi_merged.json"
 
 
 def test_openapi_stage_writes_empty_artifact_and_reports_missing_descriptors(
@@ -412,7 +517,15 @@ def test_openapi_stage_writes_empty_artifact_and_reports_missing_descriptors(
 ) -> None:
     def _run_plan(_self: Any, _plan: Any) -> AuditCommandResult:
         return AuditCommandResult(
-            records=[{"host": "10.0.0.1", "port": 50051, "descriptor_protos_b64": None}],
+            records=[
+                {
+                    "host": "10.0.0.1",
+                    "port": 50051,
+                    "is_grpc": True,
+                    "transport_mode": "plaintext",
+                    "descriptor_protos_b64": None,
+                }
+            ],
             detected_count=1,
             emitted_lines=0,
             typed_records=[],
@@ -426,6 +539,7 @@ def test_openapi_stage_writes_empty_artifact_and_reports_missing_descriptors(
 
     document = json.loads(output_path.read_text(encoding="utf-8"))
     assert document["paths"] == {}
+    assert document["servers"] == [{"url": "http://10.0.0.1:50051"}]
     assert document["x-redposture"]["descriptors_obtained"] is False
     assert document["x-redposture"]["targets_without_descriptors"] == ["10.0.0.1:50051"]
     assert "descriptors were not obtained from any target" in capsys.readouterr().out
@@ -444,11 +558,15 @@ def test_openapi_stage_preserves_cross_target_descriptor_conflicts(
                 {
                     "host": "10.0.0.1",
                     "port": 50051,
+                    "is_grpc": True,
+                    "transport_mode": "plaintext",
                     "descriptor_protos_b64": _encoded_descriptors(first),
                 },
                 {
                     "host": "10.0.0.2",
                     "port": 50052,
+                    "is_grpc": True,
+                    "transport_mode": "tls",
                     "descriptor_protos_b64": _encoded_descriptors(second),
                 },
             ],

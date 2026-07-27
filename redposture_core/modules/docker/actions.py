@@ -453,7 +453,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     prefix = _nxc_prefix(record)
     status = str(record.get("status") or "fail")
     if status == "open_no_auth":
-        return f"{prefix} [+] anonymous access{_caps_suffix(record)}"
+        return ""
     if status == "valid_credentials":
         return f"{prefix} [+] TLS client certificate accepted{_caps_suffix(record)}"
     if status == "auth_required":

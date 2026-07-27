@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import logging
 from types import SimpleNamespace
 
@@ -545,9 +546,11 @@ def test_format_record_status_variants() -> None:
         "database_count": 2,
     }
 
-    line_anon = clickhouse_stage._format_record({**base, "status": "open_no_auth"}, "txt")
-    assert "[+] anonymous access" in line_anon
-    assert "(read:false)" in line_anon
+    anonymous_record = {**base, "status": "open_no_auth"}
+    assert clickhouse_stage._format_record(anonymous_record, "txt") == ""
+    anonymous_json = json.loads(clickhouse_stage._format_record(anonymous_record, "json"))
+    assert anonymous_json["status"] == "open_no_auth"
+    assert anonymous_json["read_capability"] is False
 
     line_auth = clickhouse_stage._format_record(
         {**base, "status": "auth_required", "attempted_credentials": 2},
@@ -1367,7 +1370,7 @@ def test_clickhouse_helper_predicates_and_close_client() -> None:
         clickhouse_stage._is_connection_refused_fail_record({"status": "fail", "error": "connection refused"}) is True
     )
 
-    assert clickhouse_stage._should_emit_status_line({"status": "open_no_auth"}, "txt") is True
+    assert clickhouse_stage._should_emit_status_line({"status": "open_no_auth"}, "txt") is False
     assert clickhouse_stage._should_emit_status_line({"status": "auth_required"}, "txt") is False
     assert (
         clickhouse_stage._should_emit_status_line(

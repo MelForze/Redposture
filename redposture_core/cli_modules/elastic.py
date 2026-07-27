@@ -109,7 +109,7 @@ def configure_elastic_parser(
     actions.add_argument(
         "--discover",
         action="store_true",
-        help="Search all indices for potential secret leaks using query_string.",
+        help="Audit accessible indices and configurations for potential secret leaks.",
     )
 
 

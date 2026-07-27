@@ -139,8 +139,9 @@ def test_pairwise_ignores_last_odd_item() -> None:
 def test_format_record_for_credential_states() -> None:
     base = {"host": "127.0.0.1", "port": 6379, "key_count": 2}
 
-    line_anon = redis_stage._format_record({**base, "status": "open_no_auth"}, "txt")
-    assert "[+] anonymous access (keys:2)" in line_anon
+    anonymous_record = {**base, "status": "open_no_auth"}
+    assert redis_stage._format_record(anonymous_record, "txt") == ""
+    assert json.loads(redis_stage._format_record(anonymous_record, "json"))["status"] == "open_no_auth"
 
     line_default = redis_stage._format_record({**base, "status": "weak_default_creds"}, "txt")
     assert "[+] redis:redis" in line_default

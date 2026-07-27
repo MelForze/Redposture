@@ -171,7 +171,7 @@ def _friendly_error_from_exception(exc: BaseException) -> str:
 def _should_emit_status_line(record: dict[str, Any], output_format: str) -> bool:
     if output_format != "txt":
         return True
-    return str(record.get("status") or "") != "auth_required"
+    return str(record.get("status") or "") not in {"auth_required", "open_no_auth"}
 
 
 def _is_auth_error(value: Any) -> bool:
@@ -1785,7 +1785,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 92)
 
     if status == "open_no_auth":
-        return f"{prefix} [+] anonymous access {_caps_suffix(record)}"
+        return ""
 
     if status == "weak_default_creds":
         user = str(record.get("effective_username") or "default")

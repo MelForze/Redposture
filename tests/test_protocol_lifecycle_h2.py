@@ -153,15 +153,22 @@ def test_elastic_lifecycle_detect_is_anonymous_and_actions_use_only_selected_aut
 
     auth_attempts = 0
 
-    def _verify_auth(*_args, **kwargs):
+    def _probe_auth(*_args, **kwargs):
         nonlocal auth_attempts
         auth_attempts += 1
         authorization = str(kwargs["auth_headers"].get("Authorization") or "")
         events.append(f"auth:{auth_attempts}")
         assert authorization.startswith("Basic ")
-        return (auth_attempts == 2, None if auth_attempts == 2 else "authentication failed", "good")
+        return elastic_actions.ElasticAuthProbeResult(
+            valid=auth_attempts == 2,
+            error=None if auth_attempts == 2 else "authentication failed",
+            username="good" if auth_attempts == 2 else None,
+            status=200 if auth_attempts == 2 else 401,
+            endpoint="/_security/_authenticate",
+            detail=None,
+        )
 
-    monkeypatch.setattr(elastic_actions, "_verify_authenticate", _verify_auth)
+    monkeypatch.setattr(elastic_actions, "_probe_authenticate", _probe_auth)
     monkeypatch.setattr(
         elastic_actions,
         "_check_privileges",
@@ -591,8 +598,20 @@ def test_elastic_uncertain_auth_on_anonymous_open_preserves_open_status_and_erro
     )
     monkeypatch.setattr(
         elastic_actions,
-        "_verify_authenticate",
-        lambda *_args, **_kwargs: (None, "authentication probe timed out", None),
+        "_probe_authenticate",
+        lambda *_args, **_kwargs: elastic_actions.ElasticAuthProbeResult(
+            valid=None,
+            error="authentication probe timed out",
+            username=None,
+            status=0,
+            endpoint="/_security/_authenticate",
+            detail={
+                "status": 0,
+                "type": "transport_error",
+                "reason": "authentication probe timed out",
+                "root_cause": [],
+            },
+        ),
     )
 
     def _fetch_endpoints(*_args, **kwargs):

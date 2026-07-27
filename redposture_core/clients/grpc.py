@@ -1852,6 +1852,7 @@ def _generate_openapi_document(
     descriptor_bytes: list[bytes],
     *,
     descriptor_targets: dict[str, bool] | None = None,
+    server_urls: list[str] | None = None,
 ) -> dict[str, Any]:
     unique_descriptor_bytes, input_errors, descriptor_conflicts = _analyze_descriptor_bytes(descriptor_bytes)
     symbol_conflicts = _descriptor_symbol_conflicts(unique_descriptor_bytes)
@@ -1924,13 +1925,19 @@ def _generate_openapi_document(
     if symbol_conflicts:
         descriptor_metadata["descriptor_symbol_conflicts"] = symbol_conflicts
 
-    return {
+    document: dict[str, Any] = {
         "openapi": "3.1.0",
         "info": {"title": "RedPosture gRPC export", "version": "1.0.0"},
         "paths": paths,
         "components": {"schemas": components},
         "x-redposture": descriptor_metadata,
     }
+    normalized_server_urls = sorted(
+        {item.strip() for item in (server_urls or []) if isinstance(item, str) and item.strip()}
+    )
+    if normalized_server_urls:
+        document["servers"] = [{"url": url} for url in normalized_server_urls]
+    return document
 
 
 def _write_openapi_document(
@@ -1938,8 +1945,13 @@ def _write_openapi_document(
     descriptor_bytes: list[bytes],
     *,
     descriptor_targets: dict[str, bool] | None = None,
+    server_urls: list[str] | None = None,
 ) -> int:
-    document = _generate_openapi_document(descriptor_bytes, descriptor_targets=descriptor_targets)
+    document = _generate_openapi_document(
+        descriptor_bytes,
+        descriptor_targets=descriptor_targets,
+        server_urls=server_urls,
+    )
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")

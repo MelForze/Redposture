@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -295,6 +296,21 @@ def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypat
     assert any("[-] admin:admin" in line for line in detail_lines)
     line = _format_record(record, "txt")
     assert "[-] credentials invalid (anonymous access)" in line
+
+
+def test_format_record_suppresses_plain_anonymous_summary_but_keeps_json() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 3000,
+        "status": "open_no_auth",
+        "auth_required": False,
+        "datasource_count": 2,
+    }
+
+    assert _format_record(record, "txt") == ""
+    payload = json.loads(_format_record(record, "json"))
+    assert payload["status"] == "open_no_auth"
+    assert payload["datasource_count"] == 2
 
 
 def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkeypatch) -> None:

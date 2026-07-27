@@ -47,7 +47,6 @@ def test_fix_g1_exporter_port_collisions_all_have_negative_markers() -> None:
     [
         "redis",
         "docker",
-        "elastic",
         "clickhouse",
         "mongodb",
         "postgres",
@@ -71,7 +70,7 @@ def test_fix_g2_module_opts_into_keep_anonymous_open_no_auth(module: str) -> Non
 
 @pytest.mark.parametrize(
     "module",
-    ["consul", "proxmox", "gitlab", "oracle", "kafka", "grpc"],
+    ["consul", "proxmox", "gitlab", "oracle", "kafka", "grpc", "elastic"],
 )
 def test_fix_g2_module_stays_opted_out_of_keep_anonymous_open_no_auth(module: str) -> None:
     """These modules stay opted OUT — their auth model doesn't cleanly

@@ -874,11 +874,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        key_count = record.get("key_count")
-        if isinstance(key_count, int):
-            return f"{prefix} [+] anonymous access (keys:{format_count_value(key_count)})"
-        count_error = _clip(str(record.get("key_count_error") or "unknown count"), 72)
-        return f"{prefix} [+] anonymous access (keys:unknown) err={count_error}"
+        return ""
 
     if status in {"weak_default_creds", "valid_credentials"}:
         user = str(record.get("effective_username") or "-")

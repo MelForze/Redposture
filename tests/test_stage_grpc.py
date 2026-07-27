@@ -91,9 +91,9 @@ def test_record_formatters_cover_core_statuses() -> None:
     assert detect_line.startswith(_nxc_prefix(record))
     assert "gRPC Service" in detect_line
     assert "(reflection:enabled)" in detect_line
-    assert "(health_access:anonymous)" in detect_line
-    assert "(reflection_access:anonymous)" in detect_line
-    assert "(invoke_access:not_tested)" in detect_line
+    assert "health_access:" not in detect_line
+    assert "reflection_access:" not in detect_line
+    assert "invoke_access:" not in detect_line
     assert status_line == ""
     assert "anonymous access" not in "\n".join([detect_line, status_line, *detail_lines])
     assert not any("Reflection (" in line for line in detail_lines)

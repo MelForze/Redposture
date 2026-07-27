@@ -527,8 +527,15 @@ def test_elastic_detect_auth_and_full_data_collection_use_cached_headers(
     )
     monkeypatch.setattr(
         elastic,
-        "_verify_authenticate",
-        lambda *_args, **_kwargs: (True, None, "elastic"),
+        "_probe_authenticate",
+        lambda *_args, **_kwargs: elastic.ElasticAuthProbeResult(
+            valid=True,
+            error=None,
+            username="elastic",
+            status=200,
+            endpoint="/_security/_authenticate",
+            detail=None,
+        ),
     )
     monkeypatch.setattr(
         elastic,
@@ -574,8 +581,8 @@ def test_elastic_detect_auth_and_full_data_collection_use_cached_headers(
     monkeypatch.setattr(elastic, "_fetch_security_users", capture(([{"username": "elastic"}], None)))
     monkeypatch.setattr(
         elastic,
-        "_collect_discover_results",
-        capture(([{"index": "secrets", "hits": 1}], "discover warning")),
+        "_collect_discover_results_detailed",
+        capture(([{"index": "secrets", "hits": 1}], "discover warning", None)),
     )
 
     result = elastic.collect_elastic_data(
@@ -603,7 +610,7 @@ def test_elastic_detect_auth_and_full_data_collection_use_cached_headers(
     ("auth_valid", "auth_required", "expected_status"),
     [
         (False, False, "invalid_credentials_anonymous"),
-        (None, False, "open_no_auth"),
+        (None, False, "credentials_unverified_anonymous"),
         (False, True, "auth_required"),
         (None, None, "unknown_auth"),
     ],
@@ -618,8 +625,15 @@ def test_elastic_authentication_fallback_statuses(
     credential = AuditCredentialRun("elastic", "bad", source="provided")
     monkeypatch.setattr(
         elastic,
-        "_verify_authenticate",
-        lambda *_args, **_kwargs: (auth_valid, "authentication failed", None),
+        "_probe_authenticate",
+        lambda *_args, **_kwargs: elastic.ElasticAuthProbeResult(
+            valid=auth_valid,
+            error="authentication failed",
+            username=None,
+            status=401 if auth_valid is False else 0,
+            endpoint="/_security/_authenticate",
+            detail=None,
+        ),
     )
 
     result = elastic.authenticate_elastic(

@@ -2754,7 +2754,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     err = _clip(str(record.get("error") or "-"), 72)
 
     if status == "open_no_auth":
-        return f"{prefix} [+] anonymous access {_caps_suffix(record)}"
+        return ""
 
     if status == "weak_default_creds":
         username = str(record.get("effective_username") or "postgres")

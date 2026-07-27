@@ -222,8 +222,8 @@ def test_audit_mongodb_targets_two_pass_debug_and_output(monkeypatch: pytest.Mon
         debug_emit=debug.append,
     )
     assert result == (1, 1, 0, 0, 0, 0)
-    assert lines[0].startswith("MONGODB") and "MongoDB Service" in lines[0]
-    assert any("anonymous access" in line for line in lines)
+    assert lines[0].startswith("MONGODB") and "MongoDB Service (auth required:False)" in lines[0]
+    assert not any("[+] anonymous access" in line for line in lines)
     assert any("Collections" in line for line in lines)
     assert any("pass=1 detect start" in item for item in debug)
     assert any("stage2_gate=run" in item for item in debug)

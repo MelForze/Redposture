@@ -261,6 +261,7 @@ redposture elastic -t http://127.0.0.1:9200/ --endpoints --cluster --discover
 redposture grpc -t 127.0.0.1 --port 50051
 redposture grpc -t 127.0.0.1 --port 50051 --analyze
 redposture grpc -t 127.0.0.1 --port 50051 --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
+redposture grpc -t 127.0.0.1 --port 50051 --openapi
 ```
 
 The default gRPC scan only fingerprints transport, protocol, Reflection availability, and separate
@@ -276,6 +277,11 @@ protobuf well-known JSON types. Conflicting same-name descriptor variants are re
 `x-redposture.descriptor_conflicts`; selection uses the lowest normalized schema SHA-256 and ignores
 source-location-only differences. Malformed inputs are listed in `descriptor_errors`, while duplicate
 message, enum, or service symbols from different files are listed in `descriptor_symbol_conflicts`.
+When no path follows `--openapi`, a single endpoint is written to `openapi_HOST_PORT.json`; a multi-target
+scan is written to the merged `openapi_merged.json`. The analysis performed implicitly for export stays
+compact on the console; combine `--analyze --openapi [path]` to print the full service inventory as well.
+Generated OpenAPI `servers` entries use the detected endpoint addresses and transport (`http` for plaintext,
+`https` for TLS), so Swagger clients do not silently substitute `localhost`.
 
 ## License
 
