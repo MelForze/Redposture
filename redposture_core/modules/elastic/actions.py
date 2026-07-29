@@ -9,10 +9,9 @@ import re
 import ssl
 import threading
 import time
-import urllib.error
-import urllib.parse
 import zlib
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
@@ -25,28 +24,29 @@ from ...utils import (
     utc_now_iso,
 )
 from .discover import DiscoverReport, DiscoverRequest, DiscoverResponse, run_discovery
+from .http_session import ElasticHttpSession
 
 _ELASTIC_TAG = "ELASTIC"
 _DISCOVER_QUERY_SIZE = 200
 _DISCOVER_MAX_PRINT_PER_INDEX = 200
-_DISCOVER_QUERY_CHUNK_SIZE = 8
-_DISCOVER_MAX_CHUNKS = 6
 _TRANSPORT_DIAGNOSTIC_HEADER = "__redposture_transport_error__"
 _RESPONSE_TRUNCATED_HEADER = "__redposture_response_truncated__"
 _DETECT_EXTENDED_TIMEOUT = 2.5
 _DETECT_CONFIRM_PATHS = (
-    "/_cluster/health",
     "/_nodes?filter_path=nodes.*.version",
-    "/_cat/health",
     "/_security/_authenticate",
     "/_plugins/_security/authinfo",
+    "/_cluster/health",
+    "/_cat/health",
 )
+_TLS_HINT_PORTS = frozenset({443, 4443, 6443, 8443, 8501, 9243})
 
 _STAGE_DETECT_PROTOCOL = "detect_protocol"
 _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _THREAD_LOCAL_DEBUG_EMIT = threading.local()
+_THREAD_LOCAL_ELASTIC_SESSION = threading.local()
 _VERSION_NUMBER_RE = re.compile(r'"number"\s*:\s*"([0-9]+(?:\.[0-9]+){1,3}(?:[-+][^"]+)?)"')
 _VERSION_STRING_RE = re.compile(r'"version"\s*:\s*"([0-9]+(?:\.[0-9]+){1,3}(?:[-+][^"]+)?)"')
 
@@ -103,6 +103,24 @@ _ELASTIC_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("elastic", "changeme"),
     ("elastic", "elastic"),
     ("elastic", "password"),
+    ("admin", "admin"),
+    ("admin", "password"),
+    ("admin", "changeme"),
+    ("opensearch", "opensearch"),
+    ("opensearch", "password"),
+    ("kibana", "kibana"),
+    ("kibana", "changeme"),
+    ("logstash", "logstash"),
+    ("logstash_system", "changeme"),
+)
+_AUTH_UNSUPPORTED_REASON_RE = re.compile(
+    r"(?:"
+    r"no handler found|unknown (?:api|endpoint)|"
+    r"(?:authenticate|authentication|security|auth) (?:api|endpoint|plugin)?.*"
+    r"(?:disabled|not (?:available|found|installed)|unavailable|unsupported)|"
+    r"(?:endpoint|api|plugin).*(?:disabled|not (?:available|found|installed)|unavailable|unsupported)"
+    r")",
+    re.IGNORECASE,
 )
 
 
@@ -114,6 +132,10 @@ class ElasticLifecycleState:
     auth_headers: dict[tuple[str | None, str | None, str | None, str], dict[str, str]] = dataclass_field(
         default_factory=dict
     )
+    supported_auth_endpoint: str | None = None
+    unsupported_auth_endpoints: set[str] = dataclass_field(default_factory=set)
+    unsupported_auth_details: dict[str, dict[str, Any]] = dataclass_field(default_factory=dict)
+    session: ElasticHttpSession | None = None
 
 
 @dataclass(frozen=True)
@@ -126,6 +148,64 @@ class ElasticAuthProbeResult:
     status: int
     endpoint: str
     detail: dict[str, Any] | None = None
+    network_attempted: bool = True
+    verification_capability: str = "indeterminate"
+
+
+def _redact_exact_secrets(value: Any, secrets: Iterable[str]) -> Any:
+    """Recursively remove exact secret strings from diagnostic values."""
+
+    candidates = sorted({secret for secret in secrets if secret}, key=len, reverse=True)
+    if not candidates:
+        return value
+    if isinstance(value, str):
+        redacted = value
+        for secret in candidates:
+            redacted = redacted.replace(secret, "<redacted>")
+        return redacted
+    if isinstance(value, dict):
+        return {
+            _redact_exact_secrets(key, candidates): _redact_exact_secrets(item, candidates)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_exact_secrets(item, candidates) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_exact_secrets(item, candidates) for item in value)
+    return value
+
+
+def _redact_api_token(value: Any, api_token: str | None) -> Any:
+    if not api_token:
+        return value
+    return _redact_exact_secrets(value, (f"ApiKey {api_token}", api_token))
+
+
+def _redact_auth_probe_result(
+    result: ElasticAuthProbeResult,
+    api_token: str | None,
+) -> ElasticAuthProbeResult:
+    if not api_token:
+        return result
+    redacted_detail = _redact_api_token(result.detail, api_token)
+    return ElasticAuthProbeResult(
+        valid=result.valid,
+        error=_redact_api_token(result.error, api_token),
+        username=_redact_api_token(result.username, api_token),
+        status=result.status,
+        endpoint=result.endpoint,
+        detail=redacted_detail if isinstance(redacted_detail, dict) else None,
+        network_attempted=result.network_attempted,
+        verification_capability=result.verification_capability,
+    )
+
+
+def _redact_auth_state_details(state: ElasticLifecycleState, api_token: str | None) -> None:
+    if not api_token:
+        return
+    for endpoint, detail in tuple(state.unsupported_auth_details.items()):
+        redacted = _redact_api_token(detail, api_token)
+        state.unsupported_auth_details[endpoint] = redacted if isinstance(redacted, dict) else {}
 
 
 def _auth_probe_status(result: ElasticAuthProbeResult) -> str:
@@ -210,8 +290,45 @@ def _is_tls_or_protocol_error(error_text: str) -> bool:
         "http request",
         "certificate verify failed",
         "handshake",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "remote end closed",
+        "unexpected eof",
+        "closed (eof)",
+        "ssleoferror",
     )
     return any(token in lower for token in tokens)
+
+
+def _is_permanent_transport_error(error_text: str) -> bool:
+    lower = str(error_text or "").lower()
+    markers = (
+        "connection refused",
+        "no route to host",
+        "network unreachable",
+        "host is down",
+        "name or service not known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
+        "getaddrinfo",
+    )
+    return any(marker in lower for marker in markers)
+
+
+def _is_transient_transport_error(error_text: str) -> bool:
+    lower = str(error_text or "").lower()
+    markers = (
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "connection reset",
+        "connection aborted",
+        "broken pipe",
+        "unexpected eof",
+        "remote end closed",
+    )
+    return any(marker in lower for marker in markers)
 
 
 def _build_ssl_context(insecure: bool, ca_file: str | None) -> ssl.SSLContext:
@@ -247,6 +364,48 @@ def _elastic_headers(
     return headers
 
 
+@contextmanager
+def _elastic_session_scope(session: ElasticHttpSession | None) -> Iterator[None]:
+    """Expose a direct per-target session to legacy request helpers."""
+
+    sentinel = object()
+    previous = getattr(_THREAD_LOCAL_ELASTIC_SESSION, "session", sentinel)
+    if session is None:
+        try:
+            delattr(_THREAD_LOCAL_ELASTIC_SESSION, "session")
+        except AttributeError:
+            pass
+    else:
+        _THREAD_LOCAL_ELASTIC_SESSION.session = session
+    try:
+        yield
+    finally:
+        if previous is sentinel:
+            try:
+                delattr(_THREAD_LOCAL_ELASTIC_SESSION, "session")
+            except AttributeError:
+                pass
+        else:
+            _THREAD_LOCAL_ELASTIC_SESSION.session = previous
+
+
+def _active_elastic_session(host: str, port: int) -> ElasticHttpSession | None:
+    session = getattr(_THREAD_LOCAL_ELASTIC_SESSION, "session", None)
+    if not isinstance(session, ElasticHttpSession):
+        return None
+    normalized_host = str(host or "").strip().strip("[]")
+    if session.host != normalized_host or session.port != int(port):
+        return None
+    return session
+
+
+def _http_url_host(host: str) -> str:
+    normalized = str(host or "").strip()
+    if ":" in normalized and not normalized.startswith("["):
+        return f"[{normalized}]"
+    return normalized
+
+
 def _elastic_request(
     host: str,
     port: int,
@@ -261,18 +420,28 @@ def _elastic_request(
     data: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     scheme = "https" if use_https else "http"
-    url = f"{scheme}://{host}:{port}{path}"
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
-    response = HttpApiClient(
-        HttpClientConfig(
-            timeout=timeout,
-            insecure=bool(use_https and insecure),
-            ca_file=ca_file if use_https and ca_file else None,
-            response_size_cap=10 * 1024 * 1024,
+    active_session = _active_elastic_session(host, port)
+    if active_session is not None:
+        response = active_session.request(
+            scheme,
+            method,
+            path,
+            headers=req_headers,
+            data=data,
         )
-    ).request(method, url, headers=req_headers, body=data, timeout=timeout)
+    else:
+        url = f"{scheme}://{_http_url_host(host)}:{port}{path}"
+        response = HttpApiClient(
+            HttpClientConfig(
+                timeout=timeout,
+                insecure=bool(use_https and insecure),
+                ca_file=ca_file if use_https and ca_file else None,
+                response_size_cap=10 * 1024 * 1024,
+            )
+        ).request(method, url, headers=req_headers, body=data, timeout=timeout)
     if response.error:
         return 0, b"", {}, str(response.error)
     response_headers = dict(response.headers)
@@ -292,6 +461,7 @@ def _request_with_tls_fallback(
     method: str = "GET",
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
+    allow_fallback: bool = True,
 ) -> tuple[int, bytes, dict[str, str], str | None, str, bool, bool]:
     normalized_scheme = str(preferred_scheme or "").strip().lower()
     if normalized_scheme not in {"http", "https"}:
@@ -300,6 +470,8 @@ def _request_with_tls_fallback(
     second_use_https = not first_use_https
     first_scheme = "https" if first_use_https else "http"
     second_scheme = "http" if first_use_https else "https"
+    first_insecure = bool(first_use_https and not ca_file)
+    second_insecure = bool(second_use_https and not ca_file)
 
     status, payload, response_headers, error = _elastic_request(
         host,
@@ -307,14 +479,26 @@ def _request_with_tls_fallback(
         path,
         timeout,
         use_https=first_use_https,
-        insecure=first_use_https,
+        insecure=first_insecure,
         ca_file=ca_file if first_use_https else None,
         method=method,
         headers=headers,
         data=data,
     )
     if status > 0:
-        return status, payload, response_headers, error, first_scheme, first_use_https, not first_use_https
+        return status, payload, response_headers, error, first_scheme, first_insecure, False
+
+    first_error = str(error or "").strip() or "connection failed"
+    if not allow_fallback or not _is_tls_or_protocol_error(first_error):
+        return (
+            status,
+            payload,
+            response_headers,
+            f"{first_scheme}={first_error}",
+            first_scheme,
+            first_insecure,
+            False,
+        )
 
     fallback_status, fallback_payload, fallback_headers, fallback_error = _elastic_request(
         host,
@@ -322,7 +506,7 @@ def _request_with_tls_fallback(
         path,
         timeout,
         use_https=second_use_https,
-        insecure=second_use_https,
+        insecure=second_insecure,
         ca_file=ca_file if second_use_https else None,
         method=method,
         headers=headers,
@@ -338,11 +522,10 @@ def _request_with_tls_fallback(
             diagnostic_headers,
             fallback_error,
             second_scheme,
-            second_use_https,
-            not second_use_https,
+            second_insecure,
+            first_scheme == "https" and second_scheme == "http",
         )
 
-    first_error = str(error or "").strip() or "connection failed"
     second_error = str(fallback_error or "").strip() or "connection failed"
     combined_error = f"{first_scheme}={first_error}; {second_scheme}={second_error}"
     return (
@@ -351,8 +534,8 @@ def _request_with_tls_fallback(
         fallback_headers,
         combined_error,
         second_scheme,
-        second_use_https,
-        not second_use_https,
+        second_insecure,
+        first_scheme == "https" and second_scheme == "http",
     )
 
 
@@ -863,29 +1046,36 @@ def _request_detect_probe(
     *,
     preferred_scheme: str,
     ca_file: str | None,
+    allow_fallback: bool = True,
 ) -> tuple[int, bytes, dict[str, str], str | None, str]:
     use_https = preferred_scheme == "https"
+    insecure = bool(use_https and not ca_file)
     status, payload, headers, error = _elastic_request(
         host,
         port,
         path,
         timeout,
         use_https=use_https,
-        insecure=use_https,
+        insecure=insecure,
         ca_file=ca_file if use_https else None,
     )
     if status > 0:
         return status, payload, headers, error, preferred_scheme
 
+    primary_error = str(error or "").strip() or "connection failed"
+    if not allow_fallback or not _is_tls_or_protocol_error(primary_error):
+        return status, payload, headers, f"{preferred_scheme}={primary_error}", preferred_scheme
+
     fallback_scheme = "http" if preferred_scheme == "https" else "https"
     fallback_https = fallback_scheme == "https"
+    fallback_insecure = bool(fallback_https and not ca_file)
     fallback_status, fallback_payload, fallback_headers, fallback_error = _elastic_request(
         host,
         port,
         path,
         timeout,
         use_https=fallback_https,
-        insecure=fallback_https,
+        insecure=fallback_insecure,
         ca_file=ca_file if fallback_https else None,
     )
     if fallback_status > 0:
@@ -894,7 +1084,6 @@ def _request_detect_probe(
             diagnostic_headers[_TRANSPORT_DIAGNOSTIC_HEADER] = f"{preferred_scheme}={error}"
         return fallback_status, fallback_payload, diagnostic_headers, fallback_error, fallback_scheme
 
-    primary_error = str(error or "").strip() or "connection failed"
     secondary_error = str(fallback_error or "").strip() or "connection failed"
     combined = f"{preferred_scheme}={primary_error}; {fallback_scheme}={secondary_error}"
     return fallback_status, fallback_payload, fallback_headers, combined, fallback_scheme
@@ -1845,148 +2034,6 @@ def _list_index_names(
     return indices, error
 
 
-def _search_index_once(
-    host: str,
-    port: int,
-    timeout: float,
-    *,
-    scheme: str,
-    insecure: bool,
-    ca_file: str | None,
-    auth_headers: dict[str, str],
-    index_name: str,
-    query_string: str,
-) -> dict[str, Any]:
-    path = f"/{urllib.parse.quote(index_name, safe='')}/_search?size={_DISCOVER_QUERY_SIZE}&expand_wildcards=open"
-    body = {
-        "size": _DISCOVER_QUERY_SIZE,
-        "track_total_hits": True,
-        "query": {
-            "simple_query_string": {
-                "query": query_string,
-                "fields": ["*"],
-                "default_operator": "OR",
-                "analyze_wildcard": True,
-                "lenient": True,
-            }
-        },
-    }
-    headers = dict(auth_headers)
-    headers["Content-Type"] = "application/json; charset=utf-8"
-
-    status, payload, _headers, error = _elastic_request(
-        host,
-        port,
-        path,
-        timeout,
-        use_https=scheme == "https",
-        insecure=insecure,
-        ca_file=ca_file,
-        method="POST",
-        headers=headers,
-        data=json.dumps(body).encode("utf-8"),
-    )
-    if error:
-        return {
-            "total_hits": 0,
-            "hits": [],
-            "error": error,
-            "error_detail": {
-                "status": 0,
-                "type": "transport_error",
-                "reason": error,
-                "root_cause": [],
-            },
-        }
-    if status in {401, 403}:
-        return {
-            "total_hits": 0,
-            "hits": [],
-            "error": "Access Denied",
-            "error_detail": _parse_elastic_error(status, payload),
-        }
-    if status != 200:
-        detail = _parse_elastic_error(status, payload)
-        return {
-            "total_hits": 0,
-            "hits": [],
-            "error": _format_elastic_error_detail(detail),
-            "error_detail": detail,
-        }
-
-    parsed = _load_json_dict(payload)
-    if parsed is None:
-        return {
-            "total_hits": 0,
-            "hits": [],
-            "error": "invalid search payload",
-            "error_detail": {
-                "status": status,
-                "type": "invalid_search_payload",
-                "reason": "invalid search payload",
-                "root_cause": [],
-            },
-        }
-
-    hits_obj = parsed.get("hits")
-    if not isinstance(hits_obj, dict):
-        return {
-            "total_hits": 0,
-            "hits": [],
-            "error": "invalid search hits payload",
-            "error_detail": {
-                "status": status,
-                "type": "invalid_search_hits_payload",
-                "reason": "invalid search hits payload",
-                "root_cause": [],
-            },
-        }
-
-    total_hits = _extract_discover_total(hits_obj.get("total"))
-
-    raw_hits = hits_obj.get("hits")
-    parsed_hits: list[dict[str, Any]] = []
-    if isinstance(raw_hits, list):
-        for item in raw_hits:
-            if not isinstance(item, dict):
-                continue
-            source = item.get("_source")
-            if not isinstance(source, dict):
-                continue
-            parsed_hits.append(
-                {
-                    "index": str(item.get("_index") or index_name),
-                    "id": str(item.get("_id") or ""),
-                    "source": source,
-                }
-            )
-
-    return {
-        "total_hits": int(total_hits),
-        "hits": parsed_hits,
-        "error": None,
-        "error_detail": None,
-    }
-
-
-def _is_retryable_discover_error(detail: Mapping[str, Any] | None) -> bool:
-    if not isinstance(detail, Mapping):
-        return False
-    retryable_types = {
-        "too_many_clauses",
-        "query_shard_exception",
-        "search_phase_execution_exception",
-        "circuit_breaking_exception",
-        "illegal_argument_exception",
-        "search_context_exception",
-    }
-    observed = {str(detail.get("type") or "").strip().lower()}
-    causes = detail.get("root_cause")
-    if isinstance(causes, list):
-        observed.update(str(cause.get("type") or "").strip().lower() for cause in causes if isinstance(cause, Mapping))
-    return bool(observed & retryable_types)
-
-
 def _search_index_detailed(
     host: str,
     port: int,
@@ -1999,7 +2046,14 @@ def _search_index_detailed(
     index_name: str,
     query_string: str,
 ) -> dict[str, Any]:
-    primary = _search_index_once(
+    """Compatibility adapter backed by the mapping-aware v2 engine.
+
+    ``query_string`` is intentionally ignored: callers retain their previous
+    signature without reintroducing parser-based wildcard searches.
+    """
+
+    _ = query_string
+    report = _collect_discover_report(
         host,
         port,
         timeout,
@@ -2007,94 +2061,22 @@ def _search_index_detailed(
         insecure=insecure,
         ca_file=ca_file,
         auth_headers=auth_headers,
-        index_name=index_name,
-        query_string=query_string,
     )
-    if not primary.get("error") or not _is_retryable_discover_error(primary.get("error_detail")):
-        return {
-            **primary,
-            "retried": False,
-            "retry_chunks": 0,
-            "partial_error_details": [],
-            "total_hits_relation": "exact",
-        }
-
-    keywords: list[str] = []
-    seen_keywords: set[str] = set()
-    for raw_keyword in _DISCOVER_KEYWORDS:
-        keyword = str(raw_keyword).strip()
-        if not keyword or keyword in seen_keywords:
-            continue
-        seen_keywords.add(keyword)
-        keywords.append(keyword)
-    chunks = [
-        keywords[offset : offset + _DISCOVER_QUERY_CHUNK_SIZE]
-        for offset in range(0, len(keywords), _DISCOVER_QUERY_CHUNK_SIZE)
-    ][:_DISCOVER_MAX_CHUNKS]
-
-    unique_hits: dict[tuple[str, str], dict[str, Any]] = {}
-    primary_detail = primary.get("error_detail")
-    partial_errors: list[dict[str, Any]] = [dict(primary_detail)] if isinstance(primary_detail, Mapping) else []
-    any_success = False
-    truncated = False
-    for chunk in chunks:
-        chunk_result = _search_index_once(
-            host,
-            port,
-            timeout,
-            scheme=scheme,
-            insecure=insecure,
-            ca_file=ca_file,
-            auth_headers=auth_headers,
-            index_name=index_name,
-            query_string=_build_discover_query_string(chunk),
-        )
-        if chunk_result.get("error"):
-            detail = chunk_result.get("error_detail")
-            if isinstance(detail, dict):
-                partial_errors.append(detail)
-            continue
-        any_success = True
-        chunk_hits = chunk_result.get("hits")
-        if not isinstance(chunk_hits, list):
-            continue
-        if int(chunk_result.get("total_hits") or 0) > len(chunk_hits):
-            truncated = True
-        for hit in chunk_hits:
-            if not isinstance(hit, dict):
-                continue
-            hit_index = str(hit.get("index") or index_name)
-            hit_id = str(hit.get("id") or "")
-            if not hit_id:
-                hit_id = json.dumps(hit.get("source") or {}, sort_keys=True, ensure_ascii=False)
-            unique_hits.setdefault((hit_index, hit_id), hit)
-            if len(unique_hits) >= _DISCOVER_MAX_PRINT_PER_INDEX:
-                truncated = True
-                break
-
-    if not any_success:
-        detail = partial_errors[0] if partial_errors else primary.get("error_detail")
-        return {
-            "total_hits": 0,
-            "hits": [],
-            "error": _format_elastic_error_detail(detail) or str(primary.get("error") or "discover failed"),
-            "error_detail": detail,
-            "retried": True,
-            "retry_chunks": len(chunks),
-            "partial_error_details": partial_errors,
-            "total_hits_relation": "unknown",
-        }
-
-    hits = list(unique_hits.values())[:_DISCOVER_MAX_PRINT_PER_INDEX]
+    for result in report.legacy_results:
+        if str(result.get("index") or "") == index_name:
+            return result
     return {
-        "total_hits": len(unique_hits),
-        "hits": hits,
-        "error": None,
-        "error_detail": None,
-        "retried": True,
-        "retry_chunks": len(chunks),
-        "partial_error_details": partial_errors,
-        "total_hits_relation": "lower_bound" if truncated or partial_errors else "exact",
+        "index": index_name,
+        "total_hits": 0,
+        "total_hits_relation": "unknown" if report.error else "exact",
+        "shown_hits": 0,
+        "truncated": bool(report.error),
+        "hits": [],
+        "error": report.error,
+        "error_detail": report.error_detail,
+        "retried": False,
+        "retry_chunks": 0,
+        "partial_error_details": [],
     }
 
 
@@ -2223,6 +2205,56 @@ def _auth_endpoint_candidates(vendor: str | None) -> tuple[str, ...]:
     return ("/_security/_authenticate", "/_plugins/_security/authinfo")
 
 
+def _auth_response_is_conclusively_unsupported(status: int, detail: Mapping[str, Any] | None) -> bool:
+    """Return whether an identity endpoint can safely be cached as absent."""
+
+    if status in {404, 405}:
+        return True
+    if status != 400 or not isinstance(detail, Mapping):
+        return False
+    error_type = str(detail.get("type") or "").strip().lower()
+    if error_type in {"resource_not_found_exception", "unsupported_operation_exception"}:
+        return True
+    reasons = [str(detail.get("reason") or "")]
+    root_causes = detail.get("root_cause")
+    if isinstance(root_causes, list):
+        reasons.extend(str(cause.get("reason") or "") for cause in root_causes if isinstance(cause, Mapping))
+    return any(_AUTH_UNSUPPORTED_REASON_RE.search(reason) is not None for reason in reasons)
+
+
+def _cached_unverified_auth_result(
+    *,
+    anonymous_status: int,
+    endpoints: tuple[str, ...],
+    state: ElasticLifecycleState,
+) -> ElasticAuthProbeResult:
+    detail = {
+        "status": int(anonymous_status),
+        "type": "authentication_unverified",
+        "reason": "root endpoint is also anonymously accessible",
+        "root_cause": [],
+        "fallback": True,
+        "fallback_endpoint": "/",
+        "auth_endpoints": list(endpoints),
+        "cached_capability": True,
+        "unsupported_endpoint_details": {
+            endpoint: dict(state.unsupported_auth_details[endpoint])
+            for endpoint in endpoints
+            if endpoint in state.unsupported_auth_details
+        },
+    }
+    return ElasticAuthProbeResult(
+        valid=None,
+        error=str(detail["reason"]),
+        username=None,
+        status=int(anonymous_status),
+        endpoint="/",
+        detail=detail,
+        network_attempted=False,
+        verification_capability="identity_endpoint_unavailable",
+    )
+
+
 def _auth_username_from_body(body: dict[str, Any] | None) -> str | None:
     if not isinstance(body, dict):
         return None
@@ -2250,11 +2282,32 @@ def _probe_authenticate(
     vendor: str | None = None,
     anonymous_status: int | None = None,
     expected_username: str | None = None,
+    capability_state: ElasticLifecycleState | None = None,
 ) -> ElasticAuthProbeResult:
     last_result: ElasticAuthProbeResult | None = None
     unsupported_statuses = {400, 404, 405}
+    all_endpoints = _auth_endpoint_candidates(vendor)
+    if (
+        capability_state is not None
+        and anonymous_status == 200
+        and all(endpoint in capability_state.unsupported_auth_endpoints for endpoint in all_endpoints)
+    ):
+        return _cached_unverified_auth_result(
+            anonymous_status=anonymous_status,
+            endpoints=all_endpoints,
+            state=capability_state,
+        )
+    endpoints: tuple[str, ...]
+    if capability_state is not None and capability_state.supported_auth_endpoint is not None:
+        endpoints = (capability_state.supported_auth_endpoint,)
+    elif capability_state is not None:
+        endpoints = tuple(
+            endpoint for endpoint in all_endpoints if endpoint not in capability_state.unsupported_auth_endpoints
+        )
+    else:
+        endpoints = all_endpoints
 
-    for endpoint in _auth_endpoint_candidates(vendor):
+    for endpoint in endpoints:
         status, payload, _headers, error = _elastic_request(
             host,
             port,
@@ -2273,8 +2326,13 @@ def _probe_authenticate(
                 status=0,
                 endpoint=endpoint,
                 detail={"status": 0, "type": "transport_error", "reason": error, "root_cause": []},
+                verification_capability="transport_error",
             )
         if status == 200:
+            if capability_state is not None:
+                capability_state.supported_auth_endpoint = endpoint
+                capability_state.unsupported_auth_endpoints.discard(endpoint)
+                capability_state.unsupported_auth_details.pop(endpoint, None)
             body = _load_json_dict_loose(payload)
             authenticated_username = _auth_username_from_body(body)
             if expected_username is not None and authenticated_username != expected_username:
@@ -2293,6 +2351,7 @@ def _probe_authenticate(
                     status=status,
                     endpoint=endpoint,
                     detail=detail,
+                    verification_capability="identity_endpoint_supported",
                 )
             if authenticated_username is None:
                 detail = {
@@ -2308,6 +2367,7 @@ def _probe_authenticate(
                     status=status,
                     endpoint=endpoint,
                     detail=detail,
+                    verification_capability="identity_endpoint_supported",
                 )
             authorization = str(_header_lookup(auth_headers, "Authorization") or "")
             if expected_username is None and authorization.lower().startswith("apikey "):
@@ -2348,6 +2408,7 @@ def _probe_authenticate(
                         status=status,
                         endpoint=endpoint,
                         detail=detail,
+                        verification_capability="identity_endpoint_supported",
                     )
             return ElasticAuthProbeResult(
                 valid=True,
@@ -2356,8 +2417,13 @@ def _probe_authenticate(
                 status=status,
                 endpoint=endpoint,
                 detail=None,
+                verification_capability="identity_endpoint_supported",
             )
         if status in {401, 403}:
+            if capability_state is not None:
+                capability_state.supported_auth_endpoint = endpoint
+                capability_state.unsupported_auth_endpoints.discard(endpoint)
+                capability_state.unsupported_auth_details.pop(endpoint, None)
             detail = _parse_elastic_error(status, payload)
             return ElasticAuthProbeResult(
                 valid=False,
@@ -2366,9 +2432,16 @@ def _probe_authenticate(
                 status=status,
                 endpoint=endpoint,
                 detail=detail,
+                verification_capability="identity_endpoint_supported",
             )
 
         detail = _parse_elastic_error(status, payload)
+        conclusively_unsupported = _auth_response_is_conclusively_unsupported(status, detail)
+        if capability_state is not None and conclusively_unsupported:
+            if capability_state.supported_auth_endpoint == endpoint:
+                capability_state.supported_auth_endpoint = None
+            capability_state.unsupported_auth_endpoints.add(endpoint)
+            capability_state.unsupported_auth_details[endpoint] = dict(detail)
         last_result = ElasticAuthProbeResult(
             valid=None,
             error=_format_elastic_error_detail(detail),
@@ -2376,6 +2449,7 @@ def _probe_authenticate(
             status=status,
             endpoint=endpoint,
             detail=detail,
+            verification_capability=("identity_endpoint_unavailable" if conclusively_unsupported else "indeterminate"),
         )
         if status not in unsupported_statuses:
             return last_result
@@ -2407,6 +2481,7 @@ def _probe_authenticate(
             status=0,
             endpoint="/",
             detail=fallback_detail,
+            verification_capability="transport_error",
         )
     if root_status in {401, 403}:
         fallback_detail = _parse_elastic_error(root_status, root_payload)
@@ -2419,6 +2494,7 @@ def _probe_authenticate(
             status=root_status,
             endpoint="/",
             detail=fallback_detail,
+            verification_capability="root_access_control",
         )
 
     root_classification = _classify_detect_probe("/", root_status, root_payload, root_headers, None)
@@ -2440,6 +2516,9 @@ def _probe_authenticate(
     }
     if last_result is not None and isinstance(last_result.detail, dict):
         fallback_detail["auth_endpoint_error"] = dict(last_result.detail)
+    identity_endpoints_unavailable = capability_state is not None and all(
+        endpoint in capability_state.unsupported_auth_endpoints for endpoint in all_endpoints
+    )
     return ElasticAuthProbeResult(
         valid=None,
         error=str(fallback_detail["reason"]),
@@ -2447,6 +2526,9 @@ def _probe_authenticate(
         status=int(root_status),
         endpoint="/",
         detail=fallback_detail,
+        verification_capability=(
+            "identity_endpoint_unavailable" if identity_endpoints_unavailable else "indeterminate"
+        ),
     )
 
 
@@ -2512,9 +2594,13 @@ def _call_audit_elastic_host_with_thread_debug(
                 preferred_scheme=preferred_scheme,
                 debug=debug,
                 run_deep_checks=run_deep_checks,
+                scheme_locked=str(preferred_scheme or "").strip().lower() in {"http", "https"},
             )
         except TypeError as exc:
-            if not is_signature_compat_typeerror(exc, expected_keywords={"debug", "run_deep_checks"}):
+            if not is_signature_compat_typeerror(
+                exc,
+                expected_keywords={"debug", "run_deep_checks", "scheme_locked"},
+            ):
                 raise
             return _audit_elastic_host(
                 host,
@@ -2562,13 +2648,19 @@ def _audit_elastic_host(
     preferred_scheme: str | None = None,
     debug: bool = False,
     run_deep_checks: bool = True,
+    scheme_locked: bool = False,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
+    normalized_preferred_scheme = str(preferred_scheme or "").strip().lower()
+    if normalized_preferred_scheme not in {"http", "https"}:
+        normalized_preferred_scheme = "https" if int(port) in _TLS_HINT_PORTS else "http"
+    preferred_scheme = normalized_preferred_scheme
 
     provided_credentials = bool(username is not None and password is not None)
     provided_token = bool(api_token)
     auth_provided = provided_token or provided_credentials
+    requested_actions = bool(show_endpoints or show_plugins or show_cluster or show_users or discover)
     debug_events: list[str] = []
     stages: list[dict[str, Any]] = []
     stage_durations_ms: dict[str, int] = {}
@@ -2580,7 +2672,8 @@ def _audit_elastic_host(
         nonlocal debug_events_streamed
         if not debug:
             return
-        debug_line = f"{host}:{port} {message}"
+        safe_message = str(_redact_api_token(str(message), api_token))
+        debug_line = f"{host}:{port} {safe_message}"
         debug_events.append(debug_line)
         live_emitter = _get_thread_debug_emitter()
         if live_emitter is not None:
@@ -2666,7 +2759,11 @@ def _audit_elastic_host(
         record["stage_attempts"] = dict(stage_attempts)
         record["debug_events"] = list(debug_events) if debug else []
         record["debug_events_streamed"] = bool(debug_events_streamed)
-        return record
+        redacted_record = _redact_api_token(record, api_token)
+        if not isinstance(redacted_record, dict):
+            raise TypeError("elastic audit record must remain a mapping")
+        redacted_record["api_token"] = None
+        return redacted_record
 
     for attempt in range(attempts):
         started = time.monotonic()
@@ -2678,12 +2775,15 @@ def _audit_elastic_host(
             "/",
             timeout,
             ca_file=ca_file,
-            preferred_scheme=str(preferred_scheme or "https"),
+            preferred_scheme=preferred_scheme,
+            allow_fallback=not scheme_locked,
         )
         root_transport_error = root_headers.pop(_TRANSPORT_DIAGNOSTIC_HEADER, None)
         if error and status <= 0:
             last_error = error
-            if attempt < attempts - 1:
+            preferred_scheme = scheme
+            retryable = _is_transient_transport_error(last_error) and not _is_permanent_transport_error(last_error)
+            if retryable and attempt < attempts - 1:
                 _stage_trace(
                     _STAGE_DETECT_PROTOCOL,
                     attempt=attempt + 1,
@@ -2708,41 +2808,12 @@ def _audit_elastic_host(
                 result="fail",
                 error=last_error,
             )
-            if attempt >= attempts - 1:
-                break
+            break
 
         root_detection = _classify_detect_probe("/", status, payload, root_headers, error)
         root_detection_version = root_detection.get("version")
         if not isinstance(root_detection_version, str) or not root_detection_version.strip():
             root_detection["version"] = _extract_version_hint(payload, root_headers)
-        if (
-            scheme == "https"
-            and status > 0
-            and str(root_detection.get("signal_kind") or "neutral") in {"neutral", "hard_negative"}
-        ):
-            plain_status, plain_payload, plain_headers, plain_error = _elastic_request(
-                host,
-                port,
-                "/",
-                timeout,
-                use_https=False,
-                insecure=False,
-                ca_file=None,
-            )
-            if plain_status > 0:
-                plain_detection = _classify_detect_probe("/", plain_status, plain_payload, plain_headers, plain_error)
-                plain_detection_version = plain_detection.get("version")
-                if not isinstance(plain_detection_version, str) or not plain_detection_version.strip():
-                    plain_detection["version"] = _extract_version_hint(plain_payload, plain_headers)
-                if str(plain_detection.get("signal_kind") or "neutral") in {"hard_positive", "soft_positive"}:
-                    status = plain_status
-                    payload = plain_payload
-                    root_headers = plain_headers
-                    error = plain_error
-                    scheme = "http"
-                    effective_insecure = False
-                    tls_auto_plain = True
-                    root_detection = plain_detection
         detect_probes: list[dict[str, Any]] = [
             {
                 "path": "/",
@@ -2762,86 +2833,90 @@ def _audit_elastic_host(
             }
         ]
         root_probe_status = int(status)
-        root_probe_scheme = scheme
-
         preferred_scheme = scheme
-        for probe_path in _DETECT_CONFIRM_PATHS:
+
+        def _run_confirmation_probe(probe_path: str, pass_name: str) -> dict[str, Any]:
+            nonlocal preferred_scheme
+            requested_scheme = preferred_scheme
+            probe_kwargs: dict[str, Any] = {
+                "preferred_scheme": requested_scheme,
+                "ca_file": ca_file,
+            }
+            if scheme_locked:
+                probe_kwargs["allow_fallback"] = False
             probe_status, probe_payload, probe_headers, probe_error, probe_scheme = _request_detect_probe(
                 host,
                 port,
                 probe_path,
                 timeout,
-                preferred_scheme=preferred_scheme,
-                ca_file=ca_file,
+                **probe_kwargs,
             )
             probe_transport_error = probe_headers.pop(_TRANSPORT_DIAGNOSTIC_HEADER, None)
             probe_detection = _classify_detect_probe(
-                probe_path, probe_status, probe_payload, probe_headers, probe_error
+                probe_path,
+                probe_status,
+                probe_payload,
+                probe_headers,
+                probe_error,
             )
             probe_detection_version = probe_detection.get("version")
             if not isinstance(probe_detection_version, str) or not probe_detection_version.strip():
                 probe_detection["version"] = _extract_version_hint(probe_payload, probe_headers)
-            detect_probes.append(
-                {
-                    "path": probe_path,
-                    "status": int(probe_status),
-                    "scheme": probe_scheme,
-                    "error": probe_error,
-                    "transport_error": probe_transport_error,
-                    "signal_kind": str(probe_detection.get("signal_kind") or "neutral"),
-                    "signals": list(probe_detection.get("signals") or []),
-                    "version": probe_detection.get("version"),
-                    "vendor": probe_detection.get("vendor"),
-                    "payload": probe_payload,
-                    "headers": probe_headers,
-                    "insecure_effective": probe_scheme == "https",
-                    "tls_auto_plain": probe_scheme == "http" and preferred_scheme == "https",
-                    "pass": "base",
-                }
-            )
             if probe_status > 0:
                 preferred_scheme = probe_scheme
+            return {
+                "path": probe_path,
+                "status": int(probe_status),
+                "scheme": probe_scheme,
+                "error": probe_error,
+                "transport_error": probe_transport_error,
+                "signal_kind": str(probe_detection.get("signal_kind") or "neutral"),
+                "signals": list(probe_detection.get("signals") or []),
+                "version": probe_detection.get("version"),
+                "vendor": probe_detection.get("vendor"),
+                "payload": probe_payload,
+                "headers": probe_headers,
+                "insecure_effective": probe_scheme == "https" and not ca_file,
+                "tls_auto_plain": probe_scheme == "http" and requested_scheme == "https",
+                "pass": pass_name,
+            }
 
         detect_decision = _evaluate_detect_decision(detect_probes)
-        if str(detect_decision.get("confidence") or "low") == "low":
-            extended_timeout = max(float(timeout), _DETECT_EXTENDED_TIMEOUT)
+        transient_probe_paths: list[str] = []
+        if not bool(detect_decision.get("detected")):
             for probe_path in _DETECT_CONFIRM_PATHS:
-                probe_status, probe_payload, probe_headers, probe_error, probe_scheme = _request_detect_probe(
-                    host,
-                    port,
-                    probe_path,
-                    extended_timeout,
-                    preferred_scheme=preferred_scheme,
-                    ca_file=ca_file,
-                )
-                probe_transport_error = probe_headers.pop(_TRANSPORT_DIAGNOSTIC_HEADER, None)
-                probe_detection = _classify_detect_probe(
-                    probe_path, probe_status, probe_payload, probe_headers, probe_error
-                )
-                probe_detection_version = probe_detection.get("version")
-                if not isinstance(probe_detection_version, str) or not probe_detection_version.strip():
-                    probe_detection["version"] = _extract_version_hint(probe_payload, probe_headers)
-                detect_probes.append(
-                    {
-                        "path": probe_path,
-                        "status": int(probe_status),
-                        "scheme": probe_scheme,
-                        "error": probe_error,
-                        "transport_error": probe_transport_error,
-                        "signal_kind": str(probe_detection.get("signal_kind") or "neutral"),
-                        "signals": list(probe_detection.get("signals") or []),
-                        "version": probe_detection.get("version"),
-                        "vendor": probe_detection.get("vendor"),
-                        "payload": probe_payload,
-                        "headers": probe_headers,
-                        "insecure_effective": probe_scheme == "https",
-                        "tls_auto_plain": probe_scheme == "http" and preferred_scheme == "https",
-                        "pass": "extended",
-                    }
-                )
-                if probe_status > 0:
-                    preferred_scheme = probe_scheme
-            detect_decision = _evaluate_detect_decision(detect_probes)
+                probe = _run_confirmation_probe(probe_path, "base")
+                detect_probes.append(probe)
+                probe_error = str(probe.get("error") or "")
+                if (
+                    int(probe.get("status") or 0) <= 0
+                    and _is_transient_transport_error(probe_error)
+                    and not _is_permanent_transport_error(probe_error)
+                ):
+                    transient_probe_paths.append(probe_path)
+                detect_decision = _evaluate_detect_decision(detect_probes)
+                if bool(detect_decision.get("detected")):
+                    break
+
+        retry_paths = list(dict.fromkeys(transient_probe_paths))
+        for retry_round in range(max(0, retries)):
+            if bool(detect_decision.get("detected")) or not retry_paths:
+                break
+            next_retry_paths: list[str] = []
+            for probe_path in retry_paths:
+                probe = _run_confirmation_probe(probe_path, f"retry:{retry_round + 1}")
+                detect_probes.append(probe)
+                probe_error = str(probe.get("error") or "")
+                if (
+                    int(probe.get("status") or 0) <= 0
+                    and _is_transient_transport_error(probe_error)
+                    and not _is_permanent_transport_error(probe_error)
+                ):
+                    next_retry_paths.append(probe_path)
+                detect_decision = _evaluate_detect_decision(detect_probes)
+                if bool(detect_decision.get("detected")):
+                    break
+            retry_paths = next_retry_paths
 
         detect_confidence = str(detect_decision.get("confidence") or "low")
         detect_signals = [str(item) for item in (detect_decision.get("signals") or []) if str(item).strip()]
@@ -2875,9 +2950,9 @@ def _audit_elastic_host(
             primary_probe_headers = primary_probe.get("headers")
             if isinstance(primary_probe_headers, dict):
                 root_headers = {str(key): str(value) for key, value in primary_probe_headers.items()}
-            probe_error = primary_probe.get("error")
-            if isinstance(probe_error, str):
-                error = probe_error
+            primary_error_value = primary_probe.get("error")
+            if isinstance(primary_error_value, str):
+                error = primary_error_value
             scheme = str(primary_probe.get("scheme") or scheme)
             primary_insecure = primary_probe.get("insecure_effective")
             if isinstance(primary_insecure, bool):
@@ -2908,7 +2983,7 @@ def _audit_elastic_host(
                     "provided_username": username,
                     "provided_password": password if provided_credentials else None,
                     "provided_token": provided_token,
-                    "api_token": api_token if provided_token else None,
+                    "api_token": None,
                     "api_key_probe_status": "not_run",
                     "api_key_probe_error": None,
                     "effective_username": None,
@@ -2994,6 +3069,8 @@ def _audit_elastic_host(
         auth_probe_http_status: int | None = None
         auth_probe_endpoint: str | None = None
         auth_error_detail: dict[str, Any] | None = None
+        network_attempted: bool | None = None
+        verification_capability = "not_requested"
         if auth_provided:
             auth_probe = _probe_authenticate(
                 host,
@@ -3007,6 +3084,7 @@ def _audit_elastic_host(
                 anonymous_status=root_probe_status,
                 expected_username=username,
             )
+            auth_probe = _redact_auth_probe_result(auth_probe, api_token)
             auth_valid = auth_probe.valid
             auth_error = auth_probe.error
             effective_username = auth_probe.username
@@ -3014,13 +3092,15 @@ def _audit_elastic_host(
             auth_probe_http_status = auth_probe.status
             auth_probe_endpoint = auth_probe.endpoint
             auth_error_detail = auth_probe.detail
+            network_attempted = auth_probe.network_attempted
+            verification_capability = auth_probe.verification_capability
 
         deep_auth_headers = (
             auth_headers if auth_valid is True else _elastic_headers(username=None, password=None, api_token=None)
         )
         api_key_probe_status = "not_run"
         api_key_probe_error: str | None = None
-        if provided_token:
+        if provided_token and requested_actions:
             api_key_probe_status, api_key_probe_error = _verify_api_key_probe(
                 host,
                 port,
@@ -3044,34 +3124,6 @@ def _audit_elastic_host(
         else:
             service_status = "unknown_auth"
 
-        if not version and auth_valid is True:
-            resolved_version, version_error = _resolve_server_version_with_auth(
-                host,
-                port,
-                timeout,
-                scheme=scheme,
-                insecure=effective_insecure,
-                ca_file=ca_file,
-                auth_headers=deep_auth_headers,
-            )
-            if resolved_version:
-                version = resolved_version
-            elif version_error:
-                auth_error = (
-                    f"{auth_error}; version probe: {version_error}" if auth_error else f"version probe: {version_error}"
-                )
-
-        if not version:
-            detected_version, _ = _resolve_server_version_without_auth(
-                host,
-                port,
-                timeout,
-                preferred_scheme=root_probe_scheme,
-                ca_file=ca_file,
-            )
-            if detected_version:
-                version = detected_version
-
         _stage_trace(
             _STAGE_AUTH_INFERENCE,
             attempt=attempt + 1,
@@ -3092,7 +3144,7 @@ def _audit_elastic_host(
             "provided_username": username,
             "provided_password": password if provided_credentials else None,
             "provided_token": provided_token,
-            "api_token": api_token if provided_token else None,
+            "api_token": None,
             "api_key_probe_status": "not_run",
             "api_key_probe_error": None,
             "effective_username": effective_username,
@@ -3101,6 +3153,16 @@ def _audit_elastic_host(
             "auth_probe_http_status": auth_probe_http_status,
             "auth_probe_endpoint": auth_probe_endpoint,
             "auth_error_detail": auth_error_detail,
+            "network_attempted": network_attempted,
+            "verification_capability": verification_capability,
+            "credential_verification": {
+                "status": auth_probe_status or "not_requested",
+                "capability": verification_capability,
+                "supported_endpoint": auth_probe_endpoint
+                if verification_capability == "identity_endpoint_supported"
+                else None,
+                "unsupported_endpoints": [],
+            },
             "show_endpoints": show_endpoints,
             "show_plugins": show_plugins,
             "show_cluster": show_cluster,
@@ -3172,7 +3234,7 @@ def _audit_elastic_host(
         access_level = "unknown"
         api_key_probe_status = "not_run"
         api_key_probe_error = None
-        if auth_provided:
+        if auth_provided and requested_actions:
             can_read, can_write, can_manage, can_manage_security, rights_error = _check_privileges(
                 host,
                 port,
@@ -3214,7 +3276,7 @@ def _audit_elastic_host(
                 attempt=attempt + 1,
                 started_at=stage3_started,
                 result="skipped",
-                error="no auth provided",
+                error="no requested actions" if auth_provided else "no auth provided",
             )
 
         stage4_started = time.monotonic()
@@ -3306,7 +3368,7 @@ def _audit_elastic_host(
             for item in (endpoints_error, plugins_error, cluster_error, misconfig_error, users_error, discover_error)
             if str(item or "").strip()
         )
-        stage4_requested = bool(show_endpoints or show_plugins or show_cluster or show_users or discover)
+        stage4_requested = requested_actions
         _stage_trace(
             _STAGE_DATA,
             attempt=attempt + 1,
@@ -3390,7 +3452,7 @@ def _audit_elastic_host(
             "provided_username": username,
             "provided_password": password if provided_credentials else None,
             "provided_token": provided_token,
-            "api_token": api_token if provided_token else None,
+            "api_token": None,
             "api_key_probe_status": "not_run",
             "api_key_probe_error": None,
             "effective_username": None,
@@ -3439,6 +3501,42 @@ def _audit_elastic_host(
     )
 
 
+def _make_lifecycle_session(ctx: Any) -> ElasticHttpSession | None:
+    if str(getattr(ctx.args, "proxy", "") or "").strip():
+        return None
+    ca_file = str(getattr(ctx.args, "ca_file", "") or "").strip() or None
+    return ElasticHttpSession(
+        str(ctx.host),
+        int(ctx.port),
+        timeout=float(getattr(ctx.args, "timeout", 5.0)),
+        insecure=ca_file is None,
+        ca_file=ca_file,
+    )
+
+
+def _activate_lifecycle_session(ctx: Any, state: ElasticLifecycleState) -> ElasticHttpSession | None:
+    session = state.session
+    if session is None:
+        session = _make_lifecycle_session(ctx)
+        state.session = session
+    return session
+
+
+def close_elastic_lifecycle_state(state: Any) -> None:
+    if not isinstance(state, ElasticLifecycleState):
+        return
+    session = state.session
+    state.session = None
+    active = getattr(_THREAD_LOCAL_ELASTIC_SESSION, "session", None)
+    if active is session:
+        try:
+            delattr(_THREAD_LOCAL_ELASTIC_SESSION, "session")
+        except AttributeError:
+            pass
+    if session is not None:
+        session.close()
+
+
 def _elastic_lifecycle_key(ctx: Any) -> tuple[str | None, str | None, str | None, str]:
     credential = ctx.credential
     return (
@@ -3449,31 +3547,54 @@ def _elastic_lifecycle_key(ctx: Any) -> tuple[str | None, str | None, str | None
     )
 
 
+def _credential_verification_payload(
+    state: ElasticLifecycleState,
+    auth_probe: ElasticAuthProbeResult,
+) -> dict[str, Any]:
+    return {
+        "status": _auth_probe_status(auth_probe),
+        "capability": auth_probe.verification_capability,
+        "supported_endpoint": state.supported_auth_endpoint,
+        "unsupported_endpoints": sorted(state.unsupported_auth_endpoints),
+    }
+
+
 def detect_elastic(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     """Perform the complete anonymous identity/version classification once."""
 
     state = ctx.lifecycle_state
     if not isinstance(state, ElasticLifecycleState):
         raise TypeError("elastic lifecycle state is unavailable")
-    target_scheme = getattr(ctx.target, "scheme", None)
-    record = _audit_elastic_host(
-        str(ctx.host),
-        int(ctx.port),
-        float(getattr(ctx.args, "timeout", 5.0)),
-        int(getattr(ctx.args, "retries", 0) or 0),
-        None,
-        None,
-        None,
-        str(getattr(ctx.args, "ca_file", "") or "").strip() or None,
-        False,
-        False,
-        False,
-        False,
-        False,
-        preferred_scheme=str(target_scheme or "https"),
-        debug=bool(getattr(ctx.args, "debug", False)),
-        run_deep_checks=False,
-    )
+    target_scheme_raw = str(getattr(ctx.target, "scheme", "") or "").strip().lower()
+    target_scheme = target_scheme_raw if target_scheme_raw in {"http", "https"} else None
+    preferred_scheme = target_scheme or ("https" if int(ctx.port) in _TLS_HINT_PORTS else "http")
+    session = _make_lifecycle_session(ctx)
+    state.session = session
+    try:
+        with _elastic_session_scope(session):
+            record = _audit_elastic_host(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                int(getattr(ctx.args, "retries", 0) or 0),
+                None,
+                None,
+                None,
+                str(getattr(ctx.args, "ca_file", "") or "").strip() or None,
+                False,
+                False,
+                False,
+                False,
+                False,
+                preferred_scheme=preferred_scheme,
+                debug=bool(getattr(ctx.args, "debug", False)),
+                run_deep_checks=False,
+                scheme_locked=target_scheme is not None,
+            )
+    finally:
+        if session is not None:
+            session.close()
+        state.session = None
     state.detect_record = dict(record)
     return record
 
@@ -3495,23 +3616,28 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
         api_token=credential.token,
     )
     state.auth_headers[_elastic_lifecycle_key(ctx)] = headers
+    session = _activate_lifecycle_session(ctx, state)
     scheme = str(payload.get("scheme") or "https")
     insecure = bool(payload.get("insecure_effective"))
     ca_file = str(getattr(ctx.args, "ca_file", "") or "").strip() or None
-    auth_probe = _probe_authenticate(
-        str(ctx.host),
-        int(ctx.port),
-        float(getattr(ctx.args, "timeout", 5.0)),
-        scheme=scheme,
-        insecure=insecure,
-        ca_file=ca_file,
-        auth_headers=headers,
-        vendor=str(payload.get("vendor") or "compatible"),
-        anonymous_status=(
-            int(payload["anonymous_root_status"]) if isinstance(payload.get("anonymous_root_status"), int) else None
-        ),
-        expected_username=credential.username,
-    )
+    with _elastic_session_scope(session):
+        auth_probe = _probe_authenticate(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            scheme=scheme,
+            insecure=insecure,
+            ca_file=ca_file,
+            auth_headers=headers,
+            vendor=str(payload.get("vendor") or "compatible"),
+            anonymous_status=(
+                int(payload["anonymous_root_status"]) if isinstance(payload.get("anonymous_root_status"), int) else None
+            ),
+            expected_username=credential.username,
+            capability_state=state,
+        )
+    auth_probe = _redact_auth_probe_result(auth_probe, credential.token)
+    _redact_auth_state_details(state, credential.token)
     auth_valid = auth_probe.valid
     auth_error = auth_probe.error
     effective_username = auth_probe.username
@@ -3528,20 +3654,6 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
         status = "unknown_auth"
 
     version = payload.get("server_version")
-    if not version and auth_valid is True:
-        resolved_version, version_error = _resolve_server_version_with_auth(
-            str(ctx.host),
-            int(ctx.port),
-            float(getattr(ctx.args, "timeout", 5.0)),
-            scheme=scheme,
-            insecure=insecure,
-            ca_file=ca_file,
-            auth_headers=headers,
-        )
-        if resolved_version:
-            version = resolved_version
-        elif version_error:
-            auth_error = f"{auth_error}; version probe: {version_error}" if auth_error else version_error
 
     payload.update(
         {
@@ -3554,13 +3666,16 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
             "provided_username": credential.username,
             "provided_password": credential.password if credential.source != "default" else None,
             "provided_token": credential.token is not None,
-            "api_token": credential.token,
+            "api_token": None,
             "effective_username": effective_username,
             "auth_valid": auth_valid,
             "auth_probe_status": _auth_probe_status(auth_probe),
             "auth_probe_http_status": auth_probe.status,
             "auth_probe_endpoint": auth_probe.endpoint,
             "auth_error_detail": auth_probe.detail,
+            "network_attempted": auth_probe.network_attempted,
+            "verification_capability": auth_probe.verification_capability,
+            "credential_verification": _credential_verification_payload(state, auth_probe),
             "defcreds_enabled": credential.source == "default",
             "credentials_source": str(credential.source),
             "error": None if auth_valid is True or status == "invalid_credentials_anonymous" else auth_error,
@@ -3569,8 +3684,12 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
     return payload
 
 
-def collect_elastic_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
-    """Run capabilities and requested Elastic actions once after auth selection."""
+def _collect_elastic_data_with_session(
+    ctx: Any,
+    record: Any,
+    options: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Run capabilities and requested Elastic actions inside an active session scope."""
 
     state = ctx.lifecycle_state
     if not isinstance(state, ElasticLifecycleState):
@@ -3605,7 +3724,10 @@ def collect_elastic_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> d
     access_level = "unknown"
     api_key_probe_status = "not_run"
     api_key_probe_error: str | None = None
-    if use_authenticated:
+    requested_actions = any(
+        bool(options[name]) for name in ("show_endpoints", "show_plugins", "show_cluster", "show_users", "discover")
+    )
+    if use_authenticated and requested_actions:
         can_read, can_write, can_manage, can_manage_security, rights_error = _check_privileges(
             host,
             port,
@@ -3774,7 +3896,22 @@ def collect_elastic_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> d
                 "discover_coverage": discover_coverage or {},
             }
         )
-    return payload
+    redacted_payload = _redact_api_token(payload, credential.token)
+    if not isinstance(redacted_payload, dict):
+        raise TypeError("elastic data payload must remain a mapping")
+    redacted_payload["api_token"] = None
+    return redacted_payload
+
+
+def collect_elastic_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Run capabilities and requested actions using the target's reusable session."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, ElasticLifecycleState):
+        raise TypeError("elastic lifecycle state is unavailable")
+    session = _activate_lifecycle_session(ctx, state)
+    with _elastic_session_scope(session):
+        return _collect_elastic_data_with_session(ctx, record, options)
 
 
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
@@ -3804,6 +3941,13 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
         "api_key_probe_error",
         "effective_username",
         "auth_valid",
+        "auth_probe_status",
+        "auth_probe_http_status",
+        "auth_probe_endpoint",
+        "auth_error_detail",
+        "network_attempted",
+        "verification_capability",
+        "credential_verification",
         "cat_endpoints",
         "endpoint_diagnostics",
         "cat_plugins",
@@ -3979,7 +4123,32 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     return f"{line} err={err}" if err != "-" else line
 
 
-def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+def _is_public_root_unverified_attempt(attempt: Mapping[str, Any]) -> bool:
+    if str(attempt.get("status") or "") != "credentials_unverified_anonymous":
+        return False
+    detail = attempt.get("auth_error_detail")
+    if isinstance(detail, Mapping):
+        detail_type = str(detail.get("type") or "")
+        fallback_endpoint = str(detail.get("fallback_endpoint") or "")
+        reason = str(detail.get("reason") or "")
+        if (
+            detail_type == "authentication_unverified"
+            and fallback_endpoint == "/"
+            and "anonymously accessible" in reason.lower()
+        ):
+            return True
+    error = str(attempt.get("error") or "")
+    if "root endpoint is also anonymously accessible" in error.lower():
+        return True
+    return False
+
+
+def _format_credential_attempts_records(
+    record: dict[str, Any],
+    output_format: str,
+    *,
+    debug: bool = False,
+) -> list[str]:
     if output_format == "json":
         return []
     attempts = record.get("attempted_credentials")
@@ -3987,6 +4156,9 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         return []
     prefix = _nxc_prefix(record)
     lines: list[str] = []
+    full_default_sweep = len(attempts) > 1 and any(
+        isinstance(attempt, dict) and str(attempt.get("source") or "") == "default" for attempt in attempts
+    )
     accepted_statuses = {"valid_credentials", "weak_default_creds"}
     rejected_statuses = {"auth_required", "invalid_credentials_anonymous"}
     for attempt in attempts:
@@ -4008,15 +4180,39 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             else:
                 password_text = str(password)
             credential_text = f"{username_text}:{password_text}"
-        if status in accepted_statuses:
+        probe_status = str(attempt.get("auth_probe_status") or "")
+        if probe_status == "verified" or (not probe_status and status in accepted_statuses):
             marker = "[+]"
-        elif status in rejected_statuses:
+        elif probe_status == "rejected" or (not probe_status and status in rejected_statuses):
             marker = "[-]"
         else:
             marker = "[!]"
+        if not debug and full_default_sweep and marker == "[!]":
+            marker = "[-]"
+        if (
+            not debug
+            and marker == "[!]"
+            and (username is not None or password is not None)
+            and _is_public_root_unverified_attempt(attempt)
+        ):
+            marker = "[-]"
         suffix = ""
         if marker == "[!]" and error:
-            suffix = f" err={_clip(error, 120)}"
+            suffix = f" err={error if debug else _clip(error, 120)}"
+        if debug:
+            diagnostics: list[str] = []
+            for key in (
+                "auth_probe_status",
+                "auth_probe_http_status",
+                "auth_probe_endpoint",
+                "network_attempted",
+                "verification_capability",
+            ):
+                value = attempt.get(key)
+                if value is not None and str(value).strip():
+                    diagnostics.append(f"{key}={value}")
+            if diagnostics:
+                suffix = f" {' '.join(diagnostics)}{suffix}"
         lines.append(f"{prefix} {marker} {credential_text}{suffix}")
     return lines
 

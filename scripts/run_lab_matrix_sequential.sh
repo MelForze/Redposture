@@ -43,7 +43,7 @@ fi
 
 MATRIX_SERVICES=(
   exporters registry grafana gitlab consul kubeapi postgres mongodb oracle docker
-  clickhouse redis etcd qdrant elastic grpc kafka zookeeper keeper proxmox proxy-isolated
+  clickhouse redis etcd qdrant elastic grpc kafka zookeeper zookeeper-auth keeper proxmox proxy-isolated
 )
 READINESS_ALLOWED_COMPLETED=(
   redposture-lab-registry-seed
@@ -555,10 +555,10 @@ run_postgres_cases() {
     run_case postgres postgres_extended_query_privs 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --database postgres --table redposture.demo_accounts --show-columns 5 --column username,password --rows --dump 5 --sql-cmd "select username, role from redposture.demo_accounts order by id limit 2" --privesc-check
     run_case postgres postgres_extended_execute 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --execute "id"
     run_case postgres postgres_extended_os_read 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --os-read /etc/hostname
-    # postgres-alt accepts neither postgres:postgres nor pgbouncer:pgbouncer -- exercises
-    # the 5.5.1 path that surfaces ALL attempted defaults in the output (previously only
-    # unit-test covered). Runtime attaches `attempted_credentials`; postgres render
-    # produces one `[-] user:pass` line per attempt.
+    # postgres-alt accepts none of the built-in pairs -- exercises the path that
+    # surfaces all 9 attempted defaults in the output. Runtime attaches
+    # `attempted_credentials`; postgres render produces one `[-] user:pass`
+    # line per attempt.
     run_case postgres postgres_extended_defcreds_both_fail 0 postgres -t 127.0.0.1 --port 25439 --defcreds
     # P4-D idempotency twin of postgres_default.
     run_case postgres postgres_idempotency 0 postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables --dump 20
@@ -831,6 +831,10 @@ run_zookeeper_cases() {
   fi
 }
 
+run_zookeeper_auth_cases() {
+  run_case zookeeper zookeeper_auth_defcreds 0 zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --dump
+}
+
 run_keeper_cases() {
   run_case keeper keeper_cluster 0 keeper -t 127.0.0.1 --ports "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3
   run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
@@ -906,6 +910,7 @@ run_service_block elastic run_elastic_cases
 run_service_block grpc run_grpc_cases
 run_service_block kafka run_kafka_cases
 run_service_block zookeeper run_zookeeper_cases
+run_service_block zookeeper-auth run_zookeeper_auth_cases
 run_service_block keeper run_keeper_cases
 run_service_block proxmox run_proxmox_cases
 if is_extended_matrix; then

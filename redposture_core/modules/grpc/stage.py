@@ -16,8 +16,8 @@ from ...stage_runtime import (
     AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    has_username_password_credential_file,
     install_record_callback,
+    merge_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -30,9 +30,10 @@ _PRODUCTION_AUDIT_HOST = actions._audit_grpc_host
 class _CompactOpenApiRender:
     """Render discovery only while OpenAPI's implicit analysis runs."""
 
-    __all__ = ("_format_detect_record", "_format_record")
+    __all__ = ("_format_detect_record", "_format_record", "_format_credential_attempts_records")
     _format_detect_record = staticmethod(render._format_detect_record)
     _format_record = staticmethod(render._format_record)
+    _format_credential_attempts_records = staticmethod(render._format_credential_attempts_records)
 
 
 def _openapi_requested(args: Any) -> bool:
@@ -58,24 +59,30 @@ def _resolve_openapi_path(args: Any, plan: AuditCommandPlan) -> str:
 
 def build_grpc_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
-    if not bool(getattr(args, "defcreds", False)) or has_username_password_credential_file(args):
-        return plan
-    candidates = actions._auth_attempt_entries(
-        token=getattr(args, "token", None),
-        username=getattr(args, "username", None),
-        password=getattr(args, "password", None),
-        defcreds=True,
-    )
-    runs = tuple(
-        AuditCredentialRun(
-            token=str(item.get("token") or "") or None if item.get("type") == "token" else None,
-            username=str(item.get("username") or "") if item.get("type") == "basic" else None,
-            password=str(item.get("password") or "") if item.get("type") == "basic" else None,
-            source="default" if item.get("source") == "defcreds" else "provided",
+    token = str(getattr(args, "token", "") or "").strip() or None
+    token_runs = (AuditCredentialRun(token=token, source="provided"),) if token is not None else ()
+    default_runs = (
+        tuple(
+            AuditCredentialRun(
+                token=str(item.get("token") or "") or None if item.get("type") == "token" else None,
+                username=str(item.get("username") or "") if item.get("type") == "basic" else None,
+                password=str(item.get("password") or "") if item.get("type") == "basic" else None,
+                source="default",
+            )
+            for item in actions._auth_attempt_entries(
+                token=None,
+                username=None,
+                password=None,
+                defcreds=True,
+            )
         )
-        for item in candidates
+        if bool(getattr(args, "defcreds", False))
+        else ()
     )
-    return replace(plan, credential_runs=runs or (AuditCredentialRun(source="anonymous"),))
+    return replace(
+        plan,
+        credential_runs=merge_audit_credential_runs(token_runs, plan.credential_runs, default_runs),
+    )
 
 
 def _build_grpc_host_stage_options(args: Any) -> dict[str, Any]:
@@ -101,7 +108,18 @@ def _build_grpc_host_stage_options(args: Any) -> dict[str, Any]:
     }
 
 
+def _grpc_credential_gate(credential: AuditCredentialRun, record: AuditRecord) -> tuple[bool, str]:
+    """Continue fallback until the current token/basic identity is verified."""
+
+    has_credentials = credential.token is not None or credential.username is not None or credential.password is not None
+    if not has_credentials:
+        return actions.grpc_deep_gate(record)
+    verified = record.extra.get("provided_credentials_ok") is True
+    return verified, "grpc credential verified" if verified else "grpc credential rejected or unverified"
+
+
 def build_grpc_spec(args: Any) -> ModuleAuditSpec:
+    full_credential_sweep = bool(getattr(args, "defcreds", False))
     options = getattr(args, "_grpc_host_stage_options", None)
     if options is None:
         options = _build_grpc_host_stage_options(args)
@@ -146,6 +164,11 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_factory=(lambda _ctx: actions.GrpcLifecycleState()) if use_lifecycle_hooks else None,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         deep_gate=actions.grpc_deep_gate,
+        credential_gate=_grpc_credential_gate,
+        record_all_credential_attempts=full_credential_sweep,
+        continue_after_credential_success=full_credential_sweep,
+        continue_after_credential_error=full_credential_sweep,
+        credential_attempt_detail_fields=("provided_credential_type",),
         render_module=_CompactOpenApiRender if compact_openapi_output else render,
         colorize=render._render_colored_grpc_line,
     )
@@ -156,9 +179,6 @@ def run_grpc_stage(args: Any, logger: Any) -> int:
     console = Console(debug=cfg.debug)
     if hasattr(console, "set_structured_output"):
         console.set_structured_output(cfg.output_format == "json")
-    if getattr(args, "token", None):
-        args.username = None
-        args.password = None
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)

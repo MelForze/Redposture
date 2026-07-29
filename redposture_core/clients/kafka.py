@@ -27,6 +27,20 @@ _KAFKA_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("admin", "admin"),
     ("kafka", "kafka"),
     ("kafka", "password"),
+    ("admin", "password"),
+    ("admin", "kafka"),
+    ("admin", "admin-secret"),
+    ("kafka", "admin"),
+    ("kafka", "changeme"),
+    ("broker", "broker"),
+    ("broker", "brokerpass"),
+    ("user", "user"),
+    ("user", "password"),
+    ("client", "client"),
+    ("service", "service"),
+    ("admin", "changeme"),
+    ("service", "password"),
+    ("kafka", "zookeeper"),
 )
 
 # Connection-error classification + framed reads are shared via the transport layer.

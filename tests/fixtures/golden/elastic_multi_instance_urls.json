@@ -1,9 +1,14 @@
 [
   {
     "access_level": "unknown",
+    "anonymous_root_status": 200,
     "api_key_probe_error": null,
     "api_key_probe_status": "not_run",
-    "api_token": null,
+    "attempted_credentials": [],
+    "auth_error_detail": null,
+    "auth_probe_endpoint": null,
+    "auth_probe_http_status": null,
+    "auth_probe_status": null,
     "auth_required": false,
     "auth_valid": null,
     "can_manage": null,
@@ -54,37 +59,36 @@
     "cluster_error": null,
     "cluster_health": null,
     "cluster_nodes": null,
+    "credential_verification": {
+      "capability": "not_requested",
+      "status": "not_requested",
+      "supported_endpoint": null,
+      "unsupported_endpoints": []
+    },
     "detect_confidence": "high",
     "detect_probe_trace": [
       {
+        "error": null,
         "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 405
+        "signal_kind": "hard_positive",
+        "signals": [
+          "header_x_elastic_product",
+          "root_tagline",
+          "root_version_shape"
+        ],
+        "status": 200,
+        "transport_error": null,
+        "vendor": "elasticsearch"
       }
     ],
     "detect_signals": [
       "header_x_elastic_product",
       "root_tagline",
-      "root_version_shape",
-      "nodes_version_shape"
+      "root_version_shape"
     ],
     "discover": false,
     "discover_error": null,
+    "discover_error_detail": null,
     "discover_results": null,
     "effective_username": null,
     "endpoint_diagnostics": [
@@ -302,10 +306,10 @@
     "misconfig_error": null,
     "misconfig_findings": null,
     "module": "elastic",
+    "network_attempted": null,
     "plugins_error": null,
     "port": 19200,
     "provided_credentials": false,
-    "provided_password": null,
     "provided_token": false,
     "provided_username": null,
     "rights_error": null,
@@ -330,15 +334,24 @@
       }
     ],
     "status": "open_no_auth",
-    "tls_auto_plain": true,
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
     "users": null,
-    "users_error": null
+    "users_error": null,
+    "vendor": "elasticsearch",
+    "verification_capability": "not_requested"
   },
   {
     "access_level": "unknown",
+    "anonymous_root_status": 200,
     "api_key_probe_error": null,
     "api_key_probe_status": "not_run",
-    "api_token": null,
+    "attempted_credentials": [],
+    "auth_error_detail": null,
+    "auth_probe_endpoint": null,
+    "auth_probe_http_status": null,
+    "auth_probe_status": null,
     "auth_required": false,
     "auth_valid": null,
     "can_manage": null,
@@ -389,37 +402,36 @@
     "cluster_error": null,
     "cluster_health": null,
     "cluster_nodes": null,
+    "credential_verification": {
+      "capability": "not_requested",
+      "status": "not_requested",
+      "supported_endpoint": null,
+      "unsupported_endpoints": []
+    },
     "detect_confidence": "high",
     "detect_probe_trace": [
       {
+        "error": null,
         "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 405
+        "signal_kind": "hard_positive",
+        "signals": [
+          "header_x_elastic_product",
+          "root_tagline",
+          "root_version_shape"
+        ],
+        "status": 200,
+        "transport_error": null,
+        "vendor": "elasticsearch"
       }
     ],
     "detect_signals": [
       "header_x_elastic_product",
       "root_tagline",
-      "root_version_shape",
-      "nodes_version_shape"
+      "root_version_shape"
     ],
     "discover": false,
     "discover_error": null,
+    "discover_error_detail": null,
     "discover_results": null,
     "effective_username": null,
     "endpoint_diagnostics": [
@@ -637,10 +649,10 @@
     "misconfig_error": null,
     "misconfig_findings": null,
     "module": "elastic",
+    "network_attempted": null,
     "plugins_error": null,
     "port": 19202,
     "provided_credentials": false,
-    "provided_password": null,
     "provided_token": false,
     "provided_username": null,
     "rights_error": null,
@@ -665,15 +677,24 @@
       }
     ],
     "status": "open_no_auth",
-    "tls_auto_plain": true,
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
     "users": null,
-    "users_error": null
+    "users_error": null,
+    "vendor": "elasticsearch",
+    "verification_capability": "not_requested"
   },
   {
     "access_level": "unknown",
+    "anonymous_root_status": 200,
     "api_key_probe_error": null,
     "api_key_probe_status": "not_run",
-    "api_token": null,
+    "attempted_credentials": [],
+    "auth_error_detail": null,
+    "auth_probe_endpoint": null,
+    "auth_probe_http_status": null,
+    "auth_probe_status": null,
     "auth_required": false,
     "auth_valid": null,
     "can_manage": null,
@@ -724,37 +745,36 @@
     "cluster_error": null,
     "cluster_health": null,
     "cluster_nodes": null,
+    "credential_verification": {
+      "capability": "not_requested",
+      "status": "not_requested",
+      "supported_endpoint": null,
+      "unsupported_endpoints": []
+    },
     "detect_confidence": "high",
     "detect_probe_trace": [
       {
+        "error": null,
         "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 405
+        "signal_kind": "hard_positive",
+        "signals": [
+          "header_x_elastic_product",
+          "root_tagline",
+          "root_version_shape"
+        ],
+        "status": 200,
+        "transport_error": null,
+        "vendor": "elasticsearch"
       }
     ],
     "detect_signals": [
       "header_x_elastic_product",
       "root_tagline",
-      "root_version_shape",
-      "nodes_version_shape"
+      "root_version_shape"
     ],
     "discover": false,
     "discover_error": null,
+    "discover_error_detail": null,
     "discover_results": null,
     "effective_username": null,
     "endpoint_diagnostics": [
@@ -972,10 +992,10 @@
     "misconfig_error": null,
     "misconfig_findings": null,
     "module": "elastic",
+    "network_attempted": null,
     "plugins_error": null,
     "port": 19203,
     "provided_credentials": false,
-    "provided_password": null,
     "provided_token": false,
     "provided_username": null,
     "rights_error": null,
@@ -1000,15 +1020,24 @@
       }
     ],
     "status": "open_no_auth",
-    "tls_auto_plain": true,
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
     "users": null,
-    "users_error": null
+    "users_error": null,
+    "vendor": "elasticsearch",
+    "verification_capability": "not_requested"
   },
   {
     "access_level": "unknown",
+    "anonymous_root_status": 200,
     "api_key_probe_error": null,
     "api_key_probe_status": "not_run",
-    "api_token": null,
+    "attempted_credentials": [],
+    "auth_error_detail": null,
+    "auth_probe_endpoint": null,
+    "auth_probe_http_status": null,
+    "auth_probe_status": null,
     "auth_required": false,
     "auth_valid": null,
     "can_manage": null,
@@ -1059,37 +1088,36 @@
     "cluster_error": null,
     "cluster_health": null,
     "cluster_nodes": null,
+    "credential_verification": {
+      "capability": "not_requested",
+      "status": "not_requested",
+      "supported_endpoint": null,
+      "unsupported_endpoints": []
+    },
     "detect_confidence": "high",
     "detect_probe_trace": [
       {
+        "error": null,
         "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 405
+        "signal_kind": "hard_positive",
+        "signals": [
+          "header_x_elastic_product",
+          "root_tagline",
+          "root_version_shape"
+        ],
+        "status": 200,
+        "transport_error": null,
+        "vendor": "elasticsearch"
       }
     ],
     "detect_signals": [
       "header_x_elastic_product",
       "root_tagline",
-      "root_version_shape",
-      "nodes_version_shape"
+      "root_version_shape"
     ],
     "discover": false,
     "discover_error": null,
+    "discover_error_detail": null,
     "discover_results": null,
     "effective_username": null,
     "endpoint_diagnostics": [
@@ -1307,10 +1335,10 @@
     "misconfig_error": null,
     "misconfig_findings": null,
     "module": "elastic",
+    "network_attempted": null,
     "plugins_error": null,
     "port": 19204,
     "provided_credentials": false,
-    "provided_password": null,
     "provided_token": false,
     "provided_username": null,
     "rights_error": null,
@@ -1335,15 +1363,24 @@
       }
     ],
     "status": "open_no_auth",
-    "tls_auto_plain": true,
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
     "users": null,
-    "users_error": null
+    "users_error": null,
+    "vendor": "elasticsearch",
+    "verification_capability": "not_requested"
   },
   {
     "access_level": "unknown",
+    "anonymous_root_status": 200,
     "api_key_probe_error": null,
     "api_key_probe_status": "not_run",
-    "api_token": null,
+    "attempted_credentials": [],
+    "auth_error_detail": null,
+    "auth_probe_endpoint": null,
+    "auth_probe_http_status": null,
+    "auth_probe_status": null,
     "auth_required": false,
     "auth_valid": null,
     "can_manage": null,
@@ -1394,37 +1431,36 @@
     "cluster_error": null,
     "cluster_health": null,
     "cluster_nodes": null,
+    "credential_verification": {
+      "capability": "not_requested",
+      "status": "not_requested",
+      "supported_endpoint": null,
+      "unsupported_endpoints": []
+    },
     "detect_confidence": "high",
     "detect_probe_trace": [
       {
+        "error": null,
         "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 405
+        "signal_kind": "hard_positive",
+        "signals": [
+          "header_x_elastic_product",
+          "root_tagline",
+          "root_version_shape"
+        ],
+        "status": 200,
+        "transport_error": null,
+        "vendor": "elasticsearch"
       }
     ],
     "detect_signals": [
       "header_x_elastic_product",
       "root_tagline",
-      "root_version_shape",
-      "nodes_version_shape"
+      "root_version_shape"
     ],
     "discover": false,
     "discover_error": null,
+    "discover_error_detail": null,
     "discover_results": null,
     "effective_username": null,
     "endpoint_diagnostics": [
@@ -1642,10 +1678,10 @@
     "misconfig_error": null,
     "misconfig_findings": null,
     "module": "elastic",
+    "network_attempted": null,
     "plugins_error": null,
     "port": 19205,
     "provided_credentials": false,
-    "provided_password": null,
     "provided_token": false,
     "provided_username": null,
     "rights_error": null,
@@ -1670,8 +1706,12 @@
       }
     ],
     "status": "open_no_auth",
-    "tls_auto_plain": true,
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
     "users": null,
-    "users_error": null
+    "users_error": null,
+    "vendor": "elasticsearch",
+    "verification_capability": "not_requested"
   }
 ]

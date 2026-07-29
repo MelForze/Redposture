@@ -101,7 +101,6 @@ def test_fix_d2_mongo_stage_exits_2_on_parse_error(monkeypatch: pytest.MonkeyPat
     _console = _Console()
     monkeypatch.setattr(mongo_stage, "Console", lambda **_kw: _console)
     monkeypatch.setattr(mongo_stage.policy, "validate_args", lambda *_a, **_kw: None)
-    monkeypatch.setattr(mongo_stage, "has_username_password_credential_file", lambda _a: False)
 
     args = argparse.Namespace(
         collection=["broken."],

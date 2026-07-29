@@ -11,7 +11,8 @@ from ...stage_runtime import (
     AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    has_username_password_credential_file,
+    build_basic_credential_runs,
+    merge_audit_credential_runs,
     run_basic_host_audit,
 )
 from . import actions, policy, render
@@ -42,24 +43,21 @@ def _redis_use_lifecycle_hooks() -> bool:
 
 
 def _prepare_redis_credential_runs(args: Any) -> None:
-    if has_username_password_credential_file(args):
-        return
-    runs: list[AuditCredentialRun] = []
-    username = getattr(args, "username", None)
-    password = getattr(args, "password", None)
-    if username is not None or password is not None:
-        runs.append(AuditCredentialRun(username=username, password=password, source="provided"))
-    if bool(getattr(args, "defcreds", False)):
-        default_pair = ("redis", "redis")
-        if all((run.username, run.password) != default_pair for run in runs):
-            runs.append(AuditCredentialRun(username="redis", password="redis", source="default"))
-    if runs:
-        args._audit_credential_runs = tuple(runs)
+    supplied_runs = build_basic_credential_runs(args)
+    default_runs = (
+        tuple(
+            AuditCredentialRun(username=username, password=password, source="default")
+            for username, password in actions._REDIS_DEFAULT_CREDENTIALS
+        )
+        if bool(getattr(args, "defcreds", False))
+        else ()
+    )
+    args._audit_credential_runs = merge_audit_credential_runs(supplied_runs, default_runs)
 
 
 def build_redis_spec(args: Any) -> ModuleAuditSpec:
-    _ = args
     use_lifecycle_hooks = _redis_use_lifecycle_hooks()
+    exhaustive_credentials = bool(getattr(args, "defcreds", False))
     return ModuleAuditSpec(
         module="redis",
         label="REDIS",
@@ -75,6 +73,9 @@ def build_redis_spec(args: Any) -> ModuleAuditSpec:
         # E3 opt-in: Redis anon-open (no AUTH required) makes the defcreds
         # loop redundant — the audit already succeeded without credentials.
         keep_anonymous_open_no_auth=True,
+        continue_after_credential_success=exhaustive_credentials,
+        continue_after_credential_error=exhaustive_credentials,
+        fallback_to_anonymous_detect_record=exhaustive_credentials,
     )
 
 
@@ -82,7 +83,11 @@ def _validate_and_prepare_redis_args(args: Any, console: Any) -> int | None:
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
-    _prepare_redis_credential_runs(args)
+    try:
+        _prepare_redis_credential_runs(args)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
     return None
 
 

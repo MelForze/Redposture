@@ -51,7 +51,10 @@ def configure_grafana_parser(
     grafana_auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try default Grafana credentials admin:admin.",
+        help=(
+            "Try the curated Grafana default/common credential set, including admin:admin, "
+            "after token, provided, or file credentials."
+        ),
     )
     # E2E-batch fix: Grafana supports API keys / service account tokens
     # (`Authorization: Bearer glsa-*`) but the CLI previously exposed only

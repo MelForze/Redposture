@@ -427,6 +427,27 @@ def _port_option_provided(raw_argv: list[str]) -> bool:
     return any(token in {"--port", "--ports"} or token.startswith(("--port=", "--ports=")) for token in raw_argv)
 
 
+def _option_provided(raw_argv: list[str], *options: str) -> bool:
+    """Return whether one of ``options`` was explicitly present in argv.
+
+    Keep the provenance separate from argparse defaults so modules may safely
+    tune defaults for large plans while preserving every user-supplied value.
+    Both ``--option=value`` and compact short forms such as ``-w200`` are
+    accepted by argparse and therefore need to be recognized here as well.
+    """
+
+    long_options = tuple(option for option in options if option.startswith("--"))
+    short_options = tuple(option for option in options if option.startswith("-") and not option.startswith("--"))
+    for token in raw_argv:
+        if token in options:
+            return True
+        if any(token.startswith(f"{option}=") for option in long_options):
+            return True
+        if any(token.startswith(option) and len(token) > len(option) for option in short_options):
+            return True
+    return False
+
+
 def _build_selfcert_option_parser() -> argparse.ArgumentParser:
     parser = _NoColorArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -500,6 +521,9 @@ def build_parser() -> argparse.ArgumentParser:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     port_option_was_provided = _port_option_provided(raw_argv)
+    workers_option_was_provided = _option_provided(raw_argv, "-w", "--workers")
+    retries_option_was_provided = _option_provided(raw_argv, "-r", "--retries")
+    timeout_option_was_provided = _option_provided(raw_argv, "--timeout")
     raw_argv = _normalize_multi_port_port_flag(raw_argv)
     parser = build_parser()
 
@@ -539,4 +563,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     parsed = parser.parse_args(raw_argv)
     parsed._port_option_provided = port_option_was_provided
+    parsed._workers_option_provided = workers_option_was_provided
+    parsed._retries_option_provided = retries_option_was_provided
+    parsed._timeout_option_provided = timeout_option_was_provided
     return parsed

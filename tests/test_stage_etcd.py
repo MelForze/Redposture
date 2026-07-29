@@ -16,6 +16,7 @@ from redposture_core.stage_etcd import (
     _count_v2_nodes,
     _count_v3_keys,
     _dump_v2_all_from_body,
+    _format_credential_attempts_records,
     _format_detect_record,
     _format_keys_detail_records,
     _format_record,
@@ -76,6 +77,41 @@ def _etcd_args(**overrides: object) -> argparse.Namespace:
     }
     data.update(overrides)
     return argparse.Namespace(**data)
+
+
+def test_etcd_default_credentials_are_exact_and_explicit_overlap_is_deduplicated() -> None:
+    assert etcd._ETCD_DEFAULT_CREDS == (
+        ("root", "root"),
+        ("root", "etcd"),
+        ("etcd", "etcd"),
+        ("root", "password"),
+        ("root", "admin"),
+        ("root", "rootpass"),
+        ("etcd", "password"),
+        ("admin", "admin"),
+        ("admin", "password"),
+        ("admin", "etcd"),
+        ("admin", "changeme"),
+        ("user", "user"),
+        ("user", "password"),
+        ("service", "service"),
+    )
+    assert etcd._build_etcd_credential_candidates("root", "root", True) == [
+        ("root", "root", "provided"),
+        ("root", "etcd", "default"),
+        ("etcd", "etcd", "default"),
+        ("root", "password", "default"),
+        ("root", "admin", "default"),
+        ("root", "rootpass", "default"),
+        ("etcd", "password", "default"),
+        ("admin", "admin", "default"),
+        ("admin", "password", "default"),
+        ("admin", "etcd", "default"),
+        ("admin", "changeme", "default"),
+        ("user", "user", "default"),
+        ("user", "password", "default"),
+        ("service", "service", "default"),
+    ]
 
 
 def _etcd_host_record(
@@ -470,8 +506,12 @@ def test_audit_etcd_authenticated_reads_propagate_token_and_render_selected_defa
 
     def fake_auth(_host, _port, _timeout, username, password):
         auth_attempts.append((username, password))
+        if (username, password) == ("root", "root"):
+            raise OSError("candidate transport failure")
         if (username, password) == ("root", "etcd"):
             return "token-123", None
+        if (username, password) == ("admin", "admin"):
+            return "token-later", None
         return None, "authentication failed"
 
     monkeypatch.setattr(etcd, "_http_json_request", fake_request)
@@ -489,16 +529,102 @@ def test_audit_etcd_authenticated_reads_propagate_token_and_render_selected_defa
         dump_delay=0,
     )
 
-    assert auth_attempts[:2] == [("root", "root"), ("root", "etcd")]
+    assert auth_attempts == list(etcd._ETCD_DEFAULT_CREDS)
     assert record["status"] == "weak_default_creds"
     assert record["key_count"] == 0
     assert record["key_count_state"] == "known"
     assert record["effective_username"] == "root"
     assert record["effective_password"] == "etcd"
+    assert "candidate transport failure" in str(record["credential_attempts"][0]["error"])
     assert len(token_calls) == 3
     assert all(token == "token-123" for _payload, token in token_calls)
-    rendered = _format_record(record, "txt")
-    assert "[+] root:etcd (keys:0)" in rendered
+    assert _format_record(record, "txt") == ""
+    rendered = _format_credential_attempts_records(record, "txt")
+    assert len(rendered) == len(etcd._ETCD_DEFAULT_CREDS)
+    selected_line = next(line for line in rendered if "[+] root:etcd" in line)
+    later_success_line = next(line for line in rendered if "[+] admin:admin" in line)
+    assert selected_line.endswith("[+] root:etcd (keys:0)")
+    assert later_success_line.endswith("[+] admin:admin")
+
+
+def test_audit_etcd_defcreds_full_failure_renders_each_pair_once(monkeypatch) -> None:
+    def fake_request(_host, _port, _method, path, _timeout, *, payload=None, auth_token=None):
+        _ = (payload, auth_token)
+        if path == "/version":
+            return 200, '{"etcdserver":"3.5.14"}'
+        if path == "/v2/keys?recursive=true":
+            return 404, ""
+        if path == "/v3/auth/status":
+            return 200, '{"enabled":true}'
+        raise AssertionError(path)
+
+    attempted: list[tuple[str, str]] = []
+
+    def fake_auth(_host, _port, _timeout, username, password):
+        attempted.append((username, password))
+        return None, "authentication failed"
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    monkeypatch.setattr(etcd, "_etcd_v3_authenticate", fake_auth)
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+        defcreds=True,
+    )
+
+    assert attempted == list(etcd._ETCD_DEFAULT_CREDS)
+    assert record["status"] == "auth_required"
+    assert len(record["credential_attempts"]) == len(etcd._ETCD_DEFAULT_CREDS)
+    assert _format_record(record, "txt") == ""
+    lines = _format_credential_attempts_records(record, "txt")
+    assert len(lines) == len(etcd._ETCD_DEFAULT_CREDS)
+    assert all(" [-] " in line for line in lines)
+
+
+def test_audit_etcd_without_defcreds_stops_after_first_success(monkeypatch) -> None:
+    def fake_request(_host, _port, _method, path, _timeout, *, payload=None, auth_token=None):
+        if path == "/version":
+            return 200, '{"etcdserver":"3.5.14"}'
+        if path == "/v2/keys?recursive=true":
+            return 404, ""
+        if path == "/v3/auth/status":
+            return 200, '{"enabled":true}'
+        if path == "/v3/kv/range":
+            assert auth_token == "token-first"
+            return 200, '{"count":"0"}'
+        raise AssertionError(path)
+
+    attempted: list[tuple[str, str]] = []
+
+    def fake_auth(_host, _port, _timeout, username, password):
+        attempted.append((username, password))
+        return ("token-first" if username == "first" else "token-second"), None
+
+    monkeypatch.setattr(etcd, "_http_json_request", fake_request)
+    monkeypatch.setattr(etcd, "_etcd_v3_authenticate", fake_auth)
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+        credential_candidates=[
+            {"username": "first", "password": "one", "source": "file"},
+            {"username": "second", "password": "two", "source": "file"},
+        ],
+    )
+
+    assert attempted == [("first", "one")]
+    assert record["status"] == "valid_credentials"
+    assert record["effective_username"] == "first"
+    assert record["effective_password"] == "one"
 
 
 def test_audit_etcd_host_marks_non_etcd_and_retries_failures(monkeypatch) -> None:

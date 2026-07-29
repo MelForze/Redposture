@@ -1569,6 +1569,70 @@ def test_validate_capability_sanity_rejects_identity_marker_only(tmp_path: Path)
         _validate_capability_sanity(rows)
 
 
+def test_validate_capability_sanity_accepts_successful_empty_elastic_plugins(
+    tmp_path: Path,
+) -> None:
+    body = (
+        '{"host":"h","port":9200,"status":"valid_credentials","timestamp":"t","stages":[],'
+        '"module":"elastic","show_plugins":true,"cat_plugins":[],"plugins_error":null}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "elastic_plugins_edge", body)
+    rows = [
+        _mk_row(
+            module="elastic",
+            label="elastic_plugins_edge",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    _validate_capability_sanity(rows)
+
+
+def test_validate_capability_sanity_rejects_failed_empty_elastic_plugins(
+    tmp_path: Path,
+) -> None:
+    body = (
+        '{"host":"h","port":9200,"status":"valid_credentials","timestamp":"t","stages":[],'
+        '"module":"elastic","show_plugins":true,"cat_plugins":[],"plugins_error":"status=500"}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "elastic_plugins_edge", body)
+    rows = [
+        _mk_row(
+            module="elastic",
+            label="elastic_plugins_edge",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    with pytest.raises(SystemExit, match="capability regression"):
+        _validate_capability_sanity(rows)
+
+
+def test_validate_capability_sanity_accepts_grpc_web_detection(
+    tmp_path: Path,
+) -> None:
+    body = (
+        '{"host":"h","port":50071,"status":"detected","timestamp":"t","stages":[],'
+        '"module":"grpc","services":null,"reflection_enabled":null,"grpc_web_detected":true}'
+    )
+    json_path, log_path = _audit_json(tmp_path, "grpc_web_detect", body)
+    rows = [
+        _mk_row(
+            module="grpc",
+            label="grpc_web_detect",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    _validate_capability_sanity(rows)
+
+
 def test_validate_action_contracts_requires_grafana_datasource_effect(tmp_path: Path) -> None:
     body = (
         '{"host":"h","port":3000,"status":"valid_credentials","module":"grafana",'

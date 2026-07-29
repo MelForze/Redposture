@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ...audit_config import AuditConfig
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
+    AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    merge_audit_credential_runs,
     run_basic_host_audit,
 )
 from . import actions, policy, render
@@ -19,7 +22,19 @@ _DEFAULT_PORTS: tuple[int, ...] | None = (2379, 12379)
 
 
 def build_etcd_plan(args: Any) -> AuditCommandPlan:
-    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    default_runs = (
+        tuple(
+            AuditCredentialRun(username=username, password=password, source="default")
+            for username, password in actions._ETCD_DEFAULT_CREDS
+        )
+        if bool(getattr(args, "defcreds", False))
+        else ()
+    )
+    return replace(
+        plan,
+        credential_runs=merge_audit_credential_runs(plan.credential_runs, default_runs),
+    )
 
 
 def build_etcd_spec(args: Any) -> ModuleAuditSpec:
@@ -33,6 +48,8 @@ def build_etcd_spec(args: Any) -> ModuleAuditSpec:
         # E3 opt-in: etcd anon-open cluster (no --auth-enable) is confirmed
         # by the detect probe — v2 /keys or v3 /kv/range succeeded.
         keep_anonymous_open_no_auth=True,
+        continue_after_credential_error=bool(getattr(args, "defcreds", False)),
+        continue_after_credential_success=bool(getattr(args, "defcreds", False)),
     )
 
 

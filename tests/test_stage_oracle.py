@@ -310,6 +310,38 @@ def test_audit_oracle_valid_default_credentials(monkeypatch: pytest.MonkeyPatch)
     assert record["credential_attempts"][0]["ok"] is True
 
 
+def test_oracle_checks_every_credential_and_keeps_first_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_open(monkeypatch, auth_required=True)
+
+    selected, attempts, terminal = oracle._try_credentials(
+        "127.0.0.1",
+        1521,
+        1.0,
+        protocol="tcp",
+        service="FREEPDB1",
+        sid=None,
+        wallet=None,
+        ssl_server_dn=None,
+        insecure=False,
+        as_sysdba=False,
+        credential_candidates=[
+            {"username": "bad", "password": "bad", "default": True},
+            {"username": "system", "password": "oracle", "default": True},
+            {"username": "dev", "password": "dev", "default": True},
+        ],
+    )
+
+    assert terminal is None
+    assert selected == attempts[1]
+    assert [(item["username"], item["ok"]) for item in attempts] == [
+        ("bad", False),
+        ("system", True),
+        ("dev", False),
+    ]
+
+
 def test_audit_oracle_targets_two_pass_debug_and_output(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_open(monkeypatch, auth_required=False)
     lines: list[str] = []
@@ -427,6 +459,7 @@ def test_run_oracle_stage_credential_file_debug_and_unreachable_warning(
     monkeypatch.setattr(oracle, "AuditCommandRunner", ZeroDetectionRunner)
     args = _args(
         username=str(creds),
+        defcreds=True,
         debug=True,
         output=str(output),
         output_format="json",
@@ -435,7 +468,14 @@ def test_run_oracle_stage_credential_file_debug_and_unreachable_warning(
     assert oracle.run_oracle_stage(args, logger=object()) == 0
 
     plan = captured["plan"]
-    assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [("system", "oracle", "file")]
+    assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
+        ("system", "oracle", "file"),
+        *[
+            (username, password, "default")
+            for username, password in oracle._ORACLE_DEFAULT_CREDS
+            if (username, password) != ("system", "oracle")
+        ],
+    ]
     assert callable(args.debug_emit)
     assert captured["console"].structured_output is True
     stderr = capsys.readouterr().err
@@ -478,6 +518,37 @@ def test_oracle_helpers_parse_credentials_and_targets(tmp_path: Path) -> None:
     combo.write_text("system:oracle\n", encoding="utf-8")
     runs = oracle._credential_runs(None, None, defcreds=True, combo_list=str(combo))
     assert {item["username"] for item in runs} >= {"system", "scott"}
+    assert oracle._ORACLE_DEFAULT_CREDS == (
+        ("system", "oracle"),
+        ("sys", "oracle"),
+        ("system", "manager"),
+        ("sys", "change_on_install"),
+        ("scott", "tiger"),
+        ("dbsnmp", "dbsnmp"),
+        ("pdbadmin", "oracle"),
+        ("admin", "oracle"),
+        ("system", "system"),
+        ("sys", "sys"),
+        ("pdbadmin", "pdbadmin"),
+        ("admin", "admin"),
+        ("scott", "scott"),
+        ("hr", "hr"),
+        ("outln", "outln"),
+        ("admin", "password"),
+        ("admin", "changeme"),
+        ("user", "user"),
+        ("test", "test"),
+        ("dev", "dev"),
+    )
+    deduplicated = oracle._credential_runs("admin", "password", defcreds=True)
+    assert [(item["username"], item["password"], item["default"], item["source"]) for item in deduplicated] == [
+        ("admin", "password", False, "explicit"),
+        *[
+            (username, password, True, "default")
+            for username, password in oracle._ORACLE_DEFAULT_CREDS
+            if (username, password) != ("admin", "password")
+        ],
+    ]
     assert oracle._target_candidates("FREEPDB1", None, None, None)[0] == {"service": "FREEPDB1", "sid": None}
 
 
@@ -608,6 +679,102 @@ def test_oracle_service_list_is_used_for_auth_fallback(monkeypatch: pytest.Monke
     assert record["service_candidates"] == ["BADPDB", "FREEPDB1"]
     assert any(item.get("service") == "BADPDB" for item in record["credential_attempts"])
     assert any(item.get("service") == "FREEPDB1" for item in record["listener_targets"])
+
+
+def test_oracle_reuses_discovered_descriptor_for_ordered_credential_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listener_probe_calls = 0
+    credential_batches: list[list[tuple[str, str]]] = []
+
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_probe_listener_targets(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        nonlocal listener_probe_calls
+        listener_probe_calls += 1
+        return [
+            {
+                "protocol": "tcp",
+                "service": "FREEPDB1",
+                "sid": None,
+                "status": "accepted",
+                "exists": True,
+                "auth_required": True,
+                "error": None,
+            }
+        ]
+
+    def fake_try_credentials(*_args: object, **kwargs: object):
+        candidates = list(kwargs["credential_candidates"])
+        credential_batches.append([(str(item["username"]), str(item["password"])) for item in candidates])
+        winner = candidates[-1]
+        attempt = {
+            "username": winner["username"],
+            "password": winner["password"],
+            "ok": True,
+            "default": False,
+            "source": winner["source"],
+            "error": None,
+        }
+        return attempt, [attempt], None
+
+    monkeypatch.setattr(oracle.socket, "create_connection", lambda *_args, **_kwargs: FakeSocket())
+    monkeypatch.setattr(oracle, "_probe_listener_targets", fake_probe_listener_targets)
+    monkeypatch.setattr(oracle, "_try_credentials", fake_try_credentials)
+    monkeypatch.setattr(oracle, "_open_client", lambda *_args, **_kwargs: _FakeOracleClient())
+    monkeypatch.setattr(oracle, "_collect_oracle_data", lambda *_args, **_kwargs: {"error": None})
+
+    record = oracle._audit_oracle_host(
+        "127.0.0.1",
+        1521,
+        1.0,
+        0,
+        protocol="tcp",
+        service="FREEPDB1",
+        sid=None,
+        wallet=None,
+        ssl_server_dn=None,
+        insecure=False,
+        credential_candidates=[
+            {"username": "bad", "password": "bad", "default": False, "source": "file"},
+            {"username": "good", "password": "good", "default": False, "source": "file"},
+        ],
+        as_sysdba=False,
+        show_pdbs=False,
+        show_users=False,
+        show_roles=False,
+        show_privs=False,
+        show_schemas=False,
+        show_tables=False,
+        schema=None,
+        table=None,
+        dump_rows=False,
+        dump_limit=None,
+        query=None,
+        privesc_check=False,
+        privesc_chain=False,
+        exec_cmd=None,
+        exec_method="auto",
+        reverse_shell=None,
+        reverse_shell_type="bash",
+        os_read=None,
+        os_write=None,
+        download=None,
+        delete=None,
+        wallet_search=False,
+        hashes=False,
+        sensitive_scan=False,
+        dblink_check=False,
+    )
+
+    assert record["status"] == "valid_credentials"
+    assert listener_probe_calls == 1
+    assert credential_batches == [[("bad", "bad"), ("good", "good")]]
 
 
 def test_oracle_auth_error_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -765,6 +932,29 @@ def test_oracle_formatters_render_json_and_text() -> None:
     assert any("Password Hashes" in line for line in details)
     assert '"type": "detect"' in oracle._format_detect_record(record, "json")
     assert oracle._format_detail_records(record, "json")
+
+
+def test_oracle_credential_attempt_renderer_outputs_full_sweep_without_winner_duplicate() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 1521,
+        "status": "weak_default_creds",
+        "effective_username": "system",
+        "provided_password": "oracle",
+        "server_version": "23ai",
+        "credential_attempts": [
+            {"username": "bad", "password": "bad", "ok": False},
+            {"username": "system", "password": "oracle", "ok": True},
+            {"username": "dev", "password": "dev", "ok": False},
+        ],
+    }
+
+    assert oracle._format_record(record, "txt") == ""
+    lines = oracle._format_credential_attempts_records(record, "txt")
+    assert len(lines) == 3
+    assert "[-] bad:bad" in lines[0]
+    assert "[+] system:oracle" in lines[1]
+    assert "[-] dev:dev" in lines[2]
 
 
 def test_oracle_sidecar_artifacts_are_written(tmp_path: Path) -> None:

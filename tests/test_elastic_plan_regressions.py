@@ -109,7 +109,7 @@ def _run_fake_lifecycle(
         return payload
 
     def fake_data(ctx: Any, record: Any, _options: Any) -> dict[str, Any]:
-        data_sources.append(str(ctx.credential.source))
+        data_sources.append("anonymous" if ctx.credential.source == "anonymous" else str(ctx.credential.password))
         return dict(record.to_dict())
 
     monkeypatch.setattr(actions, "detect_elastic", fake_detect)
@@ -584,7 +584,7 @@ def test_defcreds_records_failures_then_late_success_without_anonymous_summary(
         "elastic:elastic",
         "elastic:password",
     ]
-    assert data_sources == ["default"]
+    assert data_sources == ["password"]
     assert result.records[0]["status"] == "weak_default_creds"
     assert result.records[0]["attempted_credentials"] == [
         {
@@ -613,6 +613,34 @@ def test_defcreds_records_failures_then_late_success_without_anonymous_summary(
     assert any("[-] elastic:elastic" in line for line in emitted)
     assert any("[+] elastic:password" in line for line in emitted)
     assert all("anonymous access" not in line for line in emitted)
+
+
+def test_defcreds_checks_later_candidates_after_multiple_successes_and_uses_first_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    emitted, result, auth_calls, data_sources = _run_fake_lifecycle(
+        monkeypatch,
+        auth_statuses=[
+            "invalid_credentials_anonymous",
+            "weak_default_creds",
+            "weak_default_creds",
+        ],
+    )
+
+    assert auth_calls == [
+        "elastic:changeme",
+        "elastic:elastic",
+        "elastic:password",
+    ]
+    assert data_sources == ["elastic"]
+    assert result.records[0]["status"] == "weak_default_creds"
+    assert [attempt["status"] for attempt in result.records[0]["attempted_credentials"]] == [
+        "invalid_credentials_anonymous",
+        "weak_default_creds",
+        "weak_default_creds",
+    ]
+    assert sum("[+] elastic:elastic" in line for line in emitted) == 1
+    assert sum("[+] elastic:password" in line for line in emitted) == 1
 
 
 def test_defcreds_all_fail_then_requested_actions_use_anonymous_access(
@@ -797,6 +825,15 @@ def test_credential_file_and_api_token_keep_defcreds_as_fallbacks(
         ("elastic", "changeme", "default"),
         ("elastic", "elastic", "default"),
         ("elastic", "password", "default"),
+        ("admin", "admin", "default"),
+        ("admin", "password", "default"),
+        ("admin", "changeme", "default"),
+        ("opensearch", "opensearch", "default"),
+        ("opensearch", "password", "default"),
+        ("kibana", "kibana", "default"),
+        ("kibana", "changeme", "default"),
+        ("logstash", "logstash", "default"),
+        ("logstash_system", "changeme", "default"),
     ]
 
     token_runs = captured_plans[1].credential_runs
@@ -805,6 +842,15 @@ def test_credential_file_and_api_token_keep_defcreds_as_fallbacks(
         (None, "elastic", "changeme", "default"),
         (None, "elastic", "elastic", "default"),
         (None, "elastic", "password", "default"),
+        (None, "admin", "admin", "default"),
+        (None, "admin", "password", "default"),
+        (None, "admin", "changeme", "default"),
+        (None, "opensearch", "opensearch", "default"),
+        (None, "opensearch", "password", "default"),
+        (None, "kibana", "kibana", "default"),
+        (None, "kibana", "changeme", "default"),
+        (None, "logstash", "logstash", "default"),
+        (None, "logstash_system", "changeme", "default"),
     ]
 
 

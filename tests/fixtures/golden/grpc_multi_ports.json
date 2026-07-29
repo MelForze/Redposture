@@ -1,6 +1,8 @@
 [
   {
-    "auth_required": false,
+    "action_access_satisfied": true,
+    "analysis_performed": true,
+    "auth_required": null,
     "auth_used": null,
     "defcreds_used": false,
     "descriptor_protos_b64": [
@@ -63,17 +65,28 @@
     ],
     "detect_probe_trace": [
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "http_status": 200,
         "probe": "health",
         "scheme": "http"
+      },
+      {
+        "access": "anonymous",
+        "error": "5:not found",
+        "grpc_status": 0,
+        "http_status": 200,
+        "probe": "reflection",
+        "scheme": "http"
       }
     ],
     "error": null,
     "grpc_web_detected": false,
+    "health_access": "anonymous",
     "health_checks": [
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -81,6 +94,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -88,6 +102,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -97,6 +112,7 @@
     ],
     "health_supported": true,
     "host": "127.0.0.1",
+    "invoke_access": "not_tested",
     "invoke_result": null,
     "is_grpc": true,
     "methods": [
@@ -134,11 +150,15 @@
     "module": "grpc",
     "port": 25052,
     "protocol_flavor": "grpc",
+    "provided_credential_source": "anonymous",
+    "provided_credential_type": null,
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
     "provided_username": null,
+    "reflection_access": "anonymous",
     "reflection_enabled": true,
+    "reflection_version": "v1alpha",
     "service": "grpc",
     "services": [
       "grpc.health.v1.Health",
@@ -170,12 +190,14 @@
         "stage_name": "data"
       }
     ],
-    "status": "open_no_auth",
+    "status": "detected",
     "transport": "plaintext",
     "transport_mode": "plaintext"
   },
   {
-    "auth_required": false,
+    "action_access_satisfied": true,
+    "analysis_performed": true,
+    "auth_required": null,
     "auth_used": null,
     "defcreds_used": false,
     "descriptor_protos_b64": [
@@ -238,17 +260,28 @@
     ],
     "detect_probe_trace": [
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "http_status": 200,
         "probe": "health",
         "scheme": "http"
+      },
+      {
+        "access": "anonymous",
+        "error": "5:not found",
+        "grpc_status": 0,
+        "http_status": 200,
+        "probe": "reflection",
+        "scheme": "http"
       }
     ],
     "error": null,
     "grpc_web_detected": false,
+    "health_access": "anonymous",
     "health_checks": [
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -256,6 +289,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -263,6 +297,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -272,6 +307,7 @@
     ],
     "health_supported": true,
     "host": "127.0.0.1",
+    "invoke_access": "not_tested",
     "invoke_result": null,
     "is_grpc": true,
     "methods": [
@@ -309,11 +345,15 @@
     "module": "grpc",
     "port": 25053,
     "protocol_flavor": "grpc",
+    "provided_credential_source": "anonymous",
+    "provided_credential_type": null,
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
     "provided_username": null,
+    "reflection_access": "anonymous",
     "reflection_enabled": true,
+    "reflection_version": "v1alpha",
     "service": "grpc",
     "services": [
       "grpc.health.v1.Health",
@@ -345,12 +385,14 @@
         "stage_name": "data"
       }
     ],
-    "status": "open_no_auth",
+    "status": "detected",
     "transport": "plaintext",
     "transport_mode": "plaintext"
   },
   {
-    "auth_required": false,
+    "action_access_satisfied": true,
+    "analysis_performed": true,
+    "auth_required": null,
     "auth_used": null,
     "defcreds_used": false,
     "descriptor_protos_b64": [
@@ -413,17 +455,28 @@
     ],
     "detect_probe_trace": [
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "http_status": 200,
         "probe": "health",
         "scheme": "http"
+      },
+      {
+        "access": "anonymous",
+        "error": "5:not found",
+        "grpc_status": 0,
+        "http_status": 200,
+        "probe": "reflection",
+        "scheme": "http"
       }
     ],
     "error": null,
     "grpc_web_detected": false,
+    "health_access": "anonymous",
     "health_checks": [
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -431,6 +484,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -438,6 +492,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -447,6 +502,7 @@
     ],
     "health_supported": true,
     "host": "127.0.0.1",
+    "invoke_access": "not_tested",
     "invoke_result": null,
     "is_grpc": true,
     "methods": [
@@ -484,11 +540,15 @@
     "module": "grpc",
     "port": 25054,
     "protocol_flavor": "grpc",
+    "provided_credential_source": "anonymous",
+    "provided_credential_type": null,
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
     "provided_username": null,
+    "reflection_access": "anonymous",
     "reflection_enabled": true,
+    "reflection_version": "v1alpha",
     "service": "grpc",
     "services": [
       "grpc.health.v1.Health",
@@ -520,12 +580,14 @@
         "stage_name": "data"
       }
     ],
-    "status": "open_no_auth",
+    "status": "detected",
     "transport": "plaintext",
     "transport_mode": "plaintext"
   },
   {
-    "auth_required": false,
+    "action_access_satisfied": true,
+    "analysis_performed": true,
+    "auth_required": null,
     "auth_used": null,
     "defcreds_used": false,
     "descriptor_protos_b64": [
@@ -588,17 +650,28 @@
     ],
     "detect_probe_trace": [
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "http_status": 200,
         "probe": "health",
         "scheme": "http"
+      },
+      {
+        "access": "anonymous",
+        "error": "5:not found",
+        "grpc_status": 0,
+        "http_status": 200,
+        "probe": "reflection",
+        "scheme": "http"
       }
     ],
     "error": null,
     "grpc_web_detected": false,
+    "health_access": "anonymous",
     "health_checks": [
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -606,6 +679,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -613,6 +687,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -622,6 +697,7 @@
     ],
     "health_supported": true,
     "host": "127.0.0.1",
+    "invoke_access": "not_tested",
     "invoke_result": null,
     "is_grpc": true,
     "methods": [
@@ -659,11 +735,15 @@
     "module": "grpc",
     "port": 25055,
     "protocol_flavor": "grpc",
+    "provided_credential_source": "anonymous",
+    "provided_credential_type": null,
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
     "provided_username": null,
+    "reflection_access": "anonymous",
     "reflection_enabled": true,
+    "reflection_version": "v1alpha",
     "service": "grpc",
     "services": [
       "grpc.health.v1.Health",
@@ -695,12 +775,14 @@
         "stage_name": "data"
       }
     ],
-    "status": "open_no_auth",
+    "status": "detected",
     "transport": "plaintext",
     "transport_mode": "plaintext"
   },
   {
-    "auth_required": false,
+    "action_access_satisfied": true,
+    "analysis_performed": true,
+    "auth_required": null,
     "auth_used": null,
     "defcreds_used": false,
     "descriptor_protos_b64": [
@@ -763,17 +845,28 @@
     ],
     "detect_probe_trace": [
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "http_status": 200,
         "probe": "health",
         "scheme": "http"
+      },
+      {
+        "access": "anonymous",
+        "error": "5:not found",
+        "grpc_status": 0,
+        "http_status": 200,
+        "probe": "reflection",
+        "scheme": "http"
       }
     ],
     "error": null,
     "grpc_web_detected": false,
+    "health_access": "anonymous",
     "health_checks": [
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -781,6 +874,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -788,6 +882,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "anonymous",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -797,6 +892,7 @@
     ],
     "health_supported": true,
     "host": "127.0.0.1",
+    "invoke_access": "not_tested",
     "invoke_result": null,
     "is_grpc": true,
     "methods": [
@@ -834,11 +930,15 @@
     "module": "grpc",
     "port": 50051,
     "protocol_flavor": "grpc",
+    "provided_credential_source": "anonymous",
+    "provided_credential_type": null,
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
     "provided_username": null,
+    "reflection_access": "anonymous",
     "reflection_enabled": true,
+    "reflection_version": "v1alpha",
     "service": "grpc",
     "services": [
       "grpc.health.v1.Health",
@@ -870,7 +970,7 @@
         "stage_name": "data"
       }
     ],
-    "status": "open_no_auth",
+    "status": "detected",
     "transport": "plaintext",
     "transport_mode": "plaintext"
   }

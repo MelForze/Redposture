@@ -23,6 +23,17 @@ def _run(module: Any, name: str, args: Any):
     return runner.run_plan(getattr(module, f"build_{name}_plan")(args))
 
 
+def _grpc_plan_headers(plan: Any) -> list[str | None]:
+    return [
+        grpc._build_auth_header(
+            token=run.token,
+            username=run.username,
+            password=run.password,
+        )
+        for run in plan.credential_runs
+    ]
+
+
 def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
@@ -63,6 +74,7 @@ def test_grafana_defcreds_are_explicit_ordered_runs_not_an_internal_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     auth_headers: list[str] = []
+    datasource_headers: list[str] = []
 
     def fake_http(_host, _port, path, _timeout, *, headers=None, **_kwargs):
         authorization = (headers or {}).get("Authorization")
@@ -72,8 +84,13 @@ def test_grafana_defcreds_are_explicit_ordered_runs_not_an_internal_batch(
             return 200, "Grafana login", {}
         if path == "/api/user":
             auth_headers.append(authorization)
-            return (200, "{}", {}) if authorization == grafana._auth_header("admin", "admin") else (401, "", {})
+            accepted = {
+                grafana._auth_header("admin", "admin"),
+                grafana._auth_header("grafana", "grafana"),
+            }
+            return (200, "{}", {}) if authorization in accepted else (401, "", {})
         if path == "/api/datasources":
+            datasource_headers.append(authorization)
             return 200, "[]", {}
         raise AssertionError(path)
 
@@ -98,13 +115,153 @@ def test_grafana_defcreds_are_explicit_ordered_runs_not_an_internal_batch(
     runner = AuditCommandRunner(args=args, spec=grafana.build_grafana_spec(args), emit_line=lambda _line: None)
     result = runner.run_plan(plan)
 
-    assert [run.source for run in plan.credential_runs] == ["provided", "default"]
-    assert auth_headers == [
-        grafana._auth_header("operator", "wrong"),
-        grafana._auth_header("admin", "admin"),
+    assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
+        ("operator", "wrong", "provided"),
+        ("admin", "admin", "default"),
+        ("admin", "password", "default"),
+        ("admin", "grafana", "default"),
+        ("admin", "changeme", "default"),
+        ("grafana", "grafana", "default"),
+        ("grafana", "password", "default"),
+        ("root", "root", "default"),
+        ("user", "user", "default"),
+        ("root", "password", "default"),
+        ("user", "password", "default"),
     ]
+    assert auth_headers == [
+        grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs
+    ]
+    assert datasource_headers == [grafana._auth_header("admin", "admin")]
+    assert result.records[0]["status"] == "weak_default_creds"
     assert result.records[0]["credentials_source"] == "default"
+    assert result.records[0]["effective_username"] == "admin"
+    assert result.records[0]["effective_password"] == "admin"
+    assert len(result.records[0]["auth_attempts"]) == len(plan.credential_runs)
     assert result.records[0]["datasource_count"] == 0
+
+
+def test_grafana_rejected_api_token_falls_back_to_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_headers: list[str] = []
+    datasource_headers: list[str] = []
+    winning_header = grafana._auth_header("admin", "admin")
+
+    def fake_http(_host, _port, path, _timeout, *, headers=None, **_kwargs):
+        authorization = (headers or {}).get("Authorization")
+        if path == "/api/health":
+            return 401, "", {}
+        if path == "/login":
+            return 200, "Grafana login", {}
+        if path == "/api/user":
+            auth_headers.append(authorization)
+            accepted = {winning_header, grafana._auth_header("grafana", "grafana")}
+            return (200, "{}", {}) if authorization in accepted else (401, "", {})
+        if path == "/api/datasources":
+            datasource_headers.append(authorization)
+            return 200, "[]", {}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(grafana, "_http_request", fake_http)
+    args = parse_args(
+        [
+            "grafana",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "3000",
+            "--apitoken",
+            "bad-token",
+            "--defcreds",
+            "--format",
+            "json",
+        ]
+    )
+    plan = grafana.build_grafana_plan(args)
+    result = AuditCommandRunner(
+        args=args,
+        spec=grafana.build_grafana_spec(args),
+        emit_line=lambda _line: None,
+    ).run_plan(plan)
+
+    assert plan.credential_runs[0].token == "bad-token"
+    assert auth_headers == [
+        "Bearer bad-token",
+        *[grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs[1:]],
+    ]
+    assert datasource_headers == [winning_header]
+    assert result.records[0]["status"] == "weak_default_creds"
+    assert result.records[0]["credentials_source"] == "default"
+    assert len(result.records[0]["auth_attempts"]) == len(plan.credential_runs)
+    assert "bad-token" not in str(result.records[0]["auth_attempts"])
+
+
+def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_winner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_headers: list[str] = []
+    datasource_headers: list[str] = []
+    first_header = grafana._auth_header("admin", "admin")
+    winning_header = grafana._auth_header("admin", "password")
+    later_header = grafana._auth_header("grafana", "grafana")
+
+    def fake_http(_host, _port, path, _timeout, *, headers=None, **_kwargs):
+        authorization = (headers or {}).get("Authorization")
+        if path == "/api/health":
+            return 401, "", {}
+        if path == "/login":
+            return 200, "Grafana login", {}
+        if path == "/api/user":
+            auth_headers.append(authorization)
+            if authorization == first_header:
+                raise OSError("candidate transport failure")
+            return (200, "{}", {}) if authorization in {winning_header, later_header} else (401, "", {})
+        if path == "/api/datasources":
+            datasource_headers.append(authorization)
+            return 200, "[]", {}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(grafana, "_http_request", fake_http)
+    args = parse_args(
+        [
+            "grafana",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "3000",
+            "--defcreds",
+        ]
+    )
+    plan = grafana.build_grafana_plan(args)
+    emitted: list[str] = []
+    result = AuditCommandRunner(
+        args=args,
+        spec=grafana.build_grafana_spec(args),
+        emit_line=emitted.append,
+    ).run_plan(plan)
+
+    assert auth_headers == [
+        grafana._auth_header(run.username or "admin", run.password or "") for run in plan.credential_runs
+    ]
+    assert datasource_headers == [winning_header]
+    record = result.records[0]
+    assert record["status"] == "weak_default_creds"
+    assert record["effective_username"] == "admin"
+    assert record["effective_password"] == "password"
+    assert len(record["auth_attempts"]) == len(plan.credential_runs)
+    assert record["auth_attempts"][0] == {
+        "username": "admin",
+        "password": "admin",
+        "source": "default",
+        "ok": False,
+        "error": "candidate transport failure",
+    }
+    attempt_lines = [line for line in emitted if " [+] " in line or " [-] " in line]
+    assert len(attempt_lines) == len(plan.credential_runs)
+    selected_line = next(line for line in attempt_lines if "[+] admin:password" in line)
+    later_success_line = next(line for line in attempt_lines if "[+] grafana:grafana" in line)
+    assert "(datasources:0)" in selected_line
+    assert "(datasources:" not in later_success_line
 
 
 def test_kubeapi_credential_file_reuses_anonymous_classification_and_selected_namespace_probe(
@@ -322,12 +479,13 @@ def test_grpc_token_auth_uses_one_protocol_detection_and_one_credential_attempt(
     assert result.records[0]["status"] == "valid_credentials"
 
 
-def test_grpc_defcreds_are_one_candidate_per_runtime_run_and_stop_on_success(
+def test_grpc_defcreds_sweeps_every_candidate_and_keeps_the_first_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     attempted: list[dict[str, Any]] = []
     capability_calls = 0
     default_token = grpc._DEFAULT_BEARER_TOKENS[0]
+    second_success = grpc._DEFAULT_BASIC_CREDENTIALS[0]
 
     monkeypatch.setattr(
         grpc,
@@ -347,7 +505,14 @@ def test_grpc_defcreds_are_one_candidate_per_runtime_run_and_stop_on_success(
     def fake_credentials(*_args, candidates, **_kwargs):
         assert len(candidates) == 1
         attempted.append(dict(candidates[0]))
-        ok = candidates[0].get("token") == default_token
+        ok = (
+            candidates[0].get("token") == default_token
+            or (
+                candidates[0].get("username"),
+                candidates[0].get("password"),
+            )
+            == second_success
+        )
         return ok, candidates[0] if ok else None, {}
 
     def fake_reflection(*_args, **_kwargs):
@@ -388,10 +553,98 @@ def test_grpc_defcreds_are_one_candidate_per_runtime_run_and_stop_on_success(
     result = runner.run_plan(plan)
 
     assert [run.source for run in plan.credential_runs[:2]] == ["provided", "default"]
-    assert [item.get("token") for item in attempted] == ["bad", default_token]
-    assert capability_calls == 1
-    assert result.records[0]["status"] == "valid_credentials"
+    assert [(item.get("token"), item.get("username"), item.get("password")) for item in attempted] == [
+        (run.token, run.username, run.password) for run in plan.credential_runs
+    ]
+    assert capability_calls == 2
+    assert result.records[0]["status"] == "weak_default_creds"
     assert result.records[0]["defcreds_used"] is True
+    assert result.records[0]["auth_used"] == {"type": "token", "source": "defcreds"}
+    attempts = result.records[0]["attempted_credentials"]
+    assert len(attempts) == len(plan.credential_runs)
+    assert sum(item["status"] == "weak_default_creds" for item in attempts) == 2
+    rendered_attempts = grpc._format_credential_attempts_records(result.records[0], "txt")
+    assert len(rendered_attempts) == len(plan.credential_runs)
+    assert sum("[+]" in line for line in rendered_attempts) == 2
+    assert sum("[-]" in line for line in rendered_attempts) == len(plan.credential_runs) - 2
+    assert "bad" not in "\n".join(rendered_attempts)
+
+
+def test_grpc_rejected_token_falls_back_to_explicit_basic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempted: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        grpc,
+        "_detect_grpc_target",
+        lambda *_args, **_kwargs: {
+            "status": "detected",
+            "is_grpc": True,
+            "transport_mode": "plaintext",
+            "protocol_flavor": "grpc",
+            "auth_required": True,
+            "reflection_enabled": None,
+            "health_supported": None,
+            "detect_probe_trace": [],
+        },
+    )
+
+    def fake_credentials(*_args, candidates, **_kwargs):
+        assert len(candidates) == 1
+        candidate = dict(candidates[0])
+        attempted.append(candidate)
+        ok = candidate.get("username") == "operator" and candidate.get("password") == "works"
+        return ok, candidate if ok else None, {}
+
+    monkeypatch.setattr(grpc, "_try_credentials", fake_credentials)
+    monkeypatch.setattr(
+        grpc,
+        "_reflection_list_services_call",
+        lambda *_args, **_kwargs: {"reflection_enabled": False, "services": []},
+    )
+    monkeypatch.setattr(
+        grpc,
+        "_health_check_call",
+        lambda *_args, **_kwargs: {
+            "health_supported": False,
+            "grpc_status": 12,
+            "grpc_status_name": "UNIMPLEMENTED",
+            "serving_status": None,
+            "error": None,
+        },
+    )
+    args = parse_args(
+        [
+            "grpc",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "50051",
+            "--token",
+            "bad-token",
+            "-u",
+            "operator",
+            "-p",
+            "works",
+            "--format",
+            "json",
+        ]
+    )
+    plan = grpc.build_grpc_plan(args)
+    result = AuditCommandRunner(
+        args=args,
+        spec=grpc.build_grpc_spec(args),
+        emit_line=lambda _line: None,
+    ).run_plan(plan)
+
+    assert [(run.token, run.username, run.password, run.source) for run in plan.credential_runs] == [
+        ("bad-token", None, None, "provided"),
+        (None, "operator", "works", "provided"),
+    ]
+    assert [item["type"] for item in attempted] == ["token", "basic"]
+    assert result.records[0]["status"] == "valid_credentials"
+    assert result.records[0]["provided_username"] == "operator"
 
 
 def test_grpc_analyze_continues_until_reflection_credential_and_reuses_health_credential(
@@ -488,16 +741,17 @@ def test_grpc_analyze_continues_until_reflection_credential_and_reuses_health_cr
     runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
     result = runner.run_plan(plan)
 
-    assert reflection_probe_headers == ["Bearer health-only", "Bearer admin"]
+    sweep_headers = _grpc_plan_headers(plan)
+    assert reflection_probe_headers == sweep_headers
     assert reflection_inventory_headers == ["Bearer admin"]
     assert descriptor_headers == ["Bearer admin"]
-    assert health_headers == [
-        "Bearer health-only",
-        "Bearer admin",
-        "Bearer health-only",
-        "Bearer health-only",
-    ]
-    assert result.records[0]["status"] == "valid_credentials"
+    expected_health_headers: list[str | None] = []
+    for header in sweep_headers:
+        expected_health_headers.append(header)
+        if header == "Bearer admin":
+            expected_health_headers.extend(["Bearer health-only", "Bearer health-only"])
+    assert health_headers == expected_health_headers
+    assert result.records[0]["status"] == "weak_default_creds"
     assert result.records[0]["health_access"] == "authenticated"
     assert result.records[0]["reflection_access"] == "authenticated"
     assert result.records[0]["auth_required"] is None
@@ -582,8 +836,8 @@ def test_grpc_invoke_continues_candidates_until_the_requested_method_is_accessib
     runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
     result = runner.run_plan(plan)
 
-    assert invoke_headers == ["Bearer bad", "Bearer admin"]
-    assert result.records[0]["status"] == "valid_credentials"
+    assert invoke_headers == _grpc_plan_headers(plan)
+    assert result.records[0]["status"] == "weak_default_creds"
     assert result.records[0]["invoke_access"] == "authenticated"
     assert result.records[0]["auth_required"] is None
     assert result.records[0]["action_access_satisfied"] is True
@@ -680,12 +934,18 @@ def test_grpc_public_reflection_probe_retries_deep_descriptors_with_credentials(
     runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
     result = runner.run_plan(plan)
 
-    assert list_headers == expected_headers
-    assert descriptor_headers == expected_headers
-    assert result.records[0]["status"] == "valid_credentials"
+    lifecycle_headers = [None, *_grpc_plan_headers(plan)] if use_defcreds else expected_headers
+    assert list_headers == lifecycle_headers
+    assert descriptor_headers == lifecycle_headers
+    assert result.records[0]["status"] == (
+        "weak_default_creds" if expected_source == "default" else "valid_credentials"
+    )
     assert result.records[0]["reflection_access"] == "mixed"
     assert result.records[0]["action_access_satisfied"] is True
-    assert result.records[0]["auth_used"]["token"] == "admin"
+    assert result.records[0]["auth_used"] == {
+        "type": "token",
+        "source": "defcreds" if expected_source == "default" else "provided",
+    }
     assert result.records[0]["provided_credential_source"] == expected_source
 
 
@@ -822,16 +1082,15 @@ def test_grpc_web_public_overall_health_retries_protected_service_health_with_ne
     runner = AuditCommandRunner(args=args, spec=grpc.build_grpc_spec(args), emit_line=lambda _line: None)
     result = runner.run_plan(plan)
 
-    assert health_calls == [
+    expected_health_calls = [
         ("", None),
         ("demo.Service", None),
-        ("", "Bearer bad"),
-        ("demo.Service", "Bearer bad"),
-        ("", "Bearer admin"),
-        ("demo.Service", "Bearer admin"),
     ]
-    assert result.records[0]["status"] == "valid_credentials"
+    for header in _grpc_plan_headers(plan):
+        expected_health_calls.extend([("", header), ("demo.Service", header)])
+    assert health_calls == expected_health_calls
+    assert result.records[0]["status"] == "weak_default_creds"
     assert result.records[0]["health_access"] == "mixed"
     assert result.records[0]["action_access_satisfied"] is True
-    assert result.records[0]["auth_used"]["token"] == "admin"
+    assert result.records[0]["auth_used"] == {"type": "token", "source": "defcreds"}
     assert result.records[0]["provided_credential_source"] == "default"

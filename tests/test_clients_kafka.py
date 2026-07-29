@@ -406,6 +406,20 @@ def test_kafka_small_helpers_and_metadata_success_branches() -> None:
         ("admin", "admin"),
         ("kafka", "kafka"),
         ("kafka", "password"),
+        ("admin", "password"),
+        ("admin", "kafka"),
+        ("admin", "admin-secret"),
+        ("kafka", "admin"),
+        ("kafka", "changeme"),
+        ("broker", "broker"),
+        ("broker", "brokerpass"),
+        ("user", "user"),
+        ("user", "password"),
+        ("client", "client"),
+        ("service", "service"),
+        ("admin", "changeme"),
+        ("service", "password"),
+        ("kafka", "zookeeper"),
     ]
     assert kafka._build_credential_runs(None, None, False) == [(None, None)]
 

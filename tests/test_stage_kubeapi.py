@@ -904,7 +904,7 @@ def test_run_kubeapi_stage_multi_group_uses_single_global_progress(monkeypatch: 
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
     assert progress.total == 2
-    assert progress.added == [2]
+    assert progress.added == [1, 1]
     assert progress.advances == [1, 1, 1, 1]
     assert progress.closed is True
 
@@ -1127,8 +1127,8 @@ def test_audit_kubeapi_targets_two_pass_gate_and_debug_markers(monkeypatch: pyte
     assert (total, detected, failed) == (2, 2, 0)
     assert calls == [
         ("10.0.0.1", False),
-        ("10.0.0.2", False),
         ("10.0.0.1", True),
+        ("10.0.0.2", False),
     ]
     assert any("pass=1 detect start total=2" in line for line in debug_lines)
     assert any("pass=2 deep start total=1" in line for line in debug_lines)

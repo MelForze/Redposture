@@ -75,6 +75,7 @@ class ClickHouseLifecycleState:
 
     anonymous_session: _ChSession | None = None
     credential_sessions: dict[tuple[str | None, str | None, str], _ChSession] = field(default_factory=dict)
+    auth_attempts: list[dict[str, Any]] = field(default_factory=list)
     selected_protocol: str | None = None
     auth_required: bool | None = None
 
@@ -377,7 +378,22 @@ def _build_credential_candidates(
         seen.add(pair)
 
     if defcreds:
-        defaults = (("default", ""), ("default", "default"))
+        defaults = (
+            ("default", ""),
+            ("default", "default"),
+            ("default", "password"),
+            ("default", "clickhouse"),
+            ("clickhouse", "clickhouse"),
+            ("clickhouse", "password"),
+            ("admin", "admin"),
+            ("admin", "password"),
+            ("root", "root"),
+            ("user", "user"),
+            ("default", "changeme"),
+            ("admin", "changeme"),
+            ("root", "password"),
+            ("user", "password"),
+        )
         for user, secret in defaults:
             pair = (user, secret)
             if pair in seen:
@@ -386,6 +402,37 @@ def _build_credential_candidates(
             seen.add(pair)
 
     return candidates
+
+
+def _normalize_credential_candidates(
+    username: str | None,
+    password: str | None,
+    defcreds: bool,
+    credential_candidates: list[dict[str, Any]] | None,
+) -> list[tuple[str, str, str]]:
+    """Use a caller-owned ordered batch without expanding defaults again."""
+
+    if credential_candidates is None:
+        return _build_credential_candidates(username, password, defcreds)
+
+    normalized: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in credential_candidates:
+        raw_username = candidate.get("username")
+        raw_password = candidate.get("password")
+        if raw_username is None and raw_password is None:
+            continue
+        effective_username = str(raw_username or "default").strip() or "default"
+        effective_password = "" if raw_password is None else str(raw_password)
+        source = str(candidate.get("source") or "provided")
+        if source == "anonymous":
+            source = "provided"
+        pair = (effective_username, effective_password)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        normalized.append((effective_username, effective_password, source))
+    return normalized
 
 
 def _quote_ident(name: str) -> str:
@@ -1189,6 +1236,15 @@ def authenticate_clickhouse(
     ok = session is not None
     if session is not None:
         state.credential_sessions[(credential.username, credential.password, source)] = session
+    state.auth_attempts.append(
+        {
+            "username": username,
+            "password": password,
+            "source": source,
+            "ok": ok,
+            "error": str(error or ""),
+        }
+    )
     detect_status = str(payload.get("status") or "")
     if ok:
         status = "weak_default_creds" if source == "default" else "valid_credentials"
@@ -1213,20 +1269,12 @@ def authenticate_clickhouse(
             ),
             "defcreds_enabled": source == "default",
             "default_credentials": bool(ok and source == "default"),
-            "attempted_credentials": 1,
+            "attempted_credentials": len(state.auth_attempts),
             "auth_transport_attempts": transport_attempts,
             "credentials_source": source if ok else None,
             "effective_username": username if ok else None,
             "effective_password": password if ok else None,
-            "auth_attempts": [
-                {
-                    "username": username,
-                    "password": password,
-                    "source": source,
-                    "ok": ok,
-                    "error": str(error or ""),
-                }
-            ],
+            "auth_attempts": list(state.auth_attempts),
             "error": None if ok or status == "invalid_credentials_anonymous" else error,
         }
     )
@@ -1242,6 +1290,44 @@ def collect_clickhouse_data(
     if not isinstance(state, ClickHouseLifecycleState):
         raise TypeError("clickhouse lifecycle state is unavailable")
     payload = _record_payload(record)
+    runtime_attempts = payload.get("attempted_credentials")
+    merged_attempts = list(state.auth_attempts)
+    if isinstance(runtime_attempts, list):
+        actual_by_key = {
+            (
+                str(attempt.get("username") or "default"),
+                "" if attempt.get("password") is None else str(attempt.get("password")),
+                str(attempt.get("source") or "provided"),
+            ): attempt
+            for attempt in state.auth_attempts
+        }
+        merged_attempts = []
+        for runtime_attempt in runtime_attempts:
+            if not isinstance(runtime_attempt, Mapping):
+                continue
+            key = (
+                str(runtime_attempt.get("username") or "default"),
+                "" if runtime_attempt.get("password") is None else str(runtime_attempt.get("password")),
+                str(runtime_attempt.get("source") or "provided"),
+            )
+            actual_attempt = actual_by_key.get(key)
+            if actual_attempt is not None:
+                merged_attempts.append(dict(actual_attempt))
+                continue
+            merged_attempts.append(
+                {
+                    "username": key[0],
+                    "password": key[1],
+                    "source": key[2],
+                    "ok": str(runtime_attempt.get("status") or "") in {"valid_credentials", "weak_default_creds"},
+                    "error": str(runtime_attempt.get("error") or ""),
+                }
+            )
+    payload["auth_attempts"] = merged_attempts
+    payload["attempted_credentials"] = len(merged_attempts)
+    payload["defcreds_enabled"] = bool(payload.get("defcreds_enabled")) or any(
+        str(attempt.get("source") or "") == "default" for attempt in merged_attempts
+    )
     credential = ctx.credential
     source = str(credential.source or "provided")
     session = state.take_session(credential.username, credential.password, source)
@@ -1344,11 +1430,27 @@ def _audit_clickhouse_host_on_protocol(
     execute_command: str | None,
     sql_command: str | None,
     dump_row_limit: int | None = None,
+    credential_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
-    provided_credentials = password is not None
+    candidates = _normalize_credential_candidates(
+        username,
+        password,
+        defcreds,
+        credential_candidates,
+    )
+    if credential_candidates is None:
+        provided_username = username
+        provided_password = password
+        provided_credentials = password is not None
+        defaults_enabled = bool(defcreds)
+    else:
+        provided_candidates = [candidate for candidate in candidates if candidate[2] != "default"]
+        provided_username = provided_candidates[0][0] if provided_candidates else None
+        provided_password = provided_candidates[0][1] if provided_candidates else None
+        provided_credentials = bool(provided_candidates)
+        defaults_enabled = any(source == "default" for _user, _secret, source in candidates)
     provided_credentials_ok: bool | None = False if provided_credentials else None
-    candidates = _build_credential_candidates(username, password, defcreds)
 
     last_error: str | None = None
 
@@ -1411,10 +1513,12 @@ def _audit_clickhouse_host_on_protocol(
                 selected_credential_session = cred_session
             if ok and source == "default":
                 default_credentials = True
-            if source == "provided" and ok:
+            if source != "default" and ok:
                 provided_credentials_ok = True
             if cred_session is not None and cred_session is not selected_credential_session:
                 _close_client(protocol, cred_session.client)
+            if ok and not defaults_enabled:
+                break
 
         operation_session = selected_credential_session
         operation_session_error: str | None = None
@@ -1488,7 +1592,7 @@ def _audit_clickhouse_host_on_protocol(
 
         if effective_username is not None:
             status = "weak_default_creds" if credentials_source == "default" else "valid_credentials"
-        elif auth_required is False and attempted_credentials > 0 and (provided_credentials or defcreds):
+        elif auth_required is False and attempted_credentials > 0 and (provided_credentials or defaults_enabled):
             status = "invalid_credentials_anonymous"
         elif auth_required is False:
             status = "open_no_auth"
@@ -1521,10 +1625,10 @@ def _audit_clickhouse_host_on_protocol(
             "auth_required": auth_required,
             "database": database,
             "provided_credentials": provided_credentials,
-            "provided_username": username,
-            "provided_password": password,
+            "provided_username": provided_username,
+            "provided_password": provided_password,
             "provided_credentials_ok": provided_credentials_ok,
-            "defcreds_enabled": defcreds,
+            "defcreds_enabled": defaults_enabled,
             "default_credentials": default_credentials,
             "attempted_credentials": attempted_credentials,
             "credentials_source": credentials_source,
@@ -1570,10 +1674,10 @@ def _audit_clickhouse_host_on_protocol(
         "auth_required": None,
         "database": database,
         "provided_credentials": provided_credentials,
-        "provided_username": username,
-        "provided_password": password,
+        "provided_username": provided_username,
+        "provided_password": provided_password,
         "provided_credentials_ok": provided_credentials_ok,
-        "defcreds_enabled": defcreds,
+        "defcreds_enabled": defaults_enabled,
         "default_credentials": None,
         "attempted_credentials": 0,
         "credentials_source": None,
@@ -1629,53 +1733,42 @@ def _audit_clickhouse_host(
     execute_command: str | None,
     sql_command: str | None,
     dump_row_limit: int | None = None,
+    credential_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     sequence = _protocol_attempt_order(protocol)
     last_record: dict[str, Any] | None = None
     for proto in sequence:
-        try:
-            record = _audit_clickhouse_host_on_protocol(
-                host,
-                port,
-                timeout,
-                retries,
-                username,
-                password,
-                defcreds,
-                database,
-                proto,
-                show_databases,
-                show_tables,
-                show_columns,
-                list(table_targets),
-                list(table_columns),
-                dump_table_rows,
-                execute_command,
-                sql_command,
-                dump_row_limit=dump_row_limit,
-            )
-        except TypeError as exc:
-            if "dump_row_limit" not in str(exc):
-                raise
-            record = _audit_clickhouse_host_on_protocol(
-                host,
-                port,
-                timeout,
-                retries,
-                username,
-                password,
-                defcreds,
-                database,
-                proto,
-                show_databases,
-                show_tables,
-                show_columns,
-                list(table_targets),
-                list(table_columns),
-                dump_table_rows,
-                execute_command,
-                sql_command,
-            )
+        optional_kwargs: dict[str, Any] = {"dump_row_limit": dump_row_limit}
+        if credential_candidates is not None:
+            optional_kwargs["credential_candidates"] = credential_candidates
+        while True:
+            try:
+                record = _audit_clickhouse_host_on_protocol(
+                    host,
+                    port,
+                    timeout,
+                    retries,
+                    username,
+                    password,
+                    defcreds,
+                    database,
+                    proto,
+                    show_databases,
+                    show_tables,
+                    show_columns,
+                    list(table_targets),
+                    list(table_columns),
+                    dump_table_rows,
+                    execute_command,
+                    sql_command,
+                    **optional_kwargs,
+                )
+                break
+            except TypeError as exc:
+                unsupported = next((key for key in optional_kwargs if key in str(exc)), None)
+                if unsupported is None:
+                    raise
+                optional_kwargs.pop(unsupported)
         last_record = record
         if bool(record.get("is_clickhouse")) and str(record.get("status") or "") != "fail":
             return record
@@ -1788,19 +1881,35 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return ""
 
     if status == "weak_default_creds":
+        attempts = record.get("auth_attempts")
+        if isinstance(attempts, list) and any(
+            isinstance(attempt, dict) and bool(attempt.get("ok")) for attempt in attempts
+        ):
+            return ""
         user = str(record.get("effective_username") or "default")
         password_text = _password_text(record.get("effective_password"))
         return f"{prefix} [+] {user}:{password_text} {_caps_suffix(record)}"
 
     if status == "valid_credentials":
+        attempts = record.get("auth_attempts")
+        if isinstance(attempts, list) and any(
+            isinstance(attempt, dict) and bool(attempt.get("ok")) for attempt in attempts
+        ):
+            return ""
         user = str(record.get("effective_username") or "default")
         password_text = _password_text(record.get("effective_password"))
         return f"{prefix} [+] {user}:{password_text} {_caps_suffix(record)}"
 
     if status == "invalid_credentials_anonymous":
+        attempts = record.get("auth_attempts")
+        if isinstance(attempts, list) and attempts:
+            return ""
         return f"{prefix} [-] credentials invalid (anonymous access) {_caps_suffix(record)}"
 
     if status == "auth_required":
+        attempts = record.get("auth_attempts")
+        if isinstance(attempts, list) and attempts:
+            return ""
         if int(record.get("attempted_credentials") or 0) > 0:
             return f"{prefix} [-] authentication required (credentials invalid)"
         return f"{prefix} [-] authentication required"
@@ -1825,11 +1934,21 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
 
     prefix = _nxc_prefix(record)
     lines: list[str] = []
+    effective_username = record.get("effective_username")
+    effective_password = record.get("effective_password")
+    credentials_source = str(record.get("credentials_source") or "")
     for attempt in attempts:
         user = str(attempt.get("username") or "default")
         password = _password_text(attempt.get("password"))
         if bool(attempt.get("ok")):
-            lines.append(f"{prefix} [+] {user}:{password}")
+            selected = (
+                effective_username is not None
+                and user == str(effective_username)
+                and attempt.get("password") == effective_password
+                and (not credentials_source or str(attempt.get("source") or "") == credentials_source)
+            )
+            suffix = f" {_caps_suffix(record)}" if selected else ""
+            lines.append(f"{prefix} [+] {user}:{password}{suffix}")
         else:
             lines.append(f"{prefix} [-] {user}:{password}")
     return lines
@@ -2397,7 +2516,7 @@ def _audit_clickhouse_host_with_port_fallback(
                 sql_command=sql_command,
             )
         else:
-            dump_kwargs = {"dump_row_limit": dump_row_limit} if dump_row_limit is not None else {}
+            dump_kwargs: dict[str, Any] = {"dump_row_limit": dump_row_limit} if dump_row_limit is not None else {}
             record = _audit_clickhouse_host_on_protocol(
                 host=host,
                 port=port,

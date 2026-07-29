@@ -7,13 +7,13 @@
         "error": "",
         "ok": true,
         "password": "default",
-        "source": "anonymous",
+        "source": "provided",
         "username": "default"
       }
     ],
     "auth_required": true,
     "auth_transport_attempts": 1,
-    "credentials_source": "anonymous",
+    "credentials_source": "provided",
     "database": "secure",
     "database_count": 7,
     "database_names": [

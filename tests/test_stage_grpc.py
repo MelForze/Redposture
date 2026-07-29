@@ -775,6 +775,7 @@ def test_credential_label_token_basic_and_fallback() -> None:
 def test_format_status_label_known_and_unknown() -> None:
     assert grpc_stage._format_status_label("open_no_auth") == "anonymous access"
     assert grpc_stage._format_status_label("valid_credentials") == "valid credentials"
+    assert grpc_stage._format_status_label("weak_default_creds") == "weak default credentials"
     assert grpc_stage._format_status_label("auth_required") == "authentication required"
     assert grpc_stage._format_status_label("invalid_credentials_anonymous") == "invalid credentials (anonymous works)"
     assert grpc_stage._format_status_label("not_grpc") == "not grpc"
@@ -792,13 +793,12 @@ def test_auth_required_text_three_states() -> None:
     assert grpc_stage._auth_required_text("True") == "unknown"
 
 
-def test_auth_attempt_entries_token_takes_priority_over_basic() -> None:
-    # When a token is provided, the basic-creds branch is skipped.
+def test_auth_attempt_entries_token_precedes_basic_fallback() -> None:
     attempts = grpc_stage._auth_attempt_entries(token="t-token", username="u", password="p", defcreds=False)
-    assert len(attempts) == 1
-    assert attempts[0]["type"] == "token"
-    assert attempts[0]["token"] == "t-token"
-    assert attempts[0]["source"] == "provided"
+    assert attempts == [
+        {"type": "token", "token": "t-token", "source": "provided"},
+        {"type": "basic", "username": "u", "password": "p", "source": "provided"},
+    ]
 
 
 def test_auth_attempt_entries_basic_only_when_both_username_and_password() -> None:
@@ -810,11 +810,32 @@ def test_auth_attempt_entries_basic_only_when_both_username_and_password() -> No
 
 def test_auth_attempt_entries_defcreds_appends_default_tokens_and_basics() -> None:
     attempts = grpc_stage._auth_attempt_entries(token=None, username=None, password=None, defcreds=True)
-    # Defcreds should produce at least one bearer-token attempt and one basic attempt.
-    types = [a["type"] for a in attempts]
-    assert "token" in types
-    assert "basic" in types
-    # All defcred entries carry source=defcreds
+    assert [item["token"] for item in attempts if item["type"] == "token"] == [
+        "admin",
+        "token",
+        "secret",
+        "changeme",
+        "grpc",
+        "default-token",
+    ]
+    assert [(item["username"], item["password"]) for item in attempts if item["type"] == "basic"] == [
+        ("admin", "admin"),
+        ("admin", "password"),
+        ("root", "root"),
+        ("root", "admin"),
+        ("grpc", "grpc"),
+        ("service", "service"),
+        ("test", "test"),
+        ("user", "password"),
+        ("admin", "changeme"),
+        ("root", "password"),
+        ("grpc", "password"),
+        ("grpc", "admin"),
+        ("service", "password"),
+        ("user", "user"),
+        ("guest", "guest"),
+        ("dev", "dev"),
+    ]
     assert all(a["source"] == "defcreds" for a in attempts)
 
 

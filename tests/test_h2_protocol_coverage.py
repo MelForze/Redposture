@@ -540,7 +540,7 @@ def test_elastic_detect_auth_and_full_data_collection_use_cached_headers(
     monkeypatch.setattr(
         elastic,
         "_resolve_server_version_with_auth",
-        lambda *_args, **_kwargs: ("8.18.1", None),
+        lambda *_args, **_kwargs: pytest.fail("credential auth must not launch a cosmetic version probe"),
     )
 
     detected = elastic.detect_elastic(ctx, {})
@@ -548,7 +548,7 @@ def test_elastic_detect_auth_and_full_data_collection_use_cached_headers(
     cached_headers = state.auth_headers[(None, None, "api-key", "provided")]
     assert detected["scheme"] == "http"
     assert authenticated["status"] == "valid_credentials"
-    assert authenticated["server_version"] == "8.18.1"
+    assert authenticated["server_version"] is None
     assert cached_headers["Authorization"] == "ApiKey api-key"
 
     seen_headers: list[dict[str, str]] = []
@@ -579,10 +579,26 @@ def test_elastic_detect_auth_and_full_data_collection_use_cached_headers(
         capture(([{"key": "network.host", "value": "0.0.0.0"}], None)),
     )
     monkeypatch.setattr(elastic, "_fetch_security_users", capture(([{"username": "elastic"}], None)))
+
+    class _DiscoverReport:
+        error = "discover warning"
+        error_detail = None
+
+        @staticmethod
+        def to_dict() -> dict[str, Any]:
+            return {
+                "discover_schema_version": 2,
+                "discover_findings": [],
+                "discover_coverage": {"complete": False, "status": "partial"},
+                "discover_results": [{"index": "secrets", "hits": 1}],
+                "discover_error": "discover warning",
+                "discover_error_detail": None,
+            }
+
     monkeypatch.setattr(
         elastic,
-        "_collect_discover_results_detailed",
-        capture(([{"index": "secrets", "hits": 1}], "discover warning", None)),
+        "_collect_discover_report",
+        capture(_DiscoverReport()),
     )
 
     result = elastic.collect_elastic_data(

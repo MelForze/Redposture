@@ -6,7 +6,7 @@ import json
 import socket
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ...audit_config import AuditConfig
@@ -37,6 +37,26 @@ _is_timeout_error = transport.is_connection_timeout
 _is_connection_refused_fail_record = transport.is_connection_refused_fail_record
 _is_connection_timeout_fail_record = transport.is_connection_timeout_fail_record
 _recv_exact = transport.recv_exact
+
+_REDIS_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
+    ("redis", "redis"),
+    ("default", "redis"),
+    ("default", "password"),
+    ("redis", "password"),
+    ("default", "changeme"),
+    ("redis", "changeme"),
+    ("admin", "admin"),
+    ("default", "default"),
+    ("admin", "password"),
+    ("admin", "changeme"),
+    ("root", "root"),
+    ("root", "password"),
+    ("user", "user"),
+    ("user", "password"),
+    ("service", "service"),
+    ("test", "test"),
+    ("dev", "dev"),
+)
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -122,6 +142,19 @@ def _auth_with_password(sock: socket.socket, password: str) -> tuple[bool, str |
     return False, f"unexpected AUTH response: {auth_type} {auth_value}"
 
 
+def _auth_with_password_once(
+    sock: socket.socket,
+    password: str,
+    legacy_passwords_attempted: set[str] | None,
+) -> tuple[bool, str | None]:
+    if legacy_passwords_attempted is not None and password in legacy_passwords_attempted:
+        return False, "legacy AUTH already attempted for this password"
+    result = _auth_with_password(sock, password)
+    if legacy_passwords_attempted is not None:
+        legacy_passwords_attempted.add(password)
+    return result
+
+
 def _auth_with_user_password(sock: socket.socket, username: str, password: str) -> tuple[bool, str | None]:
     auth_type, auth_value = _send_cmd(sock, "AUTH", username, password)
     if auth_type == "simple" and str(auth_value).upper() == "OK":
@@ -131,19 +164,29 @@ def _auth_with_user_password(sock: socket.socket, username: str, password: str) 
     return False, f"unexpected AUTH response: {auth_type} {auth_value}"
 
 
-def _check_default_credentials(sock: socket.socket) -> tuple[bool, str | None]:
-    ok, err = _auth_with_user_password(sock, "redis", "redis")
+def _check_default_credentials(
+    sock: socket.socket,
+    username: str = "redis",
+    password: str = "redis",
+    *,
+    legacy_passwords_attempted: set[str] | None = None,
+) -> tuple[bool, str | None]:
+    ok, err = _auth_with_user_password(sock, username, password)
     if ok:
         return True, None
 
     error = (err or "").lower()
     if "wrong number of arguments" in error or "syntax" in error:
-        return _auth_with_password(sock, "redis")
+        return _auth_with_password_once(sock, password, legacy_passwords_attempted)
     return False, err
 
 
 def _check_provided_credentials(
-    sock: socket.socket, username: str | None, password: str | None
+    sock: socket.socket,
+    username: str | None,
+    password: str | None,
+    *,
+    legacy_passwords_attempted: set[str] | None = None,
 ) -> tuple[bool | None, str | None]:
     if password is None:
         return None, None
@@ -153,9 +196,9 @@ def _check_provided_credentials(
             return True, None
         error_text = str(err or "").lower()
         if "wrong number of arguments" in error_text or "syntax" in error_text:
-            return _auth_with_password(sock, password)
+            return _auth_with_password_once(sock, password, legacy_passwords_attempted)
         return False, err
-    return _auth_with_password(sock, password)
+    return _auth_with_password_once(sock, password, legacy_passwords_attempted)
 
 
 def _count_redis_keys(sock: socket.socket) -> tuple[int | None, str | None]:
@@ -390,6 +433,7 @@ class RedisAuditLifecycleState:
     debug_emit: Callable[[str], None] | None
     started: float
     sock: Any = None
+    selected_sock: Any = None
     is_redis: bool = False
     auth_required: bool | None = None
     status: str = "fail"
@@ -417,6 +461,7 @@ class RedisAuditLifecycleState:
     active_source: str = "anonymous"
     auth_attempts_used: int = 0
     data_attempts_used: int = 0
+    legacy_auth_passwords_attempted: set[str] = field(default_factory=set)
 
 
 class _RedisAuthenticationRejected(Exception):
@@ -456,6 +501,14 @@ def redis_lifecycle_state_factory(ctx: Any) -> RedisAuditLifecycleState:
 def close_redis_lifecycle_state(state: Any) -> None:
     if isinstance(state, RedisAuditLifecycleState):
         _close_redis_lifecycle_socket(state)
+        selected_sock = state.selected_sock
+        state.selected_sock = None
+        close = getattr(selected_sock, "close", None)
+        if callable(close):
+            try:
+                close()
+            except OSError:
+                pass
 
 
 def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bool) -> AuditRecord:
@@ -474,6 +527,8 @@ def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bo
         "provided_username": state.provided_username,
         "provided_password": state.provided_password if state.provided_credentials else None,
         "provided_credentials_ok": state.provided_credentials_ok,
+        "effective_username": state.active_username,
+        "effective_password": state.active_password,
         "defcreds_enabled": state.defcreds_enabled,
         "default_credentials_attempted": state.default_credentials_attempted,
         "show_keys": state.show_keys if include_data else False,
@@ -569,17 +624,10 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
         raise TypeError("redis lifecycle state is missing")
     if not state.is_redis or state.status == "fail":
         return _redis_lifecycle_record(state, include_data=False)
-    if state.auth_required is False:
-        state.status = "open_no_auth"
-        state.error = None
-        state.active_username = None
-        state.active_password = None
-        state.active_source = "anonymous"
-        return _redis_lifecycle_record(state, include_data=False)
-
     credential = ctx.credential
+    exhaustive_credentials = bool(getattr(ctx.args, "defcreds", False))
     if credential.username is None and credential.password is None:
-        state.status = "auth_required"
+        state.status = "open_no_auth" if state.auth_required is False else "auth_required"
         return _redis_lifecycle_record(state, include_data=False)
 
     attempts = max(1, state.retries + 1)
@@ -591,17 +639,39 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
                 _open_redis_lifecycle_socket(state)
             if credential.source == "default":
                 state.default_credentials_attempted = True
-                default_ok, default_error = _check_default_credentials(state.sock)
+                if credential.username == "redis" and credential.password == "redis":
+                    default_ok, default_error = _check_default_credentials(
+                        state.sock,
+                        legacy_passwords_attempted=state.legacy_auth_passwords_attempted,
+                    )
+                else:
+                    default_ok, default_error = _check_default_credentials(
+                        state.sock,
+                        credential.username or "",
+                        credential.password or "",
+                        legacy_passwords_attempted=state.legacy_auth_passwords_attempted,
+                    )
                 state.default_credentials = bool(default_ok)
                 if default_ok:
                     state.status = "weak_default_creds"
                     state.error = None
-                    state.active_username = credential.username
-                    state.active_password = credential.password
-                    state.active_source = "default"
+                    if not exhaustive_credentials:
+                        state.active_username = credential.username
+                        state.active_password = credential.password
+                        state.active_source = "default"
+                    elif state.selected_sock is None:
+                        state.selected_sock = state.sock
+                        state.sock = None
+                        state.active_username = credential.username
+                        state.active_password = credential.password
+                        state.active_source = "default"
+                    else:
+                        _close_redis_lifecycle_socket(state)
                 else:
-                    state.status = "auth_required"
+                    state.status = "invalid_credentials_anonymous" if state.auth_required is False else "auth_required"
                     state.error = default_error
+                    if state.selected_sock is not None:
+                        _close_redis_lifecycle_socket(state)
                 return _redis_lifecycle_record(state, include_data=False)
 
             state.provided_credentials = True
@@ -611,17 +681,29 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
                 state.sock,
                 credential.username,
                 credential.password,
+                legacy_passwords_attempted=state.legacy_auth_passwords_attempted,
             )
             state.provided_credentials_ok = bool(provided_ok)
             if provided_ok:
                 state.status = "valid_credentials"
                 state.error = None
-                state.active_username = credential.username
-                state.active_password = credential.password
-                state.active_source = credential.source
+                if not exhaustive_credentials:
+                    state.active_username = credential.username
+                    state.active_password = credential.password
+                    state.active_source = credential.source
+                elif state.selected_sock is None:
+                    state.selected_sock = state.sock
+                    state.sock = None
+                    state.active_username = credential.username
+                    state.active_password = credential.password
+                    state.active_source = credential.source
+                else:
+                    _close_redis_lifecycle_socket(state)
             else:
-                state.status = "auth_required"
+                state.status = "invalid_credentials_anonymous" if state.auth_required is False else "auth_required"
                 state.error = provided_error
+                if state.selected_sock is not None:
+                    _close_redis_lifecycle_socket(state)
             return _redis_lifecycle_record(state, include_data=False)
         except (OSError, ValueError, ConnectionError) as exc:
             last_error = str(exc)
@@ -656,7 +738,14 @@ def _redis_reauthenticate_lifecycle_state(state: RedisAuditLifecycleState) -> No
     ok: bool | None
     error: str | None
     if state.active_source == "default":
-        ok, error = _check_default_credentials(state.sock)
+        if (state.active_username, state.active_password) in {(None, None), ("redis", "redis")}:
+            ok, error = _check_default_credentials(state.sock)
+        else:
+            ok, error = _check_default_credentials(
+                state.sock,
+                state.active_username or "",
+                state.active_password or "",
+            )
     else:
         ok, error = _check_provided_credentials(
             state.sock,
@@ -711,6 +800,27 @@ def redis_data_hook(ctx: Any, _auth_record: AuditRecord) -> AuditRecord:
     if not isinstance(state, RedisAuditLifecycleState):
         raise TypeError("redis lifecycle state is missing")
     args = ctx.args
+    # The shared state may currently reflect a later credential from an
+    # exhaustive sweep. Deep actions deliberately use the first confirmed
+    # identity, so reconnect and restore that selected credential first.
+    if bool(getattr(args, "defcreds", False)):
+        state.status = str(_auth_record.status)
+        state.error = _auth_record.extra.get("error")
+        state.active_username = ctx.credential.username
+        state.active_password = ctx.credential.password
+        state.active_source = str(ctx.credential.source or "provided")
+        state.default_credentials = state.status == "weak_default_creds"
+        state.provided_credentials = ctx.credential.source != "default"
+        state.provided_username = ctx.credential.username
+        state.provided_password = ctx.credential.password
+        state.provided_credentials_ok = state.status in {
+            "valid_credentials",
+            "weak_default_creds",
+        }
+        if state.selected_sock is not None:
+            _close_redis_lifecycle_socket(state)
+            state.sock = state.selected_sock
+            state.selected_sock = None
     dump_batch, dump_delay = _redis_reset_lifecycle_data(state, args)
 
     if state.status not in _REDIS_DEEP_STATUSES:
@@ -766,7 +876,21 @@ def _audit_redis_host(
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
-    normalized_candidates: list[tuple[str | None, str | None]] = []
+    normalized_candidates: list[tuple[str | None, str | None, bool]] = []
+    seen_candidates: set[tuple[str | None, str | None]] = set()
+
+    def add_candidate(
+        candidate_username: str | None,
+        candidate_password: str | None,
+        *,
+        default: bool,
+    ) -> None:
+        pair = (candidate_username, candidate_password)
+        if pair in seen_candidates:
+            return
+        seen_candidates.add(pair)
+        normalized_candidates.append((candidate_username, candidate_password, default))
+
     for candidate in credential_candidates or []:
         if not isinstance(candidate, dict):
             continue
@@ -774,18 +898,22 @@ def _audit_redis_host(
         candidate_password = candidate.get("password")
         if candidate_username is None and candidate_password is None:
             continue
-        normalized_candidates.append(
-            (
-                str(candidate_username) if candidate_username is not None else None,
-                str(candidate_password) if candidate_password is not None else None,
-            )
+        add_candidate(
+            str(candidate_username) if candidate_username is not None else None,
+            str(candidate_password) if candidate_password is not None else None,
+            default=bool(candidate.get("default")) or str(candidate.get("source") or "") == "default",
         )
     if not normalized_candidates and (username is not None or password is not None):
-        normalized_candidates.append((username, password))
+        add_candidate(username, password, default=False)
+    if defcreds and not any(candidate[2] for candidate in normalized_candidates):
+        for default_username, default_password in _REDIS_DEFAULT_CREDENTIALS:
+            add_candidate(default_username, default_password, default=True)
 
-    provided_credentials = bool(normalized_candidates)
-    provided_username = normalized_candidates[0][0] if normalized_candidates else username
-    provided_password = normalized_candidates[0][1] if normalized_candidates else password
+    provided_candidates = [candidate for candidate in normalized_candidates if not candidate[2]]
+    provided_credentials = bool(provided_candidates)
+    provided_username = provided_candidates[0][0] if provided_candidates else username
+    provided_password = provided_candidates[0][1] if provided_candidates else password
+    defaults_enabled = any(candidate[2] for candidate in normalized_candidates)
 
     for attempt in range(attempts):
         started = time.monotonic()
@@ -817,7 +945,7 @@ def _audit_redis_host(
                         "provided_username": provided_username,
                         "provided_password": provided_password if provided_credentials else None,
                         "provided_credentials_ok": None,
-                        "defcreds_enabled": defcreds,
+                        "defcreds_enabled": defaults_enabled,
                         "show_keys": show_keys,
                         "show_keys_limit": show_keys_limit,
                         "dump_keys": dump_keys,
@@ -835,28 +963,49 @@ def _audit_redis_host(
                 default_credentials = False
                 default_credentials_attempted = False
                 provided_credentials_ok: bool | None = None
+                effective_username: str | None = None
+                effective_password: str | None = None
                 auth_error: str | None = None
+                legacy_passwords_attempted: set[str] = set()
 
                 if auth_required:
-                    if defcreds:
-                        default_credentials_attempted = True
-                        default_credentials, default_error = _check_default_credentials(sock)
-                        if default_credentials:
-                            auth_error = None
+                    for candidate_username, candidate_password, candidate_is_default in normalized_candidates:
+                        candidate_ok: bool | None
+                        if candidate_is_default:
+                            default_credentials_attempted = True
+                            if candidate_username == "redis" and candidate_password == "redis":
+                                candidate_ok, candidate_error = _check_default_credentials(
+                                    sock,
+                                    legacy_passwords_attempted=legacy_passwords_attempted,
+                                )
+                            else:
+                                candidate_ok, candidate_error = _check_default_credentials(
+                                    sock,
+                                    candidate_username or "",
+                                    candidate_password or "",
+                                    legacy_passwords_attempted=legacy_passwords_attempted,
+                                )
+                            if candidate_ok:
+                                default_credentials = True
+                                effective_username = candidate_username
+                                effective_password = candidate_password
+                                auth_error = None
+                                break
+                            if candidate_error:
+                                auth_error = candidate_error
                         else:
-                            auth_error = default_error
-
-                    if not default_credentials:
-                        for candidate_username, candidate_password in normalized_candidates:
                             candidate_ok, provided_error = _check_provided_credentials(
                                 sock,
                                 candidate_username,
                                 candidate_password,
+                                legacy_passwords_attempted=legacy_passwords_attempted,
                             )
                             provided_credentials_ok = bool(candidate_ok)
                             provided_username = candidate_username
                             provided_password = candidate_password
                             if candidate_ok:
+                                effective_username = candidate_username
+                                effective_password = candidate_password
                                 auth_error = None
                                 break
                             if provided_error:
@@ -926,7 +1075,9 @@ def _audit_redis_host(
                     "provided_username": provided_username,
                     "provided_password": provided_password if provided_credentials else None,
                     "provided_credentials_ok": provided_credentials_ok,
-                    "defcreds_enabled": defcreds,
+                    "effective_username": effective_username,
+                    "effective_password": effective_password,
+                    "defcreds_enabled": defaults_enabled,
                     "default_credentials_attempted": default_credentials_attempted,
                     "show_keys": show_keys,
                     "show_keys_limit": show_keys_limit,
@@ -959,7 +1110,7 @@ def _audit_redis_host(
         "provided_username": provided_username,
         "provided_password": provided_password if provided_credentials else None,
         "provided_credentials_ok": None,
-        "defcreds_enabled": defcreds,
+        "defcreds_enabled": defaults_enabled,
         "default_credentials_attempted": False,
         "show_keys": show_keys,
         "show_keys_limit": show_keys_limit,
@@ -1099,20 +1250,37 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     status = str(record.get("status") or "fail")
     prefix = _nxc_prefix(record)
     err = _clip(str(record.get("error") or "-"), 64)
+    attempted_credentials = record.get("attempted_credentials")
+    has_attempt_details = isinstance(attempted_credentials, list) and len(attempted_credentials) > 1
 
     if status == "open_no_auth":
         return ""
 
     if status == "weak_default_creds":
-        return _with_optional_keys(record, f"{prefix} [+] redis:redis")
+        if has_attempt_details:
+            return ""
+        username = str(record.get("effective_username") or "redis").strip() or "redis"
+        effective_password = record.get("effective_password")
+        password_text = (
+            "<empty>"
+            if effective_password == ""
+            else str(effective_password)
+            if effective_password is not None
+            else "redis"
+        )
+        return _with_optional_keys(record, f"{prefix} [+] {username}:{password_text}")
 
     if status == "valid_credentials":
+        if has_attempt_details:
+            return ""
         username = str(record.get("provided_username") or "default").strip() or "default"
         provided_password = record.get("provided_password")
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
         return _with_optional_keys(record, f"{prefix} [+] {username}:{password_text}")
 
     if status == "auth_required":
+        if has_attempt_details:
+            return ""
         if record.get("provided_credentials"):
             username = str(record.get("provided_username") or "default").strip() or "default"
             provided_password = record.get("provided_password")
@@ -1128,6 +1296,42 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if err != "-":
         return f"{fail_line} err={err}"
     return fail_line
+
+
+def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+    attempts = record.get("attempted_credentials")
+    if output_format == "json" or not isinstance(attempts, list) or len(attempts) < 2:
+        return []
+
+    prefix = _nxc_prefix(record)
+    selected_username = record.get("effective_username")
+    selected_password = record.get("effective_password")
+    selected_success_rendered = False
+    lines: list[str] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        username = str(attempt.get("username") or "default")
+        password = attempt.get("password")
+        if password is None:
+            password_text = "<no-password>"
+        elif password == "":
+            password_text = "<empty>"
+        else:
+            password_text = str(password)
+        status = str(attempt.get("status") or "")
+        if status not in {"valid_credentials", "weak_default_creds"}:
+            lines.append(f"{prefix} [-] {username}:{password_text}")
+            continue
+        selected = (
+            not selected_success_rendered
+            and attempt.get("username") == selected_username
+            and password == selected_password
+        )
+        suffix = f" (keys:{format_count_value(record.get('key_count'))})" if selected else ""
+        selected_success_rendered = selected_success_rendered or selected
+        lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
+    return lines
 
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:

@@ -13,7 +13,7 @@ from ...stage_runtime import (
     AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    has_username_password_credential_file,
+    merge_audit_credential_runs,
     run_basic_host_audit,
 )
 from . import actions, policy, render
@@ -26,19 +26,30 @@ _PRODUCTION_AUDIT_HOST = actions._audit_grafana_host
 
 def build_grafana_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
-    if not bool(getattr(args, "defcreds", False)) or has_username_password_credential_file(args):
-        return plan
-    runs: list[AuditCredentialRun] = []
     token = str(getattr(args, "apitoken", "") or "").strip() or None
-    if token is not None:
-        runs.append(AuditCredentialRun(token=token, source="provided"))
-    for username, password, source in actions._build_credential_candidates(
-        getattr(args, "username", None),
-        getattr(args, "password", None),
-        True,
-    ):
-        runs.append(AuditCredentialRun(username=username, password=password, source=source))
-    return replace(plan, credential_runs=tuple(runs or (AuditCredentialRun(source="anonymous"),)))
+    token_runs = (AuditCredentialRun(token=token, source="provided"),) if token is not None else ()
+    default_runs = (
+        tuple(
+            AuditCredentialRun(username=username, password=password, source=source)
+            for username, password, source in actions._build_credential_candidates(None, None, True)
+        )
+        if bool(getattr(args, "defcreds", False))
+        else ()
+    )
+    return replace(
+        plan,
+        credential_runs=merge_audit_credential_runs(token_runs, plan.credential_runs, default_runs),
+    )
+
+
+def _grafana_credential_gate(credential: AuditCredentialRun, record: AuditRecord) -> tuple[bool, str]:
+    """Only stop credential fallback after Grafana verified this candidate."""
+
+    if credential.source == "default":
+        verified = bool(record.extra.get("default_credentials"))
+    else:
+        verified = record.extra.get("provided_credentials_ok") is True
+    return verified, "grafana credential verified" if verified else "grafana credential rejected"
 
 
 def _build_grafana_host_stage_options(args: Any) -> dict[str, Any]:
@@ -96,6 +107,9 @@ def build_grafana_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_factory=(lambda _ctx: actions.GrafanaLifecycleState()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_grafana_line,
+        credential_gate=_grafana_credential_gate,
+        continue_after_credential_error=bool(getattr(args, "defcreds", False)),
+        continue_after_credential_success=bool(getattr(args, "defcreds", False)),
     )
 
 

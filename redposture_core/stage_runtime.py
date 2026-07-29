@@ -315,13 +315,9 @@ def _record_callbacks_for_args(args: Any) -> tuple[Callable[[dict[str, Any]], No
 class LineOutputSink:
     """Buffered line sink for stages that must choose one emitted result from many attempts.
 
-    C1/C2 fix: BoundedScheduler runs `_finalize_record` on N worker threads
-    concurrently, and every worker eventually reaches `emit_many`. The prior
-    implementation opened the file lazily without a lock (two threads could
-    race, one `open('w')` truncating the other's output) and wrote/flushed
-    without serialization (lines from different records could interleave).
-    A single mutex around the file+console emit path is enough because the
-    critical section is small (a handful of writes + one flush per record).
+    Audit finalization is coordinator-owned, while other streaming stages may
+    still have multiple producers. The mutex keeps lazy file preparation,
+    file+console teeing, and each multi-line record atomic in both cases.
     """
 
     def __init__(self, output_path: str | None, emit_line: Callable[[str], None], *, append: bool = False) -> None:
@@ -464,9 +460,22 @@ class ModuleAuditSpec:
     # Continue to the next credential candidate when one auth hook raises an
     # operational exception. Default-off preserves existing module behavior.
     continue_after_credential_error: bool = False
+    # Continue probing credentials after the first accepted candidate. The
+    # first accepted identity still owns capabilities/data, while every
+    # credential result is retained for the final attempt history.
+    continue_after_credential_success: bool = False
     # Remove module-specific secrets from JSON lines without changing retained
     # records or callbacks.
     structured_output_redact_fields: tuple[str, ...] = ()
+    # Additive structured fields copied from each auth record into the
+    # ``attempted_credentials`` history. Default-empty preserves other modules.
+    credential_attempt_detail_fields: tuple[str, ...] = ()
+    # Large scans can opt out of retaining every completed record while still
+    # streaming output and callbacks. ``None`` preserves the shared default.
+    record_retention_limit: int | None = None
+    # Minimum time between TTY progress renders. ``None`` preserves immediate
+    # refresh behavior for existing modules.
+    progress_refresh_interval_s: float | None = None
 
 
 @dataclass(frozen=True)
@@ -644,6 +653,22 @@ class _AuditDetectOutcome:
 
 
 @dataclass(frozen=True)
+class _AuditPipelineOutcome:
+    """One target's completed detect-to-deep lifecycle.
+
+    Workers return the final record plus the counters the coordinator needs.
+    Keeping finalization out of workers preserves exact completion-order
+    callbacks/output without allowing records from different targets to
+    interleave.
+    """
+
+    record: AuditRecord
+    detected: bool
+    deep_candidate: bool
+    deep_processed: bool
+
+
+@dataclass(frozen=True)
 class ModuleRunSummary:
     module: str
     attempted_targets: int
@@ -777,6 +802,63 @@ def build_basic_credential_runs(args: Any) -> tuple[AuditCredentialRun, ...]:
             for entry in credential_file_entries
         )
     return (AuditCredentialRun(username=username, password=password, token=token),)
+
+
+def merge_audit_credential_runs(
+    *groups: Iterable[AuditCredentialRun],
+) -> tuple[AuditCredentialRun, ...]:
+    """Merge ordered credential groups with stable, type-aware deduplication.
+
+    Module plans use this helper to implement the shared precedence contract:
+    caller-supplied tokens/basic credentials first, credential-file entries
+    next, and module defaults last.  A generic ``AuditCredentialRun`` may
+    contain both a token and username/password; split it into two candidates so
+    a rejected token can fall back to basic authentication.
+
+    The first occurrence wins, which deliberately preserves a provided/file
+    source when the same pair is also present in the default catalog.
+    """
+
+    merged: list[AuditCredentialRun] = []
+    seen: set[tuple[object, ...]] = set()
+    anonymous: AuditCredentialRun | None = None
+
+    for group in groups:
+        for candidate in group:
+            source = candidate.source
+            has_token = candidate.token is not None
+            has_basic = candidate.username is not None or candidate.password is not None
+            if (has_token or has_basic) and source == "anonymous":
+                source = "provided"
+
+            expanded: list[AuditCredentialRun] = []
+            if has_token:
+                expanded.append(AuditCredentialRun(token=candidate.token, source=source))
+            if has_basic:
+                expanded.append(
+                    AuditCredentialRun(
+                        username=candidate.username,
+                        password=candidate.password,
+                        source=source,
+                    )
+                )
+            if not expanded:
+                anonymous = anonymous or AuditCredentialRun(source=source)
+                continue
+
+            for item in expanded:
+                if item.token is not None:
+                    key: tuple[object, ...] = ("token", item.token)
+                else:
+                    key = ("basic", item.username, item.password)
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item)
+
+    if merged:
+        return tuple(merged)
+    return (anonymous or AuditCredentialRun(source="anonymous"),)
 
 
 def has_username_password_credential_file(args: Any) -> bool:
@@ -1609,7 +1691,13 @@ class AuditCommandRunner:
 
     def _run_prepared_plan(self, plan: AuditCommandPlan, sink: LineOutputSink) -> AuditCommandResult:
         target_count = plan.target_count
-        retain_records = target_count <= DEFAULT_RECORD_RETENTION_LIMIT
+        configured_retention_limit = getattr(self.spec, "record_retention_limit", None)
+        retention_limit = (
+            DEFAULT_RECORD_RETENTION_LIMIT
+            if configured_retention_limit is None
+            else max(0, int(configured_retention_limit))
+        )
+        retain_records = target_count <= retention_limit
         # E6 fix: when target_count exceeds the retention limit, downstream
         # consumers (exporters, summary renderers) that iterate
         # `AuditCommandResult.records` used to get an empty list without any
@@ -1620,8 +1708,14 @@ class AuditCommandRunner:
             if callable(debug_emit_early):
                 debug_emit_early(
                     f"[!] record retention disabled: {target_count} targets exceed limit "
-                    f"{DEFAULT_RECORD_RETENTION_LIMIT}; AuditCommandResult.records will be empty"
+                    f"{retention_limit}; AuditCommandResult.records will be empty"
                 )
+        progress_refresh_interval_s = getattr(self.spec, "progress_refresh_interval_s", None)
+        if progress_refresh_interval_s is not None:
+            # Carry the module opt-in through args so compatibility shims and
+            # tests that replace ``start_command_progress`` keep its historical
+            # call signature.
+            self.args._progress_refresh_interval_s = float(progress_refresh_interval_s)
         progress = start_command_progress(
             self.args,
             self.spec.label,
@@ -1630,12 +1724,9 @@ class AuditCommandRunner:
             leave=False,
         )
         worker_count = max(1, int(plan.workers or getattr(self.args, "workers", 1) or 1))
-        scheduler: BoundedScheduler[tuple[int, str, int, ScanTargetSpec | None], _AuditDetectOutcome] = (
+        scheduler: BoundedScheduler[tuple[int, str, int, ScanTargetSpec | None], _AuditPipelineOutcome] = (
             BoundedScheduler(max_workers=worker_count)
         )
-        deep_scheduler: BoundedScheduler[
-            tuple[int, str, int, ScanTargetSpec | None, _AuditDetectOutcome], AuditRecord
-        ] = BoundedScheduler(max_workers=worker_count)
         emitted_lines = 0
         suppressed_records = 0
         retained_records: list[AuditRecord] = []
@@ -1645,9 +1736,19 @@ class AuditCommandRunner:
         record_callbacks = _record_callbacks_for_args(self.args)
         render_plan = build_render_plan(self.spec.render_module) if self.spec.render_module is not None else None
         debug = bool(getattr(self.args, "debug", False))
-        debug_emit = getattr(self.args, "debug_emit", None) if bool(getattr(self.args, "debug", False)) else None
+        raw_debug_emit = getattr(self.args, "debug_emit", None) if debug else None
+        cancelled = threading.Event()
+
+        def _debug_emit(message: str) -> None:
+            # BoundedScheduler deliberately detaches active daemon workers on
+            # cancellation. Do not let those workers keep writing debug output
+            # after the coordinator has returned control to the caller.
+            if not cancelled.is_set() and callable(raw_debug_emit):
+                raw_debug_emit(message)
+
+        debug_emit = _debug_emit if callable(raw_debug_emit) else None
         if debug_emit is not None:
-            debug_emit(format_pass_marker(1, "detect", "start", total=target_count))
+            debug_emit(format_pass_marker(1, "detect", "start", total=target_count, mode="pipeline"))
 
         def _emit_record(record: AuditRecord) -> None:
             nonlocal emitted_lines, suppressed_records
@@ -1680,107 +1781,51 @@ class AuditCommandRunner:
                     record_callback(dict(payload))
             _emit_record(record)
 
-        total_detected = 0
         total_deep_candidates = 0
         processed_deep = 0
-        window_index = 0
         try:
             for window in plan.iter_target_windows():
-                window_index += 1
-                detected_targets: list[tuple[int, str, int, ScanTargetSpec | None, _AuditDetectOutcome]] = []
-
-                for (idx, host, port, target), detect_outcome in scheduler.iter_completed(
+                for (_idx, _host, _port, _target), outcome in scheduler.iter_completed(
                     window,
-                    lambda item: self._run_detect_with_state(
+                    lambda item: self._run_target_pipeline(
                         item[1],
                         item[2],
                         item[3],
-                        debug_emit,
-                    ),
-                ):
-                    detect_record = detect_outcome.record
-                    if self._is_detected(detect_record):
-                        detected_count += 1
-                        detected_targets.append((idx, host, port, target, detect_outcome))
-                    else:
-                        self._close_lifecycle_state(detect_outcome.lifecycle_state)
-                        if debug_emit is not None:
-                            debug_emit(
-                                format_stage2_gate(host, int(port), "skip", self._not_detected_reason(detect_record))
-                            )
-                        _finalize_record(detect_record)
-                    progress.advance(1)
-
-                initial_deep_candidates = [
-                    (idx, host, port, target, detect_outcome)
-                    for idx, host, port, target, detect_outcome in detected_targets
-                    if self._deep_gate(detect_outcome.record)[0]
-                ]
-                total_detected += len(detected_targets)
-                total_deep_candidates += len(initial_deep_candidates)
-                if debug_emit is not None:
-                    if target_count <= len(window):
-                        debug_emit(
-                            format_pass_marker(
-                                1,
-                                "detect",
-                                "complete",
-                                detected=len(detected_targets),
-                                deep_candidates=len(initial_deep_candidates),
-                            )
-                        )
-                        debug_emit(format_pass_marker(2, "deep", "start", total=len(initial_deep_candidates)))
-                    else:
-                        debug_emit(
-                            format_pass_marker(
-                                1,
-                                "detect",
-                                "window_complete",
-                                window=window_index,
-                                detected=len(detected_targets),
-                                deep_candidates=len(initial_deep_candidates),
-                            )
-                        )
-                        debug_emit(
-                            format_pass_marker(
-                                2,
-                                "deep",
-                                "window_start",
-                                window=window_index,
-                                total=len(initial_deep_candidates),
-                            )
-                        )
-
-                if detected_targets:
-                    progress.add_total(len(detected_targets))
-                for (_idx, _host, _port, _target, _detect_outcome), final_record in deep_scheduler.iter_completed(
-                    detected_targets,
-                    lambda item: self._run_deep_and_close_state(
-                        item[1],
-                        item[2],
-                        item[3],
-                        item[4],
                         plan.credential_runs,
                         debug_emit,
                     ),
                 ):
-                    _finalize_record(final_record)
-                    processed_deep += int(self._deep_gate(final_record)[0])
+                    detected_count += int(outcome.detected)
+                    total_deep_candidates += int(outcome.deep_candidate)
+                    processed_deep += int(outcome.deep_processed)
+                    # The progress total retains the historical detect+deep
+                    # accounting, but both units are advanced only when that
+                    # target's corresponding lifecycle has actually completed.
                     progress.advance(1)
+                    if outcome.detected:
+                        progress.add_total(1)
+                        progress.advance(1)
+                    _finalize_record(outcome.record)
+        except BaseException:
+            cancelled.set()
+            raise
         finally:
             progress.close()
         if debug_emit is not None:
-            if window_index > 1:
-                debug_emit(
-                    format_pass_marker(
-                        1,
-                        "detect",
-                        "complete",
-                        detected=total_detected,
-                        deep_candidates=total_deep_candidates,
-                    )
+            debug_emit(
+                format_pass_marker(
+                    1,
+                    "detect",
+                    "complete",
+                    detected=detected_count,
+                    deep_candidates=total_deep_candidates,
+                    mode="pipeline",
                 )
-            debug_emit(format_pass_marker(2, "deep", "complete", processed=processed_deep))
+            )
+            # Keep the legacy aggregate phase marker for log consumers while
+            # declaring that no global detect-before-deep barrier exists.
+            debug_emit(format_pass_marker(2, "deep", "start", total=total_deep_candidates, mode="pipeline"))
+            debug_emit(format_pass_marker(2, "deep", "complete", processed=processed_deep, mode="pipeline"))
 
         fallback_target_count = record_count or plan.fallback_target_count
         if record_count == 0 and plan.fallback_target_count > 0 and plan.output_format == "json":
@@ -1948,6 +1993,83 @@ class AuditCommandRunner:
                 runtime_stage_telemetry=True,
             )
 
+    def _run_target_pipeline(
+        self,
+        host: str,
+        port: int,
+        target: ScanTargetSpec | None,
+        credential_runs: tuple[AuditCredentialRun, ...],
+        debug_emit: Callable[[str], None] | None,
+    ) -> _AuditPipelineOutcome:
+        """Run one target's entire lifecycle in a single scheduler worker."""
+
+        detect_outcome = self._run_detect_with_state(host, port, target, debug_emit)
+        detect_record = detect_outcome.record
+        detected = self._is_detected(detect_record)
+        deep_candidate = detected and self._deep_gate(detect_record)[0]
+        if debug_emit is not None:
+            debug_emit(
+                format_pass_marker(
+                    1,
+                    "detect",
+                    "target_complete",
+                    host=host,
+                    port=int(port),
+                    detected=int(detected),
+                    deep_candidate=int(deep_candidate),
+                    mode="pipeline",
+                )
+            )
+        if not detected:
+            self._close_lifecycle_state(detect_outcome.lifecycle_state)
+            if debug_emit is not None:
+                debug_emit(format_stage2_gate(host, int(port), "skip", self._not_detected_reason(detect_record)))
+            return _AuditPipelineOutcome(
+                record=detect_record,
+                detected=False,
+                deep_candidate=False,
+                deep_processed=False,
+            )
+
+        if debug_emit is not None:
+            debug_emit(
+                format_pass_marker(
+                    2,
+                    "deep",
+                    "target_start",
+                    host=host,
+                    port=int(port),
+                    mode="pipeline",
+                )
+            )
+        final_record = self._run_deep_and_close_state(
+            host,
+            port,
+            target,
+            detect_outcome,
+            credential_runs,
+            debug_emit,
+        )
+        deep_processed = self._deep_gate(final_record)[0]
+        if debug_emit is not None:
+            debug_emit(
+                format_pass_marker(
+                    2,
+                    "deep",
+                    "target_complete",
+                    host=host,
+                    port=int(port),
+                    processed=int(deep_processed),
+                    mode="pipeline",
+                )
+            )
+        return _AuditPipelineOutcome(
+            record=final_record,
+            detected=True,
+            deep_candidate=deep_candidate,
+            deep_processed=deep_processed,
+        )
+
     def _run_deep_and_close_state(
         self,
         host: str,
@@ -2075,6 +2197,7 @@ class AuditCommandRunner:
 
         auth_records: list[tuple[AuditCredentialRun, AuditRecord]] = []
         candidates = credential_runs or (AuditCredentialRun(source="anonymous"),)
+        retain_all_attempts = self.spec.record_all_credential_attempts or self.spec.continue_after_credential_success
         if self._should_keep_anonymous_detect_record(detect_record):
             selected_credential = AuditCredentialRun(source="anonymous")
             selected_record = detect_record
@@ -2128,7 +2251,7 @@ class AuditCommandRunner:
                     if self.spec.continue_after_credential_error:
                         continue
                     failed_record = self._preserve_detected_deep_failure(detect_record, auth_record)
-                    if self.spec.record_all_credential_attempts:
+                    if retain_all_attempts:
                         return self._with_attempted_credentials(failed_record, auth_records, force=True)
                     return failed_record
                 if runtime_stage_telemetry:
@@ -2143,17 +2266,20 @@ class AuditCommandRunner:
                         debug_emit=debug_emit,
                     )
                 auth_records.append((credential, auth_record))
-                if self._credential_gate(credential, auth_record)[0]:
+                if (
+                    self._credential_gate(credential, auth_record)[0]
+                    and not self.spec.continue_after_credential_success
+                ):
                     break
             selected_credential, selected_record, gate_reason = self._select_deep_record(detect_record, auth_records)
-        if self.spec.record_all_credential_attempts:
+        if retain_all_attempts:
             selected_record = self._with_attempted_credentials(selected_record, auth_records, force=True)
         gate = self._deep_gate(selected_record)
         if not gate[0]:
             # No credential gated (all attempts failed). Record every attempted credential
             # so renderers can surface all of them instead of only the last-tried one.
             # Generic + harmless: modules whose renderers ignore this key are unaffected.
-            if not self.spec.record_all_credential_attempts:
+            if not retain_all_attempts:
                 selected_record = self._with_attempted_credentials(selected_record, auth_records, force=False)
             if debug_emit is not None:
                 debug_emit(format_stage2_gate(host, int(port), "skip", gate[1] or gate_reason))
@@ -2203,7 +2329,7 @@ class AuditCommandRunner:
                     debug_emit=debug_emit,
                 )
             failed_record = self._preserve_detected_deep_failure(detect_record, record)
-            if self.spec.record_all_credential_attempts:
+            if retain_all_attempts:
                 return self._with_attempted_credentials(failed_record, auth_records, force=True)
             return failed_record
         if runtime_stage_telemetry:
@@ -2246,7 +2372,7 @@ class AuditCommandRunner:
                 debug_emit=debug_emit,
             )
             failed_record = self._preserve_detected_deep_failure(detect_record, record)
-            if self.spec.record_all_credential_attempts:
+            if retain_all_attempts:
                 return self._with_attempted_credentials(failed_record, auth_records, force=True)
             return failed_record
         if runtime_stage_telemetry:
@@ -2261,7 +2387,7 @@ class AuditCommandRunner:
                 debug_emit=debug_emit,
             )
         final_record = self._preserve_detected_deep_failure(detect_record, record)
-        if self.spec.record_all_credential_attempts:
+        if retain_all_attempts:
             return self._with_attempted_credentials(final_record, auth_records, force=True)
         return final_record
 
@@ -2325,6 +2451,7 @@ class AuditCommandRunner:
             return self._preserve_detected_deep_failure(detect_record, record)
 
         attempts: list[tuple[AuditCredentialRun, AuditRecord]] = []
+        retain_all_attempts = self.spec.record_all_credential_attempts or self.spec.continue_after_credential_success
         for credential in candidates:
             ctx = self._ctx(
                 host,
@@ -2337,13 +2464,32 @@ class AuditCommandRunner:
                 credential_runs=(credential,),
                 lifecycle_state=lifecycle_state,
             )
-            record = self._host_stage(ctx, run_deep_checks=True)
+            attempt_started_at = time.monotonic()
+            try:
+                record = self._host_stage(ctx, run_deep_checks=True)
+            except TypeError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolate one credential candidate
+                if not self.spec.continue_after_credential_error:
+                    raise
+                record = self._runtime_phase_failure(
+                    host=host,
+                    port=port,
+                    prior=detect_record,
+                    detect_record=detect_record,
+                    phase="data",
+                    started_at=attempt_started_at,
+                    exc=exc,
+                    debug_emit=debug_emit,
+                )
             attempts.append((credential, record))
             gate = self._credential_gate(credential, record)
             if gate[0]:
                 if debug_emit is not None:
                     debug_emit(format_stage2_gate(host, int(port), "run", gate[1]))
-                if self.spec.record_all_credential_attempts:
+                if self.spec.continue_after_credential_success:
+                    continue
+                if retain_all_attempts:
                     return self._with_attempted_credentials(record, attempts, force=True)
                 return record
 
@@ -2371,7 +2517,7 @@ class AuditCommandRunner:
         selected_record = self._with_attempted_credentials(
             selected_record,
             attempts,
-            force=self.spec.record_all_credential_attempts,
+            force=retain_all_attempts,
         )
         if debug_emit is not None:
             gate = self._deep_gate(selected_record)
@@ -2416,6 +2562,8 @@ class AuditCommandRunner:
         current 2-call behavior when creds were not provided).
         """
         if not bool(getattr(self.args, "defcreds", False)):
+            return False
+        if self.spec.continue_after_credential_success:
             return False
         if str(detect_record.status or "") != "open_no_auth":
             return False
@@ -2547,6 +2695,9 @@ class AuditCommandRunner:
                         "auth_probe_http_status",
                         "auth_probe_endpoint",
                         "auth_error_detail",
+                        "network_attempted",
+                        "verification_capability",
+                        "credential_verification",
                         "effective_username",
                         "error",
                     )
@@ -2574,8 +2725,8 @@ class AuditCommandRunner:
             return self.spec.credential_gate(credential, record)
         return self._deep_gate(record)
 
-    @staticmethod
     def _with_attempted_credentials(
+        self,
         record: AuditRecord,
         auth_records: list[tuple[AuditCredentialRun, AuditRecord]],
         *,
@@ -2593,6 +2744,9 @@ class AuditCommandRunner:
             }
             if force:
                 payload["error"] = attempt.extra.get("error")
+            for field_name in self.spec.credential_attempt_detail_fields:
+                if field_name in attempt.extra:
+                    payload[field_name] = attempt.extra.get(field_name)
             attempts_payload.append(payload)
         if not force and len(attempts_payload) <= 1:
             return record
@@ -2716,6 +2870,7 @@ def start_command_progress(
     enabled: bool = True,
     leave: bool = True,
     render_initial: bool | None = None,
+    refresh_interval_s: float | None = None,
 ) -> ProgressHandle:
     """Start a command-owned progress handle.
 
@@ -2728,7 +2883,17 @@ def start_command_progress(
     if owner is None:
         return NoOpProgress()
     initial = bool(getattr(args, "output", None)) if render_initial is None else bool(render_initial)
-    return owner.start(label, total, enabled=enabled, leave=leave, render_initial=initial)
+    effective_refresh_interval_s = (
+        getattr(args, "_progress_refresh_interval_s", None) if refresh_interval_s is None else refresh_interval_s
+    )
+    return owner.start(
+        label,
+        total,
+        enabled=enabled,
+        leave=leave,
+        render_initial=initial,
+        refresh_interval_s=effective_refresh_interval_s,
+    )
 
 
 def start_audit_progress(

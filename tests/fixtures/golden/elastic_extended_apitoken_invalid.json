@@ -1,9 +1,48 @@
 [
   {
     "access_level": "unknown",
+    "anonymous_root_status": 401,
     "api_key_probe_error": null,
     "api_key_probe_status": "not_run",
-    "api_token": "invalid-token",
+    "attempted_credentials": [
+      {
+        "auth_error_detail": {
+          "reason": "unable to authenticate with provided credentials and anonymous access is not allowed for this request",
+          "root_cause": [
+            {
+              "reason": "unable to authenticate with provided credentials and anonymous access is not allowed for this request",
+              "type": "security_exception"
+            }
+          ],
+          "status": 401,
+          "type": "security_exception"
+        },
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": null,
+        "source": "token",
+        "status": "auth_required",
+        "username": null,
+        "verification_capability": "identity_endpoint_supported"
+      }
+    ],
+    "auth_error_detail": {
+      "reason": "unable to authenticate with provided credentials and anonymous access is not allowed for this request",
+      "root_cause": [
+        {
+          "reason": "unable to authenticate with provided credentials and anonymous access is not allowed for this request",
+          "type": "security_exception"
+        }
+      ],
+      "status": 401,
+      "type": "security_exception"
+    },
+    "auth_probe_endpoint": "/_security/_authenticate",
+    "auth_probe_http_status": 401,
+    "auth_probe_status": "rejected",
     "auth_required": true,
     "auth_valid": false,
     "can_manage": null,
@@ -15,29 +54,26 @@
     "cluster_error": null,
     "cluster_health": null,
     "cluster_nodes": null,
-    "credentials_source": "anonymous",
+    "credential_verification": {
+      "capability": "identity_endpoint_supported",
+      "status": "rejected",
+      "supported_endpoint": "/_security/_authenticate",
+      "unsupported_endpoints": []
+    },
+    "credentials_source": "token",
     "defcreds_enabled": false,
     "detect_confidence": "high",
     "detect_probe_trace": [
       {
+        "error": null,
         "scheme": "http",
-        "status": 401
-      },
-      {
-        "scheme": "http",
-        "status": 401
-      },
-      {
-        "scheme": "http",
-        "status": 401
-      },
-      {
-        "scheme": "http",
-        "status": 401
-      },
-      {
-        "scheme": "http",
-        "status": 401
+        "signal_kind": "hard_positive",
+        "signals": [
+          "security_exception_missing_auth"
+        ],
+        "status": 401,
+        "transport_error": null,
+        "vendor": "elasticsearch"
       }
     ],
     "detect_signals": [
@@ -45,6 +81,7 @@
     ],
     "discover": false,
     "discover_error": null,
+    "discover_error_detail": null,
     "discover_results": null,
     "effective_username": null,
     "endpoint_diagnostics": null,
@@ -56,10 +93,10 @@
     "misconfig_error": null,
     "misconfig_findings": null,
     "module": "elastic",
+    "network_attempted": true,
     "plugins_error": null,
     "port": 19201,
     "provided_credentials": false,
-    "provided_password": null,
     "provided_token": true,
     "provided_username": null,
     "rights_error": null,
@@ -84,8 +121,12 @@
       }
     ],
     "status": "auth_required",
-    "tls_auto_plain": true,
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
     "users": null,
-    "users_error": null
+    "users_error": null,
+    "vendor": "elasticsearch",
+    "verification_capability": "identity_endpoint_supported"
   }
 ]

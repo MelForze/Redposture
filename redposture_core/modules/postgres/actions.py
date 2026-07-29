@@ -56,6 +56,18 @@ _POSTGRES_DEFAULT_CREDENTIALS = (
     ("postgres", "postgres"),
     ("pgbouncer", "pgbouncer"),
     ("pgbouncer_exporter", "pgbouncer_exporter"),
+    ("postgres", "password"),
+    ("postgres", "admin"),
+    ("postgres", "changeme"),
+    ("admin", "admin"),
+    ("admin", "postgres"),
+    ("pgsql", "pgsql"),
+    ("admin", "password"),
+    ("user", "user"),
+    ("user", "password"),
+    ("service", "service"),
+    ("test", "test"),
+    ("dev", "dev"),
 )
 
 
@@ -2757,6 +2769,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return ""
 
     if status == "weak_default_creds":
+        attempts = record.get("attempted_credentials")
+        if isinstance(attempts, list) and len(attempts) > 1:
+            return ""
         username = str(record.get("effective_username") or "postgres")
         default_password = next(
             (password for user, password in _POSTGRES_DEFAULT_CREDENTIALS if user == username),
@@ -2765,6 +2780,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [+] {username}:{default_password} {_caps_suffix(record)}"
 
     if status == "valid_credentials":
+        attempts = record.get("attempted_credentials")
+        if isinstance(attempts, list) and len(attempts) > 1:
+            return ""
         username = str(record.get("effective_username") or "postgres")
         provided_password = record.get("provided_password")
         password_text = (
@@ -2817,13 +2835,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
 
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
-    """Render one `[-] user:pass` line per attempted credential when all of them failed.
-
-    The runtime attaches `attempted_credentials` only when several credentials were tried
-    and none gated, so every default that was tried (e.g. postgres:postgres AND
-    pgbouncer:pgbouncer) is visible instead of just the last one. JSON output keeps the
-    structured list in the record itself, so nothing extra is emitted there.
-    """
+    """Render every credential checked by an exhaustive runtime sweep."""
     attempts = record.get("attempted_credentials")
     if not isinstance(attempts, list) or len(attempts) < 2:
         return []
@@ -2831,6 +2843,7 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         return []
     prefix = _nxc_prefix(record)
     lines: list[str] = []
+    selected_success_rendered = False
     for attempt in attempts:
         if not isinstance(attempt, dict):
             continue
@@ -2846,7 +2859,16 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             password_text = "<empty>"
         else:
             password_text = str(password)
-        lines.append(f"{prefix} [-] {username}:{password_text}")
+        status = str(attempt.get("status") or "")
+        ok = status in {"open_no_auth", "valid_credentials", "weak_default_creds"}
+        if ok:
+            suffix = ""
+            if not selected_success_rendered:
+                suffix = f" {_caps_suffix(record)}"
+                selected_success_rendered = True
+            lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
+        else:
+            lines.append(f"{prefix} [-] {username}:{password_text}")
     return lines
 
 
@@ -2997,13 +3019,14 @@ def _postgres_credential_runs(
     defcreds: bool,
 ) -> list[tuple[str | None, str | None, bool]]:
     runs: list[tuple[str | None, str | None, bool]] = []
-    seen: set[tuple[str | None, str | None, bool]] = set()
+    seen: set[tuple[str | None, str | None]] = set()
 
     def add(run_username: str | None, run_password: str | None, is_default: bool) -> None:
-        item = (run_username, run_password, is_default)
-        if item in seen:
+        pair = (run_username, run_password)
+        if pair in seen:
             return
-        seen.add(item)
+        seen.add(pair)
+        item = (run_username, run_password, is_default)
         runs.append(item)
 
     if username is not None or password is not None:

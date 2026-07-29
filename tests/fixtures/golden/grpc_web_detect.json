@@ -1,5 +1,7 @@
 [
   {
+    "action_access_satisfied": true,
+    "analysis_performed": false,
     "auth_required": null,
     "auth_used": null,
     "defcreds_used": false,
@@ -7,6 +9,7 @@
     "descriptors": null,
     "detect_probe_trace": [
       {
+        "access": "unknown",
         "error": "truncated gRPC-Web frame",
         "grpc_status": null,
         "http_status": 200,
@@ -16,20 +19,26 @@
     ],
     "error": null,
     "grpc_web_detected": true,
+    "health_access": "unknown",
     "health_checks": null,
     "health_supported": true,
     "host": "127.0.0.1",
+    "invoke_access": "not_tested",
     "invoke_result": null,
     "is_grpc": true,
     "methods": null,
     "module": "grpc",
     "port": 50071,
     "protocol_flavor": "grpc-web",
+    "provided_credential_source": "anonymous",
+    "provided_credential_type": null,
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
     "provided_username": null,
-    "reflection_enabled": false,
+    "reflection_access": "not_tested",
+    "reflection_enabled": null,
+    "reflection_version": null,
     "service": "grpc",
     "services": null,
     "stages": [
@@ -47,18 +56,18 @@
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "access_capabilities"
       },
       {
         "attempt": 1,
-        "error": "deep checks disabled",
-        "result": "skip",
+        "error": null,
+        "result": "ok",
         "stage_name": "data"
       }
     ],
-    "status": "auth_required",
+    "status": "detected",
     "transport": "plaintext",
     "transport_mode": "plaintext"
   }

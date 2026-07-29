@@ -15,6 +15,7 @@ from ...stage_runtime import (
     AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    merge_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -31,19 +32,17 @@ def build_clickhouse_plan(args: Any) -> AuditCommandPlan:
         plan = build_basic_audit_plan(args, default_port=_DEFAULT_HTTP_PORT, default_ports=_DEFAULT_HTTP_PORTS)
     else:
         plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
-    if any(run.source == "file" for run in plan.credential_runs) or not bool(getattr(args, "defcreds", False)):
-        return plan
-    candidates = actions._build_credential_candidates(
-        getattr(args, "username", None),
-        getattr(args, "password", None),
-        True,
+    defaults = (
+        tuple(
+            AuditCredentialRun(username=username, password=password, source=source)
+            for username, password, source in actions._build_credential_candidates(None, None, True)
+        )
+        if bool(getattr(args, "defcreds", False))
+        else ()
     )
     return replace(
         plan,
-        credential_runs=tuple(
-            AuditCredentialRun(username=username, password=password, source=source)
-            for username, password, source in candidates
-        ),
+        credential_runs=merge_audit_credential_runs(plan.credential_runs, defaults),
     )
 
 
@@ -125,6 +124,8 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
         # E3 opt-in: ClickHouse anon-open (default_user w/ empty password) is
         # already confirmed by the detect probe.
         keep_anonymous_open_no_auth=True,
+        continue_after_credential_error=bool(getattr(args, "defcreds", False)),
+        continue_after_credential_success=bool(getattr(args, "defcreds", False)),
     )
 
 
@@ -194,6 +195,50 @@ def _raw_protocol(args: Any) -> str:
     return str(getattr(args, "protocol", None) or "native")
 
 
+def _check_clickhouse_shell_target(
+    args: Any,
+    cfg: AuditConfig,
+    plan: AuditCommandPlan,
+    *,
+    host: str,
+    port: int,
+    protocol: str,
+    table_targets: list[str],
+    table_columns: list[str],
+) -> dict[str, Any]:
+    """Audit the shell target with the already-normalized credential plan."""
+
+    credential_candidates = [
+        {
+            "username": credential.username,
+            "password": credential.password,
+            "source": credential.source,
+        }
+        for credential in plan.credential_runs
+        if credential.username is not None or credential.password is not None
+    ]
+    return actions._audit_clickhouse_host(
+        host=str(host),
+        port=int(port),
+        timeout=cfg.timeout,
+        retries=cfg.retries,
+        username=None,
+        password=None,
+        defcreds=False,
+        database=str(getattr(args, "database", "default") or "default"),
+        protocol=protocol,
+        show_databases=bool(getattr(args, "show_databases", False)),
+        show_tables=bool(getattr(args, "show_tables", False)),
+        show_columns=bool(getattr(args, "show_columns", False)),
+        table_targets=table_targets,
+        table_columns=table_columns,
+        dump_table_rows=bool(getattr(args, "dump", False)),
+        execute_command=None,
+        sql_command=None,
+        credential_candidates=credential_candidates,
+    )
+
+
 def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
     cfg = AuditConfig.from_namespace(args)
     _force_single_default_port(args)
@@ -210,28 +255,15 @@ def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
     protocol = "http" if _raw_protocol(args) == "http" else "native"
     table_targets = actions._normalize_table_targets(list(getattr(args, "tables", None) or []))
     table_columns, _columns_error = actions._normalize_column_names(list(getattr(args, "columns", None) or []))
-    username = getattr(args, "username", None)
-    password = getattr(args, "password", None)
-    if password is not None and not username:
-        username = "default"
-    record = actions._audit_clickhouse_host(
+    record = _check_clickhouse_shell_target(
+        args,
+        cfg,
+        plan,
         host=str(host),
         port=int(port),
-        timeout=cfg.timeout,
-        retries=cfg.retries,
-        username=username,
-        password=password,
-        defcreds=bool(getattr(args, "defcreds", False)),
-        database=str(getattr(args, "database", "default") or "default"),
         protocol=protocol,
-        show_databases=bool(getattr(args, "show_databases", False)),
-        show_tables=bool(getattr(args, "show_tables", False)),
-        show_columns=bool(getattr(args, "show_columns", False)),
         table_targets=table_targets,
         table_columns=table_columns,
-        dump_table_rows=bool(getattr(args, "dump", False)),
-        execute_command=None,
-        sql_command=None,
     )
     _emit_clickhouse_record(record, "txt")
     if not bool(record.get("is_clickhouse")):
@@ -239,8 +271,9 @@ def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
     if str(record.get("status") or "") in {"auth_required", "fail"}:
         return 1
 
-    shell_user = str(record.get("effective_username") or username or "default")
-    shell_password = str(record.get("effective_password") or password or "")
+    shell_user = str(record.get("effective_username") or "default")
+    effective_password = record.get("effective_password")
+    shell_password = "" if effective_password is None else str(effective_password)
     shell_protocol = str(record.get("protocol") or protocol)
     readline_module = actions._load_readline_module()
     console.success("clickhouse sql-shell ready; type 'exit' or 'quit' to stop")
@@ -307,28 +340,15 @@ def _run_clickhouse_os_shell(args: Any, logger: Any, console: Any) -> int:
     protocol = "http" if _raw_protocol(args) == "http" else "native"
     table_targets = actions._normalize_table_targets(list(getattr(args, "tables", None) or []))
     table_columns, _columns_error = actions._normalize_column_names(list(getattr(args, "columns", None) or []))
-    username = getattr(args, "username", None)
-    password = getattr(args, "password", None)
-    if password is not None and not username:
-        username = "default"
-    record = actions._audit_clickhouse_host(
+    record = _check_clickhouse_shell_target(
+        args,
+        cfg,
+        plan,
         host=str(host),
         port=int(port),
-        timeout=cfg.timeout,
-        retries=cfg.retries,
-        username=username,
-        password=password,
-        defcreds=bool(getattr(args, "defcreds", False)),
-        database=str(getattr(args, "database", "default") or "default"),
         protocol=protocol,
-        show_databases=bool(getattr(args, "show_databases", False)),
-        show_tables=bool(getattr(args, "show_tables", False)),
-        show_columns=bool(getattr(args, "show_columns", False)),
         table_targets=table_targets,
         table_columns=table_columns,
-        dump_table_rows=bool(getattr(args, "dump", False)),
-        execute_command=None,
-        sql_command=None,
     )
     _emit_clickhouse_record(record, "txt")
     if not bool(record.get("is_clickhouse")):
@@ -336,8 +356,9 @@ def _run_clickhouse_os_shell(args: Any, logger: Any, console: Any) -> int:
     if str(record.get("status") or "") in {"auth_required", "fail"}:
         return 1
 
-    shell_user = str(record.get("effective_username") or username or "default")
-    shell_password = str(record.get("effective_password") or password or "")
+    shell_user = str(record.get("effective_username") or "default")
+    effective_password = record.get("effective_password")
+    shell_password = "" if effective_password is None else str(effective_password)
     shell_protocol = str(record.get("protocol") or protocol)
     readline_module = actions._load_readline_module()
     console.success("clickhouse os-shell ready; type 'exit' or 'quit' to stop")

@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import sys
 import threading
-from typing import Any
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any, TextIO
 
 from .console import is_console_no_color, should_use_color
 from .progress import suspend_active_progress_for_output
@@ -77,8 +79,8 @@ _PRIORITY_KEYS = (
 )
 
 
-def _paint(text: str, color: str) -> str:
-    if is_console_no_color() or not should_use_color(sys.stdout):
+def _paint(text: str, color: str, stream: TextIO) -> str:
+    if is_console_no_color() or not should_use_color(stream):
         return text
     code = _COLORS.get(color)
     if not code:
@@ -109,6 +111,7 @@ class AttemptLogger:
         self._lock = threading.Lock()
         self._text_fh: Any | None = None
         self._text_path: str | None = None
+        self._console_stream_overrides: list[tuple[object, TextIO]] = []
         self._trigger_callback_mode = False
         self._trigger_callback_targets: tuple[str, ...] = ()
         self._trigger_seen_signatures: set[tuple[str, ...]] = set()
@@ -117,6 +120,30 @@ class AttemptLogger:
         self._trigger_callback_stats_by_service: dict[str, int] = {}
         self._trigger_callback_stats_signatures: set[tuple[str, ...]] = set()
         self._trigger_callback_events: list[dict[str, Any]] = []
+
+    @contextmanager
+    def scoped_console_stream(self, stream: TextIO) -> Iterator[None]:
+        """Temporarily direct this logger's human output to ``stream``.
+
+        The override is instance-wide so callback threads created inside the
+        scope use the same destination.  A tokenized stack keeps nested and
+        overlapping scopes safe even when they exit in a different order.
+        """
+        token = object()
+        with self._lock:
+            self._console_stream_overrides.append((token, stream))
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._console_stream_overrides = [
+                    item for item in self._console_stream_overrides if item[0] is not token
+                ]
+
+    def _console_stream_locked(self) -> TextIO:
+        if self._console_stream_overrides:
+            return self._console_stream_overrides[-1][1]
+        return sys.stdout
 
     def set_trigger_callback_mode(
         self,
@@ -191,6 +218,7 @@ class AttemptLogger:
         line_full = line
         color = self._event_color(event)
         with self._lock:
+            console_stream = self._console_stream_locked()
             self._record_trigger_callback_event(event)
             if (
                 self._trigger_callback_mode
@@ -199,9 +227,9 @@ class AttemptLogger:
             ):
                 return
             if self._trigger_callback_mode:
-                self._emit_trigger_callback_line(event)
-            with suspend_active_progress_for_output(sys.stdout):
-                print(_paint(line, color), flush=True)
+                self._emit_trigger_callback_line(event, console_stream)
+            with suspend_active_progress_for_output(console_stream):
+                print(_paint(line, color, console_stream), file=console_stream, flush=True)
             if self._text_fh is not None:
                 self._text_fh.write(line_full + "\n")
                 self._text_fh.flush()
@@ -265,7 +293,7 @@ class AttemptLogger:
         self._trigger_seen_signatures.add(signature)
         return False
 
-    def _emit_trigger_callback_line(self, event: dict[str, Any]) -> None:
+    def _emit_trigger_callback_line(self, event: dict[str, Any], console_stream: TextIO) -> None:
         service = str(event.get("service") or "").strip().lower()
         exporter_name = _CALLBACK_EXPORTER_NAMES.get(service)
         if not exporter_name:
@@ -280,25 +308,25 @@ class AttemptLogger:
         marker_color = "green"
         suffix = ""
         if has_creds:
-            suffix = " " + _paint("(CRED!)", "orange")
+            suffix = " " + _paint("(CRED!)", "orange", console_stream)
         else:
             marker_color = "green"
-            suffix = " " + _paint("(SSRF!)", "orange")
+            suffix = " " + _paint("(SSRF!)", "orange", console_stream)
 
         target_segment = "\t" + _clip(display_target, 64) + "\t" + _clip(listen_port, 16) + "\t"
         line = (
-            f"{_paint('TRIGGER ', 'blue')}"
-            f"{_paint(target_segment, 'white')}"
-            f" {_paint('[+]', marker_color)} "
-            f"{_paint(exporter_name, 'white')}{suffix}"
+            f"{_paint('TRIGGER ', 'blue', console_stream)}"
+            f"{_paint(target_segment, 'white', console_stream)}"
+            f" {_paint('[+]', marker_color, console_stream)} "
+            f"{_paint(exporter_name, 'white', console_stream)}{suffix}"
         )
         line_plain = f"TRIGGER \t{_clip(display_target, 64)}\t{_clip(listen_port, 16)}\t [+] {exporter_name}"
         if has_creds:
             line_plain += " (CRED!)"
         else:
             line_plain += " (SSRF!)"
-        with suspend_active_progress_for_output(sys.stdout):
-            print(line, flush=True)
+        with suspend_active_progress_for_output(console_stream):
+            print(line, file=console_stream, flush=True)
         self._write_text_line_locked(line_plain)
 
     def _is_trigger_callback_event(self, event: dict[str, Any]) -> bool:

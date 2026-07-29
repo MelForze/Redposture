@@ -85,7 +85,7 @@ def configure_mongodb_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try default MongoDB credentials root:root, admin:admin, root:password, mongo:mongo, mongodb:mongodb.",
+        help="Try the curated MongoDB default/common credential set after provided or file credentials.",
     )
 
     discovery.add_argument(

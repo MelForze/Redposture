@@ -12,7 +12,8 @@ from ...stage_runtime import (
     AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    has_username_password_credential_file,
+    build_basic_credential_runs,
+    merge_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -36,6 +37,8 @@ def build_mongodb_spec(args: Any) -> ModuleAuditSpec:
         # the detect probe already listed databases; the defcreds loop only
         # adds redundant round-trips.
         keep_anonymous_open_no_auth=True,
+        continue_after_credential_success=bool(getattr(args, "defcreds", False)),
+        continue_after_credential_error=bool(getattr(args, "defcreds", False)),
     )
 
 
@@ -59,21 +62,20 @@ def run_mongodb_stage(args: Any, logger: Any) -> int:
         return 2
     if bool(getattr(args, "nosql_shell", False)):
         _force_single_default_port(args)
-    if not has_username_password_credential_file(args):
-        credential_runs = actions._credential_runs(
-            getattr(args, "username", None),
-            getattr(args, "password", None),
-            defcreds=bool(getattr(args, "defcreds", False)),
+    try:
+        supplied_runs = build_basic_credential_runs(args)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
+    default_runs = (
+        tuple(
+            AuditCredentialRun(username=username, password=password, source="default")
+            for username, password in actions._MONGODB_DEFAULT_CREDS
         )
-        if credential_runs:
-            args._audit_credential_runs = tuple(
-                AuditCredentialRun(
-                    username=item.get("username"),
-                    password=item.get("password"),
-                    source="default" if bool(item.get("default")) else "provided",
-                )
-                for item in credential_runs
-            )
+        if bool(getattr(args, "defcreds", False))
+        else ()
+    )
+    args._audit_credential_runs = merge_audit_credential_runs(supplied_runs, default_runs)
     try:
         plan = build_mongodb_plan(args)
     except ValueError as exc:

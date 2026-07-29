@@ -117,7 +117,7 @@ def test_redis_auth_covers_shortcuts_default_failure_and_transient_exhaustion(
     assert required_record.status == "auth_required"
 
     default_state = _state(is_redis=True, auth_required=True, status="auth_required", sock=_Socket())
-    monkeypatch.setattr(redis, "_check_default_credentials", lambda _sock: (False, "WRONGPASS"))
+    monkeypatch.setattr(redis, "_check_default_credentials", lambda _sock, **_kwargs: (False, "WRONGPASS"))
     default_record = redis.redis_auth_hook(
         _ctx(
             default_state,
@@ -131,7 +131,7 @@ def test_redis_auth_covers_shortcuts_default_failure_and_transient_exhaustion(
 
     attempts = 0
 
-    def fail_auth(*_args: object) -> tuple[bool | None, str | None]:
+    def fail_auth(*_args: object, **_kwargs: object) -> tuple[bool | None, str | None]:
         nonlocal attempts
         attempts += 1
         raise ConnectionError("socket reset")

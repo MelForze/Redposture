@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
+import threading
 from contextlib import contextmanager
+from io import StringIO
 from pathlib import Path
 
 import pytest
@@ -157,3 +160,111 @@ def test_logger_suspends_progress_around_stdout_print(
     assert len(events) == 2
     assert events[0].startswith("begin:")
     assert events[1].startswith("end:")
+
+
+def test_logger_scoped_console_stream_redirects_to_stderr_and_restores_stdout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logger = AttemptLogger()
+    logger.set_trigger_callback_mode(True)
+
+    with logger.scoped_console_stream(sys.stderr):
+        logger.log(
+            "redis",
+            ("10.0.0.8", 9115),
+            username="default",
+            password="secret",
+            listen_port=6379,
+        )
+
+    logger.log("scanner", ("10.0.0.9", 9115), phase="detected")
+    captured = capsys.readouterr()
+
+    assert "10.0.0.8:9115" in captured.err
+    assert "TRIGGER" in captured.err
+    assert "10.0.0.8:9115" not in captured.out
+    assert "10.0.0.9:9115" in captured.out
+    assert "10.0.0.9:9115" not in captured.err
+
+
+def test_logger_scoped_console_stream_is_nested_and_restored_after_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logger = AttemptLogger()
+    outer = StringIO()
+    inner = StringIO()
+
+    with logger.scoped_console_stream(outer):
+        logger.log("scanner", ("10.0.0.1", 9001), phase="outer-before")
+        with logger.scoped_console_stream(inner):
+            logger.log("scanner", ("10.0.0.2", 9002), phase="inner")
+        logger.log("scanner", ("10.0.0.3", 9003), phase="outer-after")
+
+    with pytest.raises(RuntimeError, match="scope failure"):
+        with logger.scoped_console_stream(inner):
+            raise RuntimeError("scope failure")
+
+    logger.log("scanner", ("10.0.0.4", 9004), phase="default")
+    captured = capsys.readouterr()
+
+    assert "10.0.0.1:9001" in outer.getvalue()
+    assert "10.0.0.3:9003" in outer.getvalue()
+    assert "10.0.0.2:9002" not in outer.getvalue()
+    assert "10.0.0.2:9002" in inner.getvalue()
+    assert "10.0.0.4:9004" in captured.out
+
+
+def test_logger_scoped_console_stream_suspends_progress_on_selected_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    suspended_streams: list[object] = []
+
+    @contextmanager
+    def fake_suspend(stream: object):
+        suspended_streams.append(stream)
+        yield
+
+    monkeypatch.setattr(logger_module, "suspend_active_progress_for_output", fake_suspend)
+    logger = AttemptLogger()
+    output = StringIO()
+
+    with logger.scoped_console_stream(output):
+        logger.log("scanner", ("10.0.0.7", 9007), phase="thread")
+
+    assert suspended_streams == [output]
+
+
+def test_logger_scoped_console_stream_applies_to_callback_threads() -> None:
+    logger = AttemptLogger()
+    output = StringIO()
+
+    with logger.scoped_console_stream(output):
+        worker = threading.Thread(
+            target=logger.log,
+            args=("scanner", ("10.0.0.5", 9005)),
+            kwargs={"phase": "thread"},
+        )
+        worker.start()
+        worker.join()
+
+    assert "10.0.0.5:9005" in output.getvalue()
+
+
+def test_logger_scoped_console_stream_does_not_change_text_file(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    logger = AttemptLogger()
+    output_file = tmp_path / "trigger.txt"
+    logger.set_text_output(str(output_file))
+
+    with logger.scoped_console_stream(sys.stderr):
+        logger.log("redis", ("10.0.0.6", 6379), username="default", password="secret")
+    logger.close()
+    captured = capsys.readouterr()
+
+    assert "10.0.0.6:6379" in captured.err
+    saved = output_file.read_text(encoding="utf-8")
+    assert "10.0.0.6:6379" in saved
+    assert "pass=secret" in saved
+    assert "\x1b[" not in saved

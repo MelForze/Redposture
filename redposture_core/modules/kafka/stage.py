@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ...audit_config import AuditConfig
@@ -15,7 +16,7 @@ from ...stage_runtime import (
     AuditHookContext,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    has_username_password_credential_file,
+    merge_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -39,7 +40,20 @@ _PRODUCTION_AUDIT_HOST = actions._audit_kafka_host
 
 
 def build_kafka_plan(args: Any) -> AuditCommandPlan:
-    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    default_runs = (
+        tuple(
+            AuditCredentialRun(username=username, password=password, source="default")
+            for username, password in actions._build_credential_runs(None, None, True)
+            if username is not None and password is not None
+        )
+        if bool(getattr(args, "defcreds", False))
+        else ()
+    )
+    return replace(
+        plan,
+        credential_runs=merge_audit_credential_runs(plan.credential_runs, default_runs),
+    )
 
 
 def _build_kafka_lifecycle_options(args: Any) -> dict[str, Any]:
@@ -58,7 +72,27 @@ def _build_kafka_lifecycle_options(args: Any) -> dict[str, Any]:
     }
 
 
+def _kafka_credential_gate(credential: AuditCredentialRun, record: AuditRecord) -> tuple[bool, str]:
+    """Only select a credential after Kafka has verified that identity."""
+
+    has_credentials = credential.username is not None or credential.password is not None
+    if not has_credentials:
+        accepted = str(record.status or "") in {
+            "open_no_auth",
+            "valid_credentials",
+            "weak_default_creds",
+            "invalid_credentials_anonymous",
+        }
+        return accepted, f"status={record.status}"
+    verified = record.extra.get("provided_credentials_ok") is True or str(record.status or "") in {
+        "valid_credentials",
+        "weak_default_creds",
+    }
+    return verified, "kafka credential verified" if verified else "kafka credential rejected or unverified"
+
+
 def build_kafka_spec(args: Any) -> ModuleAuditSpec:
+    full_credential_sweep = bool(getattr(args, "defcreds", False))
     options = _build_kafka_lifecycle_options(args)
     resolved_host_stage = getattr(actions, _PRODUCTION_HOST_STAGE.__name__, _PRODUCTION_HOST_STAGE)
     use_lifecycle_hooks = (
@@ -96,6 +130,11 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
+        record_all_credential_attempts=full_credential_sweep,
+        continue_after_credential_success=full_credential_sweep,
+        continue_after_credential_error=full_credential_sweep,
+        credential_gate=_kafka_credential_gate,
+        fallback_to_anonymous_detect_record=full_credential_sweep,
         render_module=render,
         colorize=render._render_colored_kafka_line,
     )
@@ -109,26 +148,6 @@ def run_kafka_stage(args: Any, logger: Any) -> int:
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
-    if not has_username_password_credential_file(args) and not (
-        getattr(args, "username", None) is not None and getattr(args, "password", None) is None
-    ):
-        provided_pair = (getattr(args, "username", None), getattr(args, "password", None))
-        args._audit_credential_runs = tuple(
-            AuditCredentialRun(
-                username=user,
-                password=password,
-                source=(
-                    "provided"
-                    if (user, password) == provided_pair and provided_pair[0] is not None
-                    else "default"
-                    if user is not None
-                    else "anonymous"
-                ),
-            )
-            for user, password in actions._build_credential_runs(
-                getattr(args, "username", None), getattr(args, "password", None), bool(getattr(args, "defcreds", False))
-            )
-        )
     try:
         plan = build_kafka_plan(args)
     except ValueError as exc:

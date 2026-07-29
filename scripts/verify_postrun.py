@@ -153,6 +153,7 @@ _EXPECTED_LABELS = (
     "kafka_tls_explicit_user",
     "zookeeper_default",
     "zookeeper_multi_ports",
+    "zookeeper_auth_defcreds",
     "keeper_cluster",
     "keeper_tls",
     "keeper_no4lw",
@@ -453,6 +454,11 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "kafka_multi_ports": ("orders", "payments.events", "audit.logs", "ord-1001"),
     "zookeeper_default": ("/redposture/app/api_key", "rp-zk-key-2026"),
     "zookeeper_multi_ports": ("/redposture/app/api_key", "rp-zk-key-2026"),
+    "zookeeper_auth_defcreds": (
+        '"status": "weak_default_creds"',
+        '"provided_username": "zk"',
+        "digest-acl-late-default-hit",
+    ),
     "keeper_cluster": ("/redposture/app/api_key", "rp-keeper-key-2026", "clickhouse-keeper"),
     "keeper_tls": ("clickhouse-keeper", '"transport": "tls"'),
     "keeper_no4lw": ('"service": "zookeeper-compatible"', '"fingerprint_confidence": "unconfirmed"'),
@@ -493,6 +499,7 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "redis_extended_defcreds": ("weak_default_creds",),
     "postgres_default": ("valid_credentials", "redposture.demo_accounts"),
     "postgres_extended_defcreds": ("weak_default_creds",),
+    "proxmox_extended_defcreds": ("weak_default_creds",),
     "postgres_extended_execute": ("uid=70(postgres)", '"execute_ok": true'),
     "postgres_extended_os_read": ('"os_read_ok": true',),
     "etcd_open": ("/redposture/app/api_key", "/inventory/services/grafana/url"),
@@ -502,16 +509,24 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "redis_extended_paged_dump": ("stream_len=", "svc:grafana", '"key_count": 16'),
     # P2.2: forced-paging etcd dump must continuation-cursor through every range page.
     "etcd_extended_paged_dump": ("/redposture/app/api_key", "/inventory/services/grafana/url"),
-    # P2.3: 5.5.1 path -- both default credentials are rejected, both rows surfaced.
+    # Full-refusal path: all nine default credentials are rejected and surfaced.
     # The matrix runs in --format json, so attempted_credentials is the JSON object form
-    # rather than the rendered "user:pass" colon syntax; assert both username AND password
-    # appear in the structured payload for each default that was tried.
+    # rather than the rendered "user:pass" colon syntax; assert both username and password
+    # appear in the structured payload for every default that was tried.
     "postgres_extended_defcreds_both_fail": (
         '"attempted_credentials"',
         '"username": "postgres"',
         '"password": "postgres"',
         '"username": "pgbouncer"',
         '"password": "pgbouncer"',
+        '"username": "pgbouncer_exporter"',
+        '"password": "pgbouncer_exporter"',
+        '"password": "password"',
+        '"password": "admin"',
+        '"password": "changeme"',
+        '"username": "admin"',
+        '"username": "pgsql"',
+        '"password": "pgsql"',
     ),
     # A: rich-substring for modules that previously had no content check (elastic, kubeapi,
     # grafana). Substrings extracted from real matrix JSON artifacts; verified before use.
@@ -575,6 +590,7 @@ _SEEDED_ZNODE_EXPECTATIONS: dict[str, dict[int, tuple[str, str]]] = {
         port: ("/redposture/app/api_key", "rp-zk-key-2026") for port in _ZOOKEEPER_MULTI_DUMP_PORTS
     },
     "zookeeper_extended_znode_limits": {2181: ("/redposture/app/api_key", "rp-zk-key-2026")},
+    "zookeeper_auth_defcreds": {22185: ("/redposture-auth", "digest-acl-late-default-hit")},
     "keeper_cluster": {
         19181: ("/redposture/app/api_key", "rp-keeper-key-2026"),
         29181: ("/redposture/app/api_key", "rp-keeper-key-2026"),
@@ -917,7 +933,7 @@ _MODULES_WITH_SEEDED_CREDENTIALS = frozenset({"postgres", "mongodb", "clickhouse
 _AUTH_REQUIRED_LEGITIMATE = frozenset(
     {
         "mongodb_defcreds",  # defcreds path documents that no defaults match the lab user
-        "postgres_extended_defcreds_both_fail",  # the new P2 case asserts both defaults fail
+        "postgres_extended_defcreds_both_fail",  # full-refusal case asserts all defaults fail
     }
 )
 
@@ -1147,7 +1163,7 @@ _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
         "nexus_assets",
     ),
     "gitlab": ("version", "open_endpoints", "public_projects", "token_projects", "clone_results"),
-    "grpc": ("services", "methods", "reflection_enabled", "invoke_result"),
+    "grpc": ("services", "methods", "reflection_enabled", "invoke_result", "grpc_web_detected"),
     "proxmox": ("auth_method", "successful_endpoints", "nodes", "users", "added_user"),
     "grafana": ("server_version", "datasource_count", "datasources", "check_results"),
 }
@@ -1274,10 +1290,30 @@ def _validate_capability_sanity(rows: list[dict[str, str]]) -> None:
                 continue
             if any(_field_is_populated(record.get(field)) for field in capability_fields):
                 continue
+            if _empty_inventory_query_completed(module, record):
+                continue
             raise SystemExit(
                 f"capability regression in '{row['label']}': status={status!r} but none of "
                 f"{capability_fields} carries content (host={record.get('host')} port={record.get('port')})"
             )
+
+
+def _empty_inventory_query_completed(module: str, record: dict[str, object]) -> bool:
+    """Recognize a successful, legitimately empty typed inventory response.
+
+    Elasticsearch's ``/_cat/plugins`` returns ``[]`` on a stock node.  That is
+    a completed capability query, not a silently skipped data phase.  Keep this
+    exception narrow and require the requested flag, the typed response, and
+    the absence of an action error so other empty capability records still
+    fail the postrun gate.
+    """
+
+    return (
+        module == "elastic"
+        and record.get("show_plugins") is True
+        and isinstance(record.get("cat_plugins"), list)
+        and not str(record.get("plugins_error") or "").strip()
+    )
 
 
 def _field_is_populated(value: object) -> bool:

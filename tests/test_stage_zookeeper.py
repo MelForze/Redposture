@@ -8,7 +8,10 @@ import pytest
 
 import redposture_core.stage_zookeeper as zookeeper_stage
 from redposture_core.audit_models import AuditRecord
+from redposture_core.cli_args import parse_args
 from redposture_core.modules.zookeeper import actions as lifecycle_actions
+from redposture_core.modules.zookeeper import stage as lifecycle_stage
+from redposture_core.stage_runtime import AuditCommandRunner
 from redposture_core.stage_zookeeper import (
     _ZK_ERR_NOAUTH,
     _ZK_ERR_NONODE,
@@ -1667,6 +1670,24 @@ def test_format_record_shows_zookeeper_password_for_valid_credentials() -> None:
         "txt",
     )
     assert "[+] admin:admin" in line
+
+
+def test_format_record_renders_confirmed_default_credentials_as_success() -> None:
+    line = _format_record(
+        {
+            "status": "weak_default_creds",
+            "host": "127.0.0.1",
+            "port": 2181,
+            "provided_username": "zk",
+            "provided_password": None,
+            "znode_count": 1,
+            "znodes_truncated": False,
+        },
+        "txt",
+    )
+
+    assert "[+] zk:<none>" in line
+    assert "connection failed" not in line
 
 
 def test_audit_zookeeper_does_not_retry_session_closed_requires_auth(monkeypatch) -> None:
@@ -4006,3 +4027,268 @@ def test_lifecycle_auth_refresh_preserves_runner_stage_telemetry(monkeypatch: py
     assert record["stage_attempts"] == {"detect_protocol": 1}
     assert record["debug_events"] == ["detect event"]
     assert record["debug_events_streamed"] is True
+
+
+def test_zookeeper_defcreds_plan_has_exact_stable_catalog_order() -> None:
+    expected = (
+        ("zookeeper", "zookeeper"),
+        ("zookeeper", "admin"),
+        ("zookeeper", "password"),
+        ("admin", "admin"),
+        ("admin", "password"),
+        ("admin", "zookeeper"),
+        ("zk", "zk"),
+        ("zk", "zookeeper"),
+        ("zk", "password"),
+        ("root", "root"),
+        ("root", "password"),
+        ("root", "zookeeper"),
+        ("user", "user"),
+        ("user", "password"),
+        ("guest", "guest"),
+        ("test", "test"),
+        ("dev", "dev"),
+        ("service", "service"),
+        ("kafka", "kafka"),
+        ("kafka", "zookeeper"),
+        ("solr", "solr"),
+        ("hadoop", "hadoop"),
+        ("super", "super"),
+        ("user1", "12345"),
+        ("admin", "changeme"),
+        ("admin", "kafka"),
+        ("kafka", "password"),
+        ("kafka", "changeme"),
+        ("broker", "broker"),
+        ("broker", "brokerpass"),
+        ("client", "client"),
+        ("service", "password"),
+        ("root", "admin"),
+        ("root", "rootpass"),
+    )
+    args = parse_args(
+        [
+            "zookeeper",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "2181",
+            "--defcreds",
+        ]
+    )
+
+    plan = lifecycle_stage.build_zookeeper_plan(args)
+
+    assert lifecycle_stage._DEFAULT_CREDENTIALS == expected
+    assert tuple((run.username, run.password) for run in plan.credential_runs) == expected
+    assert len(plan.credential_runs) == 34
+    assert {run.source for run in plan.credential_runs} == {"default"}
+
+
+def test_zookeeper_credential_file_precedes_defaults_and_is_stably_deduplicated(tmp_path) -> None:
+    credentials = tmp_path / "zookeeper.creds"
+    credentials.write_text("custom:secret\nadmin:admin\ncustom:secret\n", encoding="utf-8")
+    args = parse_args(
+        [
+            "zookeeper",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "2181",
+            "-u",
+            str(credentials),
+            "--defcreds",
+        ]
+    )
+
+    plan = lifecycle_stage.build_zookeeper_plan(args)
+    pairs = tuple((run.username, run.password) for run in plan.credential_runs)
+
+    assert pairs[:2] == (("custom", "secret"), ("admin", "admin"))
+    assert tuple(run.source for run in plan.credential_runs[:2]) == ("file", "file")
+    assert pairs[2:] == tuple(pair for pair in lifecycle_stage._DEFAULT_CREDENTIALS if pair != ("admin", "admin"))
+    assert pairs.count(("custom", "secret")) == 1
+    assert pairs.count(("admin", "admin")) == 1
+
+
+def test_zookeeper_explicit_default_pair_stays_provided_and_precedes_defaults() -> None:
+    args = parse_args(
+        [
+            "zookeeper",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "2181",
+            "-u",
+            "zk",
+            "-p",
+            "zookeeper",
+            "--defcreds",
+        ]
+    )
+
+    plan = lifecycle_stage.build_zookeeper_plan(args)
+    pairs = tuple((run.username, run.password) for run in plan.credential_runs)
+
+    assert plan.credential_runs[0].source == "provided"
+    assert pairs[0] == ("zk", "zookeeper")
+    assert pairs.count(("zk", "zookeeper")) == 1
+    assert len(pairs) == len(lifecycle_stage._DEFAULT_CREDENTIALS)
+
+
+def _run_zookeeper_defcreds_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    accepted_pair: tuple[str, str] | None,
+    explicit_pair: tuple[str, str] | None = None,
+    anonymous_open: bool = False,
+) -> tuple[list[tuple[str, str]], int, dict[str, object]]:
+    auth_attempts: list[tuple[str, str]] = []
+    data_calls = 0
+
+    class FakeClient:
+        def __init__(self, credential) -> None:
+            self.credential = credential
+            self.selected_transport = "plaintext"
+            self.digest_pair: tuple[str, str] | None = None
+
+        def connect(self) -> None:
+            return
+
+        def auth_digest(self, username: str, password: str):
+            pair = (username, password)
+            auth_attempts.append(pair)
+            self.digest_pair = pair
+            # ZooKeeper digest authentication accepts a well-formed identity;
+            # the protected znode ACL is what verifies whether it grants access.
+            return True, None
+
+        def get_children2(self, _path: str):
+            if self.credential.username is None:
+                code = _ZK_ERR_OK if anonymous_open else _ZK_ERR_NOAUTH
+                return ([] if anonymous_open else None), code, {}
+            code = _ZK_ERR_OK if self.digest_pair == accepted_pair else _ZK_ERR_NOAUTH
+            return ([] if code == _ZK_ERR_OK else None), code, {}
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_zookeeper_lifecycle_client",
+        lambda ctx, *_args, **_kwargs: FakeClient(ctx.credential),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_infer_auth_required_from_anonymous_probes",
+        lambda *_args, **_kwargs: (
+            not anonymous_open,
+            "root_ok" if anonymous_open else "root_noauth",
+            ["/:ok" if anonymous_open else "/:noauth"],
+        ),
+    )
+
+    def fake_collect(_ctx, record, _options):
+        nonlocal data_calls
+        data_calls += 1
+        return record.to_dict()
+
+    monkeypatch.setattr(lifecycle_actions, "collect_zookeeper_data", fake_collect)
+    argv = [
+        "zookeeper",
+        "-t",
+        "127.0.0.1",
+        "--port",
+        "2181",
+        "--defcreds",
+        "--format",
+        "json",
+    ]
+    if explicit_pair is not None:
+        argv.extend(("-u", explicit_pair[0], "-p", explicit_pair[1]))
+    args = parse_args(argv)
+    runner = AuditCommandRunner(
+        args=args,
+        spec=lifecycle_stage.build_zookeeper_spec(args),
+        emit_line=lambda _line: None,
+    )
+
+    result = runner.run_plan(lifecycle_stage.build_zookeeper_plan(args))
+
+    assert len(result.records) == 1
+    return auth_attempts, data_calls, result.records[0]
+
+
+def test_zookeeper_defcreds_full_refusal_tries_every_pair_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_attempts, data_calls, record = _run_zookeeper_defcreds_lifecycle(
+        monkeypatch,
+        accepted_pair=None,
+    )
+
+    assert tuple(auth_attempts) == lifecycle_stage._DEFAULT_CREDENTIALS
+    assert data_calls == 0
+    assert record["status"] == "auth_required"
+    attempted_credentials = record["attempted_credentials"]
+    assert isinstance(attempted_credentials, list)
+    assert len(attempted_credentials) == 34
+
+
+def test_zookeeper_defcreds_checks_full_catalog_after_late_digest_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_attempts, data_calls, record = _run_zookeeper_defcreds_lifecycle(
+        monkeypatch,
+        accepted_pair=("zk", "zookeeper"),
+    )
+
+    assert tuple(auth_attempts) == lifecycle_stage._DEFAULT_CREDENTIALS
+    assert data_calls == 1
+    assert record["status"] == "weak_default_creds"
+    assert record["provided_credentials"] is False
+    assert record["defcreds_enabled"] is True
+    attempted_credentials = record["attempted_credentials"]
+    assert isinstance(attempted_credentials, list)
+    assert len(attempted_credentials) == len(lifecycle_stage._DEFAULT_CREDENTIALS)
+    rendered = lifecycle_actions._format_credential_attempts_records(record, "txt")
+    assert len(rendered) == len(lifecycle_stage._DEFAULT_CREDENTIALS)
+    assert any("[+] zk:zookeeper" in line for line in rendered)
+    assert any("[-] root:rootpass" in line for line in rendered)
+
+
+def test_zookeeper_explicit_pair_matching_default_is_not_classified_as_weak(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_attempts, data_calls, record = _run_zookeeper_defcreds_lifecycle(
+        monkeypatch,
+        accepted_pair=("zk", "zookeeper"),
+        explicit_pair=("zk", "zookeeper"),
+    )
+
+    expected = [
+        ("zk", "zookeeper"),
+        *(pair for pair in lifecycle_stage._DEFAULT_CREDENTIALS if pair != ("zk", "zookeeper")),
+    ]
+    assert auth_attempts == expected
+    assert data_calls == 1
+    assert record["status"] == "valid_credentials"
+    assert record["provided_credentials"] is True
+    assert record["defcreds_enabled"] is False
+
+
+def test_zookeeper_anonymous_access_checks_defcreds_then_uses_anonymous_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth_attempts, data_calls, record = _run_zookeeper_defcreds_lifecycle(
+        monkeypatch,
+        accepted_pair=None,
+        anonymous_open=True,
+    )
+
+    assert tuple(auth_attempts) == lifecycle_stage._DEFAULT_CREDENTIALS
+    assert data_calls == 1
+    assert record["status"] == "open_no_auth"
+    attempted_credentials = record["attempted_credentials"]
+    assert isinstance(attempted_credentials, list)
+    assert len(attempted_credentials) == len(lifecycle_stage._DEFAULT_CREDENTIALS)

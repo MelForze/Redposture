@@ -71,7 +71,7 @@ def configure_grpc_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try compact default basic/token credentials when auth is required.",
+        help="Try the curated gRPC Basic/Bearer credential set after provided or file credentials.",
     )
 
     analysis.add_argument(

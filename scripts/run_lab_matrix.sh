@@ -15,6 +15,7 @@ if [ ! -d "${LAB_DOCKER_DIR}" ] && [ -d "${LAB_DIR}/docker" ]; then
   LAB_DOCKER_DIR="${LAB_DIR}/docker"
 fi
 COMPOSE_FILE="${LAB_DIR}/full/docker-compose.yml"
+ZOOKEEPER_AUTH_COMPOSE_FILE="${ROOT_DIR}/lab/services/zookeeper-auth/docker-compose.yml"
 if [ -n "${PYTHON_BIN:-}" ]; then
   PYTHON_BIN="${PYTHON_BIN}"
 elif [ -x "${ROOT_DIR}/.venv/bin/python" ]; then
@@ -147,6 +148,7 @@ if [ "${compose_rc}" -ne 0 ]; then
   echo "[warn] compose up returned ${compose_rc}; continuing with explicit health gate" >&2
 fi
 wait_healthy_compose
+docker compose -f "${ZOOKEEPER_AUTH_COMPOSE_FILE}" up -d --wait --wait-timeout 120
 HAS_KUBE_TOKENS=1
 HAS_CONSUL_TOKENS=1
 wait_nonempty_file "${LAB_DOCKER_DIR}/kubeapi/output/kubeapi_tokens.env" || HAS_KUBE_TOKENS=0
@@ -318,6 +320,7 @@ run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 -u admi
 
 run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --show-znodes --dump
 run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes --dump
+run_case zookeeper zookeeper_auth_defcreds 0 zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --dump
 
 run_case proxmox proxmox_audit 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
 run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover-creds --nodes --users

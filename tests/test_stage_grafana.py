@@ -123,9 +123,29 @@ def test_grafana_helper_parsers_and_auth_helpers() -> None:
     assert _build_credential_candidates("admin", "secret", True) == [
         ("admin", "secret", "provided"),
         ("admin", "admin", "default"),
+        ("admin", "password", "default"),
+        ("admin", "grafana", "default"),
+        ("admin", "changeme", "default"),
+        ("grafana", "grafana", "default"),
+        ("grafana", "password", "default"),
+        ("root", "root", "default"),
+        ("user", "user", "default"),
+        ("root", "password", "default"),
+        ("user", "password", "default"),
     ]
     assert _build_credential_candidates(None, None, False) == []
-    assert _build_credential_candidates(None, None, True) == [("admin", "admin", "default")]
+    assert _build_credential_candidates(None, None, True) == [
+        ("admin", "admin", "default"),
+        ("admin", "password", "default"),
+        ("admin", "grafana", "default"),
+        ("admin", "changeme", "default"),
+        ("grafana", "grafana", "default"),
+        ("grafana", "password", "default"),
+        ("root", "root", "default"),
+        ("user", "user", "default"),
+        ("root", "password", "default"),
+        ("user", "password", "default"),
+    ]
 
 
 def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,16 +306,24 @@ def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypat
     )
 
     assert record["status"] == "invalid_credentials_anonymous"
-    assert int(record["attempted_credentials_count"]) == 1
+    assert int(record["attempted_credentials_count"]) == 10
     auth_attempts = record.get("auth_attempts")
     assert isinstance(auth_attempts, list)
     assert [f"{item.get('username')}:{item.get('password')}" for item in auth_attempts] == [
         "admin:admin",
+        "admin:password",
+        "admin:grafana",
+        "admin:changeme",
+        "grafana:grafana",
+        "grafana:password",
+        "root:root",
+        "user:user",
+        "root:password",
+        "user:password",
     ]
     detail_lines = _format_auth_attempt_detail_records(record, "txt")
     assert any("[-] admin:admin" in line for line in detail_lines)
-    line = _format_record(record, "txt")
-    assert "[-] credentials invalid (anonymous access)" in line
+    assert _format_record(record, "txt") == ""
 
 
 def test_format_record_suppresses_plain_anonymous_summary_but_keeps_json() -> None:
@@ -313,7 +341,7 @@ def test_format_record_suppresses_plain_anonymous_summary_but_keeps_json() -> No
     assert payload["datasource_count"] == 2
 
 
-def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkeypatch) -> None:
+def test_audit_grafana_classifies_successful_default_credentials_even_if_anonymous(monkeypatch) -> None:
     verify_calls: list[tuple[str, str]] = []
 
     def fake_http_request(
@@ -338,9 +366,13 @@ def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkey
     ) -> tuple[bool, str | None]:
         _ = (host, port, timeout)
         verify_calls.append((username, password))
-        if username == "admin" and password == "admin":
+        if (username, password) == ("admin", "admin"):
+            raise OSError("candidate transport failure")
+        if (username, password) in {("admin", "password"), ("grafana", "grafana")}:
             return True, None
         return False, "invalid credentials"
+
+    datasource_headers: list[str | None] = []
 
     def fake_fetch_datasources(
         host: str,
@@ -349,7 +381,8 @@ def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkey
         *,
         auth_header: str | None = None,
     ) -> tuple[list[dict[str, str]] | None, str | None, int | None]:
-        _ = (host, port, timeout, auth_header)
+        _ = (host, port, timeout)
+        datasource_headers.append(auth_header)
         return (
             [{"name": "prometheus", "type": "prometheus", "url": "http://127.0.0.1:9090", "access": "proxy"}],
             None,
@@ -371,15 +404,36 @@ def test_audit_grafana_prefers_valid_credentials_status_even_if_anonymous(monkey
         check_urls=None,
     )
 
-    assert record["status"] == "valid_credentials"
-    assert int(record["attempted_credentials_count"]) == 1
+    assert record["status"] == "weak_default_creds"
+    assert int(record["attempted_credentials_count"]) == 10
     assert record["credentials_source"] == "default"
     assert record["effective_username"] == "admin"
-    assert verify_calls == [("admin", "admin")]
+    assert record["effective_password"] == "password"
+    assert verify_calls == [
+        ("admin", "admin"),
+        ("admin", "password"),
+        ("admin", "grafana"),
+        ("admin", "changeme"),
+        ("grafana", "grafana"),
+        ("grafana", "password"),
+        ("root", "root"),
+        ("user", "user"),
+        ("root", "password"),
+        ("user", "password"),
+    ]
+    assert datasource_headers[-1] == _auth_header("admin", "password")
     auth_attempts = record.get("auth_attempts")
     assert isinstance(auth_attempts, list)
-    assert len(auth_attempts) == 1
-    assert bool(auth_attempts[0].get("ok")) is True
+    assert len(auth_attempts) == 10
+    assert bool(auth_attempts[0].get("ok")) is False
+    assert "candidate transport failure" in str(auth_attempts[0].get("error"))
+    assert bool(auth_attempts[1].get("ok")) is True
+    assert bool(auth_attempts[4].get("ok")) is True
+    detail_lines = _format_auth_attempt_detail_records(record, "txt")
+    first_success = next(line for line in detail_lines if "[+] admin:password" in line)
+    later_success = next(line for line in detail_lines if "[+] grafana:grafana" in line)
+    assert "(datasources:1)" in first_success
+    assert "(datasources:" not in later_success
 
 
 def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> None:
@@ -435,10 +489,19 @@ def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> 
     )
 
     assert record["status"] == "invalid_credentials_anonymous"
-    assert int(record["attempted_credentials_count"]) == 2
+    assert int(record["attempted_credentials_count"]) == 11
     assert verify_calls == [
         ("custom-user", "custom-pass"),
         ("admin", "admin"),
+        ("admin", "password"),
+        ("admin", "grafana"),
+        ("admin", "changeme"),
+        ("grafana", "grafana"),
+        ("grafana", "password"),
+        ("root", "root"),
+        ("user", "user"),
+        ("root", "password"),
+        ("user", "password"),
     ]
 
 
@@ -519,11 +582,10 @@ def test_audit_grafana_emits_auth_attempt_lines_before_status(monkeypatch) -> No
     )
 
     assert (total, open_no_auth, valid, auth_required, failed) == (1, 1, 0, 0, 0)
-    assert len(emitted_lines) == 4
+    assert len(emitted_lines) == 3
     assert "[*] Grafana Service" in emitted_lines[0]
-    assert "[-] credentials invalid (anonymous access)" in emitted_lines[1]
-    assert "[-] admin:admin" in emitted_lines[2]
-    assert "[-] admin:prom-operator" in emitted_lines[3]
+    assert "[-] admin:admin" in emitted_lines[1]
+    assert "[-] admin:prom-operator" in emitted_lines[2]
 
 
 def test_audit_grafana_auth_required_after_datasource_denial(monkeypatch) -> None:
@@ -1061,7 +1123,7 @@ def test_run_grafana_stage_uses_single_progress_for_multiple_groups(monkeypatch:
         ("host-b", 3200),
         ("host-c", 3200),
     }
-    assert created_totals == [3, 3]
+    assert created_totals == [3, 1, 1, 1]
     assert advanced_steps == [1, 1, 1, 1, 1, 1]
     assert closed_count == 1
 
@@ -1129,6 +1191,53 @@ def test_fix_e2e_grafana_apitoken_flows_through_and_verifies_via_bearer(
     assert isinstance(attempts, list), f"attempted_credentials must be a list, got {type(attempts).__name__}"
     assert any(a.get("source") == "apitoken" and a.get("ok") for a in attempts)
     assert record["attempted_credentials_count"] == len([a for a in attempts if a.get("source") == "apitoken"])
+
+
+def test_grafana_defcreds_falls_back_after_api_token_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    winning_header = _auth_header("admin", "password")
+    datasource_headers: list[str | None] = []
+
+    def fake_http(_host, _port, path, _timeout, *, headers=None, **_kwargs):
+        authorization = (headers or {}).get("Authorization")
+        if path == "/api/health":
+            return 401, "", {}
+        if path == "/login":
+            return 200, "Grafana login", {}
+        if path == "/api/user":
+            if str(authorization).startswith("Bearer "):
+                raise OSError("token transport failure")
+            return (200, "{}", {}) if authorization == winning_header else (401, "", {})
+        if path == "/api/datasources":
+            datasource_headers.append(authorization)
+            return 200, "[]", {}
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http)
+    record = _audit_grafana_host(
+        "127.0.0.1",
+        3000,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        defcreds=True,
+        check_urls=None,
+        apitoken="must-not-appear",
+    )
+
+    assert record["status"] == "weak_default_creds"
+    assert record["effective_username"] == "admin"
+    assert record["effective_password"] == "password"
+    assert record["attempted_credentials_count"] == 11
+    assert record["auth_attempts"][0]["source"] == "apitoken"
+    assert record["auth_attempts"][0]["ok"] is False
+    assert "token transport failure" in record["auth_attempts"][0]["error"]
+    assert datasource_headers == [winning_header]
+    lines = _format_auth_attempt_detail_records(record, "txt")
+    assert lines[0].endswith("[-] API token (source:apitoken)")
+    assert all("must-not-appear" not in line for line in lines)
 
 
 def test_fix_e2e_grafana_attempted_credentials_is_a_list_not_an_int(

@@ -96,7 +96,9 @@ def configure_oracle_parser(
     )
     auth.add_argument("-p", "--password", default=None, metavar="value", help="Oracle password for credential check.")
     auth.add_argument(
-        "--defcreds", action="store_true", help="Try default Oracle credentials such as system:oracle and scott:tiger."
+        "--defcreds",
+        action="store_true",
+        help="Try the curated Oracle default/common credential set after provided, file, combo, or spray credentials.",
     )
     auth.add_argument(
         "--combo-list",

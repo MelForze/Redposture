@@ -33,7 +33,12 @@ _STAGE_DETECT_PROTOCOL = "detect_protocol"
 _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
-_GRAFANA_DEEP_STATUSES = {"open_no_auth", "invalid_credentials_anonymous", "valid_credentials"}
+_GRAFANA_DEEP_STATUSES = {
+    "open_no_auth",
+    "invalid_credentials_anonymous",
+    "valid_credentials",
+    "weak_default_creds",
+}
 
 
 @dataclass
@@ -575,7 +580,18 @@ def _build_credential_candidates(
         candidates.append((user, password, "provided"))
         seen.add(pair)
     if defcreds:
-        defaults = (("admin", "admin"),)
+        defaults = (
+            ("admin", "admin"),
+            ("admin", "password"),
+            ("admin", "grafana"),
+            ("admin", "changeme"),
+            ("grafana", "grafana"),
+            ("grafana", "password"),
+            ("root", "root"),
+            ("user", "user"),
+            ("root", "password"),
+            ("user", "password"),
+        )
         for user, secret in defaults:
             pair = (user, secret)
             if pair in seen:
@@ -668,12 +684,18 @@ def _audit_grafana_host(
                 nonlocal candidates_checked
                 nonlocal attempted_credentials, credentials_source, effective_username, effective_password
                 nonlocal default_credentials, provided_credentials_ok, auth_header
-                if candidates_checked or effective_username is not None:
+                if candidates_checked or (not defcreds and auth_header is not None):
                     return
                 candidates_checked = True
                 for cand_user, cand_pass, source in candidates_local:
                     attempted_credentials += 1
-                    ok, cred_error = _verify_credentials(host, port, timeout, cand_user, cand_pass)
+                    try:
+                        ok, cred_error = _verify_credentials(host, port, timeout, cand_user, cand_pass)
+                    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+                        if not defcreds:
+                            raise
+                        ok = False
+                        cred_error = _friendly_error_from_exception(exc)
                     auth_attempts_local.append(
                         {
                             "username": cand_user,
@@ -684,7 +706,7 @@ def _audit_grafana_host(
                         }
                     )
                     if ok:
-                        if effective_username is None:
+                        if auth_header is None:
                             credentials_source = source
                             effective_username = cand_user
                             effective_password = cand_pass
@@ -695,6 +717,8 @@ def _audit_grafana_host(
                             provided_credentials_ok = True
                     if cred_error:
                         errors_local.append(cred_error)
+                    if ok and not defcreds:
+                        break
 
             if provided_credentials:
                 # Reset to False if not already verified elsewhere (e.g. by the
@@ -711,7 +735,13 @@ def _audit_grafana_host(
             # reflect a successful token check just like a successful basic
             # auth check would.
             if apitoken:
-                token_ok, token_error = _verify_apitoken(host, port, timeout, apitoken)
+                try:
+                    token_ok, token_error = _verify_apitoken(host, port, timeout, apitoken)
+                except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+                    if not defcreds:
+                        raise
+                    token_ok = False
+                    token_error = _friendly_error_from_exception(exc)
                 attempted_credentials += 1
                 auth_attempts.append(
                     {
@@ -777,7 +807,7 @@ def _audit_grafana_host(
             # stays None) fell through to invalid_credentials_anonymous even
             # when Grafana had returned 200 to the Bearer probe.
             if effective_username is not None or (provided_credentials_ok is True and credentials_source == "apitoken"):
-                status = "valid_credentials"
+                status = "weak_default_creds" if credentials_source == "default" else "valid_credentials"
             elif auth_required is False and attempted_credentials > 0 and (provided_credentials or defcreds):
                 status = "invalid_credentials_anonymous"
             elif auth_required is False:
@@ -907,9 +937,16 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     if status == "open_no_auth":
         return ""
+    attempts_raw = record.get("auth_attempts")
+    has_attempt_history = isinstance(attempts_raw, list) and bool(attempts_raw)
+
     if status == "invalid_credentials_anonymous":
+        if has_attempt_history:
+            return ""
         return _with_optional_datasources(record, f"{prefix} [-] credentials invalid (anonymous access)")
-    if status == "valid_credentials":
+    if status in {"valid_credentials", "weak_default_creds"}:
+        if has_attempt_history:
+            return ""
         user = str(record.get("effective_username") or "admin")
         source = str(record.get("credentials_source") or "")
         if source == "default":
@@ -917,6 +954,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             return _with_optional_datasources(record, f"{prefix} [+] {user}:{password_text}")
         return _with_optional_datasources(record, f"{prefix} [+] {user}")
     if status == "auth_required":
+        if has_attempt_history:
+            return ""
         # E2E fix: `attempted_credentials` is now the list of attempt dicts.
         # Read the count from `attempted_credentials_count` first, but keep a
         # `len()`-fallback so we render correctly against any older cached
@@ -956,15 +995,36 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
 
     prefix = _nxc_prefix(record)
     lines: list[str] = []
+    effective_username = record.get("effective_username")
+    effective_password = record.get("effective_password")
+    credentials_source = str(record.get("credentials_source") or "")
     for attempt in attempts:
-        username = str(attempt.get("username") or "admin")
-        password = str(attempt.get("password") or "")
-        password_text = "<empty>" if password == "" else password
+        raw_username = attempt.get("username")
+        raw_password = attempt.get("password")
+        source = str(attempt.get("source") or "provided")
+        token_attempt = raw_username is None and raw_password is None
+        if token_attempt:
+            credential_text = f"API token (source:{source})"
+        else:
+            username = str(raw_username or "admin")
+            password = "" if raw_password is None else str(raw_password)
+            password_text = "<empty>" if password == "" else password
+            credential_text = f"{username}:{password_text}"
         ok = bool(attempt.get("ok"))
         if ok:
-            lines.append(_with_optional_datasources(record, f"{prefix} [+] {username}:{password_text}"))
+            if token_attempt:
+                selected = effective_username is None and bool(credentials_source) and source == credentials_source
+            else:
+                selected = (
+                    effective_username is not None
+                    and str(raw_username or "admin") == str(effective_username)
+                    and raw_password == effective_password
+                    and (not credentials_source or source == credentials_source)
+                )
+            line = f"{prefix} [+] {credential_text}"
+            lines.append(_with_optional_datasources(record, line) if selected else line)
             continue
-        lines.append(f"{prefix} [-] {username}:{password_text}")
+        lines.append(f"{prefix} [-] {credential_text}")
     return lines
 
 
@@ -1300,20 +1360,38 @@ def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any])
         source = "provided"
     if token is None and username is None and password is None:
         return record
+    continue_after_error = bool(getattr(ctx.args, "defcreds", False))
     if token is not None:
-        ok, error = _verify_apitoken(str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)), token)
+        try:
+            ok, error = _verify_apitoken(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                token,
+            )
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+            if not continue_after_error:
+                raise
+            ok = False
+            error = _friendly_error_from_exception(exc)
         attempt = {"username": None, "password": None, "source": source, "ok": bool(ok), "error": error or ""}
         auth_header = f"Bearer {token}"
     else:
         effective_user = (username or "admin").strip() or "admin"
         effective_password = password or ""
-        ok, error = _verify_credentials(
-            str(ctx.host),
-            int(ctx.port),
-            float(getattr(ctx.args, "timeout", 5.0)),
-            effective_user,
-            effective_password,
-        )
+        try:
+            ok, error = _verify_credentials(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                effective_user,
+                effective_password,
+            )
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+            if not continue_after_error:
+                raise
+            ok = False
+            error = _friendly_error_from_exception(exc)
         attempt = {
             "username": effective_user,
             "password": effective_password,
@@ -1324,13 +1402,21 @@ def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any])
         auth_header = _auth_header(effective_user, effective_password)
         username, password = effective_user, effective_password
     state.auth_attempts.append(attempt)
-    if ok:
+    if ok and state.auth_header is None:
         state.auth_header = auth_header
         state.credentials_source = source
         state.effective_username = username
         state.effective_password = password
     anonymous_open = record.get("auth_required") is False
-    status = "valid_credentials" if ok else "invalid_credentials_anonymous" if anonymous_open else "auth_required"
+    status = (
+        "weak_default_creds"
+        if ok and source == "default"
+        else "valid_credentials"
+        if ok
+        else "invalid_credentials_anonymous"
+        if anonymous_open
+        else "auth_required"
+    )
     record.update(
         {
             "timestamp": utc_now_iso(),
@@ -1360,6 +1446,48 @@ def collect_grafana_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
     if state.deep_record is not None:
         return state.deep_record
     record = dict(source_record.to_dict() if hasattr(source_record, "to_dict") else source_record)
+    runtime_attempts = record.get("attempted_credentials")
+
+    def _attempt_key(attempt: dict[str, Any]) -> tuple[str | None, str | None, str]:
+        raw_username = attempt.get("username")
+        raw_password = attempt.get("password")
+        source = str(attempt.get("source") or "provided")
+        if raw_username is None and raw_password is None:
+            return None, None, source
+        return (
+            str(raw_username or "admin"),
+            "" if raw_password is None else str(raw_password),
+            source,
+        )
+
+    merged_attempts = list(state.auth_attempts)
+    if isinstance(runtime_attempts, list):
+        actual_by_key = {_attempt_key(attempt): attempt for attempt in state.auth_attempts}
+        merged_attempts = []
+        for runtime_attempt in runtime_attempts:
+            if not isinstance(runtime_attempt, dict):
+                continue
+            key = _attempt_key(runtime_attempt)
+            actual_attempt = actual_by_key.get(key)
+            if actual_attempt is not None:
+                merged_attempts.append(dict(actual_attempt))
+                continue
+            merged_attempts.append(
+                {
+                    "username": key[0],
+                    "password": key[1],
+                    "source": key[2],
+                    "ok": str(runtime_attempt.get("status") or "") in {"valid_credentials", "weak_default_creds"},
+                    "error": str(runtime_attempt.get("error") or ""),
+                }
+            )
+    record["attempted_credentials"] = merged_attempts
+    record["attempted_credentials_count"] = len(merged_attempts)
+    record["credential_attempts"] = merged_attempts
+    record["auth_attempts"] = merged_attempts
+    record["defcreds_enabled"] = bool(record.get("defcreds_enabled")) or any(
+        str(attempt.get("source") or "") == "default" for attempt in merged_attempts
+    )
     timeout = float(getattr(ctx.args, "timeout", 5.0))
     datasources, datasource_error, datasource_status = _fetch_datasources(
         str(ctx.host),

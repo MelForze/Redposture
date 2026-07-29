@@ -80,17 +80,70 @@ class _ProtocolSocket(_DummySocket):
         return self._timeout
 
 
-def test_postgres_defcreds_include_pgbouncer_pair() -> None:
-    assert postgres._postgres_credential_runs(None, None, defcreds=True) == [
+def test_postgres_defcreds_are_ordered_and_deduplicated() -> None:
+    defaults = [
         ("postgres", "postgres", True),
         ("pgbouncer", "pgbouncer", True),
         ("pgbouncer_exporter", "pgbouncer_exporter", True),
+        ("postgres", "password", True),
+        ("postgres", "admin", True),
+        ("postgres", "changeme", True),
+        ("admin", "admin", True),
+        ("admin", "postgres", True),
+        ("pgsql", "pgsql", True),
+        ("admin", "password", True),
+        ("user", "user", True),
+        ("user", "password", True),
+        ("service", "service", True),
+        ("test", "test", True),
+        ("dev", "dev", True),
+    ]
+    assert postgres._postgres_credential_runs(None, None, defcreds=True) == [
+        *defaults,
     ]
     assert postgres._postgres_credential_runs("app", "secret", defcreds=True) == [
         ("app", "secret", False),
-        ("postgres", "postgres", True),
-        ("pgbouncer", "pgbouncer", True),
-        ("pgbouncer_exporter", "pgbouncer_exporter", True),
+        *defaults,
+    ]
+    assert postgres._postgres_credential_runs("postgres", "postgres", defcreds=True) == [
+        ("postgres", "postgres", False),
+        *defaults[1:],
+    ]
+
+
+def test_postgres_credential_file_precedes_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    credentials = tmp_path / "postgres-creds.txt"
+    credentials.write_text("file_user:file_pass\npostgres:postgres\n", encoding="utf-8")
+    captured_runs: list[tuple[str | None, str | None, str]] = []
+
+    class FakeRunner:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = (args, kwargs)
+
+        def run_plan(self, plan):
+            captured_runs.extend((run.username, run.password, run.source) for run in plan.credential_runs)
+            return type("Result", (), {"detected_count": 1})()
+
+    monkeypatch.setattr(postgres, "AuditCommandRunner", FakeRunner)
+
+    assert (
+        postgres.run_postgres_stage(
+            _postgres_args(username=str(credentials), defcreds=True),
+            logger=object(),
+        )
+        == 0
+    )
+    assert captured_runs == [
+        ("file_user", "file_pass", "file"),
+        ("postgres", "postgres", "file"),
+        *[
+            (username, password, "default")
+            for username, password in postgres._POSTGRES_DEFAULT_CREDENTIALS
+            if (username, password) != ("postgres", "postgres")
+        ],
     ]
 
 
@@ -350,6 +403,7 @@ def test_postgres_lifecycle_direct_credentials_classify_first_and_run_deep_once(
     assert [value for name, value in events if name == "startup"] == [
         ("postgres", None, "postgres"),
         ("app", "good", "postgres"),
+        ("app", "good", "postgres"),
     ]
     assert [name for name, _value in events].count("capabilities") == 1
     assert [name for name, _value in events].count("databases") == 1
@@ -357,7 +411,7 @@ def test_postgres_lifecycle_direct_credentials_classify_first_and_run_deep_once(
     assert records[0]["status"] == "valid_credentials"
 
 
-def test_postgres_lifecycle_anonymous_open_skips_defcreds_but_runs_data_once(
+def test_postgres_lifecycle_anonymous_open_checks_defcreds_and_runs_data_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[str, object]] = []
@@ -390,10 +444,23 @@ def test_postgres_lifecycle_anonymous_open_skips_defcreds_but_runs_data_once(
 
     assert [value for name, value in events if name == "startup"] == [
         ("postgres", None, "postgres"),
+        ("postgres", "postgres", "postgres"),
+        ("pgbouncer", "pgbouncer", "postgres"),
         ("postgres", None, "postgres"),
     ]
     assert [name for name, _value in events].count("capabilities") == 1
     assert records[0]["status"] == "open_no_auth"
+    attempted_credentials = records[0]["attempted_credentials"]
+    assert isinstance(attempted_credentials, list)
+    assert len(attempted_credentials) == 2
+    assert [attempt["status"] for attempt in attempted_credentials] == [
+        "invalid_credentials_anonymous",
+        "invalid_credentials_anonymous",
+    ]
+    assert [attempt["credential_verified"] for attempt in attempted_credentials] == [False, False]
+    attempt_lines = postgres._format_credential_attempts_records(records[0], "txt")
+    assert len(attempt_lines) == 2
+    assert all(" [-] " in line for line in attempt_lines)
 
 
 @pytest.mark.parametrize("source", ["file", "default"])
@@ -415,10 +482,54 @@ def test_postgres_lifecycle_two_candidates_only_deep_checks_selected_credential(
         ("postgres", None, "postgres"),
         ("first", "bad", "postgres"),
         ("second", "good", "postgres"),
+        ("second", "good", "postgres"),
     ]
     assert [name for name, _value in events].count("capabilities") == 1
     assert [name for name, _value in events].count("data") == 1
     assert records[0]["status"] == ("weak_default_creds" if source == "default" else "valid_credentials")
+
+
+def test_postgres_defcreds_sweep_continues_after_success_and_deep_uses_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    _install_postgres_lifecycle_spy(monkeypatch, valid_password="good", events=events)
+    records = _run_postgres_lifecycle(
+        _postgres_args(defcreds=True, show_databases=True),
+        (
+            AuditCredentialRun(username="bad-before", password="bad", source="default"),
+            AuditCredentialRun(username="first-success", password="good", source="default"),
+            AuditCredentialRun(username="later-success", password="good", source="default"),
+            AuditCredentialRun(username="bad-after", password="bad", source="default"),
+        ),
+    )
+
+    assert [value for name, value in events if name == "startup"] == [
+        ("postgres", None, "postgres"),
+        ("bad-before", "bad", "postgres"),
+        ("first-success", "good", "postgres"),
+        ("later-success", "good", "postgres"),
+        ("bad-after", "bad", "postgres"),
+        ("first-success", "good", "postgres"),
+    ]
+    assert [name for name, _value in events].count("capabilities") == 1
+    assert [name for name, _value in events].count("databases") == 1
+    assert [name for name, _value in events].count("data") == 1
+    assert records[0]["status"] == "weak_default_creds"
+    assert records[0]["effective_username"] == "first-success"
+    attempts = records[0]["attempted_credentials"]
+    assert [(attempt["username"], attempt["status"], attempt["credential_verified"]) for attempt in attempts] == [
+        ("bad-before", "auth_required", False),
+        ("first-success", "weak_default_creds", True),
+        ("later-success", "weak_default_creds", True),
+        ("bad-after", "auth_required", False),
+    ]
+    attempt_lines = postgres._format_credential_attempts_records(records[0], "txt")
+    assert len(attempt_lines) == 4
+    assert "[-] bad-before:bad" in attempt_lines[0]
+    assert "[+] first-success:good" in attempt_lines[1]
+    assert "[+] later-success:good" in attempt_lines[2]
+    assert "[-] bad-after:bad" in attempt_lines[3]
 
 
 def test_postgres_lifecycle_preserves_positive_detection_when_deep_work_raises(
@@ -1120,6 +1231,64 @@ def test_run_postgres_stage_shell_modes_and_main_flow(monkeypatch: pytest.Monkey
     assert captured[-1]["debug"] is True
 
 
+def test_postgres_sql_shell_uses_late_winning_default_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempted: list[tuple[str | None, str | None, bool]] = []
+
+    def fake_audit(**kwargs: object) -> dict[str, object]:
+        username = kwargs.get("username")
+        password = kwargs.get("password")
+        is_default = bool(kwargs.get("defcreds"))
+        attempted.append(
+            (
+                username if isinstance(username, str) else None,
+                password if isinstance(password, str) else None,
+                is_default,
+            )
+        )
+        success = (username, password) == ("postgres", "password")
+        return {
+            "is_postgres": True,
+            "status": "valid_credentials" if success else "auth_required",
+            "auth_required": True,
+            "effective_username": username,
+        }
+
+    query_auth: list[tuple[str, str | None]] = []
+    shell_input = iter(["select current_user", "quit"])
+    monkeypatch.setattr(postgres, "_audit_postgres_host", fake_audit)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(shell_input))
+    monkeypatch.setattr(
+        postgres,
+        "_pg_execute_sql_query",
+        lambda **kwargs: (
+            query_auth.append((str(kwargs["username"]), kwargs.get("password"))) or ["postgres"],
+            None,
+        ),
+    )
+
+    rc = postgres.run_postgres_stage(
+        _postgres_args(
+            username="app",
+            password="bad",
+            defcreds=True,
+            sql_shell=True,
+        ),
+        logger=object(),
+    )
+
+    assert rc == 0
+    assert attempted == [
+        ("app", "bad", False),
+        ("postgres", "postgres", False),
+        ("pgbouncer", "pgbouncer", False),
+        ("pgbouncer_exporter", "pgbouncer_exporter", False),
+        ("postgres", "password", False),
+    ]
+    assert query_auth == [("postgres", "password")]
+
+
 def test_run_postgres_stage_additional_output_and_error_paths(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path
 ) -> None:
@@ -1156,6 +1325,7 @@ def test_run_postgres_stage_additional_output_and_error_paths(
     assert rc == 0
     assert [(call["username"], call["run_deep_checks"]) for call in captured] == [
         (None, False),
+        ("postgres", False),
         ("postgres", True),
     ]
     assert captured[-1]["table_targets"] == ["public.users", "public.audit"]

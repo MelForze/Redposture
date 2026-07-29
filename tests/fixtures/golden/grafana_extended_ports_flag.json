@@ -130,6 +130,6 @@
         "stage_name": "data"
       }
     ],
-    "status": "valid_credentials"
+    "status": "weak_default_creds"
   }
 ]
