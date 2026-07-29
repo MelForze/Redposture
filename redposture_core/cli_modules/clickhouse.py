@@ -70,7 +70,7 @@ def configure_clickhouse_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try default ClickHouse credentials default:<empty> and default:default.",
+        help="Try the curated ClickHouse default/common credential set after provided or file credentials.",
     )
     actions.add_argument(
         "--show-databases",

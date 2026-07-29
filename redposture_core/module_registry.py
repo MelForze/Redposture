@@ -350,9 +350,9 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         name=COMMAND_ELASTIC,
         help="Audit Elasticsearch exposure, auth, cluster/users endpoints, and secret discovery.",
         description=(
-            "Elastic module detects Elasticsearch API exposure, supports Basic/API key auth checks, "
-            "collects _cat endpoints, cluster health/nodes, security users, and performs indexed "
-            "query_string discovery for potential secret leaks."
+            "Elastic module detects Elasticsearch/OpenSearch API exposure, supports Basic/API key auth checks, "
+            "collects _cat endpoints, cluster health/nodes, security users, and performs mapping-aware "
+            "document/configuration discovery for potential secret leaks."
         ),
         runner_attr="run_elastic_stage",
         configure_parser=_make_configurator(configure_elastic_parser, _HTTP_MODULE_HELPERS),

@@ -231,6 +231,15 @@ def test_elastic_credentials_merge_token_file_and_defaults_with_deduplication(tm
         ("elastic", "changeme", "file"),
         ("elastic", "elastic", "default"),
         ("elastic", "password", "default"),
+        ("admin", "admin", "default"),
+        ("admin", "password", "default"),
+        ("admin", "changeme", "default"),
+        ("opensearch", "opensearch", "default"),
+        ("opensearch", "password", "default"),
+        ("kibana", "kibana", "default"),
+        ("kibana", "changeme", "default"),
+        ("logstash", "logstash", "default"),
+        ("logstash_system", "changeme", "default"),
     ]
     assert runs[0].token == "secret-token"
 

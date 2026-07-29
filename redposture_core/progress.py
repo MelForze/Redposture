@@ -48,6 +48,7 @@ class ProgressBar:
         leave: bool = True,
         allow_nested: bool = False,
         render_initial: bool = False,
+        refresh_interval_s: float | None = None,
     ) -> None:
         self._label = str(label or "TASK").upper().strip() or "TASK"
         self._total = max(0, int(total))
@@ -64,6 +65,8 @@ class ProgressBar:
         )
         self._leave = bool(leave)
         self._started = time.monotonic()
+        self._last_rendered_at = self._started
+        self._refresh_interval_s = max(0.0, float(refresh_interval_s or 0.0))
         self._resume_after_output_pending = False
         self._description = self._build_description()
         self._register_active_progress()
@@ -96,6 +99,9 @@ class ProgressBar:
         with self._lock:
             self._done = min(self._total, self._done + inc)
             if not self._leave and self._done >= self._total:
+                return
+            now = time.monotonic()
+            if self._done < self._total and now - self._last_rendered_at < self._refresh_interval_s:
                 return
             self._render()
 
@@ -179,6 +185,9 @@ class ProgressBar:
     def _resume_after_output_locked(self) -> None:
         if not self._leave and self._done >= self._total:
             return
+        now = time.monotonic()
+        if self._done < self._total and now - self._last_rendered_at < self._refresh_interval_s:
+            return
         self._render()
 
     @staticmethod
@@ -254,6 +263,7 @@ class ProgressBar:
             self._stream.write("\n")
         self._stream.flush()
         self._last_len = visible_len
+        self._last_rendered_at = time.monotonic()
 
 
 class ProgressHandle(Protocol):
@@ -304,6 +314,7 @@ class CommandProgressOwner:
         enabled: bool = True,
         leave: bool = True,
         render_initial: bool = False,
+        refresh_interval_s: float | None = None,
     ) -> ProgressHandle:
         if self._closed or not self._enabled or not enabled or int(total) <= 0:
             return NoOpProgress()
@@ -316,6 +327,7 @@ class CommandProgressOwner:
             stream=self._stream,
             leave=leave,
             render_initial=render_initial,
+            refresh_interval_s=refresh_interval_s,
         )
         return self._active
 

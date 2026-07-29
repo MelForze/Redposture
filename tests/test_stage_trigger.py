@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -38,7 +39,47 @@ def _base_args(**overrides: object) -> argparse.Namespace:
     return argparse.Namespace(**values)
 
 
-def test_trigger_small_helpers_cover_text_json_and_filters(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def _trigger_summary(*, attempted: int = 1, triggered: int = 1) -> dict[str, object]:
+    return {
+        "detected_exporters": 1 if attempted else 0,
+        "attempted": attempted,
+        "triggered": triggered,
+        "failed": max(0, attempted - triggered),
+        "by_host": {
+            "10.0.0.1": {
+                "detected": 1 if attempted else 0,
+                "attempted": attempted,
+                "success": triggered,
+                "fail": max(0, attempted - triggered),
+            }
+        },
+        "by_callback": {
+            "10.0.0.2": {
+                "success": triggered,
+                "fail": max(0, attempted - triggered),
+            }
+        },
+    }
+
+
+def _trigger_callback_result(*, host: str = "10.0.0.1", success: bool = True) -> dict[str, object]:
+    return {
+        "phase": "callback_result",
+        "host": host,
+        "exporter": "redis_exporter",
+        "exporter_port": 9121,
+        "callback_target": "10.0.0.2",
+        "callback_port": 6379,
+        "target": "redis://10.0.0.2:6379",
+        "trigger_url": f"http://{host}:9121/scrape?target=redis://10.0.0.2:6379",
+        "status": 200 if success else 500,
+        "probe_success": success,
+        "success": success,
+        **({} if success else {"error": "status=500"}),
+    }
+
+
+def test_trigger_small_helpers_cover_text_json_and_filters() -> None:
     assert trigger._clip_text("abcdef", 3) == "abc"
     assert trigger._safe_int("42") == 42
     assert trigger._safe_int("bad") is None
@@ -63,15 +104,6 @@ def test_trigger_small_helpers_cover_text_json_and_filters(tmp_path: Path, capsy
     assert rec is not None
     assert rec["status"] == "trigger_success"
     assert rec["http_status"] == 200
-
-    out_file = tmp_path / "trigger_records.jsonl"
-    trigger._write_trigger_json_records(str(out_file), [rec])
-    assert out_file.exists()
-    assert out_file.read_text(encoding="utf-8").strip()
-
-    trigger._write_trigger_json_records(None, [rec])
-    stdout = capsys.readouterr().out
-    assert '"source_type": "trigger"' in stdout
 
     assert trigger._parse_trigger_exporter_filter(None) == set()
     assert trigger._parse_trigger_exporter_filter("redis,postgres_exporter") == {
@@ -736,6 +768,272 @@ def test_trigger_json_output_writes_structured_records(tmp_path: Path, monkeypat
     assert payload["listen_port"] == 6379
     assert payload["status"] == "trigger_success"
     assert payload["probe_success"] is True
+
+
+def test_trigger_json_streams_before_scanner_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "stream.jsonl"
+    output_path.write_text("stale\n", encoding="utf-8")
+    record_emitted = threading.Event()
+    release_scanner = threading.Event()
+    stage_finished = threading.Event()
+    result: list[int] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        emit = kwargs.get("emit_trigger_event")
+        assert callable(emit)
+        emit(_trigger_callback_result())
+        record_emitted.set()
+        assert release_scanner.wait(2)
+        return _trigger_summary()
+
+    def run_stage() -> None:
+        try:
+            result.append(
+                run_trigger_stage(
+                    _base_args(output=str(output_path), output_format="json"),
+                    AttemptLogger(),
+                )
+            )
+        finally:
+            stage_finished.set()
+
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    worker = threading.Thread(target=run_stage)
+    worker.start()
+    assert record_emitted.wait(2)
+    try:
+        assert stage_finished.is_set() is False
+        file_lines = output_path.read_text(encoding="utf-8").splitlines()
+        assert len(file_lines) == 1
+        assert json.loads(file_lines[0])["status"] == "trigger_success"
+        stdout_lines = capsys.readouterr().out.splitlines()
+        assert stdout_lines == file_lines
+    finally:
+        release_scanner.set()
+        worker.join(timeout=2)
+
+    assert worker.is_alive() is False
+    assert result == [0]
+    assert output_path.read_text(encoding="utf-8").splitlines() == file_lines
+
+
+def test_trigger_json_empty_run_truncates_stale_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "empty.jsonl"
+    output_path.write_text('{"stale":true}\n', encoding="utf-8")
+
+    monkeypatch.setattr(
+        "redposture_core.stage_trigger.scan_exporters_and_trigger",
+        lambda *_args, **_kwargs: _trigger_summary(attempted=0, triggered=0),
+    )
+
+    rc = run_trigger_stage(
+        _base_args(output=str(output_path), output_format="json"),
+        AttemptLogger(),
+    )
+
+    assert rc == 0
+    assert output_path.read_text(encoding="utf-8") == ""
+    assert capsys.readouterr().out == ""
+
+
+def test_trigger_json_emits_each_callback_result_once_without_final_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "events.jsonl"
+    batch_calls = 0
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal batch_calls
+        emit = kwargs.get("emit_trigger_event")
+        hosts = kwargs.get("hosts")
+        assert callable(emit)
+        assert isinstance(hosts, list)
+        batch_calls += 1
+        emit(_trigger_callback_result(host=str(hosts[0]), success=batch_calls == 1))
+        return _trigger_summary(attempted=1, triggered=1 if batch_calls == 1 else 0)
+
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(
+        _base_args(
+            targets="10.0.0.1,http://10.0.0.2:19121/scrape",
+            output=str(output_path),
+            output_format="json",
+        ),
+        AttemptLogger(),
+    )
+
+    assert rc == 0
+    file_lines = output_path.read_text(encoding="utf-8").splitlines()
+    stdout_lines = capsys.readouterr().out.splitlines()
+    assert stdout_lines == file_lines
+    assert batch_calls == 2
+    assert len(file_lines) == 2
+    assert [json.loads(line)["host"] for line in file_lines] == ["10.0.0.1", "10.0.0.2"]
+
+
+def test_trigger_json_keeps_debug_and_human_rows_on_stderr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "debug.jsonl"
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        logger = kwargs.get("logger")
+        emit = kwargs.get("emit_trigger_event")
+        stage_emit = kwargs.get("emit_stage_event")
+        assert isinstance(logger, AttemptLogger)
+        assert callable(emit)
+        assert callable(stage_emit)
+        logger.log("scanner", ("10.0.0.1", 9121), phase="detected")
+        emit(
+            {
+                "phase": "detect_hit",
+                "host": "10.0.0.1",
+                "exporter": "redis_exporter",
+                "exporter_port": 9121,
+            }
+        )
+        emit(_trigger_callback_result())
+        stage_emit(
+            {
+                "kind": "stage_trace",
+                "stage_name": "data",
+                "attempt": 1,
+                "duration_ms": 1,
+                "result": "ok",
+            }
+        )
+        return _trigger_summary()
+
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(
+        _base_args(output=str(output_path), output_format="json", debug=True),
+        AttemptLogger(),
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    stdout_lines = captured.out.splitlines()
+    assert len(stdout_lines) == 1
+    assert json.loads(stdout_lines[0])["source_type"] == "trigger"
+    assert output_path.read_text(encoding="utf-8").splitlines() == stdout_lines
+    assert "SCAN" in captured.err
+    assert "stage_trace stage_name=data" in captured.err
+    assert "phase=detected" in captured.err
+
+
+def test_trigger_json_output_failure_is_not_treated_as_transport_error(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    emit_calls = 0
+    close_calls = 0
+    transport_error_caught = False
+
+    class FailingSink:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            return
+
+        def prepare(self) -> None:
+            return
+
+        def emit_many(self, _lines: object) -> None:
+            nonlocal emit_calls
+            emit_calls += 1
+            raise OSError("disk full")
+
+        def close(self) -> None:
+            nonlocal close_calls
+            close_calls += 1
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        nonlocal transport_error_caught
+        emit = kwargs.get("emit_trigger_event")
+        assert callable(emit)
+        try:
+            emit(_trigger_callback_result())
+        except OSError:
+            transport_error_caught = True
+            emit(_trigger_callback_result(success=False))
+        return _trigger_summary()
+
+    monkeypatch.setattr("redposture_core.stage_trigger.LineOutputSink", FailingSink)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+
+    rc = run_trigger_stage(
+        _base_args(output_format="json"),
+        AttemptLogger(),
+    )
+
+    assert rc == 1
+    assert emit_calls == 1
+    assert close_calls == 1
+    assert transport_error_caught is False
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "failed to write trigger output: disk full" in captured.err
+    assert "failed to start service" not in captured.err
+
+
+def test_trigger_json_with_listen_keeps_listener_output_off_stdout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output_path = tmp_path / "listen.jsonl"
+    logger = AttemptLogger()
+    monotonic_values = iter([10.0, 10.2])
+
+    def fake_start_listeners(*_args: object, **_kwargs: object) -> tuple[list[object], None]:
+        logger.log("redis", ("10.0.0.3", 60000), command="PING", listen_port=16379)
+        return [], None
+
+    def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
+        emit = kwargs.get("emit_trigger_event")
+        assert callable(emit)
+        emit(_trigger_callback_result())
+        return _trigger_summary()
+
+    def fake_stop_listeners(*_args: object, **_kwargs: object) -> None:
+        logger.log("scanner", ("10.0.0.1", 9121), phase="listener_stopped")
+
+    monkeypatch.setattr("redposture_core.stage_trigger.start_listeners_for_trigger", fake_start_listeners)
+    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_trigger.stop_started_listeners", fake_stop_listeners)
+    monkeypatch.setattr("redposture_core.stage_trigger.time.monotonic", lambda: next(monotonic_values))
+
+    rc = run_trigger_stage(
+        _base_args(
+            with_listen=True,
+            listen_seconds=0.1,
+            output=str(output_path),
+            output_format="json",
+        ),
+        logger,
+    )
+
+    assert rc == 0
+    captured = capsys.readouterr()
+    stdout_lines = captured.out.splitlines()
+    assert len(stdout_lines) == 1
+    assert json.loads(stdout_lines[0])["source_type"] == "trigger"
+    assert output_path.read_text(encoding="utf-8").splitlines() == stdout_lines
+    assert "command=PING" in captured.err
+    assert "phase=listener_stopped" in captured.err
 
 
 def test_trigger_json_with_listen_requires_output(monkeypatch: pytest.MonkeyPatch) -> None:

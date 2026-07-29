@@ -1,9 +1,14 @@
 [
   {
     "access_level": "unknown",
+    "anonymous_root_status": 200,
     "api_key_probe_error": null,
     "api_key_probe_status": "not_run",
-    "api_token": null,
+    "attempted_credentials": [],
+    "auth_error_detail": null,
+    "auth_probe_endpoint": null,
+    "auth_probe_http_status": null,
+    "auth_probe_status": null,
     "auth_required": false,
     "auth_valid": null,
     "can_manage": null,
@@ -86,118 +91,270 @@
         ]
       }
     ],
+    "credential_verification": {
+      "capability": "not_requested",
+      "status": "not_requested",
+      "supported_endpoint": null,
+      "unsupported_endpoints": []
+    },
     "detect_confidence": "high",
     "detect_probe_trace": [
       {
+        "error": null,
         "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 200
-      },
-      {
-        "scheme": "http",
-        "status": 405
+        "signal_kind": "hard_positive",
+        "signals": [
+          "header_x_elastic_product",
+          "root_tagline",
+          "root_version_shape"
+        ],
+        "status": 200,
+        "transport_error": null,
+        "vendor": "elasticsearch"
       }
     ],
     "detect_signals": [
       "header_x_elastic_product",
       "root_tagline",
-      "root_version_shape",
-      "nodes_version_shape"
+      "root_version_shape"
     ],
     "discover": true,
+    "discover_coverage": {
+      "complete": false,
+      "documents_scanned": 6,
+      "duplicate_documents": 0,
+      "indices_closed": 0,
+      "indices_denied": 0,
+      "indices_enumerated": 3,
+      "indices_failed": 0,
+      "indices_scanned": 3,
+      "limitations": [
+        "secure keystore settings are not readable through the API",
+        "closed indices, snapshots, Watcher, connectors, Alerting, Notifications and stored scripts are not scanned",
+        "FLS/DLS and current authorization can hide documents or fields"
+      ],
+      "limits": {
+        "max_array_items": 256,
+        "max_depth": 32,
+        "max_documents": 50000,
+        "max_embedded_json_bytes": 65536,
+        "max_findings": 10000,
+        "max_scalar_bytes": 262144,
+        "max_seconds": 300.0,
+        "max_source_bytes": 134217728
+      },
+      "locations_dropped": 0,
+      "missing_source_documents": 0,
+      "pages_scanned": 11,
+      "query_candidates": 1,
+      "scope": {
+        "configuration": [
+          "cluster_settings",
+          "node_settings",
+          "index_settings",
+          "mappings",
+          "index_templates",
+          "component_templates",
+          "legacy_templates",
+          "ingest_pipelines"
+        ],
+        "documents": "open and hidden indices plus resolved data-stream backing indices"
+      },
+      "shard_failures": [],
+      "source_bytes_scanned": 2704,
+      "source_disabled_indices": [],
+      "source_filtered_indices": [],
+      "status": "partial",
+      "suppressed_indicators": 2,
+      "surfaces": {
+        "cluster_settings": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "component_templates": {
+          "objects_attempted": 26,
+          "objects_scanned": 26,
+          "status": "complete"
+        },
+        "index_inventory": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "index_settings": {
+          "objects_attempted": 3,
+          "objects_scanned": 3,
+          "status": "complete"
+        },
+        "index_templates": {
+          "objects_attempted": 25,
+          "objects_scanned": 25,
+          "status": "complete"
+        },
+        "ingest_pipelines": {
+          "objects_attempted": 6,
+          "objects_scanned": 6,
+          "status": "complete"
+        },
+        "legacy_templates": {
+          "objects_attempted": 5,
+          "objects_scanned": 5,
+          "status": "complete"
+        },
+        "mapping_configuration": {
+          "objects_attempted": 0,
+          "objects_scanned": 0,
+          "status": "complete"
+        },
+        "mappings": {
+          "objects_attempted": 3,
+          "objects_scanned": 3,
+          "status": "complete"
+        },
+        "node_settings": {
+          "error": "request [/_nodes/settings] contains unrecognized parameter: [include_defaults]",
+          "error_detail": {
+            "reason": "request [/_nodes/settings] contains unrecognized parameter: [include_defaults]",
+            "root_cause": [
+              {
+                "reason": "request [/_nodes/settings] contains unrecognized parameter: [include_defaults]",
+                "type": "illegal_argument_exception"
+              }
+            ],
+            "status": 400,
+            "type": "illegal_argument_exception"
+          },
+          "objects_attempted": 1,
+          "objects_scanned": 0,
+          "status": "error"
+        }
+      },
+      "timed_out": false,
+      "truncated": false,
+      "truncated_reasons": []
+    },
     "discover_error": null,
+    "discover_error_detail": null,
+    "discover_findings": [
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "credential_pair",
+          "credential_uri"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "secret-2",
+            "index": "redposture-secrets-2026.05",
+            "object": "redposture-secrets-2026.05/secret-2",
+            "source_kind": "document"
+          },
+          {
+            "id": "secret-2",
+            "index": "redposture-secrets-2026.05",
+            "object": "redposture-secrets-2026.05/secret-2",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 92,
+        "secret_type": "password",
+        "value": "PayDb!2026"
+      },
+      {
+        "confidence": "high",
+        "detectors": [
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "log-2",
+            "index": "redposture-logs-2026.05",
+            "object": "redposture-logs-2026.05/log-2",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 85,
+        "secret_type": "password",
+        "value": "metricspass"
+      },
+      {
+        "confidence": "medium",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "secret-1",
+            "index": "redposture-secrets-2026.05",
+            "object": "redposture-secrets-2026.05/secret-1",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 73,
+        "secret_type": "secret",
+        "value": "elastic-prod-api-key-2026"
+      }
+    ],
     "discover_results": [
       {
         "error": null,
+        "error_detail": null,
         "hits": [],
         "index": "finance-transactions-2026.05",
+        "partial_error_details": [],
+        "retried": false,
+        "retry_chunks": 0,
         "shown_hits": 0,
         "total_hits": 0,
+        "total_hits_relation": "exact",
         "truncated": false
       },
       {
         "error": null,
+        "error_detail": null,
         "hits": [
           {
-            "id": "log-1",
-            "source": {
-              "@timestamp": "<ISO>",
-              "attrs": {
-                "method": "GET",
-                "route": "/api/v1/orders"
-              },
-              "client_ip": "10.20.30.40",
-              "env": "prod",
-              "latency_ms": 42,
-              "level": "info",
-              "message": "request completed",
-              "service": "api-gateway",
-              "trace_id": "9fd4f6b27f4e4b9a"
-            }
-          },
-          {
             "id": "log-2",
+            "index": "redposture-logs-2026.05",
             "source": {
-              "@timestamp": "<ISO>",
               "attrs": {
-                "sasl_password": "metricspass",
-                "sasl_username": "metrics",
-                "topic": "orders.events"
-              },
-              "client_ip": "10.20.30.41",
-              "env": "prod",
-              "latency_ms": 980,
-              "level": "warn",
-              "message": "retrying kafka publish",
-              "service": "worker",
-              "trace_id": "a7f1d30a5a884f22"
+                "sasl_password": "metricspass"
+              }
             }
           }
         ],
         "index": "redposture-logs-2026.05",
-        "shown_hits": 2,
-        "total_hits": 2,
-        "truncated": false
+        "partial_error_details": [],
+        "retried": false,
+        "retry_chunks": 0,
+        "shown_hits": 1,
+        "total_hits": 1,
+        "total_hits_relation": "unknown",
+        "truncated": true
       },
       {
         "error": null,
-        "hits": [
-          {
-            "id": "secret-1",
-            "source": {
-              "kind": "api_key",
-              "owner": "observability",
-              "source": "kibana_saved_object",
-              "value": "elastic-prod-api-key-2026"
-            }
-          },
-          {
-            "id": "secret-2",
-            "source": {
-              "kind": "dsn",
-              "owner": "payments",
-              "source": "service_config",
-              "value": "postgresql://payments:PayDb!2026@postgres.internal:5432/payments?sslmode=require"
-            }
-          }
-        ],
+        "error_detail": null,
+        "hits": [],
         "index": "redposture-secrets-2026.05",
-        "shown_hits": 2,
-        "total_hits": 2,
+        "partial_error_details": [],
+        "retried": false,
+        "retry_chunks": 0,
+        "shown_hits": 0,
+        "total_hits": 0,
+        "total_hits_relation": "exact",
         "truncated": false
       }
     ],
+    "discover_schema_version": 2,
     "effective_username": null,
     "endpoint_diagnostics": [
       {
@@ -430,10 +587,10 @@
       }
     ],
     "module": "elastic",
+    "network_attempted": null,
     "plugins_error": null,
     "port": 19200,
     "provided_credentials": false,
-    "provided_password": null,
     "provided_token": false,
     "provided_username": null,
     "rights_error": null,
@@ -458,8 +615,12 @@
       }
     ],
     "status": "open_no_auth",
-    "tls_auto_plain": true,
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
     "users": null,
-    "users_error": null
+    "users_error": null,
+    "vendor": "elasticsearch",
+    "verification_capability": "not_requested"
   }
 ]

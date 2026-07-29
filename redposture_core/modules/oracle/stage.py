@@ -12,7 +12,8 @@ from ...stage_runtime import (
     AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    has_username_password_credential_file,
+    build_basic_credential_runs,
+    merge_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -32,6 +33,8 @@ def build_oracle_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         render_module=render,
         colorize=render._render_colored_oracle_line,
+        continue_after_credential_success=bool(getattr(args, "defcreds", False)),
+        continue_after_credential_error=bool(getattr(args, "defcreds", False)),
     )
 
 
@@ -43,29 +46,36 @@ def run_oracle_stage(args: Any, logger: Any) -> int:
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
-    if not has_username_password_credential_file(args):
-        try:
-            credential_runs = actions._credential_runs(
-                getattr(args, "username", None),
-                getattr(args, "password", None),
-                defcreds=bool(getattr(args, "defcreds", False)),
+    try:
+        supplied_runs = build_basic_credential_runs(args)
+        module_runs = tuple(
+            AuditCredentialRun(
+                username=item.get("username"),
+                password=item.get("password"),
+                source=str(item.get("source") or "provided"),
+            )
+            for item in actions._credential_runs(
+                None,
+                None,
+                defcreds=False,
                 combo_list=getattr(args, "combo_list", None),
                 user_list=getattr(args, "user_list", None),
                 pass_list=getattr(args, "pass_list", None),
                 spray_passwords=bool(getattr(args, "spray_passwords", False)),
             )
-        except ValueError as exc:
-            console.error(str(exc))
-            return 2
-        if credential_runs:
-            args._audit_credential_runs = tuple(
-                AuditCredentialRun(
-                    username=item.get("username"),
-                    password=item.get("password"),
-                    source="default" if bool(item.get("default")) else str(item.get("source") or "provided"),
-                )
-                for item in credential_runs
-            )
+        )
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
+    default_runs = (
+        tuple(
+            AuditCredentialRun(username=username, password=password, source="default")
+            for username, password in actions._ORACLE_DEFAULT_CREDS
+        )
+        if bool(getattr(args, "defcreds", False))
+        else ()
+    )
+    args._audit_credential_runs = merge_audit_credential_runs(supplied_runs, module_runs, default_runs)
     try:
         plan = build_oracle_plan(args)
     except ValueError as exc:

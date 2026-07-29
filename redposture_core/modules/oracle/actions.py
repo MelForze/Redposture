@@ -55,6 +55,18 @@ _ORACLE_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
     ("dbsnmp", "dbsnmp"),
     ("pdbadmin", "oracle"),
     ("admin", "oracle"),
+    ("system", "system"),
+    ("sys", "sys"),
+    ("pdbadmin", "pdbadmin"),
+    ("admin", "admin"),
+    ("scott", "scott"),
+    ("hr", "hr"),
+    ("outln", "outln"),
+    ("admin", "password"),
+    ("admin", "changeme"),
+    ("user", "user"),
+    ("test", "test"),
+    ("dev", "dev"),
 )
 _ORACLE_DEFAULT_SERVICES = ("FREEPDB1", "ORCLPDB1", "XEPDB1", "ORCL", "XE", "FREE", "PDB1")
 _ORACLE_DEFAULT_SIDS = ("FREE", "XE", "ORCLCDB", "ORCL", "PDB1")
@@ -346,6 +358,7 @@ def _try_credentials(
     credential_candidates: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], str | None]:
     attempts: list[dict[str, Any]] = []
+    selected: dict[str, Any] | None = None
     terminal_status: str | None = None
     for candidate in credential_candidates:
         username = str(candidate.get("username") or "")
@@ -376,7 +389,8 @@ def _try_credentials(
                 "error": None,
             }
             attempts.append(attempt)
-            return attempt, attempts, None
+            if selected is None:
+                selected = attempt
         except OracleAccountLockedError as exc:
             terminal_status = "account_locked"
             attempts.append(
@@ -417,7 +431,7 @@ def _try_credentials(
         finally:
             if client is not None:
                 client.close()
-    return None, attempts, terminal_status
+    return selected, attempts, terminal_status
 
 
 def _probe_listener_targets(
@@ -1422,23 +1436,55 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return json.dumps(record, ensure_ascii=False)
     prefix = _nxc_prefix(record)
     status = str(record.get("status") or "fail")
+    credential_attempts = record.get("credential_attempts")
+    has_attempt_details = isinstance(credential_attempts, list) and len(credential_attempts) > 1
     if status == "open_no_auth":
         return ""
     if status in {"valid_credentials", "weak_default_creds"}:
+        if has_attempt_details:
+            return ""
         user = str(record.get("effective_username") or record.get("provided_username") or "-")
         secret = record.get("provided_password")
         secret_text = "<empty>" if secret == "" else str(secret or "")
         marker = "[+]"
         return f"{prefix} {marker} {user}:{secret_text}{_caps_suffix(record)}"
     if status == "auth_required":
+        if has_attempt_details:
+            return ""
         return f"{prefix} [-] authentication required"
     if status in {"account_locked", "account_expired", "invalid_credentials"}:
+        if has_attempt_details:
+            return ""
         user = str(record.get("provided_username") or "-")
         secret = record.get("provided_password")
         secret_text = "<empty>" if secret == "" else str(secret or "")
         return f"{prefix} [-] {status} {user}:{secret_text}"
     err = _clip(str(record.get("error") or "connection failed"), 120)
     return f"{prefix} [!] connection failed err={err}"
+
+
+def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+    attempts = record.get("credential_attempts")
+    if output_format != "txt" or not isinstance(attempts, list) or len(attempts) < 2:
+        return []
+
+    prefix = _nxc_prefix(record)
+    selected_username = record.get("effective_username")
+    selected_password = record.get("provided_password")
+    lines: list[str] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        username = str(attempt.get("username") or "-")
+        password = attempt.get("password")
+        password_text = "<empty>" if password == "" else str(password or "")
+        if bool(attempt.get("ok")):
+            selected = attempt.get("username") == selected_username and password == selected_password
+            suffix = _caps_suffix(record) if selected else ""
+            lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
+        else:
+            lines.append(f"{prefix} [-] {username}:{password_text}")
+    return lines
 
 
 def _limited_detail(

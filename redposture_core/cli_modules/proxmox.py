@@ -72,7 +72,7 @@ def configure_proxmox_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try a compact set of common Proxmox username/password pairs.",
+        help="Try the curated Proxmox realm-qualified credential set after API token, provided, or file credentials.",
     )
     actions.add_argument(
         "--discover-creds",

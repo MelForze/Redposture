@@ -39,7 +39,54 @@ _ETCD_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
     ("root", "root"),
     ("root", "etcd"),
     ("etcd", "etcd"),
+    ("root", "password"),
+    ("root", "admin"),
+    ("root", "rootpass"),
+    ("etcd", "password"),
+    ("admin", "admin"),
+    ("admin", "password"),
+    ("admin", "etcd"),
+    ("admin", "changeme"),
+    ("user", "user"),
+    ("user", "password"),
+    ("service", "service"),
 )
+
+
+def _build_etcd_credential_candidates(
+    username: str | None,
+    password: str | None,
+    defcreds: bool,
+    credential_candidates: list[dict[str, Any]] | None = None,
+) -> list[tuple[str, str, str]]:
+    """Normalize one source-aware etcd credential batch in stable order."""
+
+    candidates: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(user: str, secret: str, source: str) -> None:
+        pair = (user, secret)
+        if pair in seen:
+            return
+        seen.add(pair)
+        candidates.append((user, secret, source))
+
+    if credential_candidates is not None:
+        for candidate in credential_candidates:
+            raw_username = candidate.get("username")
+            raw_password = candidate.get("password")
+            if raw_username is None or raw_password is None:
+                continue
+            source = str(candidate.get("source") or "provided")
+            _add(str(raw_username), str(raw_password), source)
+        return candidates
+
+    if username is not None and password is not None:
+        _add(str(username), str(password), "provided")
+    if defcreds:
+        for default_user, default_secret in _ETCD_DEFAULT_CREDS:
+            _add(default_user, default_secret, "default")
+    return candidates
 
 
 def _etcd_v3_authenticate(
@@ -502,9 +549,21 @@ def _audit_etcd_host(
     username: str | None = None,
     password: str | None = None,
     defcreds: bool = False,
+    credential_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
+    normalized_candidates = _build_etcd_credential_candidates(
+        username,
+        password,
+        defcreds,
+        credential_candidates,
+    )
+    provided_candidates = [candidate for candidate in normalized_candidates if candidate[2] != "default"]
+    provided_credentials = bool(provided_candidates)
+    provided_username = provided_candidates[0][0] if provided_candidates else None
+    provided_password = provided_candidates[0][1] if provided_candidates else None
+    defaults_enabled = any(source == "default" for _user, _secret, source in normalized_candidates)
 
     for attempt in range(attempts):
         started = time.monotonic()
@@ -595,36 +654,43 @@ def _audit_etcd_host(
                 auth_required = None
 
             # ---- v3 authentication attempt --------------------------------------
-            provided_credentials = username is not None and password is not None
             auth_token: str | None = None
             credential_attempts: list[dict[str, Any]] = []
             selected_credential: dict[str, Any] | None = None
             effective_username: str | None = None
             effective_password: str | None = None
 
-            if v3_supported and auth_required is True and (provided_credentials or defcreds):
-                candidate_pairs: list[tuple[str, str, bool]] = []
-                if provided_credentials and username is not None and password is not None:
-                    candidate_pairs.append((str(username), str(password), False))
-                if defcreds:
-                    for default_user, default_secret in _ETCD_DEFAULT_CREDS:
-                        candidate_pairs.append((default_user, default_secret, True))
-                for user, secret, is_default in candidate_pairs:
-                    token, err = _etcd_v3_authenticate(host, port, timeout, user, secret)
+            if v3_supported and auth_required is True and normalized_candidates:
+                for user, secret, source in normalized_candidates:
+                    is_default = source == "default"
+                    try:
+                        candidate_token, err = _etcd_v3_authenticate(host, port, timeout, user, secret)
+                    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+                        if not defaults_enabled:
+                            raise
+                        candidate_token = None
+                        err = _friendly_error_from_exception(exc)
                     credential_attempts.append(
                         {
                             "username": user,
                             "password": secret,
+                            "source": source,
                             "default": is_default,
-                            "ok": token is not None,
+                            "ok": candidate_token is not None,
                             "error": err,
                         }
                     )
-                    if token is not None:
-                        auth_token = token
-                        selected_credential = {"username": user, "password": secret, "default": is_default}
+                    if candidate_token is not None and auth_token is None:
+                        auth_token = candidate_token
+                        selected_credential = {
+                            "username": user,
+                            "password": secret,
+                            "source": source,
+                            "default": is_default,
+                        }
                         effective_username = user
                         effective_password = secret
+                    if candidate_token is not None and not defaults_enabled:
                         break
 
             # If we successfully authenticated, re-run the /v3/kv/range probe with
@@ -773,14 +839,14 @@ def _audit_etcd_host(
                 "auth_required": auth_required,
                 "api_auth_required": api_auth_required,
                 "provided_credentials": provided_credentials,
-                "provided_username": username if provided_credentials else None,
-                "provided_password": password if provided_credentials else None,
+                "provided_username": provided_username,
+                "provided_password": provided_password,
                 "provided_credentials_ok": (
                     None
                     if not provided_credentials
                     else bool(selected_credential is not None and not selected_credential.get("default"))
                 ),
-                "defcreds_enabled": defcreds,
+                "defcreds_enabled": defaults_enabled,
                 "effective_username": effective_username,
                 "effective_password": effective_password,
                 "credential_attempts": credential_attempts,
@@ -877,6 +943,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return ""
 
     if status in {"weak_default_creds", "valid_credentials"}:
+        attempts = record.get("credential_attempts")
+        if isinstance(attempts, list) and attempts:
+            return ""
         user = str(record.get("effective_username") or "-")
         pw = record.get("provided_password") if status == "valid_credentials" else record.get("effective_password")
         password_text = str(pw) if pw is not None else "<none>"
@@ -887,6 +956,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [+] {user}:{password_text} (keys:unknown) err={count_error}"
 
     if status == "auth_required":
+        attempts = record.get("credential_attempts")
+        if isinstance(attempts, list) and attempts:
+            return ""
         return f"{prefix} [-] authentication required"
 
     if status == "unknown_auth":
@@ -899,6 +971,48 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if err != "-":
         return f"{line} err={err}"
     return line
+
+
+def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt":
+        return []
+
+    attempts_raw = record.get("credential_attempts")
+    if not isinstance(attempts_raw, list) or not attempts_raw:
+        return []
+
+    attempts = [attempt for attempt in attempts_raw if isinstance(attempt, dict)]
+    if not attempts:
+        return []
+
+    effective_username = record.get("effective_username")
+    effective_password = record.get("effective_password")
+    prefix = _nxc_prefix(record)
+    lines: list[str] = []
+    for attempt in attempts:
+        raw_username = attempt.get("username")
+        raw_password = attempt.get("password")
+        username = str(raw_username or "-")
+        password = "<none>" if raw_password is None else "<empty>" if raw_password == "" else str(raw_password)
+        if not bool(attempt.get("ok")):
+            lines.append(f"{prefix} [-] {username}:{password}")
+            continue
+
+        line = f"{prefix} [+] {username}:{password}"
+        selected = (
+            effective_username is not None
+            and str(raw_username or "-") == str(effective_username)
+            and raw_password == effective_password
+        )
+        if selected:
+            key_count = record.get("key_count")
+            if isinstance(key_count, int):
+                line = f"{line} (keys:{format_count_value(key_count)})"
+            else:
+                count_error = _clip(str(record.get("key_count_error") or "unknown count"), 72)
+                line = f"{line} (keys:unknown) err={count_error}"
+        lines.append(line)
+    return lines
 
 
 def _format_keys_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -1032,6 +1146,7 @@ def _call_audit_etcd_host_with_stage_debug(
     username: str | None = None,
     password: str | None = None,
     defcreds: bool = False,
+    credential_candidates: list[dict[str, Any]] | None = None,
     run_deep_checks: bool,
     debug: bool,
     debug_emit: Callable[[str], None] | None,
@@ -1045,19 +1160,14 @@ def _call_audit_etcd_host_with_stage_debug(
     audit_kwargs: dict[str, Any] = dict(audit_limit_kwargs)
     audit_kwargs["dump_batch"] = dump_batch
     audit_kwargs["dump_delay"] = dump_delay
-    # E2E-batch fix: credentials + defcreds must propagate BOTH to the detect
-    # phase AND the deep phase, because the auth verdict is what determines
-    # whether the runtime's deep_gate allows deep phase to run at all.
-    # Previously we gated defcreds behind `run_deep_checks`, so:
-    #  1. detect phase (run_deep_checks=False) — defcreds disabled → detect
-    #     returned auth_required with zero credential_attempts.
-    #  2. auth phase (run_deep_checks=False) — same, still no defcreds tried.
-    #  3. deep_gate rejected `auth_required` → deep phase never ran.
-    # As a result `redposture etcd --defcreds` reported auth_required with
-    # empty credential_attempts even when root:root would have worked.
+    # The shared runtime supplies one source-aware candidate batch during the
+    # deep phase.  Direct/legacy calls still use username/password + defcreds;
+    # when a batch is present, _audit_etcd_host ignores that legacy expansion.
     audit_kwargs["username"] = username
     audit_kwargs["password"] = password
     audit_kwargs["defcreds"] = defcreds
+    if credential_candidates:
+        audit_kwargs["credential_candidates"] = credential_candidates
     try:
         record = _audit_etcd_host(
             host,
@@ -1071,9 +1181,12 @@ def _call_audit_etcd_host_with_stage_debug(
         )
     except TypeError as exc:
         # Backward-compat: tests patch _audit_etcd_host with a legacy signature.
-        if not is_signature_compat_typeerror(exc, expected_keywords={"username", "password", "defcreds"}):
+        if not is_signature_compat_typeerror(
+            exc,
+            expected_keywords={"username", "password", "defcreds", "credential_candidates"},
+        ):
             raise
-        for legacy_key in ("username", "password", "defcreds"):
+        for legacy_key in ("username", "password", "defcreds", "credential_candidates"):
             audit_kwargs.pop(legacy_key, None)
         record = _audit_etcd_host(
             host,

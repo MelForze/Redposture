@@ -2474,7 +2474,7 @@ def test_run_consul_stage_multi_port_uses_single_global_progress(monkeypatch: py
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
     assert progress.total == 2
-    assert progress.added == [2]
+    assert progress.added == [1, 1]
     assert progress.advances == [1, 1, 1, 1]
     assert progress.closed is True
 

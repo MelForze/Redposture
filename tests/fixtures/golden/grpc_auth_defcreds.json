@@ -1,6 +1,8 @@
 [
   {
-    "auth_required": true,
+    "action_access_satisfied": true,
+    "analysis_performed": true,
+    "auth_required": null,
     "auth_used": {
       "password": "admin",
       "source": "defcreds",
@@ -68,17 +70,28 @@
     ],
     "detect_probe_trace": [
       {
+        "access": "auth_required",
         "error": null,
         "grpc_status": 16,
         "http_status": 200,
         "probe": "health",
         "scheme": "https"
+      },
+      {
+        "access": "auth_required",
+        "error": null,
+        "grpc_status": 16,
+        "http_status": 200,
+        "probe": "reflection",
+        "scheme": "https"
       }
     ],
     "error": null,
     "grpc_web_detected": false,
+    "health_access": "authenticated",
     "health_checks": [
       {
+        "access": "authenticated",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -86,6 +99,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "authenticated",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -93,6 +107,7 @@
         "serving_status": "SERVING"
       },
       {
+        "access": "authenticated",
         "error": null,
         "grpc_status": 0,
         "grpc_status_name": "OK",
@@ -102,6 +117,7 @@
     ],
     "health_supported": true,
     "host": "127.0.0.1",
+    "invoke_access": "not_tested",
     "invoke_result": null,
     "is_grpc": true,
     "methods": [
@@ -139,11 +155,15 @@
     "module": "grpc",
     "port": 50061,
     "protocol_flavor": "grpc",
+    "provided_credential_source": "default",
+    "provided_credential_type": "basic",
     "provided_credentials": true,
     "provided_credentials_ok": true,
     "provided_password": "admin",
     "provided_username": "admin",
+    "reflection_access": "authenticated",
     "reflection_enabled": true,
+    "reflection_version": "v1alpha",
     "service": "grpc",
     "services": [
       "grpc.health.v1.Health",
@@ -175,7 +195,7 @@
         "stage_name": "data"
       }
     ],
-    "status": "valid_credentials",
+    "status": "weak_default_creds",
     "transport": "tls",
     "transport_mode": "tls"
   }

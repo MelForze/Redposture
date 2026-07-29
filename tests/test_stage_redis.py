@@ -104,6 +104,29 @@ def test_check_default_credentials_falls_back_to_password_auth(monkeypatch: pyte
     assert calls == ["userpass", "password"]
 
 
+def test_check_default_credentials_uses_actual_candidate_for_acl_and_legacy_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_user_auth(_sock: object, username: str, password: str) -> tuple[bool, str | None]:
+        calls.append(("acl", username, password))
+        return False, "ERR wrong number of arguments for 'auth' command"
+
+    def fake_password_auth(_sock: object, password: str) -> tuple[bool, str | None]:
+        calls.append(("legacy", password))
+        return True, None
+
+    monkeypatch.setattr(redis_stage, "_auth_with_user_password", fake_user_auth)
+    monkeypatch.setattr(redis_stage, "_auth_with_password", fake_password_auth)
+
+    assert redis_stage._check_default_credentials(object(), "default", "password") == (True, None)
+    assert calls == [
+        ("acl", "default", "password"),
+        ("legacy", "password"),
+    ]
+
+
 def test_check_provided_credentials_without_password_returns_none() -> None:
     ok, err = redis_stage._check_provided_credentials(sock=object(), username="redis", password=None)
     assert ok is None
@@ -1047,7 +1070,7 @@ def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypa
     assert progress_advances == [1, 1, 1]
 
 
-def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
+def test_run_redis_stage_username_file_then_defaults_checks_every_pair(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     creds_file = tmp_path / "creds.txt"
@@ -1132,10 +1155,14 @@ def test_run_redis_stage_username_file_tries_all_pairs_and_disables_defcreds(
     rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
 
     assert rc == 0
+    expected_defaults = [
+        ("auth", username, password, False) for username, password in redis_actions._REDIS_DEFAULT_CREDENTIALS
+    ]
     assert captured_calls == [
         ("detect", None, None, False),
         ("auth", "bad", "bad", False),
         ("auth", "good", "good", False),
+        *expected_defaults,
         ("data", "good", "good", True),
     ]
     assert progress_totals == [2]
@@ -1241,7 +1268,26 @@ def _run_redis_lifecycle_result(args):
     ).run_plan(plan)
 
 
-def test_redis_defcreds_expand_after_provided_and_file_candidates_stay_unchanged(tmp_path) -> None:
+def test_redis_defcreds_expand_after_provided_and_file_candidates(tmp_path) -> None:
+    defaults = [
+        ("redis", "redis", "default"),
+        ("default", "redis", "default"),
+        ("default", "password", "default"),
+        ("redis", "password", "default"),
+        ("default", "changeme", "default"),
+        ("redis", "changeme", "default"),
+        ("admin", "admin", "default"),
+        ("default", "default", "default"),
+        ("admin", "password", "default"),
+        ("admin", "changeme", "default"),
+        ("root", "root", "default"),
+        ("root", "password", "default"),
+        ("user", "user", "default"),
+        ("user", "password", "default"),
+        ("service", "service", "default"),
+        ("test", "test", "default"),
+        ("dev", "dev", "default"),
+    ]
     direct_args = parse_args(
         [
             "redis",
@@ -1259,7 +1305,7 @@ def test_redis_defcreds_expand_after_provided_and_file_candidates_stay_unchanged
     redis_module_stage._prepare_redis_credential_runs(direct_args)
     assert [(run.username, run.password, run.source) for run in direct_args._audit_credential_runs] == [
         ("app", "secret", "provided"),
-        ("redis", "redis", "default"),
+        *defaults,
     ]
 
     credentials = tmp_path / "credentials.txt"
@@ -1281,7 +1327,35 @@ def test_redis_defcreds_expand_after_provided_and_file_candidates_stay_unchanged
     assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
         ("one", "1", "file"),
         ("two", "2", "file"),
+        *defaults,
     ]
+
+
+def test_redis_explicit_default_overlap_stays_provided_and_is_stably_deduplicated() -> None:
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "-u",
+            "redis",
+            "-p",
+            "redis",
+            "--defcreds",
+        ]
+    )
+
+    redis_module_stage._prepare_redis_credential_runs(args)
+    runs = args._audit_credential_runs
+
+    assert (runs[0].username, runs[0].password, runs[0].source) == ("redis", "redis", "provided")
+    assert [(run.username, run.password) for run in runs] == [
+        ("redis", "redis"),
+        *redis_actions._REDIS_DEFAULT_CREDENTIALS[1:],
+    ]
+    assert sum((run.username, run.password) == ("redis", "redis") for run in runs) == 1
 
 
 def test_redis_defcreds_try_provided_before_default_and_classify_default(monkeypatch) -> None:
@@ -1297,6 +1371,8 @@ def test_redis_defcreds_try_provided_before_default_and_classify_default(monkeyp
             return "error", "WRONGPASS invalid credentials"
         if command == ("AUTH", "redis", "redis"):
             return "simple", "OK"
+        if command[0] == "AUTH":
+            return "error", "WRONGPASS invalid credentials"
         if command == ("DBSIZE",):
             return "integer", 3
         pytest.fail(f"unexpected Redis command: {command!r}")
@@ -1324,11 +1400,115 @@ def test_redis_defcreds_try_provided_before_default_and_classify_default(monkeyp
     assert commands == [
         ("PING",),
         ("AUTH", "app", "bad"),
-        ("AUTH", "redis", "redis"),
+        *[("AUTH", username, password) for username, password in redis_actions._REDIS_DEFAULT_CREDENTIALS],
         ("DBSIZE",),
     ]
     assert result.records[0]["status"] == "weak_default_creds"
     assert result.records[0]["default_credentials"] is True
+
+
+def test_redis_defcreds_checks_full_catalog_after_late_default_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(redis_actions.socket, "create_connection", lambda *_args, **_kwargs: _DummySocket())
+
+    def send_cmd(_sock: object, *parts: object):
+        command = tuple(str(item) for item in parts)
+        commands.append(command)
+        if command == ("PING",):
+            return "error", "NOAUTH Authentication required."
+        if command == ("AUTH", "default", "password"):
+            return "simple", "OK"
+        if command[0] == "AUTH":
+            return "error", "WRONGPASS invalid credentials"
+        if command == ("DBSIZE",):
+            return "integer", 2
+        pytest.fail(f"unexpected Redis command: {command!r}")
+
+    monkeypatch.setattr(redis_actions, "_send_cmd", send_cmd)
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "--defcreds",
+            "-f",
+            "json",
+        ]
+    )
+
+    result = _run_redis_lifecycle_result(args)
+
+    assert commands == [
+        ("PING",),
+        *[("AUTH", username, password) for username, password in redis_actions._REDIS_DEFAULT_CREDENTIALS],
+        ("DBSIZE",),
+    ]
+    assert result.records[0]["status"] == "weak_default_creds"
+    assert result.records[0]["effective_username"] == "default"
+    assert result.records[0]["effective_password"] == "password"
+    attempts = result.records[0]["attempted_credentials"]
+    assert isinstance(attempts, list)
+    assert len(attempts) == len(redis_actions._REDIS_DEFAULT_CREDENTIALS)
+    rendered = redis_actions._format_credential_attempts_records(result.records[0], "txt")
+    assert len(rendered) == len(redis_actions._REDIS_DEFAULT_CREDENTIALS)
+    assert any("[+] default:password" in line for line in rendered)
+    assert any("[-] dev:dev" in line for line in rendered)
+
+
+def test_redis_legacy_auth_fallback_is_deduplicated_by_password_without_skipping_acl_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(redis_actions.socket, "create_connection", lambda *_args, **_kwargs: _DummySocket())
+
+    def send_cmd(_sock: object, *parts: object):
+        command = tuple(str(item) for item in parts)
+        commands.append(command)
+        if command == ("PING",):
+            return "error", "NOAUTH Authentication required."
+        if command[0] == "AUTH" and len(command) == 3:
+            return "error", "ERR wrong number of arguments for 'auth' command"
+        if command[0] == "AUTH" and len(command) == 2:
+            return "error", "WRONGPASS invalid credentials"
+        pytest.fail(f"unexpected Redis command: {command!r}")
+
+    monkeypatch.setattr(redis_actions, "_send_cmd", send_cmd)
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "6379",
+            "--defcreds",
+            "-f",
+            "json",
+        ]
+    )
+
+    result = _run_redis_lifecycle_result(args)
+    auth_commands = [command for command in commands if command[0] == "AUTH"]
+    acl_pairs = [command[1:] for command in auth_commands if len(command) == 3]
+    legacy_passwords = [command[1] for command in auth_commands if len(command) == 2]
+
+    assert acl_pairs == list(redis_actions._REDIS_DEFAULT_CREDENTIALS)
+    assert legacy_passwords == [
+        "redis",
+        "password",
+        "changeme",
+        "admin",
+        "default",
+        "root",
+        "user",
+        "service",
+        "test",
+        "dev",
+    ]
+    assert result.records[0]["status"] == "auth_required"
 
 
 def test_redis_auth_transient_retries_without_repeating_detect(monkeypatch) -> None:

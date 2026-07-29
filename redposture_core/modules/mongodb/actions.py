@@ -50,6 +50,19 @@ _MONGODB_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
     ("root", "password"),
     ("mongo", "mongo"),
     ("mongodb", "mongodb"),
+    ("admin", "password"),
+    ("admin", "mongo"),
+    ("admin", "mongodb"),
+    ("root", "mongo"),
+    ("root", "mongodb"),
+    ("mongo", "password"),
+    ("mongodb", "password"),
+    ("admin", "changeme"),
+    ("root", "admin"),
+    ("user", "user"),
+    ("user", "password"),
+    ("test", "test"),
+    ("dev", "dev"),
 )
 _MONGODB_DUMP_SAFETY_LIMIT = 1000
 
@@ -214,7 +227,7 @@ def _try_credentials(
     auth_db: str,
     credential_candidates: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """Try each candidate; return the first success + the attempt log.
+    """Try every candidate; return the first success + the complete attempt log.
 
     A7 fix: transient network failures (connection refused/reset/timeout, DNS
     blips) are NOT recorded as credential attempts — the credential was never
@@ -225,6 +238,7 @@ def _try_credentials(
     5 phantom failed credential probes.
     """
     attempts: list[dict[str, Any]] = []
+    selected: dict[str, Any] | None = None
     for candidate in credential_candidates:
         username = candidate.get("username")
         password = candidate.get("password")
@@ -249,7 +263,8 @@ def _try_credentials(
                 "error": None,
             }
             attempts.append(attempt)
-            return attempt, attempts
+            if selected is None:
+                selected = attempt
         except Exception as exc:
             transient = is_transient_network_error(exc) and not is_auth_error(exc)
             attempts.append(
@@ -264,7 +279,7 @@ def _try_credentials(
             )
         finally:
             close_quietly(raw_client)
-    return None, attempts
+    return selected, attempts
 
 
 def _selected_databases(
@@ -837,15 +852,21 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if status == "open_no_auth":
         return ""
     if status == "weak_default_creds":
+        if len(_credential_attempt_rows(record)) > 1:
+            return ""
         username = str(record.get("effective_username") or "-")
         password = str(record.get("provided_password") or "")
         return f"{prefix} [+] {username}:{password} {_caps_suffix(record)}"
     if status == "valid_credentials":
+        if len(_credential_attempt_rows(record)) > 1:
+            return ""
         username = str(record.get("effective_username") or record.get("provided_username") or "-")
         provided_password = record.get("provided_password")
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
         return f"{prefix} [+] {username}:{password_text} {_caps_suffix(record)}"
     if status == "invalid_credentials_anonymous":
+        if len(_credential_attempt_rows(record)) > 1:
+            return ""
         username = str(record.get("provided_username") or "-")
         provided_password = record.get("provided_password")
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
@@ -895,8 +916,6 @@ def _generic_credential_attempt_rows(attempted_credentials: Any) -> list[dict[st
 
 
 def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
-    if str(record.get("status") or "") != "auth_required":
-        return []
     attempts = _credential_attempt_rows(record)
     if len(attempts) < 2:
         return []
@@ -904,14 +923,20 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         return []
     prefix = _nxc_prefix(record)
     lines: list[str] = []
+    selected_username = record.get("effective_username")
+    selected_password = record.get("provided_password")
     for attempt in attempts:
         if not isinstance(attempt, dict):
             continue
         username = str(attempt.get("username") or "-")
         password = attempt.get("password")
         password_text = "<empty>" if password == "" else str(password or "")
-        marker = "[+]" if attempt.get("ok") else "[-]"
-        lines.append(f"{prefix} {marker} {username}:{password_text}")
+        if attempt.get("ok"):
+            selected = attempt.get("username") == selected_username and password == selected_password
+            suffix = _caps_suffix(record) if selected else ""
+            lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
+        else:
+            lines.append(f"{prefix} [-] {username}:{password_text}")
     return lines
 
 

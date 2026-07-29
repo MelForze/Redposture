@@ -84,7 +84,10 @@ def configure_postgres_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try default Postgres credentials postgres:postgres and pgbouncer:pgbouncer when auth is required.",
+        help=(
+            "Try the curated Postgres/PgBouncer credential set, including postgres:postgres "
+            "and pgbouncer:pgbouncer, after provided or file credentials."
+        ),
     )
     discovery.add_argument(
         "--show-databases",

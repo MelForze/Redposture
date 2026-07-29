@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .actions import (
+    _format_credential_attempts_records,
     _format_detect_record,
     _format_record,
     _format_topics_detail_records,
@@ -14,6 +15,7 @@ __all__ = [
     "_nxc_prefix",
     "_format_detect_record",
     "_format_record",
+    "_format_credential_attempts_records",
     "_format_topics_detail_records",
     "_render_colored_kafka_line",
 ]

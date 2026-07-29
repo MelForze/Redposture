@@ -143,6 +143,8 @@ def test_format_record_txt_and_json() -> None:
     }
     assert grpc._format_record(rec, "json").startswith("{")
     assert isinstance(grpc._format_record(rec, "txt"), str)
+    weak = {**rec, "status": "weak_default_creds", "auth_used": {"type": "token", "source": "defcreds"}}
+    assert grpc._format_record(weak, "txt").endswith("[+] token")
 
 
 def test_format_record_renders_failed_token_type_and_source() -> None:

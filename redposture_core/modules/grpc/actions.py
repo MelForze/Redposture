@@ -83,6 +83,11 @@ class GrpcLifecycleState:
     reflection_auth_used: dict[str, Any] | None = None
     health_deep_auth_required: bool = False
     reflection_deep_auth_required: bool = False
+    sweep_health_deep_auth_required: bool = False
+    sweep_reflection_deep_auth_required: bool = False
+    first_success_key: tuple[str | None, str | None, str | None, str] | None = None
+    first_health_auth_used: dict[str, Any] | None = None
+    first_reflection_auth_used: dict[str, Any] | None = None
 
     def session_for(self, host: str, port: int, *, timeout: float, use_tls: bool) -> _GrpcH2Session:
         key = (str(host), int(port), bool(use_tls))
@@ -175,6 +180,14 @@ _DEFAULT_BASIC_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("service", "service"),
     ("test", "test"),
     ("user", "password"),
+    ("admin", "changeme"),
+    ("root", "password"),
+    ("grpc", "password"),
+    ("grpc", "admin"),
+    ("service", "password"),
+    ("user", "user"),
+    ("guest", "guest"),
+    ("dev", "dev"),
 )
 _DEFAULT_BEARER_TOKENS: tuple[str, ...] = (
     "admin",
@@ -634,6 +647,41 @@ def _credential_auth_header(candidate: dict[str, Any] | None) -> str | None:
     )
 
 
+def _public_auth_used(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep successful auth metadata without exposing a Bearer token value."""
+
+    if not isinstance(candidate, dict):
+        return None
+    if candidate.get("type") != "token":
+        return candidate
+    return {key: value for key, value in candidate.items() if key != "token"}
+
+
+def _public_auth_attempts(last_attempt: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(last_attempt, dict):
+        return []
+    raw_attempts = last_attempt.get("attempts")
+    if not isinstance(raw_attempts, list):
+        return []
+    attempts: list[dict[str, Any]] = []
+    for item in raw_attempts:
+        if not isinstance(item, dict):
+            continue
+        candidate = item.get("candidate")
+        if not isinstance(candidate, dict):
+            continue
+        auth_type = str(candidate.get("type") or "")
+        attempt = {
+            "username": candidate.get("username") if auth_type == "basic" else None,
+            "password": candidate.get("password") if auth_type == "basic" else None,
+            "source": str(candidate.get("source") or "provided"),
+            "status": "valid_credentials" if bool(item.get("ok")) else "invalid_credentials",
+            "provided_credential_type": auth_type or None,
+        }
+        attempts.append(attempt)
+    return attempts
+
+
 def _provided_credential_type(*, token: str | None, username: str | None, password: str | None) -> str | None:
     if token:
         return "token"
@@ -668,7 +716,7 @@ def _auth_attempt_entries(
 
     if token:
         _add_token(token, "provided")
-    elif username is not None and password is not None:
+    if username is not None and password is not None:
         _add_basic(username, password, "provided")
 
     if defcreds:
@@ -702,10 +750,13 @@ def _try_credentials(
     reflection_access: str = _ACCESS_AUTH_REQUIRED,
     required_capability: str = "any",
     session: _GrpcH2Session | None = None,
+    continue_after_success: bool = False,
 ) -> tuple[bool, dict[str, Any] | None, dict[str, Any] | None]:
     last_attempt: dict[str, Any] | None = None
     health_candidate: dict[str, Any] | None = None
     reflection_candidate: dict[str, Any] | None = None
+    first_matched_candidate: dict[str, Any] | None = None
+    attempt_history: list[dict[str, Any]] = []
     for candidate in candidates:
         auth_header = _credential_auth_header(candidate)
         if protocol_flavor == "grpc-web":
@@ -770,10 +821,15 @@ def _try_credentials(
             candidate_ok = reflection_ok
         else:
             candidate_ok = health_ok or reflection_ok
+        attempt_history.append({"candidate": dict(candidate), "ok": bool(candidate_ok)})
+        last_attempt["attempts"] = [dict(item) for item in attempt_history]
         if candidate_ok:
-            return True, candidate, last_attempt
+            if first_matched_candidate is None:
+                first_matched_candidate = dict(candidate)
+            if not continue_after_success:
+                return True, first_matched_candidate, last_attempt
 
-    return False, None, last_attempt
+    return first_matched_candidate is not None, first_matched_candidate, last_attempt
 
 
 def _format_status_label(status: str) -> str:
@@ -781,6 +837,8 @@ def _format_status_label(status: str) -> str:
         return "anonymous access"
     if status == "valid_credentials":
         return "valid credentials"
+    if status == "weak_default_creds":
+        return "weak default credentials"
     if status == "auth_required":
         return "authentication required"
     if status == "invalid_credentials_anonymous":
@@ -1010,6 +1068,7 @@ def _audit_grpc_host(
     provided_credentials_ok: bool | None = None
     auth_used: dict[str, Any] | None = None
     auth_error: str | None = None
+    attempted_credentials: list[dict[str, Any]] = []
 
     if perform_analysis and protocol_flavor != "grpc-web" and reflection_access == _ACCESS_AUTH_REQUIRED:
         required_credential_capability = "reflection"
@@ -1034,7 +1093,10 @@ def _audit_grpc_host(
             reflection_access=reflection_access,
             required_capability=required_credential_capability,
             session=native_session,
+            continue_after_success=bool(defcreds),
         )
+        if defcreds:
+            attempted_credentials = _public_auth_attempts(last_attempt)
         if isinstance(last_attempt, dict):
             attempted_health_candidate = last_attempt.get("health_candidate")
             attempted_reflection_candidate = last_attempt.get("reflection_candidate")
@@ -1105,8 +1167,10 @@ def _audit_grpc_host(
             )
             else None
         )
-        health_deep_auth_used = health_provisional_auth or health_auth_used
-        reflection_deep_auth_used = reflection_provisional_auth or reflection_auth_used
+        health_deep_auth_used = health_provisional_auth or health_auth_used or _session_state.first_health_auth_used
+        reflection_deep_auth_used = (
+            reflection_provisional_auth or reflection_auth_used or _session_state.first_reflection_auth_used
+        )
         health_auth_header = _credential_auth_header(health_deep_auth_used)
         reflection_auth_header = _credential_auth_header(reflection_deep_auth_used)
         invoke_auth_used = auth_used
@@ -1354,6 +1418,9 @@ def _audit_grpc_host(
     if not action_access_satisfied and health_access == _ACCESS_MIXED:
         _session_state.health_auth_used = None
 
+    if status == "valid_credentials" and isinstance(auth_used, dict) and auth_used.get("source") == "defcreds":
+        status = "weak_default_creds"
+
     error_parts: list[str] = []
     if detect_result.get("detect_error") and status in {"fail", "not_grpc"}:
         error_parts.append(str(detect_result.get("detect_error")))
@@ -1378,7 +1445,7 @@ def _audit_grpc_host(
         "provided_username": username,
         "provided_password": password if username is not None and password is not None else None,
         "provided_credentials_ok": provided_credentials_ok,
-        "auth_used": auth_used,
+        "auth_used": _public_auth_used(auth_used),
         "defcreds_used": bool(defcreds),
         "reflection_enabled": reflection_enabled,
         "reflection_version": reflection_version,
@@ -1401,6 +1468,7 @@ def _audit_grpc_host(
         "stage_capabilities_ms": capability_duration_ms,
         "stage_data_ms": data_duration_ms,
         "stage_attempts_used": stage_attempts_used,
+        **({"attempted_credentials": attempted_credentials} if defcreds else {}),
     }
 
 
@@ -1490,6 +1558,20 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     status = str(record.get("status") or "fail")
     prefix = _nxc_prefix(record)
     err = _clip(str(record.get("error") or "-"), 72)
+    credential_attempts = record.get("attempted_credentials")
+    if (
+        isinstance(credential_attempts, list)
+        and credential_attempts
+        and status
+        in {
+            "auth_required",
+            "invalid_credentials",
+            "invalid_credentials_anonymous",
+            "valid_credentials",
+            "weak_default_creds",
+        }
+    ):
+        return ""
 
     services_count = len(record.get("services") or []) if isinstance(record.get("services"), list) else 0
     methods_count = len(record.get("methods") or []) if isinstance(record.get("methods"), list) else 0
@@ -1509,7 +1591,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         password_text = "<empty>" if provided_password == "" else str(provided_password or "")
         return f"{prefix} [-] {username}:{password_text}"
 
-    if status == "valid_credentials":
+    if status in {"valid_credentials", "weak_default_creds"}:
         auth_used = record.get("auth_used")
         if isinstance(auth_used, dict):
             label = _credential_label(auth_used)
@@ -1542,12 +1624,45 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     return line
 
 
+def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt":
+        return []
+    attempts = record.get("attempted_credentials")
+    if not isinstance(attempts, list) or not attempts:
+        return []
+    prefix = _nxc_prefix(record)
+    success_statuses = {"valid_credentials", "weak_default_creds"}
+    lines: list[str] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        username = attempt.get("username")
+        password = attempt.get("password")
+        credential_type = str(attempt.get("provided_credential_type") or "")
+        source = str(attempt.get("source") or "provided")
+        if credential_type == "token" or (username is None and password is None):
+            label = f"token (source:{source})"
+        else:
+            username_text = str(username or "user")
+            if password is None:
+                password_text = "<no-password>"
+            elif password == "":
+                password_text = "<empty>"
+            else:
+                password_text = str(password)
+            label = f"{username_text}:{password_text}"
+        marker = "[+]" if str(attempt.get("status") or "") in success_statuses else "[-]"
+        lines.append(f"{prefix} {marker} {label}")
+    return lines
+
+
 def _format_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
     if str(record.get("status") or "") not in {
         "detected",
         "invalid_credentials",
         "open_no_auth",
         "valid_credentials",
+        "weak_default_creds",
     }:
         return []
     if record.get("analysis_performed") is False:
@@ -2047,8 +2162,10 @@ def _grpc_lifecycle_audit(
     ):
         credential_source = "provided"
     record["provided_credential_source"] = credential_source
-    if credential_source == "default":
+    if credential_source in {"default", "defcreds"}:
         record["defcreds_used"] = True
+        if str(record.get("status") or "") == "valid_credentials":
+            record["status"] = "weak_default_creds"
         auth_used = record.get("auth_used")
         if isinstance(auth_used, dict):
             auth_used["source"] = "defcreds"
@@ -2092,6 +2209,18 @@ def authenticate_grpc(ctx: Any, _detect_record: Any, options: dict[str, Any]) ->
     if not isinstance(state, GrpcLifecycleState):
         raise TypeError("grpc lifecycle state is unavailable")
     run_deep_checks = bool(options.get("analyze", False))
+    full_credential_sweep = bool(getattr(ctx.args, "defcreds", False))
+    if full_credential_sweep:
+        state.sweep_health_deep_auth_required = state.sweep_health_deep_auth_required or state.health_deep_auth_required
+        state.sweep_reflection_deep_auth_required = (
+            state.sweep_reflection_deep_auth_required or state.reflection_deep_auth_required
+        )
+        # A previous winner must not make a later default look authenticated.
+        # Each candidate gets its own Authorization header on a fresh probe.
+        state.health_auth_used = None
+        state.reflection_auth_used = None
+        state.health_deep_auth_required = state.sweep_health_deep_auth_required
+        state.reflection_deep_auth_required = state.sweep_reflection_deep_auth_required
     reflection_challenge_before = state.reflection_deep_auth_required
     health_challenge_before = state.health_deep_auth_required
     record = _grpc_lifecycle_audit(ctx, options, run_deep_checks=run_deep_checks)
@@ -2099,10 +2228,13 @@ def authenticate_grpc(ctx: Any, _detect_record: Any, options: dict[str, Any]) ->
     credential = ctx.credential
     has_credentials = bool(credential.token or (credential.username is not None and credential.password is not None))
     protocol_flavor = str(record.get("protocol_flavor") or "grpc")
-    if protocol_flavor == "grpc-web":
-        new_action_challenge = not health_challenge_before and state.health_deep_auth_required
-    else:
-        new_action_challenge = not reflection_challenge_before and state.reflection_deep_auth_required
+    new_health_challenge = (
+        protocol_flavor == "grpc-web" and not health_challenge_before and state.health_deep_auth_required
+    )
+    new_reflection_challenge = (
+        protocol_flavor != "grpc-web" and not reflection_challenge_before and state.reflection_deep_auth_required
+    )
+    new_action_challenge = new_health_challenge or new_reflection_challenge
 
     # A public lightweight probe can reveal the protected deep operation only
     # during this credential's sole runtime run. Retry exactly once, now with
@@ -2115,6 +2247,38 @@ def authenticate_grpc(ctx: Any, _detect_record: Any, options: dict[str, Any]) ->
         and new_action_challenge
     ):
         record = _grpc_lifecycle_audit(ctx, options, run_deep_checks=True)
+    if full_credential_sweep:
+        state.sweep_health_deep_auth_required = (
+            state.sweep_health_deep_auth_required
+            or health_challenge_before
+            or new_health_challenge
+            or state.health_deep_auth_required
+        )
+        state.sweep_reflection_deep_auth_required = (
+            state.sweep_reflection_deep_auth_required
+            or reflection_challenge_before
+            or new_reflection_challenge
+            or state.reflection_deep_auth_required
+        )
+        key = _grpc_lifecycle_key(ctx)
+        if state.first_health_auth_used is None and isinstance(state.health_auth_used, dict):
+            state.first_health_auth_used = dict(state.health_auth_used)
+        if state.first_reflection_auth_used is None and isinstance(state.reflection_auth_used, dict):
+            state.first_reflection_auth_used = dict(state.reflection_auth_used)
+        if record.get("provided_credentials_ok") is True and state.first_success_key is None:
+            state.first_success_key = key
+        state.health_auth_used = (
+            dict(state.first_health_auth_used) if isinstance(state.first_health_auth_used, dict) else None
+        )
+        state.reflection_auth_used = (
+            dict(state.first_reflection_auth_used) if isinstance(state.first_reflection_auth_used, dict) else None
+        )
+        if state.first_success_key is not None:
+            state.health_deep_auth_required = False
+            state.reflection_deep_auth_required = False
+        else:
+            state.health_deep_auth_required = state.sweep_health_deep_auth_required
+            state.reflection_deep_auth_required = state.sweep_reflection_deep_auth_required
     state.deep_records[_grpc_lifecycle_key(ctx)] = record
     return record
 

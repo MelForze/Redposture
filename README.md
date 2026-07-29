@@ -158,6 +158,14 @@ redposture grafana -t 127.0.0.1 --defcreds
 redposture grafana -t 127.0.0.1 --defcreds --show-datasources
 ```
 
+`--defcreds` performs ordered online authentication probes in ClickHouse, Elastic/OpenSearch, etcd,
+Grafana, gRPC, Kafka, MongoDB, Oracle, Postgres, Proxmox, Redis, and ZooKeeper. Explicit tokens,
+username/password pairs, credential-file entries, and module-specific combo/spray inputs keep priority;
+the curated module defaults are appended once with stable deduplication. With `--defcreds`, every candidate
+is checked and rendered even after a credential succeeds; the first confirmed identity is retained for
+follow-up data and capability checks. These requests can trigger account lockout, throttling, or security
+alerts, so use them only on authorized targets.
+
 GitLab public and token-backed checks:
 
 ```bash
@@ -225,7 +233,26 @@ redposture etcd -t 127.0.0.1 --show-keys 20 --dump 10
 redposture qdrant -t 127.0.0.1 --collections --dump 10
 redposture kafka -t 127.0.0.1 --show-topics --dump 10
 redposture zookeeper -t 127.0.0.1 --show-znodes 20 --dump 10
+redposture zookeeper -t 127.0.0.1 --defcreds --show-znodes 20
 redposture keeper -t 127.0.0.1 --show-znodes 20 --dump 10
+```
+
+ZooKeeper `--defcreds` tries a fixed set of 34 digest username/password pairs. Explicit credentials or
+credential-file entries are attempted first, defaults are appended once with stable deduplication, and the
+full catalog is checked even after one or more identities are confirmed. The first confirmed identity is
+retained for znode analysis. Candidates are also probed when znodes are anonymously readable, while data
+collection falls back to the anonymous session if none can be verified. A run therefore makes up to 34
+digest authentication attempts per target (plus unique explicit/file entries). Use this option only with
+authorization and account for server-side lockout, throttling, and alerting policies. `keeper` does not
+expose this flag.
+
+The focused auth-required lab protects `/` and `/redposture-auth` with a digest ACL for
+`zk:zookeeper`. That pair is intentionally the eighth default candidate:
+
+```bash
+docker compose -f lab/services/zookeeper-auth/docker-compose.yml up -d --wait
+redposture zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --dump -f json
+docker compose -f lab/services/zookeeper-auth/docker-compose.yml down -v
 ```
 
 ### ClickHouse Keeper audit and focused lab
@@ -263,6 +290,19 @@ redposture grpc -t 127.0.0.1 --port 50051 --analyze
 redposture grpc -t 127.0.0.1 --port 50051 --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
 redposture grpc -t 127.0.0.1 --port 50051 --openapi
 ```
+
+Elastic scans bare targets on ports `9200`, `19200`, and `29200` by default. Use `host:port` for a
+target-specific port or `--port` for an explicit port set; when both are supplied, the explicit set is
+added without removing the target-specific port. Transient transport retries are opt-in through
+`-r/--retries`. Plans with at least 10,000 expanded endpoints also automatically use up to 200 workers
+within the process file-descriptor limit (up to 64 through a proxy) and a one-second timeout. Explicit
+`-w/--workers`, `-r/--retries`, and `--timeout` values always win.
+
+Elastic `--discover` uses mappings to target sensitive fields, then performs a bounded `_source` sweep and
+audits readable settings, templates, mappings, and ingest pipelines. Findings are deduplicated by secret
+value and include confidence plus coverage; partial authorization, disabled/filtered `_source`, closed
+indices, timeouts, and scan limits are reported without claiming that no secrets exist. Found secret values
+are intentionally written in full to the terminal, `-o`, debug output, and logs.
 
 The default gRPC scan only fingerprints transport, protocol, Reflection availability, and separate
 Health/Reflection access policies. Public Health is not treated as endpoint-wide anonymous access.

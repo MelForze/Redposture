@@ -15,7 +15,8 @@ from ...stage_runtime import (
     AuditHookContext,
     ModuleAuditSpec,
     build_basic_audit_plan,
-    has_username_password_credential_file,
+    build_basic_credential_runs,
+    merge_audit_credential_runs,
     run_basic_host_audit,
 )
 from . import actions, policy, render
@@ -48,6 +49,18 @@ def _proxmox_record(payload: AuditRecord | dict[str, Any]) -> AuditRecord:
     if isinstance(payload, AuditRecord):
         return payload
     return AuditRecord.from_mapping(dict(payload), module="proxmox", service="proxmox")
+
+
+def _proxmox_apply_credential_source(record: AuditRecord, credential: AuditCredentialRun) -> AuditRecord:
+    if (
+        credential.source != "default"
+        or str(record.status or "") != "token_ok"
+        or str(record.extra.get("auth_method") or "") != "password"
+    ):
+        return record
+    payload = record.to_dict()
+    payload.update({"status": "weak_default_creds", "defcreds_enabled": True})
+    return _proxmox_record(payload)
 
 
 def _resolved_proxmox_host_stage() -> Any:
@@ -208,34 +221,46 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
         }
     )
 
-    if _resolved_proxmox_host_stage() is not _PROXMOX_HOST_STAGE_IMPL:
+    if _proxmox_host_stage_is_replaced():
         options = _build_proxmox_host_stage_options(ctx.args)
-        deep_record = _proxmox_record(
-            _resolved_proxmox_host_stage()(
-                host=ctx.host,
-                port=ctx.port,
-                timeout=cfg.timeout,
-                retries=cfg.retries,
-                pve_api_token=token,
-                use_https=use_https,
-                insecure=bool(getattr(ctx.args, "insecure", False)),
-                proxy=_proxmox_proxy(ctx.args),
-                username=credential.username,
-                password=credential.password,
-                defcreds=credential.source == "default",
-                discover_creds=bool(options["discover_creds"]),
-                show_nodes=bool(options["show_nodes"]),
-                show_users=bool(options["show_users"]),
-                add_user=options["add_user"],
-                run_deep_checks=True,
-                debug=cfg.debug,
-                debug_emit=ctx.debug_emit,
-                on_status_ready=options["on_status_ready"],
-                on_discovered_url=options["on_discovered_url"],
-                on_credential_finding=options["on_credential_finding"],
-            )
+        deep_record = _proxmox_apply_credential_source(
+            _proxmox_record(
+                _resolved_proxmox_host_stage()(
+                    host=ctx.host,
+                    port=ctx.port,
+                    timeout=cfg.timeout,
+                    retries=cfg.retries,
+                    pve_api_token=token,
+                    use_https=use_https,
+                    insecure=bool(getattr(ctx.args, "insecure", False)),
+                    proxy=_proxmox_proxy(ctx.args),
+                    username=credential.username,
+                    password=credential.password,
+                    defcreds=False,
+                    discover_creds=bool(options["discover_creds"]),
+                    show_nodes=bool(options["show_nodes"]),
+                    show_users=bool(options["show_users"]),
+                    add_user=options["add_user"],
+                    run_deep_checks=True,
+                    debug=cfg.debug,
+                    debug_emit=ctx.debug_emit,
+                    on_status_ready=options["on_status_ready"],
+                    on_discovered_url=options["on_discovered_url"],
+                    on_credential_finding=options["on_credential_finding"],
+                )
+            ),
+            credential,
         )
-        if state is not None:
+        if (
+            state is not None
+            and state.deep_record is None
+            and str(deep_record.status or "")
+            in {
+                "token_ok",
+                "weak_default_creds",
+                "insufficient_privileges",
+            }
+        ):
             state.deep_record = deep_record
         return deep_record
 
@@ -268,24 +293,51 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
         return _proxmox_record(payload)
 
     if token:
+        auth_headers = actions._proxmox_auth_headers(token)
+        status, token_payload, _headers, token_error = actions._proxmox_request(
+            ctx.host,
+            ctx.port,
+            "/access",
+            cfg.timeout,
+            cfg.retries,
+            pve_api_token="",
+            use_https=use_https,
+            insecure=bool(getattr(ctx.args, "insecure", False)),
+            proxy=_proxmox_proxy(ctx.args),
+            auth_headers=auth_headers,
+        )
+        error_message = token_error or actions._extract_error_message(token_payload)
+        if status not in {200, 403}:
+            payload.update(
+                {
+                    "status": "auth_failed",
+                    "auth_required": True,
+                    "auth_method": "pveapitoken",
+                    "auth_username": None,
+                    "auth_password": None,
+                    "auth_attempts": [],
+                    "error": error_message or f"unexpected HTTP {status} from /access",
+                }
+            )
+            return _proxmox_record(payload)
         token_resolved: tuple[dict[str, str], str, str | None, str | None, list[dict[str, str]]] = (
-            actions._proxmox_auth_headers(token),
+            auth_headers,
             "pveapitoken",
             None,
             None,
             [],
         )
-        if state is not None:
+        if state is not None and state.resolved_auth is None:
             state.resolved_auth = token_resolved
         payload.update(
             {
-                "status": "token_ok",
+                "status": "token_ok" if status == 200 else "insufficient_privileges",
                 "auth_required": True,
                 "auth_method": "pveapitoken",
                 "auth_username": None,
                 "auth_password": None,
                 "auth_attempts": [],
-                "error": None,
+                "error": error_message if status == 403 else None,
             }
         )
         return _proxmox_record(payload)
@@ -318,6 +370,7 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
     )
     attempt = {
         "username": username,
+        "password": password,
         "source": "defcreds" if credential.source == "default" else credential.source,
         "ok": str(headers is not None),
     }
@@ -344,11 +397,11 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
         str | None,
         list[dict[str, str]],
     ] = (dict(headers), "password", username, password, auth_attempts)
-    if state is not None:
+    if state is not None and state.resolved_auth is None:
         state.resolved_auth = password_resolved
     payload.update(
         {
-            "status": "token_ok",
+            "status": "weak_default_creds" if credential.source == "default" else "token_ok",
             "auth_required": True,
             "auth_method": "password",
             "auth_username": username,
@@ -393,7 +446,7 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
             on_discovered_url=options["on_discovered_url"],
             on_credential_finding=options["on_credential_finding"],
         )
-        return _proxmox_record(raw_record)
+        return _proxmox_apply_credential_source(_proxmox_record(raw_record), ctx.credential)
     raw_record = actions._audit_proxmox_host(
         ctx.host,
         ctx.port,
@@ -415,41 +468,36 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         on_credential_finding=options["on_credential_finding"],
         _resolved_auth=state.resolved_auth,
     )
-    return _proxmox_record(
-        actions._attach_proxmox_stage_telemetry(
-            raw_record,
-            host=ctx.host,
-            port=ctx.port,
-            retries=cfg.retries,
-            run_deep_checks=True,
-            debug=cfg.debug,
-            debug_emit=ctx.debug_emit,
-            started=started,
-        )
+    return _proxmox_apply_credential_source(
+        _proxmox_record(
+            actions._attach_proxmox_stage_telemetry(
+                raw_record,
+                host=ctx.host,
+                port=ctx.port,
+                retries=cfg.retries,
+                run_deep_checks=True,
+                debug=cfg.debug,
+                debug_emit=ctx.debug_emit,
+                started=started,
+            )
+        ),
+        ctx.credential,
     )
 
 
 def _prepare_proxmox_credential_runs(args: Any) -> None:
-    if has_username_password_credential_file(args):
-        return
     token = str(getattr(args, "pve_api_token", "") or "").strip()
-    if token:
-        args._audit_credential_runs = (AuditCredentialRun(token=token, source="provided"),)
-        return
-    runs: list[AuditCredentialRun] = []
-    username = getattr(args, "username", None)
-    password = getattr(args, "password", None)
-    if username is not None or password is not None:
-        runs.append(AuditCredentialRun(username=username, password=password, source="provided"))
-    if bool(getattr(args, "defcreds", False)):
-        seen = {(run.username, run.password) for run in runs}
-        for default_username, default_password in actions._PROXMOX_DEFAULT_CREDENTIALS:
-            if (default_username, default_password) in seen:
-                continue
-            seen.add((default_username, default_password))
-            runs.append(AuditCredentialRun(username=default_username, password=default_password, source="default"))
-    if runs:
-        args._audit_credential_runs = tuple(runs)
+    token_runs = (AuditCredentialRun(token=token, source="provided"),) if token else ()
+    supplied_runs = build_basic_credential_runs(args)
+    default_runs = (
+        tuple(
+            AuditCredentialRun(username=username, password=password, source="default")
+            for username, password in actions._PROXMOX_DEFAULT_CREDENTIALS
+        )
+        if bool(getattr(args, "defcreds", False))
+        else ()
+    )
+    args._audit_credential_runs = merge_audit_credential_runs(token_runs, supplied_runs, default_runs)
 
 
 def _build_proxmox_host_stage_options(args: Any) -> dict[str, Any]:
@@ -466,6 +514,7 @@ def _build_proxmox_host_stage_options(args: Any) -> dict[str, Any]:
 
 
 def build_proxmox_spec(args: Any) -> ModuleAuditSpec:
+    full_credential_sweep = bool(getattr(args, "defcreds", False))
     return ModuleAuditSpec(
         module="proxmox",
         label="PROXMOX",
@@ -476,6 +525,10 @@ def build_proxmox_spec(args: Any) -> ModuleAuditSpec:
         auth=_proxmox_auth,
         data=_proxmox_data,
         lifecycle_state_factory=_proxmox_lifecycle_state_factory,
+        record_all_credential_attempts=full_credential_sweep,
+        continue_after_credential_success=full_credential_sweep,
+        continue_after_credential_error=full_credential_sweep,
+        credential_attempt_detail_fields=("auth_method",),
         render_module=render,
         colorize=render._render_colored_proxmox_line,
     )
@@ -485,7 +538,11 @@ def _validate_and_prepare_proxmox_args(args: Any, console: Any) -> int | None:
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
-    _prepare_proxmox_credential_runs(args)
+    try:
+        _prepare_proxmox_credential_runs(args)
+    except ValueError as exc:
+        console.error(str(exc))
+        return 2
     return None
 
 

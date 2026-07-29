@@ -61,7 +61,7 @@ def configure_redis_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try default Redis credentials redis:redis when auth is required.",
+        help="Try the curated Redis ACL/legacy credential set after provided or file credentials.",
     )
     actions.add_argument(
         "--show-keys",
@@ -157,7 +157,7 @@ def configure_etcd_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try default etcd credentials (root:root, root:etcd, etcd:etcd) when auth is required.",
+        help="Try the curated etcd v3 credential set after provided or file credentials.",
     )
     actions.add_argument(
         "--show-keys",
@@ -256,7 +256,7 @@ def configure_kafka_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try default Kafka credentials admin:admin, kafka:kafka, kafka:password.",
+        help="Try the curated Kafka SASL/PLAIN credential set after provided or file credentials.",
     )
     actions.add_argument(
         "--show-topics",

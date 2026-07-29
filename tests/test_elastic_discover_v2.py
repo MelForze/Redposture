@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from hashlib import sha256
 from typing import Any
@@ -245,6 +246,16 @@ def test_strong_value_detectors_preserve_full_secret_values(
     )
 
 
+def test_jwe_detector_supports_direct_encryption_with_empty_key_segment() -> None:
+    header = base64.urlsafe_b64encode(b'{"alg":"dir","enc":"A256GCM"}').rstrip(b"=").decode()
+    token = f"{header}..aW5pdHZlY3Rvcg.Y2lwaGVydGV4dA.YXV0aHRhZw"
+
+    detections = analyze_value(token, path="authorization")
+
+    assert any(item.secret_type == "jwe" and item.value == token and item.score >= 90 for item in detections)
+    assert all(item.secret_type != "jwt" for item in detections)
+
+
 def test_exact_sensitive_field_accepts_weak_but_real_password() -> None:
     detections = analyze_value("changeme", path="database.password")
 
@@ -404,6 +415,30 @@ def test_base64_password_leaf_exports_decoded_value_instead_of_encoded_wrapper()
 
     assert "Super-Secret-123" in values
     assert encoded not in values
+
+
+def test_base64_service_account_json_is_scanned_once_for_inner_credentials() -> None:
+    private_key = "-----BEGIN PRIVATE KEY-----\nZmFrZQ==\n-----END PRIVATE KEY-----"
+    encoded = base64.b64encode(
+        json.dumps(
+            {
+                "type": "service_account",
+                "client_secret": "google-client-secret",
+                "private_key": private_key,
+            }
+        ).encode()
+    ).decode()
+    result = scan_value_tree(
+        {"credentials": encoded},
+        source_kind="document",
+        object_name="logs/service-account",
+    )
+    values = {item.value for item, _location in result.detections}
+
+    assert "google-client-secret" in values
+    assert private_key in values
+    assert encoded not in values
+    assert all(item.secret_type != "encoded_credentials" for item, _location in result.detections)
 
 
 def test_recursive_scanner_reports_each_traversal_limit() -> None:

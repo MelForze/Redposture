@@ -23,6 +23,9 @@ def configure_elastic_parser(
     add_output_flags(common)
     add_log_flag(common)
     add_scan_host_flags(common, include_profiles=False)
+    # Elastic retries only transient transport failures and only when the
+    # operator explicitly opts in with -r/--retries.
+    parser.set_defaults(retries=0)
     common.add_argument(
         "--port",
         dest="port",
@@ -31,8 +34,8 @@ def configure_elastic_parser(
         metavar="port",
         help=(
             "Elasticsearch port spec: single port, list/range, or file "
-            "(examples: 9200, 9200,19200, ./ports.txt). "
-            "If omitted, scans 9200, 19200."
+            "(examples: 9200, 9200,19200,29200, ./ports.txt). "
+            "If omitted, scans 9200, 19200, 29200."
         ),
     )
     add_multi_ports_flag(common)
@@ -83,7 +86,7 @@ def configure_elastic_parser(
     auth.add_argument(
         "--defcreds",
         action="store_true",
-        help="Try default Elasticsearch credentials elastic:changeme, elastic:elastic, elastic:password.",
+        help="Try the curated Elasticsearch/OpenSearch credential set after API token or basic credentials.",
     )
 
     actions.add_argument(

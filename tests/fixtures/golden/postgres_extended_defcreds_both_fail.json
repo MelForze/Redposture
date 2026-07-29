@@ -18,6 +18,42 @@
         "source": "default",
         "status": "auth_required",
         "username": "pgbouncer_exporter"
+      },
+      {
+        "password": "password",
+        "source": "default",
+        "status": "auth_required",
+        "username": "postgres"
+      },
+      {
+        "password": "admin",
+        "source": "default",
+        "status": "auth_required",
+        "username": "postgres"
+      },
+      {
+        "password": "changeme",
+        "source": "default",
+        "status": "auth_required",
+        "username": "postgres"
+      },
+      {
+        "password": "admin",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "password": "postgres",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "password": "pgsql",
+        "source": "default",
+        "status": "auth_required",
+        "username": "pgsql"
       }
     ],
     "auth_database": "postgres",
@@ -30,8 +66,8 @@
     "database_names": null,
     "defcreds_enabled": true,
     "dump_row_limit": null,
-    "effective_username": "pgbouncer_exporter",
-    "error": "password authentication failed for user \"pgbouncer_exporter\"",
+    "effective_username": "pgsql",
+    "error": "password authentication failed for user \"pgsql\"",
     "error_kind": "authentication_failed",
     "execute_attempted": false,
     "execute_command": null,
@@ -55,7 +91,7 @@
     "privesc_summary": {},
     "provided_credentials": false,
     "provided_password": null,
-    "provided_username": "pgbouncer_exporter",
+    "provided_username": "pgsql",
     "readable_tables": null,
     "service": "postgres",
     "show_columns": false,

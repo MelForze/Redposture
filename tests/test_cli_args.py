@@ -406,7 +406,7 @@ def test_postgres_help_shows_defaults_only_for_selected_flags() -> None:
     assert "Optional Postgres username for credential check. (default:" not in help_text
     assert "Optional Postgres password for credential check. (default:" not in help_text
     assert "pgbouncer:pgbouncer" in help_text
-    assert "Try default Postgres credentials postgres:postgres" in help_text
+    assert "Try the curated Postgres/PgBouncer credential set" in help_text
     assert "pgbouncer:pgbouncer when auth is required. (default:" not in help_text
 
 
@@ -1827,6 +1827,7 @@ def test_zookeeper_flags_are_parsed() -> None:
             "zk-user",
             "-p",
             "zk-pass",
+            "--defcreds",
             "--show-znodes",
             "--dump",
             "--znode",
@@ -1850,6 +1851,7 @@ def test_zookeeper_flags_are_parsed() -> None:
     assert args.ports == "2181,22181"
     assert args.username == "zk-user"
     assert args.password == "zk-pass"
+    assert args.defcreds is True
     assert args.show_znodes is True
     assert args.dump is True
     assert args.znode == "/brokers/ids/1"
@@ -1857,6 +1859,19 @@ def test_zookeeper_flags_are_parsed() -> None:
     assert args.enum_workers == 7
     assert args.output_format == "json"
     assert args.output == "zookeeper_audit.jsonl"
+
+
+def test_zookeeper_defcreds_is_not_added_to_keeper() -> None:
+    zookeeper_help = _command_help("zookeeper")
+    assert "--defcreds" in zookeeper_help
+    assert "network auth attempt" in zookeeper_help
+    assert "lockout" in zookeeper_help
+    assert "--defcreds" not in _command_help("keeper")
+
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["keeper", "-t", "10.0.0.9", "--defcreds"])
+
+    assert exc.value.code == 2
 
 
 @pytest.mark.parametrize("command", ["zookeeper", "keeper"])

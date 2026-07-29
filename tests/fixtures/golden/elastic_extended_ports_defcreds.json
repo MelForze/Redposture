@@ -1,9 +1,28 @@
 [
   {
     "access_level": "more_than_read",
+    "anonymous_root_status": 401,
     "api_key_probe_error": null,
     "api_key_probe_status": "not_run",
-    "api_token": null,
+    "attempted_credentials": [
+      {
+        "auth_error_detail": null,
+        "auth_probe_endpoint": "/_security/_authenticate",
+        "auth_probe_http_status": 200,
+        "auth_probe_status": "verified",
+        "error": null,
+        "network_attempted": true,
+        "password": "changeme",
+        "source": "default",
+        "status": "weak_default_creds",
+        "username": "elastic",
+        "verification_capability": "identity_endpoint_supported"
+      }
+    ],
+    "auth_error_detail": null,
+    "auth_probe_endpoint": "/_security/_authenticate",
+    "auth_probe_http_status": 200,
+    "auth_probe_status": "verified",
     "auth_required": true,
     "auth_valid": true,
     "can_manage": true,
@@ -54,29 +73,26 @@
     "cluster_error": null,
     "cluster_health": null,
     "cluster_nodes": null,
+    "credential_verification": {
+      "capability": "identity_endpoint_supported",
+      "status": "verified",
+      "supported_endpoint": "/_security/_authenticate",
+      "unsupported_endpoints": []
+    },
     "credentials_source": "default",
     "defcreds_enabled": true,
     "detect_confidence": "high",
     "detect_probe_trace": [
       {
+        "error": null,
         "scheme": "http",
-        "status": 401
-      },
-      {
-        "scheme": "http",
-        "status": 401
-      },
-      {
-        "scheme": "http",
-        "status": 401
-      },
-      {
-        "scheme": "http",
-        "status": 401
-      },
-      {
-        "scheme": "http",
-        "status": 401
+        "signal_kind": "hard_positive",
+        "signals": [
+          "security_exception_missing_auth"
+        ],
+        "status": 401,
+        "transport_error": null,
+        "vendor": "elasticsearch"
       }
     ],
     "detect_signals": [
@@ -84,6 +100,7 @@
     ],
     "discover": false,
     "discover_error": null,
+    "discover_error_detail": null,
     "discover_results": null,
     "effective_username": "elastic",
     "endpoint_diagnostics": [
@@ -301,10 +318,10 @@
     "misconfig_error": null,
     "misconfig_findings": null,
     "module": "elastic",
+    "network_attempted": true,
     "plugins_error": null,
     "port": 19201,
     "provided_credentials": false,
-    "provided_password": null,
     "provided_token": false,
     "provided_username": "elastic",
     "rights_error": null,
@@ -329,8 +346,12 @@
       }
     ],
     "status": "weak_default_creds",
-    "tls_auto_plain": true,
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
     "users": null,
-    "users_error": null
+    "users_error": null,
+    "vendor": "elasticsearch",
+    "verification_capability": "identity_endpoint_supported"
   }
 ]

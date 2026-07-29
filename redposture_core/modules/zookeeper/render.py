@@ -6,6 +6,7 @@ from __future__ import annotations
 # `_emit_line` name; flush policy is centralized rather than duplicated per module.
 from ...exporters.output import emit_line as _emit_line
 from .actions import (
+    _format_credential_attempts_records,
     _format_detect_record,
     _format_record,
     _format_znodes_detail_records,
@@ -16,6 +17,7 @@ from .actions import (
 __all__ = [
     "_nxc_prefix",
     "_emit_line",
+    "_format_credential_attempts_records",
     "_format_detect_record",
     "_format_record",
     "_format_znodes_detail_records",

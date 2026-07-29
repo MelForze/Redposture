@@ -46,7 +46,7 @@ _STAGE_DETECT_PROTOCOL = "detect_protocol"
 _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
-_PROXMOX_DEEP_STATUSES = {"token_ok", "insufficient_privileges"}
+_PROXMOX_DEEP_STATUSES = {"token_ok", "weak_default_creds", "insufficient_privileges"}
 
 _SENSITIVE_KEY_TOKENS = (
     "password",
@@ -116,6 +116,12 @@ _PROXMOX_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("root@pam", "admin"),
     ("root@pam", "password"),
     ("root@pam", "proxmox"),
+    ("root@pam", "Proxmox123"),
+    ("root@pam", "changeme"),
+    ("root@pam", "toor"),
+    ("admin@pve", "admin"),
+    ("admin@pve", "password"),
+    ("admin@pam", "admin"),
 )
 
 
@@ -683,14 +689,23 @@ def _resolve_proxmox_auth_headers(
         return _proxmox_auth_headers(token), "pveapitoken", None, None, []
 
     candidates: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_candidate(user: str, secret: str, source: str) -> None:
+        pair = (user, secret)
+        if pair in seen:
+            return
+        seen.add(pair)
+        candidates.append((user, secret, source))
+
     if username is not None and password is not None:
-        candidates.append((str(username), str(password), "provided"))
+        add_candidate(str(username), str(password), "provided")
     if defcreds:
         for user, secret in _PROXMOX_DEFAULT_CREDENTIALS:
-            if (user, secret, "defcreds") not in candidates:
-                candidates.append((user, secret, "defcreds"))
+            add_candidate(user, secret, "defcreds")
 
     attempts: list[dict[str, str]] = []
+    first_success: tuple[dict[str, str], str, str] | None = None
     for user, secret, source in candidates:
         headers, _error = _login_proxmox_password(
             host,
@@ -703,9 +718,21 @@ def _resolve_proxmox_auth_headers(
             insecure=insecure,
             proxy=proxy,
         )
-        attempts.append({"username": user, "source": source, "ok": str(headers is not None)})
-        if headers is not None:
-            return headers, "password", user, secret, attempts
+        attempts.append(
+            {
+                "username": user,
+                "password": secret,
+                "source": source,
+                "ok": str(headers is not None),
+            }
+        )
+        if headers is not None and first_success is None:
+            first_success = (dict(headers), user, secret)
+            if not defcreds:
+                break
+    if first_success is not None:
+        headers, winning_user, winning_secret = first_success
+        return headers, "password", winning_user, winning_secret, attempts
     return {}, "password", None, None, attempts or [{"username": "-", "source": "none", "ok": "False"}]
 
 
@@ -1484,13 +1511,33 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     return f"{_nxc_prefix(record)} [*] Proxmox API"
 
 
+def _proxmox_sweep_attempts(record: dict[str, Any]) -> list[dict[str, Any]]:
+    runtime_attempts = record.get("attempted_credentials")
+    if isinstance(runtime_attempts, list) and runtime_attempts:
+        return [item for item in runtime_attempts if isinstance(item, dict)]
+    internal_attempts = record.get("auth_attempts")
+    if not isinstance(internal_attempts, list) or not any(
+        isinstance(item, dict) and str(item.get("source") or "") in {"default", "defcreds"}
+        for item in internal_attempts
+    ):
+        return []
+    return [item for item in internal_attempts if isinstance(item, dict)]
+
+
 def _format_record(record: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
         return json.dumps(record, ensure_ascii=False)
 
     prefix = _nxc_prefix(record)
     status = str(record.get("status") or "fail")
-    if status == "token_ok":
+    if _proxmox_sweep_attempts(record) and status in {
+        "auth_failed",
+        "token_ok",
+        "weak_default_creds",
+        "insufficient_privileges",
+    }:
+        return ""
+    if status in {"token_ok", "weak_default_creds"}:
         if str(record.get("auth_method") or "") == "password":
             username = str(record.get("auth_username") or "-")
             password = str(record.get("auth_password") or "-")
@@ -1506,6 +1553,41 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [-] invalid pve api token"
     err = _clip(str(record.get("error") or "connection failed"), 90)
     return f"{prefix} [!] connection failed err={err}"
+
+
+def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt":
+        return []
+    attempts = _proxmox_sweep_attempts(record)
+    if not attempts:
+        return []
+    prefix = _nxc_prefix(record)
+    success_statuses = {"token_ok", "weak_default_creds", "insufficient_privileges"}
+    lines: list[str] = []
+    for attempt in attempts:
+        username = attempt.get("username")
+        password = attempt.get("password")
+        status = str(attempt.get("status") or "")
+        auth_method = str(attempt.get("auth_method") or "")
+        source = str(attempt.get("source") or "provided")
+        if auth_method in {"pveapitoken", "token"} or ("status" in attempt and username is None and password is None):
+            label = f"token (source:{source})"
+        else:
+            username_text = str(username or "-")
+            if password is None:
+                password_text = "<no-password>"
+            elif password == "":
+                password_text = "<empty>"
+            else:
+                password_text = str(password)
+            label = f"{username_text}:{password_text}"
+        if status:
+            ok = status in success_statuses
+        else:
+            ok = attempt.get("ok") is True or str(attempt.get("ok") or "").lower() == "true"
+        suffix = " (insufficient privileges)" if status == "insufficient_privileges" else ""
+        lines.append(f"{prefix} {'[+]' if ok else '[-]'} {label}{suffix}")
+    return lines
 
 
 def _format_findings_detail_records(record: dict[str, Any], output_format: str) -> list[str]:

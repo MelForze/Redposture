@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core.audit_models import AuditRecord
+from redposture_core.modules.proxmox import stage as proxmox_module_stage
 from redposture_core.network_proxy import ProxyConfig
 from redposture_core.stage_proxmox import (
     _PROXMOX_DEFAULT_CREDENTIALS,
@@ -27,6 +28,7 @@ from redposture_core.stage_proxmox import (
     _derive_permission_caps,
     _extract_error_message,
     _format_add_user_detail_records,
+    _format_credential_attempts_records,
     _format_discovered_urls_detail_records,
     _format_findings_detail_records,
     _format_nodes_detail_records,
@@ -244,7 +246,7 @@ def test_proxmox_lifecycle_two_candidates_login_each_but_run_data_only_for_selec
     assert [call["path"] for call in calls].count("/access") == 2
     assert [call["path"] for call in calls].count("/access/permissions?path=/") == 1
     assert [call["path"] for call in calls].count("/nodes") == 1
-    assert records[0]["status"] == "token_ok"
+    assert records[0]["status"] == ("weak_default_creds" if source == "default" else "token_ok")
     assert [item["username"] for item in records[0]["auth_attempts"]] == ["first@pam", "second@pam"]
 
 
@@ -303,28 +305,113 @@ def test_proxmox_default_credentials_are_exact() -> None:
         ("root@pam", "admin"),
         ("root@pam", "password"),
         ("root@pam", "proxmox"),
+        ("root@pam", "Proxmox123"),
+        ("root@pam", "changeme"),
+        ("root@pam", "toor"),
+        ("admin@pve", "admin"),
+        ("admin@pve", "password"),
+        ("admin@pam", "admin"),
     )
+
+
+def test_proxmox_credential_order_is_token_file_then_defaults(tmp_path) -> None:
+    credentials = tmp_path / "proxmox-creds.txt"
+    credentials.write_text("file@pam:file-pass\nroot@pam:root\n", encoding="utf-8")
+    args = _proxmox_lifecycle_args(
+        pve_api_token="audit@pve!scan=token-secret",
+        username=str(credentials),
+        defcreds=True,
+    )
+
+    proxmox_module_stage._prepare_proxmox_credential_runs(args)
+
+    assert [(run.token, run.username, run.password, run.source) for run in args._audit_credential_runs] == [
+        ("audit@pve!scan=token-secret", None, None, "provided"),
+        (None, "file@pam", "file-pass", "file"),
+        (None, "root@pam", "root", "file"),
+        *[
+            (None, username, password, "default")
+            for username, password in _PROXMOX_DEFAULT_CREDENTIALS
+            if (username, password) != ("root@pam", "root")
+        ],
+    ]
+
+
+def test_proxmox_invalid_token_falls_back_to_basic_without_disclosure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        _retries: int,
+        **kwargs: object,
+    ):
+        auth_headers = dict(kwargs.get("auth_headers") or {})
+        form = dict(kwargs.get("form") or {})
+        auth_kind = (
+            "token" if "Authorization" in auth_headers else "ticket" if "Cookie" in auth_headers else "anonymous"
+        )
+        calls.append((path, auth_kind))
+        if path == "/access" and auth_kind == "anonymous":
+            return 401, _json_payload({"message": "authentication required"}), {}, None
+        if path == "/access" and auth_kind == "token":
+            return 401, _json_payload({"message": "invalid api token"}), {}, None
+        if path == "/access/ticket":
+            assert form == {"username": "root@pam", "password": "good"}
+            return 200, _json_payload({"ticket": "PVE:ticket", "CSRFPreventionToken": "csrf"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"/": {"Sys.Audit": 1}}), {}, None
+        if path == "/nodes":
+            return 200, _json_payload([{"node": "pve-a"}]), {}, None
+        return 200, _json_payload({}), {}, None
+
+    monkeypatch.setattr("redposture_core.modules.proxmox.actions._proxmox_request", fake_request)
+    args = _proxmox_lifecycle_args(
+        pve_api_token="audit@pve!scan=bad-token-value",
+        username="root@pam",
+        password="good",
+        defcreds=False,
+    )
+    proxmox_module_stage._prepare_proxmox_credential_runs(args)
+
+    records = _run_proxmox_lifecycle(args, args._audit_credential_runs)
+
+    assert records[0]["status"] == "token_ok"
+    assert records[0]["auth_method"] == "password"
+    assert records[0]["auth_username"] == "root@pam"
+    assert "bad-token-value" not in json.dumps(records[0], ensure_ascii=False)
+    assert calls[:4] == [
+        ("/access", "anonymous"),
+        ("/access", "token"),
+        ("/access/ticket", "anonymous"),
+        ("/access", "ticket"),
+    ]
 
 
 def test_proxmox_password_auth_failed_render_mentions_attempts_not_token() -> None:
-    line = _format_record(
-        {
-            "host": "127.0.0.1",
-            "port": 8006,
-            "status": "auth_failed",
-            "auth_method": "password",
-            "auth_attempts": [
-                {"username": "root@pam", "source": "defcreds", "ok": "False"},
-                {"username": "root@pam", "source": "defcreds", "ok": "False"},
-                {"username": "audit@pve", "source": "provided", "ok": "False"},
-            ],
-        },
-        "txt",
-    )
-    assert "password authentication failed" in line
-    assert "attempts=3" in line
-    assert "users=root@pam,audit@pve" in line
-    assert "invalid pve api token" not in line
+    record = {
+        "host": "127.0.0.1",
+        "port": 8006,
+        "status": "auth_failed",
+        "auth_method": "password",
+        "auth_attempts": [
+            {"username": "root@pam", "password": "root", "source": "defcreds", "ok": "False"},
+            {"username": "root@pam", "password": "admin", "source": "defcreds", "ok": "False"},
+            {"username": "audit@pve", "password": "audit", "source": "provided", "ok": "False"},
+        ],
+    }
+    assert _format_record(record, "txt") == ""
+    lines = _format_credential_attempts_records(record, "txt")
+    assert lines == [
+        "PROXMOX \t127.0.0.1\t8006\t [-] root@pam:root",
+        "PROXMOX \t127.0.0.1\t8006\t [-] root@pam:admin",
+        "PROXMOX \t127.0.0.1\t8006\t [-] audit@pve:audit",
+    ]
+    assert "invalid pve api token" not in "\n".join(lines)
 
 
 def test_proxmox_token_auth_failed_render_still_mentions_invalid_token() -> None:
@@ -343,19 +430,17 @@ def test_proxmox_token_auth_failed_render_still_mentions_invalid_token() -> None
 
 
 def test_proxmox_insufficient_privileges_with_password_auth_is_not_password_failure() -> None:
-    line = _format_record(
-        {
-            "host": "127.0.0.1",
-            "port": 8006,
-            "status": "insufficient_privileges",
-            "auth_method": "password",
-            "auth_attempts": [{"username": "root@pam", "source": "defcreds", "ok": "True"}],
-        },
-        "txt",
-    )
-
-    assert "token valid but insufficient privileges" in line
-    assert "password authentication failed" not in line
+    record = {
+        "host": "127.0.0.1",
+        "port": 8006,
+        "status": "insufficient_privileges",
+        "auth_method": "password",
+        "auth_attempts": [{"username": "root@pam", "password": "root", "source": "defcreds", "ok": "True"}],
+    }
+    assert _format_record(record, "txt") == ""
+    lines = _format_credential_attempts_records(record, "txt")
+    assert lines == ["PROXMOX \t127.0.0.1\t8006\t [+] root@pam:root"]
+    assert "password authentication failed" not in "\n".join(lines)
 
 
 def test_audit_proxmox_defcreds_all_fail_keeps_auth_attempts_and_password_render(monkeypatch) -> None:
@@ -403,15 +488,16 @@ def test_audit_proxmox_defcreds_all_fail_keeps_auth_attempts_and_password_render
     assert record["status"] == "auth_failed"
     assert record["auth_method"] == "password"
     assert record["auth_attempts"] == [
-        {"username": "root@pam", "source": "defcreds", "ok": "False"},
-        {"username": "root@pam", "source": "defcreds", "ok": "False"},
-        {"username": "root@pam", "source": "defcreds", "ok": "False"},
-        {"username": "root@pam", "source": "defcreds", "ok": "False"},
+        {"username": username, "password": password, "source": "defcreds", "ok": "False"}
+        for username, password in _PROXMOX_DEFAULT_CREDENTIALS
     ]
     assert json.loads(_format_record(record, "json"))["auth_attempts"] == record["auth_attempts"]
-    line = _format_record(record, "txt")
-    assert "password authentication failed attempts=4 users=root@pam" in line
-    assert "invalid pve api token" not in line
+    assert _format_record(record, "txt") == ""
+    lines = _format_credential_attempts_records(record, "txt")
+    assert len(lines) == len(_PROXMOX_DEFAULT_CREDENTIALS)
+    for username, password in _PROXMOX_DEFAULT_CREDENTIALS:
+        assert sum(f"[-] {username}:{password}" in line for line in lines) == 1
+    assert "invalid pve api token" not in "\n".join(lines)
 
 
 def test_audit_proxmox_defcreds_login_transport_error_is_not_token_failure(monkeypatch) -> None:
@@ -1743,10 +1829,15 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
         for call in calls
         if not call["pve_api_token"] and call["run_deep_checks"] is False
     ] == [("host-http", False), ("host-https", True)]
-    assert all(not call["pve_api_token"] for call in calls[:2])
     assert {
         (call["host"], call["use_https"]) for call in calls if call["pve_api_token"] == "monitor@pve!audit=token"
     } == {("host-http", False), ("host-https", True)}
+    for host in ("host-http", "host-https"):
+        host_calls = [call for call in calls if call["host"] == host]
+        assert not host_calls[0]["pve_api_token"]
+        assert host_calls[0]["run_deep_checks"] is False
+        assert host_calls[1]["pve_api_token"] == "monitor@pve!audit=token"
+        assert host_calls[1]["run_deep_checks"] is True
     assert any("proxmox audit started:" in item for item in fake_console.infos)
 
 
@@ -1788,11 +1879,14 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:
     )
 
     calls: list[dict[str, object]] = []
+    retained: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
         calls.append(dict(kwargs))
         status = "token_ok" if kwargs.get("username") else "auth_failed"
-        return _proxmox_stage_record(kwargs, status=status)
+        record = _proxmox_stage_record(kwargs, status=status)
+        record.extra["winner_marker"] = kwargs.get("password")
+        return record
 
     patch_module_host_stage_for_test(monkeypatch, "proxmox", fake_audit_targets)
 
@@ -1821,6 +1915,7 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:
         add_user="",
         https=True,
         insecure=True,
+        _record_callback=lambda record: retained.append(record),
     )
 
     rc = run_proxmox_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
@@ -1830,7 +1925,18 @@ def test_run_proxmox_stage_username_password_and_defcreds(monkeypatch) -> None:
     assert [(call["username"], call["password"], call["defcreds"], call["run_deep_checks"]) for call in calls] == [
         (None, None, False, False),
         ("root@pam", "proxmox", False, True),
+        *[
+            (username, password, False, True)
+            for username, password in _PROXMOX_DEFAULT_CREDENTIALS
+            if (username, password) != ("root@pam", "proxmox")
+        ],
     ]
+    assert len(retained) == 1
+    assert retained[0]["status"] == "token_ok"
+    assert retained[0]["winner_marker"] == "proxmox"
+    attempts = retained[0]["attempted_credentials"]
+    assert isinstance(attempts, list)
+    assert len(attempts) == len(_PROXMOX_DEFAULT_CREDENTIALS)
 
 
 def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatch) -> None:

@@ -5,6 +5,7 @@ import io
 import json
 import ssl
 import urllib.error
+import urllib.request
 import zlib
 from types import SimpleNamespace
 
@@ -84,11 +85,29 @@ def test_elastic_default_credential_runs_are_exact_and_deduplicated() -> None:
         ("elastic", "changeme"),
         ("elastic", "elastic"),
         ("elastic", "password"),
+        ("admin", "admin"),
+        ("admin", "password"),
+        ("admin", "changeme"),
+        ("opensearch", "opensearch"),
+        ("opensearch", "password"),
+        ("kibana", "kibana"),
+        ("kibana", "changeme"),
+        ("logstash", "logstash"),
+        ("logstash_system", "changeme"),
     ]
     assert elastic_stage._build_credential_runs("elastic", "elastic", True) == [
         ("elastic", "elastic"),
         ("elastic", "changeme"),
         ("elastic", "password"),
+        ("admin", "admin"),
+        ("admin", "password"),
+        ("admin", "changeme"),
+        ("opensearch", "opensearch"),
+        ("opensearch", "password"),
+        ("kibana", "kibana"),
+        ("kibana", "changeme"),
+        ("logstash", "logstash"),
+        ("logstash_system", "changeme"),
     ]
     assert elastic_stage._build_credential_runs(None, None, False) == [(None, None)]
 
@@ -264,7 +283,7 @@ def test_request_with_tls_fallback_switches_to_http(monkeypatch: pytest.MonkeyPa
     assert tls_auto_plain is True
 
 
-def test_request_with_tls_fallback_retries_http_on_non_tls_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_request_with_tls_fallback_skips_alternate_scheme_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[bool] = []
 
     def fake_request(
@@ -296,12 +315,12 @@ def test_request_with_tls_fallback_retries_http_on_non_tls_error(monkeypatch: py
         ca_file=None,
     )
 
-    assert calls == [True, False]
-    assert status == 200
-    assert error is None
-    assert scheme == "http"
-    assert effective_insecure is False
-    assert tls_auto_plain is True
+    assert calls == [True]
+    assert status == 0
+    assert error == "https=connection timeout"
+    assert scheme == "https"
+    assert effective_insecure is True
+    assert tls_auto_plain is False
 
 
 def test_request_with_tls_fallback_double_fail_has_combined_errors(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -508,34 +527,22 @@ def test_fetch_cat_endpoints_collects_cat_and_common_2xx_only(monkeypatch: pytes
     assert any(item.get("endpoint") == "/_ingest/pipeline" for item in diagnostics)
 
 
-def test_search_index_builds_query_and_returns_full_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured: dict[str, object] = {}
-
-    def fake_request(
-        host: str,
-        port: int,
-        path: str,
-        timeout: float,
-        *,
-        use_https: bool,
-        insecure: bool,
-        ca_file: str | None,
-        method: str = "GET",
-        headers: dict[str, str] | None = None,
-        data: bytes | None = None,
-    ) -> tuple[int, bytes, dict[str, str], str | None]:
-        _ = (host, port, timeout, use_https, insecure, ca_file, headers)
-        captured["path"] = path
-        captured["method"] = method
-        captured["body"] = json.loads((data or b"{}").decode("utf-8"))
-        return (
-            200,
-            b'{"hits":{"total":{"value":250},"hits":[{"_id":"1","_source":{"password":"secret"}}]}}',
-            {},
-            None,
-        )
-
-    monkeypatch.setattr(elastic_stage, "_elastic_request", fake_request)
+def test_search_index_tuple_adapter_returns_v2_candidate_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    expected = {
+        "index": ".security",
+        "total_hits": 250,
+        "hits": [{"index": ".security", "id": "1", "source": {"password": "secret"}}],
+        "error": None,
+    }
+    monkeypatch.setattr(
+        elastic_stage,
+        "_collect_discover_report",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            legacy_results=[expected],
+            error=None,
+            error_detail=None,
+        ),
+    )
 
     total_hits, hits, error = _search_index(
         "127.0.0.1",
@@ -552,21 +559,6 @@ def test_search_index_builds_query_and_returns_full_source(monkeypatch: pytest.M
     assert error is None
     assert total_hits == 250
     assert hits == [{"index": ".security", "id": "1", "source": {"password": "secret"}}]
-    assert str(captured["path"]).startswith("/.security/_search?size=200&expand_wildcards=open")
-    assert captured["method"] == "POST"
-    assert captured["body"] == {
-        "size": 200,
-        "track_total_hits": True,
-        "query": {
-            "simple_query_string": {
-                "query": "password OR secret",
-                "fields": ["*"],
-                "default_operator": "OR",
-                "analyze_wildcard": True,
-                "lenient": True,
-            }
-        },
-    }
 
 
 def test_audit_elastic_host_status_matrix(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -626,7 +618,7 @@ def test_audit_elastic_host_status_matrix(monkeypatch: pytest.MonkeyPatch) -> No
     assert record["auth_required"] is True
 
 
-def test_audit_elastic_host_runs_extended_detect_pass_on_ambiguous_result(
+def test_audit_elastic_host_does_not_replay_deterministic_ambiguous_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -682,12 +674,13 @@ def test_audit_elastic_host_runs_extended_detect_pass_on_ambiguous_result(
         discover=False,
     )
 
-    assert record["is_elastic"] is True
-    assert record["status"] == "open_no_auth"
-    assert record["detect_confidence"] == "medium"
+    assert record["is_elastic"] is False
+    assert record["status"] == "not_elastic"
+    assert record["detect_confidence"] == "low"
     assert isinstance(record["detect_probe_trace"], list)
-    assert len(record["detect_probe_trace"]) == 11
-    assert 2.5 in [timeout for _path, timeout in calls]
+    assert len(record["detect_probe_trace"]) == 6
+    assert len(calls) == 5
+    assert {timeout for _path, timeout in calls} == {1.0}
 
 
 def test_audit_elastic_host_skips_extended_detect_pass_on_high_confidence(
@@ -742,16 +735,17 @@ def test_audit_elastic_host_skips_extended_detect_pass_on_high_confidence(
 
     assert record["is_elastic"] is True
     assert record["detect_confidence"] == "high"
-    assert len(calls) == 5
-    assert all(timeout == 1.0 for _path, timeout in calls)
+    assert calls == []
 
 
-def test_audit_elastic_host_rechecks_http_when_https_looks_non_elastic(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_elastic_host_does_not_switch_scheme_after_valid_http_response(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         elastic_stage,
         "_request_with_tls_fallback",
         lambda *_args, **_kwargs: (200, b"<html>proxy</html>", {}, None, "https", True, False),
     )
+
+    schemes: list[bool] = []
 
     def fake_request(
         host: str,
@@ -767,6 +761,7 @@ def test_audit_elastic_host_rechecks_http_when_https_looks_non_elastic(monkeypat
         data: bytes | None = None,
     ) -> tuple[int, bytes, dict[str, str], str | None]:
         _ = (host, port, path, timeout, insecure, ca_file, method, headers, data)
+        schemes.append(use_https)
         if use_https:
             return 200, b"<html>proxy</html>", {}, None
         return (
@@ -794,14 +789,17 @@ def test_audit_elastic_host_rechecks_http_when_https_looks_non_elastic(monkeypat
         discover=False,
     )
 
-    assert record["status"] == "open_no_auth"
-    assert record["is_elastic"] is True
-    assert record["scheme"] == "http"
-    assert record["tls_auto_plain"] is True
-    assert record["server_version"] == "8.17.3"
+    assert record["status"] == "not_elastic"
+    assert record["is_elastic"] is False
+    assert record["scheme"] == "https"
+    assert record["tls_auto_plain"] is False
+    assert record["server_version"] is None
+    assert schemes and all(schemes)
 
 
-def test_audit_elastic_host_resolves_version_with_authenticated_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_elastic_host_does_not_run_cosmetic_authenticated_version_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         elastic_stage,
         "_request_with_tls_fallback",
@@ -827,9 +825,21 @@ def test_audit_elastic_host_resolves_version_with_authenticated_probe(monkeypatc
             detail=None,
         ),
     )
-    monkeypatch.setattr(elastic_stage, "_resolve_server_version_with_auth", lambda *_args, **_kwargs: ("8.13.4", None))
-    monkeypatch.setattr(elastic_stage, "_verify_api_key_probe", lambda *_args, **_kwargs: ("ok", None))
-    monkeypatch.setattr(elastic_stage, "_check_privileges", lambda *_args, **_kwargs: (True, False, False, False, None))
+    monkeypatch.setattr(
+        elastic_stage,
+        "_resolve_server_version_with_auth",
+        lambda *_args, **_kwargs: pytest.fail("cosmetic version probe must not run"),
+    )
+    monkeypatch.setattr(
+        elastic_stage,
+        "_verify_api_key_probe",
+        lambda *_args, **_kwargs: pytest.fail("credential-only mode must not probe API-key capabilities"),
+    )
+    monkeypatch.setattr(
+        elastic_stage,
+        "_check_privileges",
+        lambda *_args, **_kwargs: pytest.fail("credential-only mode must not probe privileges"),
+    )
 
     record = _audit_elastic_host(
         "127.0.0.1",
@@ -848,12 +858,12 @@ def test_audit_elastic_host_resolves_version_with_authenticated_probe(monkeypatc
     )
 
     assert record["status"] == "valid_credentials"
-    assert record["server_version"] == "8.13.4"
-    assert record["api_key_probe_status"] == "ok"
+    assert record["server_version"] is None
+    assert record["api_key_probe_status"] == "not_run"
     assert record["api_key_probe_error"] is None
 
 
-def test_audit_elastic_host_auth_required_resolves_version_without_auth_probe(
+def test_audit_elastic_host_auth_required_keeps_unknown_version_without_extra_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -873,7 +883,9 @@ def test_audit_elastic_host_auth_required_resolves_version_without_auth_probe(
         elastic_stage, "_request_detect_probe", lambda *_args, **_kwargs: (401, b"{}", {}, None, "https")
     )
     monkeypatch.setattr(
-        elastic_stage, "_resolve_server_version_without_auth", lambda *_args, **_kwargs: ("8.17.3", None)
+        elastic_stage,
+        "_resolve_server_version_without_auth",
+        lambda *_args, **_kwargs: pytest.fail("cosmetic version probe must not run"),
     )
 
     record = _audit_elastic_host(
@@ -893,7 +905,7 @@ def test_audit_elastic_host_auth_required_resolves_version_without_auth_probe(
     )
 
     assert record["status"] == "auth_required"
-    assert record["server_version"] == "8.17.3"
+    assert record["server_version"] is None
 
 
 def test_audit_elastic_host_uses_root_status_for_auth_required_and_hides_version_probe_error(
@@ -934,7 +946,11 @@ def test_audit_elastic_host_uses_root_status_for_auth_required_and_hides_version
         return 404, b"{}", {"Content-Type": "application/json"}, None, "https"
 
     monkeypatch.setattr(elastic_stage, "_request_detect_probe", fake_detect_probe)
-    monkeypatch.setattr(elastic_stage, "_resolve_server_version_without_auth", lambda *_args, **_kwargs: (None, "x"))
+    monkeypatch.setattr(
+        elastic_stage,
+        "_resolve_server_version_without_auth",
+        lambda *_args, **_kwargs: pytest.fail("cosmetic version probe must not run"),
+    )
 
     record = _audit_elastic_host(
         "127.0.0.1",
@@ -1366,7 +1382,7 @@ def test_run_elastic_stage_validation_and_apikey_precedence(monkeypatch: pytest.
     assert rc == 0
     assert [(call["username"], call["password"], call["api_token"], call["run_deep_checks"]) for call in captured] == [
         (None, None, None, False),
-        (None, None, "ZXM6bGFiLXRva2Vu", True),
+        *[(run.username, run.password, run.token, True) for run in elastic_stage._build_elastic_credential_runs(args)],
     ]
     assert all(call["show_plugins"] is False for call in captured)
 
@@ -1431,6 +1447,15 @@ def test_run_elastic_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Mo
         ("elastic", "changeme", True),
         ("elastic", "elastic", True),
         ("elastic", "password", True),
+        ("admin", "admin", True),
+        ("admin", "password", True),
+        ("admin", "changeme", True),
+        ("opensearch", "opensearch", True),
+        ("opensearch", "password", True),
+        ("kibana", "kibana", True),
+        ("kibana", "changeme", True),
+        ("logstash", "logstash", True),
+        ("logstash_system", "changeme", True),
     ]
 
 
@@ -1840,8 +1865,8 @@ def test_audit_elastic_targets_two_pass_gate_and_debug_markers(monkeypatch: pyte
     assert totals == (2, 1, 0, 1, 0)
     assert calls == [
         ("10.0.0.1", False),
-        ("10.0.0.2", False),
         ("10.0.0.1", True),
+        ("10.0.0.2", False),
     ]
     assert any("pass=1 detect start total=2" in line for line in debug_lines)
     assert any("pass=2 deep start total=1" in line for line in debug_lines)
@@ -2095,7 +2120,7 @@ def test_elastic_request_http_error_and_exception_paths(monkeypatch: pytest.Monk
                 raise http_error
             raise urllib.error.URLError(OSError("[Errno 111] Connection refused"))
 
-    monkeypatch.setattr(elastic_stage.urllib.request, "urlopen", _UrlOpen("http_error"))
+    monkeypatch.setattr(urllib.request, "urlopen", _UrlOpen("http_error"))
     status, payload, headers, error = elastic_stage._elastic_request(
         "127.0.0.1",
         9200,
@@ -2111,7 +2136,7 @@ def test_elastic_request_http_error_and_exception_paths(monkeypatch: pytest.Monk
     assert error is None
     http_error.close()
 
-    monkeypatch.setattr(elastic_stage.urllib.request, "urlopen", _UrlOpen("url_error"))
+    monkeypatch.setattr(urllib.request, "urlopen", _UrlOpen("url_error"))
     status, payload, headers, error = elastic_stage._elastic_request(
         "127.0.0.1",
         9200,

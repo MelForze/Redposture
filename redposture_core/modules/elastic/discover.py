@@ -103,6 +103,11 @@ _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _JWT_RE = re.compile(
     r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,}){0,2})(?![A-Za-z0-9_-])"
 )
+_JWE_RE = re.compile(
+    r"(?<![A-Za-z0-9_-])"
+    r"([A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})"
+    r"(?![A-Za-z0-9_-])"
+)
 _AWS_ACCESS_RE = re.compile(r"(?<![A-Z0-9])((?:AKIA|ASIA)[A-Z0-9]{16})(?![A-Z0-9])")
 _AWS_SECRET_RE = re.compile(r"[A-Za-z0-9/+=]{40}")
 _GOOGLE_API_RE = re.compile(r"(?<![A-Za-z0-9_-])(AIza[A-Za-z0-9_-]{35})(?![A-Za-z0-9_-])")
@@ -768,15 +773,26 @@ def _decode_base64url_json(value: str) -> Mapping[str, Any] | None:
 
 def _validated_jwt(value: str) -> bool:
     parts = value.split(".")
-    if len(parts) not in {3, 5}:
+    if len(parts) != 3:
         return False
     header = _decode_base64url_json(parts[0])
     if header is None or not isinstance(header.get("alg"), str):
         return False
-    if len(parts) == 5:
-        return all(bool(part) for part in parts)
     payload = _decode_base64url_json(parts[1])
     return payload is not None and bool(parts[2])
+
+
+def _validated_jwe(value: str) -> bool:
+    parts = value.split(".")
+    if len(parts) != 5:
+        return False
+    header = _decode_base64url_json(parts[0])
+    return (
+        header is not None
+        and isinstance(header.get("alg"), str)
+        and isinstance(header.get("enc"), str)
+        and all(bool(parts[offset]) for offset in (2, 3, 4))
+    )
 
 
 def analyze_value(
@@ -784,6 +800,7 @@ def analyze_value(
     *,
     path: str = "",
     field_classification: FieldClass | None = None,
+    allow_base64: bool = True,
 ) -> list[DetectedSecret]:
     """Analyze one scalar and return confidence-scored secret candidates."""
 
@@ -806,6 +823,10 @@ def analyze_value(
     detections: list[DetectedSecret] = []
     for match in _PRIVATE_KEY_RE.finditer(text):
         detections.append(_candidate(match.group(0), "private_key", 100, "private_key_pem"))
+    for match in _JWE_RE.finditer(text):
+        token = match.group(1)
+        if _validated_jwe(token):
+            detections.append(_candidate(token, "jwe", 95, "jwe_structure"))
     for match in _JWT_RE.finditer(text):
         token = match.group(1)
         if _validated_jwt(token):
@@ -905,7 +926,7 @@ def analyze_value(
             "dockerconfigjson",
             "client_key_data",
         )
-        if normalized.endswith(base64_contexts):
+        if allow_base64 and normalized.endswith(base64_contexts):
             decoded = _decode_credential_base64(stripped)
             if decoded:
                 if ":" in decoded:
@@ -1022,7 +1043,7 @@ def scan_value_tree(
         if reason not in result.truncated_reasons:
             result.truncated_reasons.append(reason)
 
-    def walk(current: Any, pointer: str, depth: int, key_hint: str) -> None:
+    def walk(current: Any, pointer: str, depth: int, key_hint: str, base64_decoded: bool = False) -> None:
         if depth > effective_options.max_depth:
             add_reason("max_depth")
             return
@@ -1094,13 +1115,19 @@ def scan_value_tree(
             for raw_key, child in current.items():
                 key = str(raw_key)
                 child_hint = f"{key_hint}.{key}" if key_hint else key
-                walk(child, f"{pointer}/{_json_pointer_escape(key)}", depth + 1, child_hint)
+                walk(
+                    child,
+                    f"{pointer}/{_json_pointer_escape(key)}",
+                    depth + 1,
+                    child_hint,
+                    base64_decoded,
+                )
             return
         if isinstance(current, (list, tuple)):
             if len(current) > effective_options.max_array_items:
                 add_reason("max_array_items")
             for offset, child in enumerate(current[: effective_options.max_array_items]):
-                walk(child, f"{pointer}/{offset}", depth + 1, key_hint)
+                walk(child, f"{pointer}/{offset}", depth + 1, key_hint, base64_decoded)
             return
         if isinstance(current, (bytes, bytearray)):
             scalar_text = bytes(current).decode("utf-8", errors="replace")
@@ -1108,10 +1135,11 @@ def scan_value_tree(
             scalar_text = str(current)
         else:
             return
-        scalar_size = len(scalar_text.encode("utf-8", errors="replace"))
+        scalar_bytes = scalar_text.encode("utf-8", errors="replace")
+        scalar_size = len(scalar_bytes)
         if scalar_size > effective_options.max_scalar_bytes:
             add_reason("max_scalar_bytes")
-            scalar_text = scalar_text[: effective_options.max_scalar_bytes]
+            scalar_text = scalar_bytes[: effective_options.max_scalar_bytes].decode("utf-8", errors="ignore")
         location = FindingLocation(
             source_kind=source_kind,
             object=object_name,
@@ -1124,12 +1152,27 @@ def scan_value_tree(
             scalar_text,
             path=classification_path,
             field_classification=classify_field(classification_path),
+            allow_base64=not base64_decoded,
         )
+        decoded_json: dict[str, Any] | list[Any] | None = None
+        if not base64_decoded and classify_field(classification_path) in {"strong", "medium"}:
+            decoded = _decode_credential_base64(scalar_text)
+            if decoded and len(decoded.encode("utf-8")) <= effective_options.max_embedded_json_bytes:
+                try:
+                    parsed_decoded = json.loads(decoded)
+                except (TypeError, ValueError):
+                    parsed_decoded = None
+                if isinstance(parsed_decoded, (dict, list)):
+                    decoded_json = parsed_decoded
         for detection in detections:
+            if decoded_json is not None and detection.secret_type == "encoded_credentials":
+                continue
             if detection.available:
                 result.detections.append((detection, location))
             else:
                 result.suppressed_indicators += 1
+        if decoded_json is not None and depth < effective_options.max_depth:
+            walk(decoded_json, pointer, depth + 1, key_hint, True)
         stripped = scalar_text.lstrip()
         if (
             stripped.startswith(("{", "["))
@@ -1141,7 +1184,7 @@ def scan_value_tree(
             except (TypeError, ValueError):
                 return
             if isinstance(embedded, (dict, list)):
-                walk(embedded, pointer, depth + 1, key_hint)
+                walk(embedded, pointer, depth + 1, key_hint, base64_decoded)
 
     walk(value, path, 0, "")
     return result

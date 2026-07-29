@@ -2365,17 +2365,25 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     status = str(record.get("status") or "fail")
     prefix = _nxc_prefix(record)
     err = _clip(str(record.get("error") or "-"), 72)
+    attempted_credentials = record.get("attempted_credentials")
+    has_attempt_details = isinstance(attempted_credentials, list) and len(attempted_credentials) > 1
 
     if status == "open_no_auth":
         return ""
 
     if status == "invalid_credentials_anonymous":
+        if has_attempt_details:
+            return ""
         return f"{prefix} [-] {_credentials_label(record)}"
 
-    if status == "valid_credentials":
+    if status in {"valid_credentials", "weak_default_creds"}:
+        if has_attempt_details:
+            return ""
         return _with_optional_znodes(record, f"{prefix} [+] {_credentials_label(record)} {_znode_caps_suffix(record)}")
 
     if status == "auth_required":
+        if has_attempt_details:
+            return ""
         if record.get("provided_credentials"):
             return f"{prefix} [-] {_credentials_label(record)}"
         if record.get("auth_inference_source") in {
@@ -2392,6 +2400,39 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if err != "-":
         return f"{line} err={err}"
     return line
+
+
+def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+    attempts = record.get("attempted_credentials")
+    if output_format == "json" or not isinstance(attempts, list) or len(attempts) < 2:
+        return []
+
+    prefix = _nxc_prefix(record)
+    selected_success_rendered = False
+    lines: list[str] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        username = str(attempt.get("username") or "user")
+        password = attempt.get("password")
+        if password is None:
+            password_text = "<no-password>"
+        elif password == "":
+            password_text = "<empty>"
+        else:
+            password_text = str(password)
+        verified = attempt.get("provided_credentials_ok") is True
+        status = str(attempt.get("status") or "")
+        accepted = verified or status in {"valid_credentials", "weak_default_creds"}
+        if not accepted:
+            lines.append(f"{prefix} [-] {username}:{password_text}")
+            continue
+        suffix = ""
+        if not selected_success_rendered:
+            suffix = f" {_znode_caps_suffix(record)}"
+            selected_success_rendered = True
+        lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
+    return lines
 
 
 def _format_znodes_detail_records(record: dict[str, Any], output_format: str) -> list[str]:

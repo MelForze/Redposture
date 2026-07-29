@@ -292,20 +292,22 @@ def test_kafka_error_helpers_and_format_record_statuses() -> None:
         {**base, "status": "valid_credentials", "provided_username": "alice", "provided_password": ""},
         "txt",
     )
-    assert "[-] authentication required attempts=2 users=admin,kafka" in kafka._format_record(
-        {
-            **base,
-            "status": "auth_required",
-            "provided_credentials": True,
-            "provided_username": "kafka",
-            "provided_password": "password",
-            "attempted_credentials": [
-                {"username": "admin", "password": "admin", "source": "default", "status": "auth_required"},
-                {"username": "kafka", "password": "password", "source": "default", "status": "auth_required"},
-            ],
-        },
-        "txt",
-    )
+    sweep_record = {
+        **base,
+        "status": "auth_required",
+        "provided_credentials": True,
+        "provided_username": "kafka",
+        "provided_password": "password",
+        "attempted_credentials": [
+            {"username": "admin", "password": "admin", "source": "default", "status": "auth_required"},
+            {"username": "kafka", "password": "password", "source": "default", "status": "auth_required"},
+        ],
+    }
+    assert kafka._format_record(sweep_record, "txt") == ""
+    assert kafka._format_credential_attempts_records(sweep_record, "txt") == [
+        "KAFKA   \t127.0.0.1\t9092\t [-] admin:admin",
+        "KAFKA   \t127.0.0.1\t9092\t [-] kafka:password",
+    ]
     assert "[-] authentication required" in kafka._format_record({**base, "status": "auth_required"}, "txt")
     assert "[!] auth status unknown err=weird" in kafka._format_record(
         {**base, "status": "unknown_auth", "error": "weird"},
@@ -319,11 +321,39 @@ def test_kafka_default_credential_runs_are_exact_and_deduplicated() -> None:
         ("admin", "admin"),
         ("kafka", "kafka"),
         ("kafka", "password"),
+        ("admin", "password"),
+        ("admin", "kafka"),
+        ("admin", "admin-secret"),
+        ("kafka", "admin"),
+        ("kafka", "changeme"),
+        ("broker", "broker"),
+        ("broker", "brokerpass"),
+        ("user", "user"),
+        ("user", "password"),
+        ("client", "client"),
+        ("service", "service"),
+        ("admin", "changeme"),
+        ("service", "password"),
+        ("kafka", "zookeeper"),
     ]
     assert kafka._build_credential_runs("kafka", "kafka", True) == [
         ("kafka", "kafka"),
         ("admin", "admin"),
         ("kafka", "password"),
+        ("admin", "password"),
+        ("admin", "kafka"),
+        ("admin", "admin-secret"),
+        ("kafka", "admin"),
+        ("kafka", "changeme"),
+        ("broker", "broker"),
+        ("broker", "brokerpass"),
+        ("user", "user"),
+        ("user", "password"),
+        ("client", "client"),
+        ("service", "service"),
+        ("admin", "changeme"),
+        ("service", "password"),
+        ("kafka", "zookeeper"),
     ]
     assert kafka._build_credential_runs(None, None, False) == [(None, None)]
 
@@ -361,11 +391,22 @@ def test_run_kafka_stage_defcreds_keeps_no_auth_result_as_anonymous(monkeypatch:
         return payload
 
     monkeypatch.setattr(kafka_actions, "detect_kafka", fake_detect)
-    monkeypatch.setattr(
-        kafka_actions,
-        "authenticate_kafka",
-        lambda *_args, **_kwargs: pytest.fail("anonymous-open detect must skip default credentials"),
-    )
+
+    def fake_auth(ctx, record, _options) -> dict[str, object]:
+        calls.append((ctx.credential.username, ctx.credential.password, False))
+        payload = record.to_dict()
+        payload.update(
+            {
+                "status": "invalid_credentials_anonymous",
+                "provided_credentials": True,
+                "provided_username": ctx.credential.username,
+                "provided_password": ctx.credential.password,
+                "provided_credentials_ok": False,
+            }
+        )
+        return payload
+
+    monkeypatch.setattr(kafka_actions, "authenticate_kafka", fake_auth)
     monkeypatch.setattr(kafka_actions, "collect_kafka_data", fake_data)
 
     rc = kafka.run_kafka_stage(_kafka_args(defcreds=True, show_topics=True), logger=object())
@@ -374,9 +415,14 @@ def test_run_kafka_stage_defcreds_keeps_no_auth_result_as_anonymous(monkeypatch:
     plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
     assert any("Kafka Broker (auth required:False)" in msg for msg in plains)
     assert not any("[+] anonymous access" in msg for msg in plains)
-    assert not any("[-] kafka:password" in msg for msg in plains)
-    assert not any("[-] admin:admin" in msg for msg in plains)
-    assert calls == [(None, None, False), (None, None, True)]
+    expected_pairs = list(kafka._KAFKA_DEFAULT_CREDENTIALS)
+    for username, password in expected_pairs:
+        assert sum(msg.endswith(f"[-] {username}:{password}") for msg in plains) == 1
+    assert calls == [
+        (None, None, False),
+        *((username, password, False) for username, password in expected_pairs),
+        (None, None, True),
+    ]
 
 
 def test_run_kafka_stage_defcreds_auth_required_renders_failed_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -435,10 +481,24 @@ def test_run_kafka_stage_defcreds_auth_required_renders_failed_attempts(monkeypa
         ("admin", "admin", False),
         ("kafka", "kafka", False),
         ("kafka", "password", False),
+        ("admin", "password", False),
+        ("admin", "kafka", False),
+        ("admin", "admin-secret", False),
+        ("kafka", "admin", False),
+        ("kafka", "changeme", False),
+        ("broker", "broker", False),
+        ("broker", "brokerpass", False),
+        ("user", "user", False),
+        ("user", "password", False),
+        ("client", "client", False),
+        ("service", "service", False),
+        ("admin", "changeme", False),
+        ("service", "password", False),
+        ("kafka", "zookeeper", False),
     ]
     plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
-    assert any("[-] authentication required attempts=3 users=admin,kafka" in msg for msg in plains)
-    assert not any("[-] kafka:password" in msg for msg in plains)
+    for username, password in kafka._KAFKA_DEFAULT_CREDENTIALS:
+        assert sum(msg.endswith(f"[-] {username}:{password}") for msg in plains) == 1
 
 
 def test_kafka_malformed_frame_failure_does_not_abort_next_target(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -675,16 +735,10 @@ def test_audit_kafka_host_uses_valid_credentials_when_auth_is_required(monkeypat
     assert record["topics"] == ["private"]
 
 
-def test_audit_kafka_host_default_pair_yields_weak_default_creds_status(
+def test_audit_kafka_host_explicit_pair_overlapping_defaults_stays_valid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Kafka E2E-batch fix: when the winning credential pair matches one of
-    `_KAFKA_DEFAULT_CREDENTIALS`, status must be `weak_default_creds` and
-    `defcreds_enabled=True` — parity with postgres/mongodb. Previously kafka
-    unconditionally reported `valid_credentials` even when `admin:admin`
-    succeeded, hiding a real weak-credential finding from downstream reports.
-    Regressioned against a live SASL/PLAIN lab that seeded `user_admin=admin`.
-    """
+    """The source, not pair membership, determines weak-default classification."""
     monkeypatch.setattr(
         "redposture_core.clients.kafka.socket.create_connection", lambda *_args, **_kwargs: _DummySocket()
     )
@@ -708,7 +762,7 @@ def test_audit_kafka_host_default_pair_yields_weak_default_creds_status(
         9092,
         1.0,
         0,
-        username="admin",  # a member of _KAFKA_DEFAULT_CREDENTIALS
+        username="admin",
         password="admin",
         show_topics=True,
         query_topic=None,
@@ -716,17 +770,31 @@ def test_audit_kafka_host_default_pair_yields_weak_default_creds_status(
         max_messages=10,
     )
 
-    assert record["status"] == "weak_default_creds"
-    assert record["defcreds_enabled"] is True
+    assert record["status"] == "valid_credentials"
+    assert record["defcreds_enabled"] is False
     assert record["provided_credentials_ok"] is True
     assert record["effective_username"] == "admin"
-    # credential_attempts populated with the winning attempt so downstream
-    # renderers can surface `admin:admin` as a weak-cred finding.
     attempts = record["credential_attempts"]
     assert len(attempts) == 1
     assert attempts[0]["username"] == "admin"
-    assert attempts[0]["default"] is True
+    assert attempts[0]["default"] is False
     assert attempts[0]["ok"] is True
+
+    default_record = kafka._audit_kafka_host(
+        "127.0.0.1",
+        9092,
+        1.0,
+        0,
+        username="admin",
+        password="admin",
+        show_topics=True,
+        query_topic=None,
+        dump=False,
+        max_messages=10,
+        credential_source="default",
+    )
+    assert default_record["status"] == "weak_default_creds"
+    assert default_record["defcreds_enabled"] is True
 
 
 def test_audit_kafka_host_non_default_pair_stays_valid_credentials(
@@ -1191,8 +1259,8 @@ def test_run_kafka_stage_debug_flow_binds_actions_and_writes_all_ports(
     assert rc == 0
     assert [(call["port"], call["run_deep_checks"]) for call in captured] == [
         (9092, False),
-        (29092, False),
         (9092, True),
+        (29092, False),
         (29092, True),
     ]
     assert all(call["debug"] is True and callable(call["debug_emit"]) for call in captured)
@@ -1242,10 +1310,10 @@ def test_run_kafka_stage_multi_port_verbose_uses_single_global_progress(monkeypa
     assert rc == 0
     assert [(call["port"], call["run_deep_checks"]) for call in captured] == [
         (9092, False),
-        (29092, False),
-        (39092, False),
         (9092, True),
+        (29092, False),
         (29092, True),
+        (39092, False),
         (39092, True),
     ]
     assert progress_totals == [6]
@@ -1305,9 +1373,9 @@ def test_run_kafka_stage_credential_file_output_uses_single_global_progress(
     assert rc == 0
     assert [(call["host"], call["username"], call["password"], call["run_deep_checks"]) for call in captured] == [
         ("10.0.0.1", None, None, False),
-        ("10.0.0.2", None, None, False),
         ("10.0.0.1", "alice", "one", True),
         ("10.0.0.1", "bob", "two", True),
+        ("10.0.0.2", None, None, False),
         ("10.0.0.2", "alice", "one", True),
         ("10.0.0.2", "bob", "two", True),
     ]
@@ -1322,12 +1390,13 @@ def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Monk
     monkeypatch.setattr(kafka, "collect_scan_targets", lambda *_args, **_kwargs: ["127.0.0.1"])
 
     captured: list[tuple[str | None, str | None, bool]] = []
+    retained: list[dict[str, object]] = []
 
     def fake_audit_targets(**kwargs):
         captured.append((kwargs["username"], kwargs["password"], kwargs["run_deep_checks"]))
         status = (
             "valid_credentials"
-            if (kwargs["username"], kwargs["password"]) == ("kafka", "password")
+            if (kwargs["username"], kwargs["password"]) in {("admin", "admin"), ("service", "service")}
             else "auth_required"
         )
         return _kafka_host_record(kwargs, status=status, detected=True)
@@ -1351,15 +1420,22 @@ def test_run_kafka_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Monk
         lambda _args, label, total, **kwargs: _FakeProgressBar(label, total, **kwargs),
     )
 
-    rc = kafka.run_kafka_stage(_kafka_args(defcreds=True), logger=object())
+    rc = kafka.run_kafka_stage(
+        _kafka_args(defcreds=True, _record_callback=lambda record: retained.append(record)),
+        logger=object(),
+    )
 
     assert rc == 0
     assert captured == [
         (None, None, False),
-        ("admin", "admin", True),
-        ("kafka", "kafka", True),
-        ("kafka", "password", True),
+        *((username, password, True) for username, password in kafka._KAFKA_DEFAULT_CREDENTIALS),
     ]
+    assert retained[0]["provided_username"] == "admin"
+    assert retained[0]["provided_password"] == "admin"
+    attempts = retained[0]["attempted_credentials"]
+    assert isinstance(attempts, list)
+    assert len(attempts) == len(kafka._KAFKA_DEFAULT_CREDENTIALS)
+    assert sum(item["status"] == "valid_credentials" for item in attempts) == 2
 
 
 def test_run_kafka_stage_txt_emit_line_and_error_path(

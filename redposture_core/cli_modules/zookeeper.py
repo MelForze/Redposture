@@ -69,6 +69,14 @@ def configure_zookeeper_parser(
         metavar="value",
         help="Optional ZooKeeper password for digest auth credential check.",
     )
+    auth.add_argument(
+        "--defcreds",
+        action="store_true",
+        help=(
+            "Try the built-in ZooKeeper digest credential set after explicit/file credentials. "
+            "Each candidate performs a network auth attempt and may trigger server lockout policy."
+        ),
+    )
     actions.add_argument(
         "--show-znodes",
         **optional_show_count_kwargs(

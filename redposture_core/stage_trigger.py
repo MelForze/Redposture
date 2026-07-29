@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
@@ -19,7 +20,7 @@ from .logger import AttemptLogger
 from .profiles import load_profiles
 from .rendering import colorize_spans, format_count_value
 from .servers import RunningServer
-from .stage_runtime import start_command_progress
+from .stage_runtime import LineOutputSink, start_command_progress
 from .utils import collect_scan_ports, collect_scan_target_specs, normalize_ip_literal, normalize_scan_host, utc_now_iso
 
 _TRIGGER_EXPORTER_DISPLAY_NAMES = {
@@ -93,16 +94,8 @@ def _json_record_from_trigger_event(event: dict[str, Any]) -> dict[str, Any] | N
     return {key: value for key, value in record.items() if value is not None}
 
 
-def _write_trigger_json_records(output_path: str | None, records: list[dict[str, Any]]) -> None:
-    payload = "\n".join(json.dumps(item, ensure_ascii=False) for item in records)
-    if payload:
-        payload += "\n"
-    if output_path:
-        with open(output_path, "w", encoding="utf-8") as fh:
-            fh.write(payload)
-    # `-o` now tees: write the file (if any) AND echo to stdout instead of suppressing it.
-    if payload:
-        print(payload, end="", flush=True)
+class _TriggerOutputError(RuntimeError):
+    """A JSONL sink failure that must not be handled as a transport error."""
 
 
 def _trigger_plain_row(stage_tag: str, target: str, port: str, marker: str, body: str) -> str:
@@ -118,16 +111,17 @@ def _render_trigger_row(
     body: str,
     logger: AttemptLogger | None = None,
 ) -> None:
+    stream = console._diagnostic_stream()
     marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "red", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(target, 64)
     target_segment = "\t" + clipped_target + "\t-\t"
     line = (
-        f"{console._paint('TRIGGER ', 'blue', sys.stdout)}"
-        f"{console._paint(target_segment, 'white', sys.stdout)}"
-        f" {console._paint(marker, marker_color, sys.stdout)} "
-        f"{console._paint(body, 'white', sys.stdout)}"
+        f"{console._paint('TRIGGER ', 'blue', stream)}"
+        f"{console._paint(target_segment, 'white', stream)}"
+        f" {console._paint(marker, marker_color, stream)} "
+        f"{console._paint(body, 'white', stream)}"
     )
-    console.plain(line)
+    console.plain(line, stream=stream)
     if logger is not None:
         logger.write_text_line(_trigger_plain_row("TRIGGER", target, "-", marker, body))
 
@@ -141,17 +135,18 @@ def _render_trigger_callback_row(
     stage_tag: str = "TRIGGER",
     logger: AttemptLogger | None = None,
 ) -> None:
+    stream = console._diagnostic_stream()
     marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "red", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(callback_target, 64)
     clipped_port = _clip_text(callback_port, 16)
     target_segment = "\t" + clipped_target + "\t" + clipped_port + "\t"
     line = (
-        f"{console._paint(f'{stage_tag:<8}', 'blue', sys.stdout)}"
-        f"{console._paint(target_segment, 'white', sys.stdout)}"
-        f" {console._paint(marker, marker_color, sys.stdout)} "
-        f"{console._paint(exporter_name, 'white', sys.stdout)}"
+        f"{console._paint(f'{stage_tag:<8}', 'blue', stream)}"
+        f"{console._paint(target_segment, 'white', stream)}"
+        f" {console._paint(marker, marker_color, stream)} "
+        f"{console._paint(exporter_name, 'white', stream)}"
     )
-    console.plain(line)
+    console.plain(line, stream=stream)
     if logger is not None:
         logger.write_text_line(_trigger_plain_row(stage_tag, callback_target, callback_port, marker, exporter_name))
 
@@ -164,6 +159,7 @@ def _render_trigger_check_row(
     body: str,
     logger: AttemptLogger | None = None,
 ) -> None:
+    stream = console._diagnostic_stream()
     marker_color = {"[*]": "cyan", "[+]": "green", "[-]": "red", "[!]": "red"}.get(marker, "white")
     clipped_target = _clip_text(target, 64)
     clipped_port = _clip_text(port, 16)
@@ -193,12 +189,12 @@ def _render_trigger_check_row(
     body_colored = colorize_spans(console, body, spans)
 
     line = (
-        f"{console._paint(stage_segment, 'blue', sys.stdout)}"
-        f"{console._paint(target_segment, 'white', sys.stdout)}"
-        f" {console._paint(marker, marker_color, sys.stdout)} "
+        f"{console._paint(stage_segment, 'blue', stream)}"
+        f"{console._paint(target_segment, 'white', stream)}"
+        f" {console._paint(marker, marker_color, stream)} "
         f"{body_colored}"
     )
-    console.plain(line)
+    console.plain(line, stream=stream)
     if logger is not None:
         logger.write_text_line(_trigger_plain_row("CHECK", target, port, marker, body))
 
@@ -550,7 +546,7 @@ def _run_trigger_requests(
     trigger_exporters: list[dict[str, Any]],
     show_trigger_info: bool,
     log_trigger_attempts: bool,
-    record_sink: list[dict[str, Any]] | None = None,
+    record_sink: LineOutputSink | None = None,
     progress_advance: Callable[[int], None] | None = None,
     progress_add_total: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
@@ -562,12 +558,21 @@ def _run_trigger_requests(
         )
     callback_emit_lock = threading.Lock()
     emitted_scan_rows: set[tuple[str, str, str]] = set()
+    record_sink_failed = False
 
     def _emit_trigger_event(event: dict[str, Any]) -> None:
+        nonlocal record_sink_failed
         if record_sink is not None:
             json_record = _json_record_from_trigger_event(event)
             if json_record is not None:
-                record_sink.append(json_record)
+                with callback_emit_lock:
+                    if record_sink_failed:
+                        return
+                    try:
+                        record_sink.emit_many([json.dumps(json_record, ensure_ascii=False)])
+                    except (OSError, TypeError, ValueError) as exc:
+                        record_sink_failed = True
+                        raise _TriggerOutputError(str(exc)) from exc
         phase = str(event.get("phase") or "")
         if phase == "detect_hit":
             scan_target = str(event.get("host") or "-")
@@ -742,6 +747,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     output_format = str(getattr(args, "output_format", "txt") or "txt").strip().lower()
     output_path = getattr(args, "output", None)
     stream_to_stdout = not bool(output_path)
+    console.set_structured_output(output_format == "json")
 
     if args.timeout <= 0:
         console.error("--timeout must be > 0")
@@ -909,7 +915,18 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 else:
                     console.debug(f"trigger exporter={item.get('name')} target_fmt={item.get('target_fmt')}")
 
-    trigger_records: list[dict[str, Any]] = []
+    json_sink: LineOutputSink | None = None
+    if output_format == "json":
+        json_sink = LineOutputSink(
+            output_path,
+            lambda line: print(line, file=sys.stdout, flush=True),
+        )
+        try:
+            json_sink.prepare()
+        except OSError as exc:
+            console.error(f"failed to open trigger output: {exc}")
+            return 1
+
     show_trigger_info = output_format == "txt" or not stream_to_stdout
     trigger_progress = None
     trigger_progress_total = sum(
@@ -944,43 +961,51 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         trigger_progress = None
 
     if not args.with_listen:
-        _start_trigger_progress()
+        result_code = 0
         try:
-            for batch_hosts, batch_exporters in run_batches:
-                _run_trigger_requests(
-                    args,
-                    logger,
-                    console,
-                    batch_hosts,
-                    callback_targets,
-                    batch_exporters,
-                    show_trigger_info=show_trigger_info,
-                    log_trigger_attempts=output_format == "txt" or not stream_to_stdout,
-                    record_sink=trigger_records if output_format == "json" else None,
-                    progress_advance=_advance_trigger_progress,
-                    progress_add_total=_add_trigger_progress_total,
-                )
+            logger_scope = logger.scoped_console_stream(sys.stderr) if output_format == "json" else nullcontext()
+            with logger_scope:
+                _start_trigger_progress()
+                for batch_hosts, batch_exporters in run_batches:
+                    _run_trigger_requests(
+                        args,
+                        logger,
+                        console,
+                        batch_hosts,
+                        callback_targets,
+                        batch_exporters,
+                        show_trigger_info=show_trigger_info,
+                        log_trigger_attempts=output_format == "txt" or not stream_to_stdout,
+                        record_sink=json_sink,
+                        progress_advance=_advance_trigger_progress,
+                        progress_add_total=_add_trigger_progress_total,
+                    )
+        except _TriggerOutputError as exc:
+            console.error(f"failed to write trigger output: {exc}")
+            result_code = 1
         finally:
             _close_trigger_progress()
-        if output_format == "json":
-            try:
-                _write_trigger_json_records(output_path, trigger_records)
-            except OSError as exc:
-                console.error(f"failed to write trigger output: {exc}")
-                return 1
-        return 0
+            if json_sink is not None:
+                try:
+                    json_sink.close()
+                except OSError as exc:
+                    console.error(f"failed to close trigger output: {exc}")
+                    result_code = 1
+        return result_code
 
     running: list[RunningServer] = []
     temp_cert_dir: str | None = None
-    try:
-        logger.set_trigger_callback_mode(
-            True,
-            callback_targets=callback_targets,
-            deduplicate=not args.debug,
-        )
-        running, temp_cert_dir = start_listeners_for_trigger(args, logger, console)
-        _start_trigger_progress()
+    result_code = 0
+    logger_scope = logger.scoped_console_stream(sys.stderr) if output_format == "json" else nullcontext()
+    with logger_scope:
         try:
+            logger.set_trigger_callback_mode(
+                True,
+                callback_targets=callback_targets,
+                deduplicate=not args.debug,
+            )
+            running, temp_cert_dir = start_listeners_for_trigger(args, logger, console)
+            _start_trigger_progress()
             for batch_hosts, batch_exporters in run_batches:
                 _run_trigger_requests(
                     args,
@@ -991,45 +1016,46 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     batch_exporters,
                     show_trigger_info=show_trigger_info,
                     log_trigger_attempts=False,
-                    record_sink=trigger_records if output_format == "json" else None,
+                    record_sink=json_sink,
                     progress_advance=_advance_trigger_progress,
                     progress_add_total=_add_trigger_progress_total,
                 )
+            _close_trigger_progress()
+            if getattr(args, "check_credentials", False):
+                _run_trigger_credential_checks(args, logger, console)
+            if listen_seconds is not None:
+                console.info(f"listeners are up; waiting for incoming events ({listen_seconds:.1f}s)")
+                deadline = time.monotonic() + float(listen_seconds)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(1.0, remaining))
+                console.info("listen window elapsed; stopping listeners...")
+            else:
+                console.info("listeners are up; waiting for incoming events (Ctrl+C to stop)")
+                while True:
+                    time.sleep(1)
+        except KeyboardInterrupt:
+            console.info("stopping listeners...")
+        except _TriggerOutputError as exc:
+            console.error(f"failed to write trigger output: {exc}")
+            result_code = 1
+        except OSError as exc:
+            console.error(f"failed to start service: {exc}")
+            result_code = 1
+        except ValueError as exc:
+            console.error(str(exc))
+            result_code = 2
         finally:
             _close_trigger_progress()
-        if getattr(args, "check_credentials", False):
-            _run_trigger_credential_checks(args, logger, console)
-        if output_format == "json":
-            try:
-                _write_trigger_json_records(output_path, trigger_records)
-            except OSError as exc:
-                console.error(f"failed to write trigger output: {exc}")
-                return 1
-        if listen_seconds is not None:
-            console.info(f"listeners are up; waiting for incoming events ({listen_seconds:.1f}s)")
-            deadline = time.monotonic() + float(listen_seconds)
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                time.sleep(min(1.0, remaining))
-            console.info("listen window elapsed; stopping listeners...")
-            return 0
-        console.info("listeners are up; waiting for incoming events (Ctrl+C to stop)")
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        console.info("stopping listeners...")
-        return 0
-    except OSError as exc:
-        console.error(f"failed to start service: {exc}")
-        return 1
-    except ValueError as exc:
-        console.error(str(exc))
-        return 2
-    finally:
-        _close_trigger_progress()
-        logger.set_trigger_callback_mode(False)
-        stop_started_listeners(running, temp_cert_dir)
+            logger.set_trigger_callback_mode(False)
+            stop_started_listeners(running, temp_cert_dir)
+            if json_sink is not None:
+                try:
+                    json_sink.close()
+                except OSError as exc:
+                    console.error(f"failed to close trigger output: {exc}")
+                    result_code = 1
 
-    return 0
+    return result_code

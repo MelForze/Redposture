@@ -4,6 +4,7 @@ import builtins
 import json
 import logging
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -51,12 +52,42 @@ def test_configure_clickhouse_loggers_suppresses_warning_propagation() -> None:
 
 def test_build_credential_candidates_with_defcreds() -> None:
     candidates = clickhouse_stage._build_credential_candidates(None, None, True)
-    assert candidates == [("default", "", "default"), ("default", "default", "default")]
+    assert candidates == [
+        ("default", "", "default"),
+        ("default", "default", "default"),
+        ("default", "password", "default"),
+        ("default", "clickhouse", "default"),
+        ("clickhouse", "clickhouse", "default"),
+        ("clickhouse", "password", "default"),
+        ("admin", "admin", "default"),
+        ("admin", "password", "default"),
+        ("root", "root", "default"),
+        ("user", "user", "default"),
+        ("default", "changeme", "default"),
+        ("admin", "changeme", "default"),
+        ("root", "password", "default"),
+        ("user", "password", "default"),
+    ]
 
 
 def test_build_credential_candidates_with_provided_and_defcreds_deduplicates() -> None:
     candidates = clickhouse_stage._build_credential_candidates("default", "", True)
-    assert candidates == [("default", "", "provided"), ("default", "default", "default")]
+    assert candidates == [
+        ("default", "", "provided"),
+        ("default", "default", "default"),
+        ("default", "password", "default"),
+        ("default", "clickhouse", "default"),
+        ("clickhouse", "clickhouse", "default"),
+        ("clickhouse", "password", "default"),
+        ("admin", "admin", "default"),
+        ("admin", "password", "default"),
+        ("root", "root", "default"),
+        ("user", "user", "default"),
+        ("default", "changeme", "default"),
+        ("admin", "changeme", "default"),
+        ("root", "password", "default"),
+        ("user", "password", "default"),
+    ]
 
 
 def test_audit_clickhouse_marks_invalid_credentials_anonymous_when_provided_fails(
@@ -116,7 +147,9 @@ def test_audit_clickhouse_marks_invalid_credentials_anonymous_when_provided_fail
     assert bool(attempts[0].get("ok")) is False
 
 
-def test_audit_clickhouse_defcreds_always_attempts_two_pairs(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_clickhouse_defcreds_sweeps_all_pairs_and_keeps_first_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def fake_connect(
         protocol: str,
         host: str,
@@ -128,10 +161,8 @@ def test_audit_clickhouse_defcreds_always_attempts_two_pairs(monkeypatch: pytest
         database: str = "default",
     ):
         _ = (protocol, host, port, timeout, database)
-        if username == "default" and password == "":
-            return _session(), None
-        if username == "default" and password == "default":
-            return None, "Code: 516. Authentication failed"
+        if (username, password) in {("default", ""), ("admin", "admin")}:
+            return _session(username=username, password=password), None
         return None, "Code: 516. Authentication failed"
 
     monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_connect)
@@ -164,12 +195,17 @@ def test_audit_clickhouse_defcreds_always_attempts_two_pairs(monkeypatch: pytest
     )
 
     assert record["status"] == "weak_default_creds"
-    assert int(record["attempted_credentials"]) == 2
+    assert record["effective_username"] == "default"
+    assert record["effective_password"] == ""
+    assert int(record["attempted_credentials"]) == 14
     attempts = record.get("auth_attempts")
     assert isinstance(attempts, list)
-    assert [f"{item.get('username')}:{item.get('password')}" for item in attempts] == [
-        "default:",
-        "default:default",
+    expected = clickhouse_stage._build_credential_candidates(None, None, True)
+    assert [
+        (item.get("username"), item.get("password"), item.get("source"), bool(item.get("ok"))) for item in attempts
+    ] == [
+        (username, password, source, (username, password) in {("default", ""), ("admin", "admin")})
+        for username, password, source in expected
     ]
 
 
@@ -211,7 +247,7 @@ def test_audit_clickhouse_auth_required_when_all_credentials_fail(monkeypatch: p
 
     assert record["status"] == "auth_required"
     assert record["is_clickhouse"] is True
-    assert int(record["attempted_credentials"]) == 2
+    assert int(record["attempted_credentials"]) == 14
 
 
 def test_audit_clickhouse_marks_valid_credentials_when_provided_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1059,6 +1095,120 @@ def test_run_clickhouse_stage_os_shell_executes_command(
     assert "uid=1000(redposture)" in stdout
 
 
+@pytest.mark.parametrize(
+    ("shell_flag", "shell_input", "shell_runner"),
+    [
+        ("--sql-shell", "select 1", "_run_sql_query_once"),
+        ("--os-shell", "id", "_run_execute_command_once"),
+    ],
+)
+def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    shell_flag: str,
+    shell_input: str,
+    shell_runner: str,
+) -> None:
+    credentials = tmp_path / "clickhouse-shell.creds"
+    credentials.write_text("bad:bad\nadmin:admin\n", encoding="utf-8")
+    connection_attempts: list[tuple[str, str]] = []
+
+    def fake_connect(_protocol, _host, _port, _timeout, username, password, *, database="default"):
+        connection_attempts.append((username, password))
+        if (username, password) == ("admin", "admin"):
+            return _session(username=username, password=password, database=database), None
+        return None, "Code: 516. Authentication failed"
+
+    monkeypatch.setattr(clickhouse_stage, "_configure_clickhouse_loggers", lambda: None)
+    monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: object())
+    monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_connect)
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "_run_clickhouse_actions_on_session",
+        lambda *_args, **_kwargs: _empty_clickhouse_action_result(),
+    )
+    monkeypatch.setattr(clickhouse_stage, "_close_client", lambda *_args: None)
+    monkeypatch.setattr(clickhouse_stage, "_load_readline_module", lambda: None)
+    monkeypatch.setattr(clickhouse_stage, "_add_readline_history", lambda *_args, **_kwargs: None)
+
+    emitted_records: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "_emit_clickhouse_record",
+        lambda record, _format: emitted_records.append(dict(record)),
+    )
+    inputs = iter([shell_input, "exit"])
+    monkeypatch.setattr(builtins, "input", lambda _prompt: next(inputs))
+    shell_calls: list[dict[str, Any]] = []
+
+    def fake_shell_runner(**kwargs):
+        shell_calls.append(dict(kwargs))
+        return [], None
+
+    monkeypatch.setattr(clickhouse_stage, shell_runner, fake_shell_runner)
+    args = parse_args(
+        [
+            "clickhouse",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "9000",
+            "-u",
+            str(credentials),
+            "--defcreds",
+            shell_flag,
+        ]
+    )
+
+    rc = clickhouse_stage.run_clickhouse_stage(
+        args,
+        logger=SimpleNamespace(log=lambda *_args, **_kwargs: None),
+    )
+
+    assert rc == 0
+    assert connection_attempts == [
+        ("default", ""),
+        ("bad", "bad"),
+        ("admin", "admin"),
+        ("default", ""),
+        ("default", "default"),
+        ("default", "password"),
+        ("default", "clickhouse"),
+        ("clickhouse", "clickhouse"),
+        ("clickhouse", "password"),
+        ("admin", "password"),
+        ("root", "root"),
+        ("user", "user"),
+        ("default", "changeme"),
+        ("admin", "changeme"),
+        ("root", "password"),
+        ("user", "password"),
+    ]
+    assert emitted_records[0]["status"] == "valid_credentials"
+    assert emitted_records[0]["credentials_source"] == "file"
+    assert emitted_records[0]["defcreds_enabled"] is True
+    assert [(item["username"], item["password"], item["source"]) for item in emitted_records[0]["auth_attempts"]] == [
+        ("bad", "bad", "file"),
+        ("admin", "admin", "file"),
+        ("default", "", "default"),
+        ("default", "default", "default"),
+        ("default", "password", "default"),
+        ("default", "clickhouse", "default"),
+        ("clickhouse", "clickhouse", "default"),
+        ("clickhouse", "password", "default"),
+        ("admin", "password", "default"),
+        ("root", "root", "default"),
+        ("user", "user", "default"),
+        ("default", "changeme", "default"),
+        ("admin", "changeme", "default"),
+        ("root", "password", "default"),
+        ("user", "password", "default"),
+    ]
+    assert len(shell_calls) == 1
+    assert shell_calls[0]["username"] == "admin"
+    assert shell_calls[0]["password"] == "admin"
+
+
 def test_call_audit_clickhouse_host_with_stage_debug_adds_stage_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1239,7 +1389,7 @@ def test_run_clickhouse_stage_multi_port_verbose_uses_single_global_progress(
     assert len(_FakeProgress.instances) == 1
     progress = _FakeProgress.instances[0]
     assert progress.total == 3
-    assert progress.added == [3]
+    assert progress.added == [1, 1, 1]
     assert progress.advances == [1, 1, 1, 1, 1, 1]
     assert progress.closed is True
 
@@ -1691,10 +1841,22 @@ def test_clickhouse_defcreds_plan_preserves_provided_then_default_order() -> Non
         ("app", "secret", "provided"),
         ("default", "", "default"),
         ("default", "default", "default"),
+        ("default", "password", "default"),
+        ("default", "clickhouse", "default"),
+        ("clickhouse", "clickhouse", "default"),
+        ("clickhouse", "password", "default"),
+        ("admin", "admin", "default"),
+        ("admin", "password", "default"),
+        ("root", "root", "default"),
+        ("user", "user", "default"),
+        ("default", "changeme", "default"),
+        ("admin", "changeme", "default"),
+        ("root", "password", "default"),
+        ("user", "password", "default"),
     ]
 
 
-def test_clickhouse_lifecycle_accepts_first_successful_default_credential(
+def test_clickhouse_lifecycle_renders_every_attempt_until_first_success_without_duplicate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     auth_pairs: list[tuple[str, str]] = []
@@ -1707,31 +1869,56 @@ def test_clickhouse_lifecycle_accepts_first_successful_default_credential(
 
     def fake_auth(_protocol, _host, _port, _timeout, username, password, database):
         auth_pairs.append((username, password))
-        if (username, password) == ("default", ""):
+        if (username, password) in {("default", "default"), ("admin", "admin")}:
             return _session(username=username, password=password, database=database), None
         return None, "Code: 516. Authentication failed"
 
-    action_calls = 0
+    action_sessions: list[tuple[str, str]] = []
 
-    def fake_actions(_session_obj, **_kwargs):
-        nonlocal action_calls
-        action_calls += 1
+    def fake_actions(session_obj, **_kwargs):
+        action_sessions.append((session_obj.username, session_obj.password))
         return _empty_clickhouse_action_result()
 
     monkeypatch.setattr(clickhouse_stage, "_open_operational_session", fake_auth)
     monkeypatch.setattr(clickhouse_stage, "_run_clickhouse_actions_on_session", fake_actions)
     monkeypatch.setattr(clickhouse_stage, "_close_client", lambda *_args: None)
 
-    args = parse_args(["clickhouse", "-t", "127.0.0.1", "--port", "9000", "--defcreds", "--format", "json"])
+    args = parse_args(["clickhouse", "-t", "127.0.0.1", "--port", "9000", "--defcreds"])
     plan = clickhouse_stage.build_clickhouse_plan(args)
+    emitted: list[str] = []
     runner = AuditCommandRunner(
-        args=args, spec=clickhouse_stage.build_clickhouse_spec(args), emit_line=lambda _line: None
+        args=args,
+        spec=clickhouse_stage.build_clickhouse_spec(args),
+        emit_line=emitted.append,
     )
     result = runner.run_plan(plan)
 
-    assert auth_pairs == [("default", "")]
-    assert action_calls == 1
+    expected_pairs = [
+        (username, password)
+        for username, password, _source in clickhouse_stage._build_credential_candidates(None, None, True)
+    ]
+    assert auth_pairs == expected_pairs
+    assert action_sessions == [("default", "default")]
     assert result.records[0]["status"] == "weak_default_creds"
+    assert result.records[0]["effective_username"] == "default"
+    assert result.records[0]["effective_password"] == "default"
+    assert [
+        (item["username"], item["password"], item["source"], item["ok"]) for item in result.records[0]["auth_attempts"]
+    ] == [
+        (
+            username,
+            password,
+            "default",
+            (username, password) in {("default", "default"), ("admin", "admin")},
+        )
+        for username, password in expected_pairs
+    ]
+    attempt_lines = [line for line in emitted if " [+] " in line or " [-] " in line]
+    assert len(attempt_lines) == len(expected_pairs)
+    selected_line = next(line for line in attempt_lines if "[+] default:default" in line)
+    later_success_line = next(line for line in attempt_lines if "[+] admin:admin" in line)
+    assert "(read:true)" in selected_line
+    assert "(read:" not in later_success_line
 
 
 def test_clickhouse_auth_retries_transient_failure_without_repeating_detect(

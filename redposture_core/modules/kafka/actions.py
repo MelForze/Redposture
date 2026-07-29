@@ -11,7 +11,6 @@ from typing import Any
 
 from ...clients import kafka as _kafka_client
 from ...clients.kafka import (
-    _KAFKA_DEFAULT_CREDENTIALS,
     KAFKA_AUTH_ERROR_CODES,
     _build_credential_runs,
     _build_metadata_request_body,
@@ -62,7 +61,10 @@ from ...utils import (
     utc_now_iso,
 )
 
+_KAFKA_DEFAULT_CREDENTIALS = _kafka_client._KAFKA_DEFAULT_CREDENTIALS
+
 __all__ = [
+    "_KAFKA_DEFAULT_CREDENTIALS",
     "_KafkaReader",
     "_authenticate_and_fetch_metadata",
     "_build_credential_runs",
@@ -335,6 +337,7 @@ def _audit_kafka_via_sasl_fallback(
     max_messages: int,
     show_topics_limit: int | None = None,
     *,
+    credential_source: str = "provided",
     use_tls: bool | None = None,
     probe_write: bool = False,
     debug_emit: Callable[[str], None] | None = None,
@@ -427,7 +430,7 @@ def _audit_kafka_via_sasl_fallback(
             # the actual attempt and a single-entry `credential_attempts` list
             # so downstream renderers/exporters see the metadata for kafka the
             # same way they see it for other modules.
-            is_default_pair = provided_credentials_ok and ((username, password) in _KAFKA_DEFAULT_CREDENTIALS)
+            is_default_pair = bool(provided_credentials_ok and credential_source == "default")
             if provided_credentials_ok:
                 status = "weak_default_creds" if is_default_pair else "valid_credentials"
             else:
@@ -515,6 +518,7 @@ def _audit_kafka_via_sasl_fallback(
             dump,
             max_messages,
             show_topics_limit=show_topics_limit,
+            credential_source=credential_source,
             use_tls=True,
             probe_write=probe_write,
             debug_emit=debug_emit,
@@ -538,6 +542,7 @@ def _audit_kafka_host(
     probe_write: bool = False,
     debug_emit: Callable[[str], None] | None = None,
     lifecycle_state: KafkaLifecycleState | None = None,
+    credential_source: str = "provided",
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     provided_credentials = username is not None and password is not None
@@ -575,6 +580,7 @@ def _audit_kafka_host(
                                 query_topic=query_topic,
                                 dump=dump,
                                 max_messages=max_messages,
+                                credential_source=credential_source,
                                 use_tls=(transport_mode == "tls") or None,
                                 probe_write=probe_write,
                                 debug_emit=debug_emit,
@@ -726,7 +732,7 @@ def _audit_kafka_host(
 
                 # Kafka E2E fix (SASL fallback path): mirror the classification
                 # logic from the main SASL path so the record shape is uniform.
-                is_default_pair = provided_credentials_ok and ((username, password) in _KAFKA_DEFAULT_CREDENTIALS)
+                is_default_pair = bool(provided_credentials_ok and credential_source == "default")
                 if auth_required is False:
                     if provided_credentials and provided_credentials_ok is False:
                         status = "invalid_credentials_anonymous"
@@ -833,6 +839,7 @@ def _audit_kafka_host(
                         query_topic=query_topic,
                         dump=dump,
                         max_messages=max_messages,
+                        credential_source=credential_source,
                         use_tls=(transport_use_tls is True) or None,
                         probe_write=probe_write,
                         debug_emit=debug_emit,
@@ -937,7 +944,7 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
     if ok and metadata is not None:
         state.credential_metadata[_kafka_lifecycle_key(ctx)] = dict(metadata)
     anonymous_open = state.auth_required is False or str(payload.get("status") or "") == "open_no_auth"
-    is_default = credential.source == "default" or ((username, password) in _KAFKA_DEFAULT_CREDENTIALS)
+    is_default = credential.source == "default"
     if ok:
         status = "weak_default_creds" if is_default else "valid_credentials"
     elif anonymous_open:
@@ -1194,6 +1201,19 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     status = str(record.get("status") or "fail")
     prefix = _nxc_prefix(record)
     err = _clip(str(record.get("error") or "-"), 72)
+    credential_attempts = record.get("attempted_credentials")
+    if (
+        isinstance(credential_attempts, list)
+        and credential_attempts
+        and status
+        in {
+            "auth_required",
+            "invalid_credentials_anonymous",
+            "valid_credentials",
+            "weak_default_creds",
+        }
+    ):
+        return ""
 
     if status == "open_no_auth":
         return ""
@@ -1237,6 +1257,31 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if err != "-":
         return f"{line} err={err}"
     return line
+
+
+def _format_credential_attempts_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt":
+        return []
+    attempts = record.get("attempted_credentials")
+    if not isinstance(attempts, list) or not attempts:
+        return []
+    prefix = _nxc_prefix(record)
+    success_statuses = {"valid_credentials", "weak_default_creds"}
+    lines: list[str] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        username = str(attempt.get("username") or "user")
+        password = attempt.get("password")
+        if password is None:
+            password_text = "<no-password>"
+        elif password == "":
+            password_text = "<empty>"
+        else:
+            password_text = str(password)
+        marker = "[+]" if str(attempt.get("status") or "") in success_statuses else "[-]"
+        lines.append(f"{prefix} {marker} {username}:{password_text}")
+    return lines
 
 
 _KAFKA_DEBUG_DIAG_SUFFIX_RE = re.compile(r"\s*\(topic=.*\)$")

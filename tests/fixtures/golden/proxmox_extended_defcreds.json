@@ -28,6 +28,7 @@
     "cap_read": true,
     "checked_endpoints": 3,
     "credential_hits": 0,
+    "defcreds_enabled": true,
     "discover_creds": false,
     "endpoint_results": [
       {
@@ -86,7 +87,7 @@
         "stage_name": "data"
       }
     ],
-    "status": "token_ok",
+    "status": "weak_default_creds",
     "successful_endpoints": 3,
     "use_https": true,
     "users": null,

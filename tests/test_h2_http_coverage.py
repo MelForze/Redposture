@@ -339,6 +339,31 @@ def test_grafana_failed_default_basic_auth_remains_auth_required(
     assert state.auth_header is None
 
 
+def test_grafana_successful_default_basic_auth_is_weak_default_creds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(grafana, "_verify_credentials", lambda *_args: (True, None))
+    state = grafana.GrafanaLifecycleState()
+    ctx = _ctx(
+        state,
+        port=3000,
+        credential=AuditCredentialRun(username="admin", password="admin", source="default"),
+    )
+
+    record = grafana.authenticate_grafana(
+        ctx,
+        {"is_grafana": True, "status": "auth_required", "auth_required": True},
+        _grafana_options(),
+    )
+
+    assert record["status"] == "weak_default_creds"
+    assert record["credentials_source"] == "default"
+    assert record["default_credentials"] is True
+    assert record["provided_credentials"] is False
+    assert record["provided_credentials_ok"] is None
+    assert state.credentials_source == "default"
+
+
 def test_gitlab_detect_handles_malformed_version_json_via_login_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1014,7 +1039,11 @@ def test_grpc_lifecycle_reuses_one_native_h2_session_and_closes_it(
     assert selected_session._closed is True
 
 
-def test_grpc_default_credential_relabels_auth_source(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("credential_source", ["default", "defcreds"])
+def test_grpc_default_credential_relabels_auth_source_and_status(
+    monkeypatch: pytest.MonkeyPatch,
+    credential_source: str,
+) -> None:
     captured: dict[str, Any] = {}
 
     def fake_audit(*_args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -1027,7 +1056,7 @@ def test_grpc_default_credential_relabels_auth_source(monkeypatch: pytest.Monkey
         state,
         port=50051,
         target_scheme="https",
-        credential=AuditCredentialRun(token="default-token", source="default"),
+        credential=AuditCredentialRun(token="default-token", source=credential_source),
     )
 
     record = grpc._grpc_lifecycle_audit(ctx, _grpc_options(), run_deep_checks=True)
@@ -1036,6 +1065,7 @@ def test_grpc_default_credential_relabels_auth_source(monkeypatch: pytest.Monkey
     assert captured["preferred_scheme"] == "https"
     assert captured["_lifecycle_detect_result"] is state.detect_result
     assert captured["_session_state"] is state
+    assert record["status"] == "weak_default_creds"
     assert record["defcreds_used"] is True
     assert record["auth_used"]["source"] == "defcreds"
 

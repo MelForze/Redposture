@@ -75,7 +75,7 @@
         "stage_name": "data"
       }
     ],
-    "status": "weak_default_creds",
+    "status": "valid_credentials",
     "topic_count": 2,
     "topic_messages": null,
     "topic_permissions": {

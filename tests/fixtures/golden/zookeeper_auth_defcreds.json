@@ -1,0 +1,73 @@
+[
+  {
+    "auth_error": null,
+    "auth_inference_source": "root_noauth",
+    "auth_probe_trace": [
+      "/:noauth"
+    ],
+    "auth_required": true,
+    "can_create_znode": true,
+    "can_delete_znode": true,
+    "connect_error": null,
+    "credential_verdict": "valid",
+    "defcreds_enabled": true,
+    "dump": true,
+    "dump_error": null,
+    "dump_limit": null,
+    "enum_error": null,
+    "error": null,
+    "host": "127.0.0.1",
+    "is_zookeeper": true,
+    "max_znodes": 2000,
+    "module": "zookeeper",
+    "port": 22185,
+    "provided_credentials": false,
+    "provided_credentials_ok": true,
+    "provided_password": null,
+    "provided_username": "zk",
+    "query_error": null,
+    "query_znode": "/redposture-auth",
+    "query_znode_dump": "digest-acl-late-default-hit",
+    "query_znode_dump_error": null,
+    "query_znode_value": "/redposture-auth (children:0,bytes:27)",
+    "service": "zookeeper",
+    "show_znodes": false,
+    "stage2_error": null,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "auth_inference_credentials"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "access_capabilities"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "data"
+      }
+    ],
+    "status": "weak_default_creds",
+    "znode_capability_error": null,
+    "znode_count": 1,
+    "znode_count_attempt_timeouts": [],
+    "znode_count_partial": false,
+    "znode_count_unknown": false,
+    "znode_details": null,
+    "znode_values": null,
+    "znodes": [],
+    "znodes_truncated": false
+  }
+]

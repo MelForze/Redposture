@@ -261,6 +261,35 @@ def test_mongodb_small_helpers_and_collection_validation() -> None:
         {"username": "root", "password": "root", "default": False},
         {"username": "admin", "password": "admin", "default": True},
     ]
+    assert mongodb._MONGODB_DEFAULT_CREDS == (
+        ("root", "root"),
+        ("admin", "admin"),
+        ("root", "password"),
+        ("mongo", "mongo"),
+        ("mongodb", "mongodb"),
+        ("admin", "password"),
+        ("admin", "mongo"),
+        ("admin", "mongodb"),
+        ("root", "mongo"),
+        ("root", "mongodb"),
+        ("mongo", "password"),
+        ("mongodb", "password"),
+        ("admin", "changeme"),
+        ("root", "admin"),
+        ("user", "user"),
+        ("user", "password"),
+        ("test", "test"),
+        ("dev", "dev"),
+    )
+    deduplicated = mongodb._credential_runs("admin", "changeme", defcreds=True)
+    assert [(item["username"], item["password"], item["default"]) for item in deduplicated] == [
+        ("admin", "changeme", False),
+        *[
+            (username, password, True)
+            for username, password in mongodb._MONGODB_DEFAULT_CREDS
+            if (username, password) != ("admin", "changeme")
+        ],
+    ]
     assert mongodb._parse_json_object("", field_name="--query") == ({}, None)
     assert mongodb._parse_json_object("[1]", field_name="--query")[1] == "--query must be a JSON object"
     assert mongodb._split_csv_values(["a,b", "b", " c "]) == ["a", "b", "c"]
@@ -586,6 +615,31 @@ def test_try_credentials_and_collect_data_error_branches(monkeypatch: pytest.Mon
     assert data["nosql_command_error"] == "command failed"
 
 
+def test_try_credentials_checks_every_candidate_and_keeps_first_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_open(monkeypatch, auth_required=True)
+
+    selected, attempts = mongodb._try_credentials(
+        "127.0.0.1",
+        27017,
+        1.0,
+        auth_db="admin",
+        credential_candidates=[
+            {"username": "bad", "password": "bad", "default": True},
+            {"username": "root", "password": "root", "default": True},
+            {"username": "dev", "password": "dev", "default": True},
+        ],
+    )
+
+    assert selected == attempts[1]
+    assert [(item["username"], item["ok"]) for item in attempts] == [
+        ("bad", False),
+        ("root", True),
+        ("dev", False),
+    ]
+
+
 def test_mongodb_formatters_cover_txt_and_json_branches() -> None:
     record = {
         "timestamp": "now",
@@ -727,6 +781,36 @@ def test_run_mongodb_stage_credential_file_does_not_use_tcp_prefilter(
     assert "127.0.0.2" in output
 
 
+def test_mongodb_credential_file_precedes_defaults_and_preserves_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    credentials = tmp_path / "mongodb-creds.txt"
+    credentials.write_text("file_user:file_pass\nroot:root\n", encoding="utf-8")
+    captured_runs: list[tuple[str | None, str | None, str]] = []
+
+    class FakeRunner:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = (args, kwargs)
+
+        def run_plan(self, plan: object):
+            captured_runs.extend((run.username, run.password, run.source) for run in plan.credential_runs)
+            return type("Result", (), {"detected_count": 1})()
+
+    monkeypatch.setattr(mongodb, "AuditCommandRunner", FakeRunner)
+
+    assert mongodb.run_mongodb_stage(_args(username=str(credentials), defcreds=True), logger=object()) == 0
+    assert captured_runs == [
+        ("file_user", "file_pass", "file"),
+        ("root", "root", "file"),
+        *[
+            (username, password, "default")
+            for username, password in mongodb._MONGODB_DEFAULT_CREDS
+            if (username, password) != ("root", "root")
+        ],
+    ]
+
+
 def test_run_mongodb_stage_defcreds_expands_default_pairs(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     _patch_open(monkeypatch, auth_required=True)
 
@@ -817,3 +901,20 @@ def test_mongodb_format_record_defers_to_credential_attempts_when_multiple() -> 
     single = dict(record, credential_attempts=[record["credential_attempts"][0]])
     assert mongodb._format_record(single, "txt") != ""
     assert "admin:admin" in mongodb._format_record(single, "txt")
+
+    successful = {
+        **record,
+        "status": "weak_default_creds",
+        "effective_username": "root",
+        "provided_password": "root",
+        "read_capability": True,
+        "credential_attempts": [
+            {"username": "admin", "password": "admin", "ok": False},
+            {"username": "root", "password": "root", "ok": True},
+        ],
+    }
+    assert mongodb._format_record(successful, "txt") == ""
+    success_lines = mongodb._format_credential_attempts_records(successful, "txt")
+    assert len(success_lines) == 2
+    assert "[-] admin:admin" in success_lines[0]
+    assert "[+] root:root" in success_lines[1]
