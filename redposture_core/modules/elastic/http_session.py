@@ -15,7 +15,7 @@ import threading
 from collections.abc import Mapping
 from types import TracebackType
 
-from ...clients.http_api import HttpResponse, normalize_http_error
+from ...clients.http_api import HttpResponse, join_http_target_path, normalize_http_error
 
 _STALE_SOCKET_ERRNOS = frozenset(
     value
@@ -192,7 +192,7 @@ class ElasticHttpSession:
             raise ValueError("invalid HTTP request path")
         if not normalized.startswith("/"):
             normalized = f"/{normalized}"
-        return normalized
+        return join_http_target_path(normalized)
 
     def _request_once(
         self,

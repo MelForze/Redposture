@@ -7,6 +7,7 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.kafka import KafkaTlsConfig
 from ...console import Console
 from ...show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from ...stage_runtime import (
@@ -16,7 +17,9 @@ from ...stage_runtime import (
     AuditHookContext,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    command_result_exit_code,
     merge_audit_credential_runs,
+    sort_default_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -42,7 +45,7 @@ _PRODUCTION_AUDIT_HOST = actions._audit_kafka_host
 def build_kafka_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
     default_runs = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source="default")
             for username, password in actions._build_credential_runs(None, None, True)
             if username is not None and password is not None
@@ -101,8 +104,43 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         and actions._audit_kafka_host is _PRODUCTION_AUDIT_HOST
     )
 
-    def _state_factory(_ctx: AuditHookContext) -> actions.KafkaLifecycleState:
-        return actions.KafkaLifecycleState()
+    def _state_factory(ctx: AuditHookContext) -> actions.KafkaLifecycleState:
+        target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
+        tls_material = any(
+            (
+                bool(getattr(args, "insecure", False)),
+                bool(getattr(args, "tls_ca", None)),
+                bool(getattr(args, "tls_cert", None)),
+                bool(getattr(args, "tls_server_name", None)),
+            )
+        )
+        if bool(getattr(args, "plaintext", False)):
+            requested_use_tls: bool | None = False
+        elif (
+            bool(getattr(args, "tls", False))
+            or tls_material
+            or target_scheme
+            in {
+                "kafka+ssl",
+                "kafkas",
+                "ssl",
+                "tls",
+            }
+        ):
+            requested_use_tls = True
+        else:
+            requested_use_tls = None
+        tls_config = KafkaTlsConfig(
+            insecure=bool(getattr(args, "insecure", False)) or requested_use_tls is None,
+            ca_file=getattr(args, "tls_ca", None),
+            cert_file=getattr(args, "tls_cert", None),
+            key_file=getattr(args, "tls_key", None),
+            server_name=str(getattr(args, "tls_server_name", "") or "").strip() or None,
+        )
+        return actions.KafkaLifecycleState(
+            requested_use_tls=requested_use_tls,
+            tls_config=tls_config,
+        )
 
     def _detect(ctx: AuditHookContext) -> AuditRecord:
         return AuditRecord.from_mapping(actions.detect_kafka(ctx, options), module="kafka", service="kafka")
@@ -168,7 +206,7 @@ def run_kafka_stage(args: Any, logger: Any) -> int:
         return 2
     if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all kafka targets are unreachable")
-    return 0
+    return command_result_exit_code(result)
 
 
 __all__ = ["build_kafka_plan", "build_kafka_spec", "run_kafka_stage"]

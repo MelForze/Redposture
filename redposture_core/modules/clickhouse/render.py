@@ -8,6 +8,7 @@ from __future__ import annotations
 from ...exporters.output import emit_line as _emit_line
 from .actions import (
     _format_auth_attempt_detail_records,
+    _format_database_fallback_detail_records,
     _format_databases_detail_records,
     _format_detect_record,
     _format_execute_detail_records,
@@ -26,6 +27,7 @@ __all__ = [
     "_format_detect_record",
     "_format_record",
     "_format_auth_attempt_detail_records",
+    "_format_database_fallback_detail_records",
     "_format_databases_detail_records",
     "_format_tables_detail_records",
     "_format_table_columns_detail_records",

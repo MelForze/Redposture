@@ -8,7 +8,7 @@ from ...stage_runtime import validate_basic_module_args
 
 
 def validate_args(args: Any, console: Any) -> int | None:
-    common_rc = validate_basic_module_args(args, console, module="registry", pure_http=True)
+    common_rc = validate_basic_module_args(args, console, module="registry")
     if common_rc is not None:
         return common_rc
     if getattr(args, "token", None) and (

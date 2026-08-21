@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.http_api import http_target_context
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
     AuditCommandRunner,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    command_result_exit_code,
 )
 from . import actions, policy, render
 
@@ -22,7 +25,11 @@ _PRODUCTION_AUDIT_HOST = actions._audit_kubeapi_host
 
 
 def build_kubeapi_plan(args: Any) -> AuditCommandPlan:
-    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
+    return plan
 
 
 def _build_kubeapi_host_stage_options(args: Any) -> dict[str, Any]:
@@ -46,21 +53,19 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
     )
 
     def _detect(ctx: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(actions.detect_kubeapi(ctx, options), module="kubeapi", service="kubeapi")
+        with http_target_context(ctx.target, api_prefixes=("/version", "/api", "/apis")):
+            result = actions.detect_kubeapi(ctx, options)
+        return AuditRecord.from_mapping(result, module="kubeapi", service="kubeapi")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.authenticate_kubeapi(ctx, record, options),
-            module="kubeapi",
-            service="kubeapi",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/version", "/api", "/apis")):
+            result = actions.authenticate_kubeapi(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="kubeapi", service="kubeapi")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.collect_kubeapi_data(ctx, record, options),
-            module="kubeapi",
-            service="kubeapi",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/version", "/api", "/apis")):
+            result = actions.collect_kubeapi_data(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="kubeapi", service="kubeapi")
 
     return ModuleAuditSpec(
         module="kubeapi",
@@ -123,7 +128,7 @@ def run_kubeapi_stage(args: Any, logger: Any) -> int:
         return 2
     if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all kubeapi targets are unreachable")
-    return 0
+    return command_result_exit_code(result)
 
 
 __all__ = [

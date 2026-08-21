@@ -16,8 +16,6 @@ from dataclasses import dataclass, field
 from queue import Empty, Queue
 from typing import Any, Literal
 
-from ..scheduler import BoundedScheduler
-
 _ZK_PROTOCOL_VERSION = 0
 _ZK_PASSWD_DEFAULT = b"\x00" * 16
 _ZK_OP_CREATE = 1
@@ -35,6 +33,7 @@ _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH = -124
 _ZK_ERR_THROTTLED_OP = -127
 _ZK_ERR_NODEEXISTS = -110
 _ZK_MAX_FRAME = 64 * 1024 * 1024
+_ZK_MAX_CHILDREN_PER_RESPONSE = 1_000_000
 _ZK_SYSTEM_PREFIX = "/zookeeper"
 _ZK_ACL_ALL_PERMS = 0x1F
 _ZK_CREATE_EPHEMERAL = 1
@@ -47,6 +46,15 @@ _ZK_FOUR_LETTER_MAX_RESPONSE = 1024 * 1024
 _ZK_FOUR_LETTER_COMMANDS = frozenset({"srvr", "stat", "mntr", "isro"})
 
 ZkTransportMode = Literal["auto", "plaintext", "tls"]
+
+
+class _ZkProtocolPayloadError(ValueError):
+    """A malformed ZooKeeper payload after its transport was established."""
+
+    def __init__(self, message: str, *, transport: Literal["plaintext", "tls"]) -> None:
+        super().__init__(message)
+        self.transport = transport
+        self.tls_handshake_completed = transport == "tls"
 
 
 @dataclass(frozen=True)
@@ -143,13 +151,15 @@ def _zk_error_name(code: int) -> str:
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:
-    data = b""
+    if size < 0:
+        raise ValueError("invalid receive size")
+    data = bytearray()
     while len(data) < size:
         chunk = sock.recv(size - len(data))
         if not chunk:
             raise ConnectionError("unexpected EOF")
-        data += chunk
-    return data
+        data.extend(chunk)
+    return bytes(data)
 
 
 def _recv_frame(sock: socket.socket) -> bytes:
@@ -174,12 +184,18 @@ def _decode_zk_string(data: bytes, offset: int = 0) -> tuple[str | None, int]:
         raise ValueError("invalid ZooKeeper string payload")
     (size,) = struct.unpack(">i", data[offset : offset + 4])
     offset += 4
-    if size < 0:
+    if size == -1:
         return None, offset
+    if size < -1:
+        raise ValueError("invalid ZooKeeper string length")
     end = offset + size
     if end > len(data):
         raise ValueError("truncated ZooKeeper string payload")
-    return data[offset:end].decode("utf-8", errors="replace"), end
+    try:
+        value = data[offset:end].decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("invalid UTF-8 in ZooKeeper string payload") from exc
+    return value, end
 
 
 def _decode_zk_buffer(data: bytes, offset: int = 0) -> tuple[bytes | None, int]:
@@ -187,8 +203,10 @@ def _decode_zk_buffer(data: bytes, offset: int = 0) -> tuple[bytes | None, int]:
         raise ValueError("invalid ZooKeeper buffer payload")
     (size,) = struct.unpack(">i", data[offset : offset + 4])
     offset += 4
-    if size < 0:
+    if size == -1:
         return None, offset
+    if size < -1:
+        raise ValueError("invalid ZooKeeper buffer length")
     end = offset + size
     if end > len(data):
         raise ValueError("truncated ZooKeeper buffer payload")
@@ -205,19 +223,68 @@ def _encode_acl_world_anyone_all() -> bytes:
     )
 
 
-def _parse_children_vector(payload: bytes, offset: int = 0) -> tuple[list[str], int]:
+def _valid_znode_child_name(value: str) -> bool:
+    if not value or value in {".", ".."} or "/" in value:
+        return False
+    for char in value:
+        codepoint = ord(char)
+        if (
+            codepoint == 0
+            or 0x01 <= codepoint <= 0x1F
+            or 0x7F <= codepoint <= 0x9F
+            or 0xD800 <= codepoint <= 0xF8FF
+            or 0xFFF0 <= codepoint <= 0xFFFF
+        ):
+            return False
+    return True
+
+
+def _parse_children_vector(payload: bytes, offset: int = 0) -> tuple[list[str] | None, int]:
     if offset + 4 > len(payload):
         raise ValueError("invalid ZooKeeper children vector")
     (count,) = struct.unpack(">i", payload[offset : offset + 4])
     offset += 4
-    if count < 0:
-        return [], offset
+    if count == -1:
+        return None, offset
+    if count < -1:
+        raise ValueError("invalid ZooKeeper children vector count")
+    if count > _ZK_MAX_CHILDREN_PER_RESPONSE:
+        raise ValueError("ZooKeeper children vector exceeds safe limit")
+    # Every valid child consumes at least a four-byte length and one byte of
+    # UTF-8 data. Reject impossible counts before entering the decode loop.
+    if count > (len(payload) - offset) // 5:
+        raise ValueError("truncated ZooKeeper children vector")
 
     children: list[str] = []
     for _ in range(count):
         item, offset = _decode_zk_string(payload, offset)
-        children.append(str(item or ""))
+        if item is None or not _valid_znode_child_name(item):
+            raise ValueError("invalid ZooKeeper child name")
+        children.append(item)
     return children, offset
+
+
+def _parse_connect_response(payload: bytes) -> None:
+    """Validate the complete ZooKeeper ConnectResponse wire record."""
+
+    if len(payload) < 20:
+        raise ValueError("invalid ZooKeeper connect response")
+    protocol_version, negotiated_timeout, session_id = struct.unpack(">iiq", payload[0:16])
+    if protocol_version != _ZK_PROTOCOL_VERSION or negotiated_timeout <= 0 or session_id == 0:
+        raise ValueError("invalid ZooKeeper connect response")
+
+    passwd_len = struct.unpack(">i", payload[16:20])[0]
+    if passwd_len != len(_ZK_PASSWD_DEFAULT):
+        raise ValueError("invalid ZooKeeper connect payload")
+    payload_end = 20 + passwd_len
+    if payload_end > len(payload):
+        raise ValueError("invalid ZooKeeper connect payload")
+
+    # The readOnly boolean was appended to ConnectResponse in newer protocol
+    # versions. Older peers omit it; no other trailing bytes are valid.
+    trailing = payload[payload_end:]
+    if trailing not in {b"", b"\x00", b"\x01"}:
+        raise ValueError("invalid ZooKeeper connect payload")
 
 
 def _parse_stat(payload: bytes, offset: int = 0) -> tuple[dict[str, int], int]:
@@ -239,6 +306,8 @@ def _parse_stat(payload: bytes, offset: int = 0) -> tuple[dict[str, int], int]:
         _pzxid,
     ) = struct.unpack(">qqqqiiiqiiq", payload[offset : offset + 68])
     offset += 68
+    if data_length < 0 or num_children < 0:
+        raise ValueError("invalid ZooKeeper stat counters")
     return {"data_length": int(data_length), "num_children": int(num_children)}, offset
 
 
@@ -324,6 +393,10 @@ def _transport_attempt_order(config: ZkTransportConfig) -> tuple[Literal["plaint
 
 
 def _transport_error_is_endpoint_independent(exc: BaseException) -> bool:
+    # SSLError inherits OSError and commonly uses small library-local error
+    # numbers that overlap POSIX errno values such as EPERM.
+    if isinstance(exc, ssl.SSLError):
+        return False
     if isinstance(exc, socket.gaierror):
         return True
     if isinstance(exc, ConnectionRefusedError):
@@ -333,7 +406,107 @@ def _transport_error_is_endpoint_independent(exc: BaseException) -> bool:
         errno.ENETUNREACH,
         errno.EHOSTUNREACH,
         errno.EADDRNOTAVAIL,
+        errno.EACCES,
+        errno.EPERM,
+        errno.EMFILE,
+        errno.ENFILE,
+        errno.ENOBUFS,
     }
+
+
+def _is_tls_protocol_mismatch(exc: BaseException) -> bool:
+    if not isinstance(exc, ssl.SSLError):
+        return False
+    text = str(exc).upper().replace(" ", "_")
+    return any(
+        marker in text
+        for marker in (
+            "WRONG_VERSION_NUMBER",
+            "UNKNOWN_PROTOCOL",
+            "HTTP_REQUEST",
+        )
+    )
+
+
+def _is_tls_security_error(exc: BaseException) -> bool:
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return True
+    if isinstance(exc, (FileNotFoundError, PermissionError)):
+        return True
+    if isinstance(exc, ValueError) and "certificate and key" in str(exc).lower():
+        return True
+    if isinstance(exc, _ZkProtocolPayloadError) and isinstance(exc.__cause__, BaseException):
+        if _is_tls_security_error(exc.__cause__):
+            return True
+    text = str(exc).upper().replace(" ", "_")
+    return isinstance(exc, (ssl.SSLError, _ZkProtocolPayloadError)) and any(
+        marker in text
+        for marker in (
+            "CERTIFICATE_VERIFY_FAILED",
+            "CERTIFICATE_REQUIRED",
+            "BAD_CERTIFICATE",
+            "CERTIFICATE_UNKNOWN",
+            "UNKNOWN_CA",
+            "PEM_LIB",
+            "KEY_VALUES_MISMATCH",
+            "HANDSHAKE_FAILURE",
+            "ACCESS_DENIED",
+            "DECRYPT_ERROR",
+        )
+    )
+
+
+def _is_transport_or_protocol_mismatch(exc: BaseException) -> bool:
+    """Return whether one alternate transport attempt is meaningful."""
+
+    if isinstance(exc, _ZkProtocolPayloadError):
+        # This wrapper exists only after a socket/handshake succeeded and the
+        # ZooKeeper ConnectResponse exchange failed.  EOF, timeout and a
+        # malformed record are all protocol-specific evidence.
+        return True
+    if isinstance(exc, (TimeoutError, ConnectionResetError, BrokenPipeError)):
+        return True
+    if isinstance(exc, ValueError) and not _is_tls_security_error(exc):
+        return True
+    if _is_tls_protocol_mismatch(exc):
+        return True
+    if isinstance(exc, OSError) and exc.errno in {
+        errno.ECONNRESET,
+        errno.ECONNABORTED,
+        errno.EPIPE,
+        errno.ETIMEDOUT,
+    }:
+        return True
+    text = str(exc).strip().lower()
+    return any(
+        marker in text
+        for marker in (
+            "unexpected eof",
+            "unexpected_eof",
+            "connection reset",
+            "connection_reset",
+            "remote end closed",
+            "connection closed",
+            "timed out",
+            "timeout",
+        )
+    )
+
+
+def _transport_error_allows_fallback(
+    exc: BaseException,
+    *,
+    attempted_transport: Literal["plaintext", "tls"],
+    config: ZkTransportConfig,
+) -> bool:
+    """Allow auto-detection fallback only for transport-specific failures."""
+
+    if _transport_error_is_endpoint_independent(exc):
+        return False
+    if attempted_transport == "tls" and _is_tls_security_error(exc):
+        return False
+    _ = config
+    return _is_transport_or_protocol_mismatch(exc)
 
 
 def query_four_letter_word(
@@ -493,12 +666,7 @@ def fingerprint_zookeeper_implementation(
     transport: Literal["plaintext", "tls"],
     config: ZkTransportConfig,
 ) -> ZkImplementationFingerprint:
-    commands = ("srvr", "stat", "mntr", "isro")
     responses: dict[str, ZkFourLetterResult] = {}
-    scheduler: BoundedScheduler[str, ZkFourLetterResult] = BoundedScheduler(
-        max_workers=len(commands),
-        max_inflight=len(commands),
-    )
 
     def _query(command: str) -> ZkFourLetterResult:
         try:
@@ -516,15 +684,15 @@ def fingerprint_zookeeper_implementation(
                 error=_friendly_error_from_exception(exc),
             )
 
-    for command, response in scheduler.iter_completed(commands, _query):
-        responses[command] = response
-
     version: str | None = None
     is_keeper: bool | None = None
+    # Identity probes are deliberately sequential and strongest-first. Stop as
+    # soon as a definitive vendor marker is observed; this keeps Apache and
+    # non-compatible endpoints to the smallest possible request budget.
     for command in ("srvr", "stat", "mntr"):
-        candidate_version, candidate_impl = _version_from_four_letter(
-            responses.get(command, ZkFourLetterResult(command)).response
-        )
+        response = _query(command)
+        responses[command] = response
+        candidate_version, candidate_impl = _version_from_four_letter(response.response)
         if version is None and candidate_version:
             version = candidate_version
         if candidate_impl is not None:
@@ -532,6 +700,14 @@ def fingerprint_zookeeper_implementation(
             if candidate_version:
                 version = candidate_version
             break
+
+    # mntr and isro are telemetry, not parallel identity guesses. Query them
+    # only after Keeper has been confirmed; re-use mntr when it was the probe
+    # that supplied the strong marker.
+    if is_keeper is True:
+        if "mntr" not in responses:
+            responses["mntr"] = _query("mntr")
+        responses["isro"] = _query("isro")
 
     merged_values: dict[str, str] = {}
     for command in ("srvr", "stat", "mntr"):
@@ -604,6 +780,7 @@ class _ZkClient:
         self._xid = 1
 
     def connect(self) -> None:
+        self.selected_transport = None
         failures: list[tuple[str, BaseException]] = []
         for transport in _transport_attempt_order(self.transport_config):
             try:
@@ -613,8 +790,65 @@ class _ZkClient:
             except (TimeoutError, ConnectionError, OSError, ValueError, ssl.SSLError) as exc:
                 failures.append((transport, exc))
                 self._close_socket_only()
-                if _transport_error_is_endpoint_independent(exc):
+                if not _transport_error_allows_fallback(
+                    exc,
+                    attempted_transport=transport,
+                    config=self.transport_config,
+                ):
                     raise
+        if len(failures) == 1:
+            raise failures[0][1]
+        details = "; ".join(f"{mode}: {_friendly_error_from_exception(exc)}" for mode, exc in failures)
+        raise ConnectionError(f"ZooKeeper transport auto-detection failed ({details})")
+
+    def connect_and_get_root(self) -> tuple[list[str] | None, int, dict[str, int] | None]:
+        """Select a transport only after a complete root request succeeds.
+
+        A valid ConnectResponse alone is not enough to distinguish a real
+        ZooKeeper endpoint from a protocol look-alike.  Initial detection uses
+        this combined operation so a plaintext reset/EOF/timeout or malformed
+        root response can consume the single TLS fallback.  Confirmed
+        certificate/mTLS failures and permanent endpoint errors never trigger
+        a downgrade; protocol mismatch/reset/EOF/bounded timeout may consume
+        one alternate attempt.
+        """
+
+        self.selected_transport = None
+        failures: list[tuple[str, BaseException]] = []
+        for transport in _transport_attempt_order(self.transport_config):
+            try:
+                self._connect_once(transport)
+            except (TimeoutError, ConnectionError, OSError, ValueError, ssl.SSLError) as exc:
+                failures.append((transport, exc))
+                self._close_socket_only()
+                if not _transport_error_allows_fallback(
+                    exc,
+                    attempted_transport=transport,
+                    config=self.transport_config,
+                ):
+                    raise
+                continue
+
+            try:
+                root = self.get_children2("/")
+            except (TimeoutError, ConnectionError, OSError, ValueError, ssl.SSLError) as exc:
+                failures.append((transport, exc))
+                self._close_socket_only()
+                # A fully decoded root response is required before selection.
+                # Certificate/mTLS failures and permanent endpoint errors do
+                # not downgrade, while reset/EOF/timeout/malformed protocol
+                # evidence may consume the single alternate attempt.
+                if not _transport_error_allows_fallback(
+                    exc,
+                    attempted_transport=transport,
+                    config=self.transport_config,
+                ):
+                    raise
+                continue
+
+            self.selected_transport = transport
+            return root
+
         if len(failures) == 1:
             raise failures[0][1]
         details = "; ".join(f"{mode}: {_friendly_error_from_exception(exc)}" for mode, exc in failures)
@@ -628,27 +862,27 @@ class _ZkClient:
             transport=transport,
             config=self.transport_config,
         )
-        session_timeout_ms = max(1000, int(self.timeout * 1000))
-        connect_payload = (
-            struct.pack(">i", _ZK_PROTOCOL_VERSION)
-            + struct.pack(">q", 0)
-            + struct.pack(">i", session_timeout_ms)
-            + struct.pack(">q", 0)
-            + struct.pack(">i", len(_ZK_PASSWD_DEFAULT))
-            + _ZK_PASSWD_DEFAULT
-            + b"\x00"
-        )
-        _send_frame(self._require_sock(), connect_payload)
-        response = _recv_frame(self._require_sock())
-
-        if len(response) < 20:
-            raise ValueError("invalid ZooKeeper connect response")
-        _ = struct.unpack(">i", response[0:4])[0]
-        _ = struct.unpack(">i", response[4:8])[0]
-        _ = struct.unpack(">q", response[8:16])[0]
-        passwd_len = struct.unpack(">i", response[16:20])[0]
-        if passwd_len < 0 or 20 + passwd_len > len(response):
-            raise ValueError("invalid ZooKeeper connect payload")
+        try:
+            session_timeout_ms = max(1000, int(self.timeout * 1000))
+            connect_payload = (
+                struct.pack(">i", _ZK_PROTOCOL_VERSION)
+                + struct.pack(">q", 0)
+                + struct.pack(">i", session_timeout_ms)
+                + struct.pack(">q", 0)
+                + struct.pack(">i", len(_ZK_PASSWD_DEFAULT))
+                + _ZK_PASSWD_DEFAULT
+                + b"\x00"
+            )
+            _send_frame(self._require_sock(), connect_payload)
+            response = _recv_frame(self._require_sock())
+            _parse_connect_response(response)
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            # ``_open_zk_socket`` performs the TLS handshake before returning.
+            # Every failure below this point therefore belongs to the
+            # ZooKeeper ConnectRequest/ConnectResponse exchange. Preserve the
+            # boundary so certificate failures remain distinguishable from an
+            # EOF/timeout/malformed protocol response eligible for one fallback.
+            raise _ZkProtocolPayloadError(str(exc), transport=transport) from exc
 
     def _close_socket_only(self) -> None:
         sock = self.sock
@@ -708,10 +942,11 @@ class _ZkClient:
     def auth_digest(self, username: str, password: str) -> tuple[bool, str | None]:
         raw_auth = f"{username}:{password}".encode("utf-8", errors="replace")
         payload = struct.pack(">i", 0) + _encode_zk_string("digest") + struct.pack(">i", len(raw_auth)) + raw_auth
-        try:
-            err, _ = self._request_with_xid(_ZK_AUTH_XID, _ZK_OP_AUTH, payload)
-        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
-            return False, _friendly_error_from_exception(exc)
+        # Only a protocol response can reject a credential.  Transport and
+        # malformed-response failures must remain exceptions so lifecycle
+        # callers classify the attempt as unverified/retryable rather than as
+        # a definitive authentication failure.
+        err, _ = self._request_with_xid(_ZK_AUTH_XID, _ZK_OP_AUTH, payload)
 
         if err == _ZK_ERR_OK:
             return True, None
@@ -721,24 +956,32 @@ class _ZkClient:
         payload = _encode_zk_string(path) + b"\x00"
         err, response_payload = self._request(_ZK_OP_GET_CHILDREN2, payload)
         if err != _ZK_ERR_OK:
+            if response_payload:
+                raise ValueError("unexpected ZooKeeper error payload")
             return None, err, None
 
         children, offset = _parse_children_vector(response_payload, 0)
-        stat: dict[str, int] | None = None
-        if offset < len(response_payload):
-            stat, _ = _parse_stat(response_payload, offset)
+        if children is None:
+            raise ValueError("invalid null ZooKeeper children vector")
+        stat, offset = _parse_stat(response_payload, offset)
+        if len(children) != stat["num_children"]:
+            raise ValueError("ZooKeeper children vector/stat count mismatch")
+        if offset != len(response_payload):
+            raise ValueError("unexpected trailing ZooKeeper getChildren2 payload")
         return children, err, stat
 
     def get_data(self, path: str) -> tuple[bytes | None, int, dict[str, int] | None]:
         payload = _encode_zk_string(path) + b"\x00"
         err, response_payload = self._request(_ZK_OP_GET_DATA, payload)
         if err != _ZK_ERR_OK:
+            if response_payload:
+                raise ValueError("unexpected ZooKeeper error payload")
             return None, err, None
 
         data, offset = _decode_zk_buffer(response_payload, 0)
-        stat: dict[str, int] | None = None
-        if offset < len(response_payload):
-            stat, _ = _parse_stat(response_payload, offset)
+        stat, offset = _parse_stat(response_payload, offset)
+        if offset != len(response_payload):
+            raise ValueError("unexpected trailing ZooKeeper getData payload")
         return data, err, stat
 
     def create(self, path: str, data: bytes = b"", flags: int = _ZK_CREATE_EPHEMERAL) -> int:
@@ -786,11 +1029,26 @@ def _enumerate_znodes(
             transport_config=transport_config,
         )
 
+    node_budget = max(0, int(max_znodes))
+    if node_budget == 0:
+        if progress_hook is not None:
+            progress_hook(
+                {
+                    "event": "enumerate_done",
+                    "processed_parents": 0,
+                    "queued": 0,
+                    "total_count": 0,
+                    "listed_count": 0,
+                    "elapsed_s": 0.0,
+                }
+            )
+        return [], 0, True, {}, None
     queue = deque(["/"])
-    visited: set[str] | None = {"/"} if collect_paths else None
+    visited: set[str] = {"/"}
     listed_nodes: list[str] = []
     listed_meta: dict[str, dict[str, Any]] = {}
     total_count = 0
+    budget_truncated = False
     processed_parents = 0
     started = time.monotonic()
     last_report_at = started
@@ -806,7 +1064,7 @@ def _enumerate_znodes(
             return (
                 listed_nodes,
                 total_count,
-                total_count > len(listed_nodes),
+                budget_truncated or (collect_paths and total_count > len(listed_nodes)),
                 listed_meta,
                 (f"getChildren failed for {parent}: {_friendly_error_from_exception(exc)}"),
             )
@@ -817,6 +1075,11 @@ def _enumerate_znodes(
             continue
         if err == _ZK_ERR_NOAUTH:
             # Parent exists, but subtree is not readable without auth.
+            if parent_meta is None and collect_paths:
+                parent_meta = listed_meta.setdefault(
+                    parent,
+                    {"path": parent, "children": None, "bytes": None, "error": None},
+                )
             if parent_meta is not None:
                 parent_meta["error"] = "Access Denied"
             continue
@@ -826,7 +1089,7 @@ def _enumerate_znodes(
             return (
                 listed_nodes,
                 total_count,
-                total_count > len(listed_nodes),
+                budget_truncated or (collect_paths and total_count > len(listed_nodes)),
                 listed_meta,
                 (f"getChildren failed for {parent}: {_zk_error_name(err)}"),
             )
@@ -839,14 +1102,14 @@ def _enumerate_znodes(
 
         for child in children:
             full_path = _join_znode_path(parent, child)
-            if _is_system_znode(full_path):
+            if full_path in visited:
                 continue
-            if visited is not None:
-                if full_path in visited:
-                    continue
-                visited.add(full_path)
+            if len(visited) >= node_budget:
+                budget_truncated = True
+                break
+            visited.add(full_path)
             total_count += 1
-            if collect_paths and len(listed_nodes) < max_znodes:
+            if collect_paths:
                 listed_nodes.append(full_path)
                 listed_meta[full_path] = {"path": full_path, "children": None, "bytes": None, "error": None}
             queue.append(full_path)
@@ -893,7 +1156,7 @@ def _enumerate_znodes(
                 last_report_count = total_count
                 last_report_processed = processed_parents
 
-    truncated = (total_count > len(listed_nodes)) if collect_paths else False
+    truncated = budget_truncated or (collect_paths and total_count > len(listed_nodes))
     if progress_hook is not None:
         progress_hook(
             {
@@ -926,11 +1189,28 @@ def _enumerate_znodes_parallel(
     task_queue: Queue[str | None] = Queue()
     result_queue: Queue[dict[str, Any]] = Queue()
     stop_event = threading.Event()
+    active_clients_lock = threading.Lock()
+    active_clients: dict[int, _ZkClient] = {}
 
-    queue_set: set[str] | None = {"/"} if collect_paths else None
+    node_budget = max(0, int(max_znodes))
+    if node_budget == 0:
+        if progress_hook is not None:
+            progress_hook(
+                {
+                    "event": "enumerate_done",
+                    "processed_parents": 0,
+                    "queued": 0,
+                    "total_count": 0,
+                    "listed_count": 0,
+                    "elapsed_s": 0.0,
+                }
+            )
+        return [], 0, True, {}, None
+    queue_set: set[str] = {"/"}
     listed_nodes: list[str] = []
     listed_meta: dict[str, dict[str, Any]] = {}
     total_count = 0
+    budget_truncated = False
     processed_parents = 0
     in_flight = 1
 
@@ -975,6 +1255,10 @@ def _enumerate_znodes_parallel(
                 client = _ZkClient(host, port, timeout)
             else:
                 client = _ZkClient(host, port, timeout, transport_config=transport_config)
+            with active_clients_lock:
+                if stop_event.is_set():
+                    return
+                active_clients[id(client)] = client
             client.connect()
             if auth_username is not None and auth_password is not None:
                 auth_ok, auth_error = client.auth_digest(auth_username, auth_password)
@@ -1047,6 +1331,8 @@ def _enumerate_znodes_parallel(
             )
         finally:
             if client is not None:
+                with active_clients_lock:
+                    active_clients.pop(id(client), None)
                 client.close()
 
     threads = [threading.Thread(target=_worker, daemon=True) for _ in range(worker_count)]
@@ -1089,6 +1375,11 @@ def _enumerate_znodes_parallel(
                 _emit_progress(time.monotonic())
                 continue
             if err == _ZK_ERR_NOAUTH:
+                if parent_meta is None and collect_paths:
+                    parent_meta = listed_meta.setdefault(
+                        parent,
+                        {"path": parent, "children": None, "bytes": None, "error": None},
+                    )
                 if parent_meta is not None:
                     parent_meta["error"] = "Access Denied"
                 _emit_progress(time.monotonic())
@@ -1108,14 +1399,14 @@ def _enumerate_znodes_parallel(
 
             for child in children:
                 full_path = _join_znode_path(parent, child)
-                if _is_system_znode(full_path):
+                if full_path in queue_set:
                     continue
-                if queue_set is not None:
-                    if full_path in queue_set:
-                        continue
-                    queue_set.add(full_path)
+                if len(queue_set) >= node_budget:
+                    budget_truncated = True
+                    break
+                queue_set.add(full_path)
                 total_count += 1
-                if collect_paths and len(listed_nodes) < max_znodes:
+                if collect_paths:
                     listed_nodes.append(full_path)
                     listed_meta[full_path] = {"path": full_path, "children": None, "bytes": None, "error": None}
                 in_flight += 1
@@ -1123,13 +1414,28 @@ def _enumerate_znodes_parallel(
 
             _emit_progress(time.monotonic())
     finally:
-        stop_event.set()
+        # Closing the live sockets is what interrupts workers currently blocked
+        # in recv(); the event alone is only observed between requests.  Take
+        # the snapshot under the same lock used for registration so no worker
+        # can publish a new live client after cancellation starts.
+        with active_clients_lock:
+            stop_event.set()
+            clients_to_cancel = list(active_clients.values())
+        for active_client in clients_to_cancel:
+            try:
+                close_socket = getattr(active_client, "_close_socket_only", None)
+                if callable(close_socket):
+                    close_socket()
+                else:
+                    active_client.close()
+            except Exception:  # pragma: no cover - best-effort cancellation boundary
+                continue
         for _ in range(worker_count):
             task_queue.put(None)
         for thread in threads:
             thread.join(timeout=1.0)
 
-    truncated = (total_count > len(listed_nodes)) if collect_paths else False
+    truncated = budget_truncated or (collect_paths and total_count > len(listed_nodes))
     if progress_hook is not None:
         progress_hook(
             {

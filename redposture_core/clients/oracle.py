@@ -109,7 +109,10 @@ def normalize_oracle_error(exc: BaseException | str | None) -> str:
         ("ORA-12170", "connection timeout"),
         ("DPY-6005", "connection refused (listener is not available)"),
         ("DPY-6003", "connection timeout"),
-        ("DPY-4011", "authentication failed"),
+        # python-oracledb defines DPY-4011 as a connection that was closed by
+        # the database or the network.  It is transport evidence, not an
+        # authentication verdict (and, on its own, not an Oracle fingerprint).
+        ("DPY-4011", "database or network closed the connection"),
     )
     for needle, normalized in mapping:
         if needle in upper:
@@ -129,7 +132,7 @@ def classify_oracle_error(exc: BaseException | str | None) -> str:
         return "account_locked"
     if "ORA-28001" in text or normalized == "account expired":
         return "account_expired"
-    if "ORA-01017" in text or "DPY-4011" in text or "authentication" in normalized:
+    if "ORA-01017" in text or "authentication" in normalized:
         return "invalid_credentials"
     if "ORA-12526" in text or "ORA-12527" in text or "ORA-12528" in text:
         return "listener_restricted"
@@ -379,26 +382,32 @@ def classify_nne_policy(
     encrypted = "ENCRYPTION SERVICE" in joined and "INACTIVE" not in joined
     crypto = "CRYPTO-CHECKSUMMING" in joined or "CHECKSUM" in joined
     weak_tokens = [token for token in _WEAK_NNE_TOKENS if token in joined]
+    # TCP versus TCPS describes the outer transport only.  Oracle Native
+    # Network Encryption is negotiated inside ordinary SQL*Net/TCP, so a TCP
+    # listener must never be labelled plaintext/weak without session evidence.
     if encrypted:
         status = "encrypted"
-    elif tcp_available and tcps_available:
-        status = "optional_or_plaintext_allowed"
-    elif tcp_available and not tcps_available:
-        status = "plaintext_allowed"
     elif tcps_available and not tcp_available:
         status = "tcps_only"
     else:
         status = "unknown"
-    weak = status in {"optional_or_plaintext_allowed", "plaintext_allowed"} or bool(weak_tokens)
-    weak_reasons = weak_tokens + (
-        ["plaintext accepted"] if status in {"optional_or_plaintext_allowed", "plaintext_allowed"} else []
-    )
+    weak = bool(weak_tokens)
+    weak_reasons = weak_tokens
     return {
         "status": status,
         "encrypted": encrypted,
         "crypto_checksum": crypto,
         "tcp_available": tcp_available,
         "tcps_available": tcps_available,
+        "transport_observation": (
+            "tcp_and_tcps"
+            if tcp_available and tcps_available
+            else "tcp_only"
+            if tcp_available
+            else "tcps_only"
+            if tcps_available
+            else "none"
+        ),
         "weak": weak,
         "weak_reasons": weak_reasons,
         "reasons": weak_reasons,

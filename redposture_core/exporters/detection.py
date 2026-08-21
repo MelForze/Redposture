@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from ..utils import utc_now_iso
+from .http_client import build_http_url
 
 PROMETHEUS_METRIC_LINE_RE = re.compile(
     r"(?m)^[a-zA-Z_:][a-zA-Z0-9_:]*(?:\{[^{}\n]*\})?\s+"
@@ -27,7 +28,7 @@ def build_scan_error_record(host: str, port: int, error: BaseException) -> dict[
         "host": host,
         "exporter": "unknown",
         "port": port,
-        "url": f"http://{host}:{port}/metrics",
+        "url": build_http_url(host, port, "/metrics"),
         "detected": False,
         "method": "none",
         "status": None,

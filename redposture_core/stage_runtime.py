@@ -643,6 +643,27 @@ class AuditCommandResult:
     record_count: int = 0
     status_counts: dict[str, int] = field(default_factory=dict)
     record_retention_truncated: bool = False
+    operational_failure_count: int = 0
+
+    @property
+    def inconclusive(self) -> bool:
+        """Whether no service was confirmed and detection had operational failures."""
+
+        return self.detected_count == 0 and self.operational_failure_count > 0
+
+
+def command_result_exit_code(result: AuditCommandResult) -> int:
+    """Return a shell status that preserves inconclusive audit outcomes.
+
+    A negative service result is still a successful audit. A run where no
+    service was confirmed and at least one target failed before detection is
+    operationally inconclusive, so callers must not report a clean exit.
+    """
+
+    detected_count = int(getattr(result, "detected_count", 0) or 0)
+    operational_failure_count = int(getattr(result, "operational_failure_count", 0) or 0)
+    _ = detected_count
+    return 1 if operational_failure_count > 0 else 0
 
 
 @dataclass(frozen=True)
@@ -757,10 +778,13 @@ def build_basic_audit_plan(
         target_plan = stream_scan_target_specs(
             targets,
             policy=TargetParsePolicy(url_mode="preserve", path_policy="preserve"),
+            exclude_targets=getattr(args, "out_targets", None),
         )
     except (OSError, ValueError) as exc:
         raise ValueError(f"failed to parse targets: {exc}") from exc
     if not target_plan:
+        if targets and getattr(args, "out_targets", None):
+            raise ValueError("all targets were excluded by --out-target")
         raise ValueError("targets are required")
 
     port_option_provided = getattr(args, "_port_option_provided", None)
@@ -802,6 +826,35 @@ def build_basic_credential_runs(args: Any) -> tuple[AuditCredentialRun, ...]:
             for entry in credential_file_entries
         )
     return (AuditCredentialRun(username=username, password=password, token=token),)
+
+
+def sort_default_audit_credential_runs(
+    runs: Iterable[AuditCredentialRun],
+) -> tuple[AuditCredentialRun, ...]:
+    """Return one deterministic alphabetical ordering for built-in credentials.
+
+    Default tokens have no login, so they retain authentication-type priority
+    ahead of username/password candidates and are sorted by token value. Basic
+    credentials are ordered case-insensitively by login and then password;
+    original strings are tie-breakers so the result is deterministic even when
+    values differ only by case. Anonymous placeholders sort last.
+
+    Callers must apply this helper only to the built-in defaults group. Explicit
+    credentials and credential-file entries intentionally keep user order and
+    are merged before the sorted defaults with ``merge_audit_credential_runs``.
+    """
+
+    def _key(candidate: AuditCredentialRun) -> tuple[int, str, str, str, str]:
+        if candidate.token is not None:
+            token = str(candidate.token)
+            return 0, token.casefold(), token, "", ""
+        if candidate.username is not None or candidate.password is not None:
+            username = "" if candidate.username is None else str(candidate.username)
+            password = "" if candidate.password is None else str(candidate.password)
+            return 1, username.casefold(), password.casefold(), username, password
+        return 2, "", "", "", ""
+
+    return tuple(sorted(tuple(runs), key=_key))
 
 
 def merge_audit_credential_runs(
@@ -905,7 +958,7 @@ def validate_basic_module_args(
     if username_value is not None:
         try:
             credential_file_entries = parse_username_password_credential_file(username_value, password_value)
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:
             console.error(str(exc))
             return 2
     allow_password_only = module in {"redis"}
@@ -952,8 +1005,9 @@ def validate_basic_module_args(
             target_plan = stream_scan_target_specs(
                 str(targets),
                 policy=TargetParsePolicy(url_mode="preserve", path_policy="preserve"),
+                exclude_targets=getattr(args, "out_targets", None),
             )
-        except ValueError as exc:
+        except (OSError, ValueError) as exc:
             console.error(f"failed to parse targets: {exc}")
             return 2
         if target_plan.has_scheme("https"):
@@ -1282,6 +1336,7 @@ _PRE_DETECT_NOISE_MARKERS = (
     "no route to host",
     "network unreachable",
     "host is down",
+    "dns lookup failed",
     "name or service not known",
     "temporary failure in name resolution",
     "nodename nor servname",
@@ -1312,6 +1367,37 @@ _PRE_DETECT_NOISE_MARKERS = (
     "wrong_version_number",
     "unexpected_eof_while_reading",
     "sslv3_alert",
+)
+
+_PRE_DETECT_OPERATIONAL_MARKERS = (
+    "connection refused",
+    "connection reset",
+    "reset by peer",
+    "connection aborted",
+    "operation not permitted",
+    "connection timeout",
+    "timed out",
+    "timeout",
+    "unexpected eof",
+    "protocol closed before",
+    "closed before",
+    "remote end closed",
+    "server closed",
+    "no route to host",
+    "network unreachable",
+    "host is down",
+    "dns lookup failed",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "nodename nor servname",
+    "getaddrinfo",
+    "proxy tunnel",
+    "proxy connect",
+    "socks",
+    "tunnel failed",
+    "certificate verify failed",
+    "peer requires client certificate",
+    "tlsv1 alert unknown ca",
 )
 
 
@@ -1355,6 +1441,24 @@ def is_pre_detect_network_noise(record: AuditRecord | dict[str, Any]) -> bool:
     if not text:
         return False
     return any(marker in text for marker in _PRE_DETECT_NOISE_MARKERS)
+
+
+def is_pre_detect_operational_failure(record: AuditRecord | dict[str, Any]) -> bool:
+    """Return true when detection failed operationally before service proof.
+
+    Runtime-isolated exceptions carry a failed ``detect_protocol`` trace even
+    when their message is not one of the known network strings. Legacy module
+    records do not always carry phase traces, so the existing bounded network
+    marker classifier remains the compatibility fallback.
+    """
+
+    payload = record.to_dict() if isinstance(record, AuditRecord) else dict(record)
+    if _record_looks_detected(payload):
+        return False
+    if payload.get("operational_failure") is True:
+        return True
+    text = _record_noise_text(payload)
+    return bool(text and any(marker in text for marker in _PRE_DETECT_OPERATIONAL_MARKERS))
 
 
 def _can_call_detail_renderer(func: Callable[..., Any]) -> bool:
@@ -1419,6 +1523,12 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         return getattr(args, "proxy", None)
     if name == "insecure":
         return bool(getattr(args, "insecure", False))
+    if name in {"tls", "tls_insecure"}:
+        return bool(getattr(args, name, False))
+    if name == "sslmode":
+        return str(getattr(args, "sslmode", "disable") or "disable")
+    if name in {"ssl_ca", "ssl_cert", "ssl_key", "ssl_server_name"}:
+        return getattr(args, name, None)
     if name in {"ca_file", "tls_ca", "tls_cert", "tls_key", "cert_file", "key_file"}:
         transport_aliases = {
             "ca_file": ("ca_file", "tls_ca"),
@@ -1534,6 +1644,7 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         "tls_ca": "tls_ca",
         "tls_cert": "tls_cert",
         "tls_key": "tls_key",
+        "tls_cert_key": "tls_cert_key",
         "ca_file": "ca_file",
         "preferred_scheme": "scheme",
         "container_selector": "container",
@@ -1581,6 +1692,7 @@ def _argument_value_for_hook(name: str, ctx: AuditHookContext, cfg: AuditConfig)
         "nne_check",
         "node_dump_name",
         "nosql_command",
+        "tls_cert_key",
         "on_credential_finding",
         "on_discovered_url",
         "on_status_ready",
@@ -1732,6 +1844,7 @@ class AuditCommandRunner:
         retained_records: list[AuditRecord] = []
         record_count = 0
         detected_count = 0
+        operational_failure_count = 0
         status_counts: dict[str, int] = {}
         record_callbacks = _record_callbacks_for_args(self.args)
         render_plan = build_render_plan(self.spec.render_module) if self.spec.render_module is not None else None
@@ -1769,8 +1882,9 @@ class AuditCommandRunner:
             sink.emit_many(lines)
 
         def _finalize_record(record: AuditRecord) -> None:
-            nonlocal record_count
+            nonlocal operational_failure_count, record_count
             record_count += 1
+            operational_failure_count += int(is_pre_detect_operational_failure(record))
             status = str(record.status or "")
             status_counts[status] = status_counts.get(status, 0) + 1
             if retain_records:
@@ -1828,7 +1942,26 @@ class AuditCommandRunner:
             debug_emit(format_pass_marker(2, "deep", "complete", processed=processed_deep, mode="pipeline"))
 
         fallback_target_count = record_count or plan.fallback_target_count
-        if record_count == 0 and plan.fallback_target_count > 0 and plan.output_format == "json":
+        inconclusive = detected_count == 0 and operational_failure_count > 0
+        partial = detected_count > 0 and operational_failure_count > 0
+        conclusive_negative_count = max(0, record_count - operational_failure_count)
+        if (inconclusive or partial) and plan.output_format == "json":
+            summary = {
+                "type": "summary",
+                "module": self.spec.module,
+                "service": self.spec.module,
+                "status": "inconclusive" if inconclusive else "partial",
+                "requested_targets": int(plan.fallback_target_count),
+                "processed_targets": int(record_count),
+                "record_count": int(record_count),
+                "detected_count": int(detected_count),
+                "operational_failure_count": int(operational_failure_count),
+                "conclusive_negative_count": int(conclusive_negative_count),
+                "reason": "operational_failures_before_detection" if inconclusive else "partial_operational_failure",
+            }
+            emitted_lines += 1
+            sink.emit_many((json.dumps(summary, ensure_ascii=False),))
+        elif record_count == 0 and plan.fallback_target_count > 0 and plan.output_format == "json":
             summary = {
                 "type": "summary",
                 "module": self.spec.module,
@@ -1842,6 +1975,24 @@ class AuditCommandRunner:
             }
             emitted_lines += 1
             sink.emit_many((json.dumps(summary, ensure_ascii=False),))
+        elif inconclusive and plan.output_format != "json":
+            total = fallback_target_count
+            target_word = "target" if total == 1 else "targets"
+            fallback_lines = (
+                f"[!] {self.spec.label} audit inconclusive: no service confirmed; "
+                f"{operational_failure_count}/{total} {target_word} unreachable or failed before detection",
+            )
+            emitted_lines += len(fallback_lines)
+            sink.emit_many(fallback_lines)
+        elif partial and plan.output_format != "json":
+            total = fallback_target_count
+            target_word = "target" if total == 1 else "targets"
+            fallback_lines = (
+                f"[!] {self.spec.label} audit partial: confirmed={detected_count}; "
+                f"{operational_failure_count}/{total} {target_word} unreachable or failed before detection",
+            )
+            emitted_lines += len(fallback_lines)
+            sink.emit_many(fallback_lines)
         elif emitted_lines == 0 and fallback_target_count > 0 and plan.output_format != "json":
             if fallback_target_count > 1:
                 fallback_lines = (f"[*] No {self.spec.label} service detected on {fallback_target_count} target(s)",)
@@ -1859,6 +2010,7 @@ class AuditCommandRunner:
             record_count=record_count,
             status_counts=status_counts,
             record_retention_truncated=not retain_records,
+            operational_failure_count=operational_failure_count,
         )
 
     def _ctx(
@@ -2624,7 +2776,7 @@ class AuditCommandRunner:
                 module=self.spec.module,
                 service=self.spec.module,
                 status="fail",
-                extra={"error": message, f"is_{self.spec.module}": False},
+                extra={"error": message, "operational_failure": True, f"is_{self.spec.module}": False},
             )
 
     def _host_stage(self, ctx: AuditHookContext, *, run_deep_checks: bool) -> AuditRecord:
@@ -2852,9 +3004,9 @@ def run_basic_host_audit(
     except OSError as exc:
         console.error(f"failed to process {name} output: {exc}")
         return 2
-    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
+    if cfg.debug and command_result_exit_code(result) != 0 and hasattr(console, "warn"):
         console.warn(f"all {name} targets are unreachable")
-    return 0
+    return command_result_exit_code(result)
 
 
 def get_command_progress_owner(args: Any) -> CommandProgressOwner | None:

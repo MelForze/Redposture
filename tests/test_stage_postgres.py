@@ -82,21 +82,21 @@ class _ProtocolSocket(_DummySocket):
 
 def test_postgres_defcreds_are_ordered_and_deduplicated() -> None:
     defaults = [
-        ("postgres", "postgres", True),
+        ("admin", "admin", True),
+        ("admin", "password", True),
+        ("admin", "postgres", True),
+        ("dev", "dev", True),
         ("pgbouncer", "pgbouncer", True),
         ("pgbouncer_exporter", "pgbouncer_exporter", True),
-        ("postgres", "password", True),
+        ("pgsql", "pgsql", True),
         ("postgres", "admin", True),
         ("postgres", "changeme", True),
-        ("admin", "admin", True),
-        ("admin", "postgres", True),
-        ("pgsql", "pgsql", True),
-        ("admin", "password", True),
-        ("user", "user", True),
-        ("user", "password", True),
+        ("postgres", "password", True),
+        ("postgres", "postgres", True),
         ("service", "service", True),
         ("test", "test", True),
-        ("dev", "dev", True),
+        ("user", "password", True),
+        ("user", "user", True),
     ]
     assert postgres._postgres_credential_runs(None, None, defcreds=True) == [
         *defaults,
@@ -107,7 +107,7 @@ def test_postgres_defcreds_are_ordered_and_deduplicated() -> None:
     ]
     assert postgres._postgres_credential_runs("postgres", "postgres", defcreds=True) == [
         ("postgres", "postgres", False),
-        *defaults[1:],
+        *[item for item in defaults if item[:2] != ("postgres", "postgres")],
     ]
 
 
@@ -182,7 +182,7 @@ def test_postgres_auth_required_single_attempt_keeps_one_line() -> None:
         "defcreds_enabled": True,
         "effective_username": "postgres",
     }
-    assert _format_record(record, "txt").endswith("[-] postgres:postgres")
+    assert _format_record(record, "txt").endswith("[-] postgres:admin")
     assert postgres._format_credential_attempts_records(record, "txt") == []
 
 
@@ -753,6 +753,97 @@ def test_postgres_protocol_helpers_and_startup_auth_paths(monkeypatch: pytest.Mo
     assert pgbouncer_error.value.error_kind == "auth_configuration_error"
 
 
+def test_postgres_sslrequest_prefer_require_and_verified_mtls(monkeypatch: pytest.MonkeyPatch) -> None:
+    refused = _ProtocolSocket(b"N")
+    monkeypatch.setattr(postgres.socket, "create_connection", lambda *_args, **_kwargs: refused)
+    with postgres._pg_open_socket(
+        "db.local",
+        5432,
+        1.0,
+        tls_config=postgres._pg_tls_config("prefer"),
+    ) as sock:
+        assert sock is refused
+    assert refused.sent == [struct.pack(">II", 8, 80877103)]
+
+    monkeypatch.setattr(postgres.socket, "create_connection", lambda *_args, **_kwargs: _ProtocolSocket(b"N"))
+    with pytest.raises(_PgAuditError, match="refused TLS") as excinfo:
+        with postgres._pg_open_socket(
+            "db.local",
+            5432,
+            1.0,
+            tls_config=postgres._pg_tls_config("require"),
+        ):
+            pass
+    assert excinfo.value.detected is True
+    assert excinfo.value.failure_phase == "tls"
+
+    raw = _ProtocolSocket(b"S")
+    wrapped = _ProtocolSocket()
+
+    class FakeContext:
+        def __init__(self) -> None:
+            self.check_hostname = False
+            self.loaded: tuple[str, str | None] | None = None
+            self.server_hostname: str | None = None
+
+        def load_cert_chain(self, certfile: str, keyfile: str | None = None) -> None:
+            self.loaded = (certfile, keyfile)
+
+        def wrap_socket(self, sock: object, *, server_hostname: str | None = None):
+            assert sock is raw
+            self.server_hostname = server_hostname
+            return wrapped
+
+    context = FakeContext()
+    monkeypatch.setattr(postgres.socket, "create_connection", lambda *_args, **_kwargs: raw)
+    monkeypatch.setattr(postgres.ssl, "create_default_context", lambda *, cafile=None: context)
+    with postgres._pg_open_socket(
+        "10.0.0.5",
+        5432,
+        1.0,
+        tls_config=postgres._pg_tls_config(
+            "verify-full",
+            "/tmp/ca.pem",
+            "/tmp/client.pem",
+            "/tmp/client.key",
+            "db.internal",
+        ),
+    ) as sock:
+        assert sock is wrapped
+    assert context.check_hostname is True
+    assert context.loaded == ("/tmp/client.pem", "/tmp/client.key")
+    assert context.server_hostname == "db.internal"
+
+
+def test_postgres_cli_defaults_to_tls_prefer_and_accepts_verification_options() -> None:
+    from redposture_core.cli_args import parse_args
+
+    defaults = parse_args(["postgres", "-t", "db.local"])
+    assert defaults.sslmode == "prefer"
+    configured = parse_args(
+        [
+            "postgres",
+            "-t",
+            "db.local",
+            "--sslmode",
+            "verify-full",
+            "--ssl-ca",
+            "ca.pem",
+            "--ssl-cert",
+            "client.pem",
+            "--ssl-key",
+            "client.key",
+            "--ssl-server-name",
+            "db.internal",
+        ]
+    )
+    assert configured.sslmode == "verify-full"
+    assert configured.ssl_ca == "ca.pem"
+    assert configured.ssl_cert == "client.pem"
+    assert configured.ssl_key == "client.key"
+    assert configured.ssl_server_name == "db.internal"
+
+
 def test_collect_postgres_privileges_and_query_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     bool_results = iter([(True, None), (False, None)])
     monkeypatch.setattr(postgres, "_pg_query_scalar_bool", lambda *_args, **_kwargs: next(bool_results))
@@ -1281,9 +1372,15 @@ def test_postgres_sql_shell_uses_late_winning_default_credential(
     assert rc == 0
     assert attempted == [
         ("app", "bad", False),
-        ("postgres", "postgres", False),
+        ("admin", "admin", False),
+        ("admin", "password", False),
+        ("admin", "postgres", False),
+        ("dev", "dev", False),
         ("pgbouncer", "pgbouncer", False),
         ("pgbouncer_exporter", "pgbouncer_exporter", False),
+        ("pgsql", "pgsql", False),
+        ("postgres", "admin", False),
+        ("postgres", "changeme", False),
         ("postgres", "password", False),
     ]
     assert query_auth == [("postgres", "password")]
@@ -1407,7 +1504,7 @@ def test_run_postgres_stage_multi_port_verbose_uses_single_outer_progress(
         ),
         logger=object(),
     )
-    assert rc == 0
+    assert rc == 1
     assert [call["port"] for call in calls] == [5432, 25432, 25433, 25434, 25435]
     assert all(call["run_deep_checks"] is False for call in calls)
     assert progress_totals == [5]
@@ -1739,7 +1836,8 @@ def test_audit_postgres_suppresses_connection_refused_when_suppression_enabled(m
 
     assert (total, open_no_auth, weak, valid, auth_required, failed) == (1, 0, 0, 0, 0, 1)
     assert len(lines) == 1
-    assert "No POSTGRES service detected" in lines[0]
+    assert "POSTGRES audit inconclusive" in lines[0]
+    assert "unreachable or failed before detection" in lines[0]
     assert all("Connection refused" not in line and "timed out" not in line for line in lines)
 
 
@@ -2655,7 +2753,11 @@ def test_postgres_privesc_check_collector(monkeypatch: pytest.MonkeyPatch) -> No
     assert any(
         item["id"] == "security_definer_accessible" and "public.safe_definer" in item["evidence"] for item in checks
     )
-    assert summary == {"critical": 3, "high": 4, "medium": 3, "unknown": 0, "total": 11}
+    assert summary == {"critical": 3, "high": 4, "medium": 1, "unknown": 0, "total": 11}
+    secdef = next(item for item in checks if item["id"] == "security_definer_accessible")
+    create_db = next(item for item in checks if item["id"] == "database_create_privilege")
+    assert secdef["observed"] is True and secdef["vulnerable"] is False
+    assert create_db["observed"] is True and create_db["vulnerable"] is False
 
 
 def test_postgres_detail_and_status_renderers_cover_text_and_json_paths() -> None:

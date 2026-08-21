@@ -15,10 +15,17 @@ class DockerEngineError(RuntimeError):
 
 
 class DockerEngineHTTPError(DockerEngineError):
-    def __init__(self, status: int, reason: str, body: bytes = b"") -> None:
+    def __init__(
+        self,
+        status: int,
+        reason: str,
+        body: bytes = b"",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status = int(status)
         self.reason = str(reason or "")
         self.body = body
+        self.headers = dict(headers or {})
         detail = self.reason or body.decode("utf-8", "replace")[:120]
         super().__init__(f"docker API HTTP {self.status}: {detail}")
 
@@ -82,7 +89,10 @@ def build_docker_url(host: str, port: int, *, transport: str, path: str) -> str:
     scheme = "https" if transport == "tls" else "http"
     if not path.startswith("/"):
         path = "/" + path
-    return f"{scheme}://{host}:{int(port)}{path}"
+    normalized_host = str(host).strip()
+    if ":" in normalized_host and not normalized_host.startswith("["):
+        normalized_host = f"[{normalized_host}]"
+    return f"{scheme}://{normalized_host}:{int(port)}{path}"
 
 
 def _ssl_context(*, insecure: bool, ca_file: str | None, cert_file: str | None, key_file: str | None) -> ssl.SSLContext:
@@ -144,7 +154,14 @@ class DockerEngineClient:
         allow_statuses: set[int] | None = None,
     ) -> DockerHTTPResponse:
         body: bytes | None = None
-        req_headers = {"Host": f"{self.host}:{self.port}", "User-Agent": "redposture", "Accept": "application/json"}
+        authority_host = self.host
+        if ":" in authority_host and not authority_host.startswith("["):
+            authority_host = f"[{authority_host}]"
+        req_headers = {
+            "Host": f"{authority_host}:{self.port}",
+            "User-Agent": "redposture",
+            "Accept": "application/json",
+        }
         if headers:
             req_headers.update(headers)
         if json_body is not None:
@@ -160,7 +177,7 @@ class DockerEngineClient:
             result = DockerHTTPResponse(int(response.status), str(response.reason), normalized_headers, raw)
             allowed = allow_statuses or set(range(200, 300))
             if result.status not in allowed:
-                raise DockerEngineHTTPError(result.status, result.reason, result.body)
+                raise DockerEngineHTTPError(result.status, result.reason, result.body, result.headers)
             return result
         except DockerEngineHTTPError:
             raise

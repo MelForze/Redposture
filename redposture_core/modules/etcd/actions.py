@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import time
 import urllib.error
 from collections.abc import Callable
 from typing import Any
 
 from ...clients import transport
-from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
+from ...clients.http_api import (
+    HttpApiClient,
+    HttpClientConfig,
+    build_http_target_url,
+    current_http_target_binding,
+    http_target_context,
+    resolve_http_scheme,
+)
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
@@ -35,21 +43,24 @@ _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _ETCD_DEEP_STATUSES = {"open_no_auth", "weak_default_creds", "valid_credentials"}
 _ETCD_V3_ALL_RANGE_KEY_B64 = "AA=="
+_ETCD_V3_PREFIXES: tuple[str, ...] = ("/v3", "/v3beta", "/v3alpha")
+_ETCD_V3_PREFIX_CACHE: dict[tuple[str, int, str | None, str], str] = {}
+_ETCD_V3_PREFIX_CACHE_LOCK = threading.Lock()
 _ETCD_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
-    ("root", "root"),
-    ("root", "etcd"),
-    ("etcd", "etcd"),
-    ("root", "password"),
-    ("root", "admin"),
-    ("root", "rootpass"),
-    ("etcd", "password"),
     ("admin", "admin"),
-    ("admin", "password"),
-    ("admin", "etcd"),
     ("admin", "changeme"),
-    ("user", "user"),
-    ("user", "password"),
+    ("admin", "etcd"),
+    ("admin", "password"),
+    ("etcd", "etcd"),
+    ("etcd", "password"),
+    ("root", "admin"),
+    ("root", "etcd"),
+    ("root", "password"),
+    ("root", "root"),
+    ("root", "rootpass"),
     ("service", "service"),
+    ("user", "password"),
+    ("user", "user"),
 )
 
 
@@ -117,6 +128,28 @@ def _etcd_v3_authenticate(
     return None, f"authenticate returned status {status}"
 
 
+def _etcd_v2_authenticate(
+    host: str,
+    port: int,
+    timeout: float,
+    username: str,
+    password: str,
+) -> tuple[bool, str | None]:
+    status, body = _http_json_request(
+        host,
+        port,
+        "GET",
+        "/v2/keys?recursive=true",
+        timeout,
+        basic_auth=(username, password),
+    )
+    if status == 200 and _count_v2_keys(body) is not None:
+        return True, None
+    if status in {401, 403} or _body_indicates_auth_required(body):
+        return False, "invalid credentials"
+    return False, f"v2 key probe returned status {status}"
+
+
 def _clip(text: str, width: int = 64) -> str:
     if len(text) <= width:
         return text
@@ -154,9 +187,9 @@ def _http_json_request(
     *,
     payload: dict[str, Any] | None = None,
     auth_token: str | None = None,
+    basic_auth: tuple[str, str] | None = None,
 ) -> tuple[int, str]:
     scheme = resolve_http_scheme(host, port, timeout, probe_path="/version")
-    url = f"{scheme}://{host}:{port}{path}"
     body_bytes: bytes | None = None
     headers = {"User-Agent": "RedPosture/1.0"}
     if payload is not None:
@@ -167,11 +200,43 @@ def _http_json_request(
         # grpc-metadata alias which upstream tooling uses.
         headers["Authorization"] = auth_token
         headers["Grpc-Metadata-Authorization"] = auth_token
+    elif basic_auth is not None:
+        user, secret = basic_auth
+        encoded = base64.b64encode(f"{user}:{secret}".encode()).decode("ascii")
+        headers["Authorization"] = f"Basic {encoded}"
     client = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True))
-    response = client.request(method, url, headers=headers, body=body_bytes, timeout=timeout)
-    if response.error:
-        raise urllib.error.URLError(response.error)
-    return int(response.status), response.text
+
+    requested_path = str(path or "/")
+    candidates = [requested_path]
+    if requested_path.startswith("/v3/"):
+        binding = current_http_target_binding()
+        key = (str(host), int(port), binding.scheme, binding.base_path)
+        with _ETCD_V3_PREFIX_CACHE_LOCK:
+            cached_prefix = _ETCD_V3_PREFIX_CACHE.get(key)
+        suffix = requested_path[len("/v3") :]
+        prefixes = ([cached_prefix] if cached_prefix else []) + list(_ETCD_V3_PREFIXES)
+        candidates = []
+        for prefix in prefixes:
+            if prefix and f"{prefix}{suffix}" not in candidates:
+                candidates.append(f"{prefix}{suffix}")
+
+    last_status = 0
+    last_text = ""
+    for index, candidate_path in enumerate(candidates):
+        url = build_http_target_url(host, port, candidate_path, default_scheme=scheme)
+        response = client.request(method, url, headers=headers, body=body_bytes, timeout=timeout)
+        if response.error:
+            raise urllib.error.URLError(response.error)
+        last_status, last_text = int(response.status), response.text
+        if not requested_path.startswith("/v3/") or last_status not in {404, 501}:
+            if requested_path.startswith("/v3/"):
+                selected_prefix = candidate_path[: -len(requested_path[len("/v3") :])]
+                with _ETCD_V3_PREFIX_CACHE_LOCK:
+                    _ETCD_V3_PREFIX_CACHE[key] = selected_prefix
+            return last_status, last_text
+        if index == len(candidates) - 1:
+            break
+    return last_status, last_text
 
 
 def _load_json(body: str) -> dict[str, Any] | None:
@@ -228,6 +293,13 @@ def _count_v2_keys(body: str) -> int | None:
         return None
     node = payload.get("node")
     return _count_v2_nodes(node)
+
+
+def _looks_like_v2_keys_response(body: str) -> bool:
+    payload = _load_json(body)
+    if payload is None:
+        return False
+    return isinstance(payload.get("action"), str) and isinstance(payload.get("node"), dict)
 
 
 def _parse_v3_key_count(body: str) -> tuple[int | None, str | None]:
@@ -359,8 +431,25 @@ def _dump_v2_all_from_body(body: str) -> list[dict[str, str | None]] | None:
     return [_etcd_kv_entry(key, value) for key, value in pairs]
 
 
-def _dump_v2_key(host: str, port: int, key: str, timeout: float) -> tuple[dict[str, str | None] | None, str | None]:
-    status, body = _http_json_request(host, port, "GET", f"/v2/keys{key}", timeout)
+def _dump_v2_key(
+    host: str,
+    port: int,
+    key: str,
+    timeout: float,
+    *,
+    basic_auth: tuple[str, str] | None = None,
+) -> tuple[dict[str, str | None] | None, str | None]:
+    if basic_auth is None:
+        status, body = _http_json_request(host, port, "GET", f"/v2/keys{key}", timeout)
+    else:
+        status, body = _http_json_request(
+            host,
+            port,
+            "GET",
+            f"/v2/keys{key}",
+            timeout,
+            basic_auth=basic_auth,
+        )
     if status == 404:
         return _etcd_kv_entry(key, "<not found>"), None
     if status != 200:
@@ -591,16 +680,17 @@ def _audit_etcd_host(
             v2_error: str | None = None
 
             v2_status, v2_body = _http_json_request(host, port, "GET", "/v2/keys?recursive=true", timeout)
-            if v2_status in (200, 401, 403):
+            v2_json = _load_json(v2_body)
+            v2_shape_valid = _looks_like_v2_keys_response(v2_body) or (
+                is_etcd and isinstance(v2_json, dict) and isinstance(v2_json.get("node"), dict)
+            )
+            if v2_status == 200 and v2_shape_valid:
                 v2_supported = True
-                if v2_status == 200:
-                    v2_auth_required = False
-                    key_count_v2 = _count_v2_keys(v2_body)
-                    if key_count_v2 is None:
-                        key_count_v2_error = "v2 key count response returned invalid JSON"
-                else:
-                    v2_auth_required = True
-            elif _body_indicates_auth_required(v2_body):
+                v2_auth_required = False
+                key_count_v2 = _count_v2_keys(v2_body)
+                if key_count_v2 is None:
+                    key_count_v2_error = "v2 key count response returned invalid JSON"
+            elif v2_status in {401, 403} and _body_indicates_auth_required(v2_body):
                 v2_supported = True
                 v2_auth_required = True
             elif v2_status not in (404,):
@@ -655,12 +745,13 @@ def _audit_etcd_host(
 
             # ---- v3 authentication attempt --------------------------------------
             auth_token: str | None = None
+            v2_basic_auth: tuple[str, str] | None = None
             credential_attempts: list[dict[str, Any]] = []
             selected_credential: dict[str, Any] | None = None
             effective_username: str | None = None
             effective_password: str | None = None
 
-            if v3_supported and auth_required is True and normalized_candidates:
+            if v3_supported and v3_auth_required is True and normalized_candidates:
                 for user, secret, source in normalized_candidates:
                     is_default = source == "default"
                     try:
@@ -675,6 +766,7 @@ def _audit_etcd_host(
                             "username": user,
                             "password": secret,
                             "source": source,
+                            "api": "v3",
                             "default": is_default,
                             "ok": candidate_token is not None,
                             "error": err,
@@ -692,6 +784,56 @@ def _audit_etcd_host(
                         effective_password = secret
                     if candidate_token is not None and not defaults_enabled:
                         break
+
+            if v2_supported and v2_auth_required is True and normalized_candidates:
+                for user, secret, source in normalized_candidates:
+                    is_default = source == "default"
+                    try:
+                        candidate_ok, err = _etcd_v2_authenticate(host, port, timeout, user, secret)
+                    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+                        if not defaults_enabled:
+                            raise
+                        candidate_ok = False
+                        err = _friendly_error_from_exception(exc)
+                    credential_attempts.append(
+                        {
+                            "username": user,
+                            "password": secret,
+                            "source": source,
+                            "api": "v2",
+                            "default": is_default,
+                            "ok": candidate_ok,
+                            "error": err,
+                        }
+                    )
+                    if candidate_ok and v2_basic_auth is None:
+                        v2_basic_auth = (user, secret)
+                        if selected_credential is None:
+                            selected_credential = {
+                                "username": user,
+                                "password": secret,
+                                "source": source,
+                                "default": is_default,
+                            }
+                            effective_username = user
+                            effective_password = secret
+                    if candidate_ok and not defaults_enabled:
+                        break
+
+            if v2_basic_auth is not None:
+                v2_status, v2_body = _http_json_request(
+                    host,
+                    port,
+                    "GET",
+                    "/v2/keys?recursive=true",
+                    timeout,
+                    basic_auth=v2_basic_auth,
+                )
+                if v2_status == 200 and _count_v2_keys(v2_body) is not None:
+                    key_count_v2 = _count_v2_keys(v2_body)
+                    key_count_v2_error = (
+                        None if key_count_v2 is not None else "v2 key count response returned invalid JSON"
+                    )
 
             # If we successfully authenticated, re-run the /v3/kv/range probe with
             # the token so downstream key enumeration reflects post-auth state.
@@ -712,33 +854,54 @@ def _audit_etcd_host(
                 if range_status == 200:
                     v3_auth_required = True  # confirmed auth-gated
                     key_count_v3, key_count_v3_error = _parse_v3_key_count(range_body)
-                    auth_required = True
 
             key_count: int | None = None
+            key_count_by_api: dict[str, int | None] = {
+                "v2": key_count_v2 if v2_supported else None,
+                "v3": key_count_v3 if v3_supported else None,
+            }
             keys: list[str] | None = None
             key_values: list[str] | None = None
             key_value_entries: list[dict[str, str | None]] | None = None
+            key_value_entries_by_api: dict[str, list[dict[str, str | None]] | None] = {}
             query_key_value: str | None = None
             query_key_entry: dict[str, str | None] | None = None
+            query_key_entries_by_api: dict[str, dict[str, str | None] | None] = {}
             key_dump_error: str | None = None
             key_count_error: str | None = None
-            has_access = auth_required is False or auth_token is not None
+            v2_has_access = bool(v2_supported and (v2_auth_required is False or v2_basic_auth is not None))
+            v3_has_access = bool(v3_supported and (v3_auth_required is False or auth_token is not None))
+            api_has_access = {"v2": v2_has_access, "v3": v3_has_access}
+            has_access = v2_has_access or v3_has_access
             if has_access:
-                key_count = key_count_v2 if key_count_v2 is not None else key_count_v3
+                known_counts = [
+                    count
+                    for api_name, count in key_count_by_api.items()
+                    if api_has_access[api_name] and isinstance(count, int)
+                ]
+                accessible_api_count = sum(api_has_access.values())
+                if len(known_counts) == accessible_api_count:
+                    key_count = sum(known_counts)
                 if key_count is None:
-                    key_count_error = key_count_v2_error if v2_auth_required is False else key_count_v3_error
+                    count_errors = [
+                        item
+                        for item in (
+                            key_count_v2_error if v2_has_access else None,
+                            key_count_v3_error if v3_has_access else None,
+                        )
+                        if item
+                    ]
+                    key_count_error = "; ".join(count_errors) or "one or more API key counts are unknown"
                 if show_keys or dump_keys:
-                    all_key_values: list[dict[str, str | None]] | None = None
-                    if v2_supported:
-                        all_key_values = _dump_v2_all_from_body(v2_body)
-                        if all_key_values is None:
-                            key_dump_error = "/v2/keys returned invalid JSON"
-                    elif v3_supported:
+                    dump_errors: list[str] = []
+                    if v2_has_access:
+                        v2_entries = _dump_v2_all_from_body(v2_body)
+                        key_value_entries_by_api["v2"] = v2_entries
+                        if v2_entries is None:
+                            dump_errors.append("v2: /v2/keys returned invalid JSON")
+                    if v3_has_access:
                         if dump_keys:
-                            # Stream the dump in paged ranges instead of one keyspace-wide
-                            # range; key names for --show-keys are derived from the dumped
-                            # entries below (same approach as the Redis dump).
-                            all_key_values, key_dump_error = _stream_dump_v3_all(
+                            v3_entries, v3_dump_error = _stream_dump_v3_all(
                                 host,
                                 port,
                                 timeout,
@@ -748,42 +911,76 @@ def _audit_etcd_host(
                                 auth_token=auth_token,
                             )
                         else:
-                            all_key_values, key_dump_error = _dump_v3_all(
+                            v3_entries, v3_dump_error = _dump_v3_all(
                                 host,
                                 port,
                                 timeout,
                                 limit=show_keys_limit,
                                 auth_token=auth_token,
                             )
+                        key_value_entries_by_api["v3"] = v3_entries
+                        if v3_dump_error:
+                            dump_errors.append(f"v3: {v3_dump_error}")
 
-                    if isinstance(all_key_values, list):
+                    combined_entries: list[dict[str, str | None]] = []
+                    for api_name in ("v2", "v3"):
+                        api_entries = key_value_entries_by_api.get(api_name)
+                        if not isinstance(api_entries, list):
+                            continue
+                        for item in api_entries:
+                            combined_entries.append({**item, "api": api_name})
+                    if combined_entries:
                         if show_keys:
-                            names = {_key_name_from_entry(item) for item in all_key_values}
+                            names = {_key_name_from_entry(item) for item in combined_entries}
                             keys = sorted(item for item in names if item)
                             if show_keys_limit is not None:
                                 keys = keys[:show_keys_limit]
                         if dump_keys:
-                            entries = list(all_key_values)
+                            entries = list(combined_entries)
                             if dump_keys_limit is not None:
                                 entries = entries[:dump_keys_limit]
                             key_value_entries = entries
                             key_values = [_etcd_kv_entry_text(item) for item in entries]
+                    elif show_keys:
+                        keys = []
+                    elif dump_keys:
+                        key_value_entries = []
+                        key_values = []
+                    key_dump_error = "; ".join(dump_errors) or None
 
                 if query_key:
-                    if v2_supported:
-                        key_entry, one_key_error = _dump_v2_key(host, port, query_key, timeout)
-                    elif v3_supported:
-                        key_entry, one_key_error = _dump_v3_key(host, port, query_key, timeout, auth_token=auth_token)
-                    else:
-                        key_entry, one_key_error = None, "no supported API for key dump"
-
-                    if one_key_error:
-                        key_dump_error = (
-                            one_key_error if key_dump_error is None else f"{key_dump_error}; {one_key_error}"
+                    query_errors: list[str] = []
+                    if v2_has_access:
+                        v2_entry, one_key_error = _dump_v2_key(
+                            host,
+                            port,
+                            query_key,
+                            timeout,
+                            basic_auth=v2_basic_auth,
                         )
-                    elif key_entry:
-                        query_key_entry = key_entry
-                        query_key_value = _etcd_kv_entry_text(key_entry)
+                        query_key_entries_by_api["v2"] = v2_entry
+                        if one_key_error:
+                            query_errors.append(f"v2: {one_key_error}")
+                    if v3_has_access:
+                        v3_entry, one_key_error = _dump_v3_key(
+                            host,
+                            port,
+                            query_key,
+                            timeout,
+                            auth_token=auth_token,
+                        )
+                        query_key_entries_by_api["v3"] = v3_entry
+                        if one_key_error:
+                            query_errors.append(f"v3: {one_key_error}")
+                    for api_name in ("v2", "v3"):
+                        key_entry = query_key_entries_by_api.get(api_name)
+                        if key_entry:
+                            query_key_entry = {**key_entry, "api": api_name}
+                            query_key_value = _etcd_kv_entry_text(key_entry)
+                            break
+                    if query_errors:
+                        query_error = "; ".join(query_errors)
+                        key_dump_error = query_error if key_dump_error is None else f"{key_dump_error}; {query_error}"
 
             api_versions = _join_api_versions(v2_supported=v2_supported, v3_supported=v3_supported)
 
@@ -803,7 +1000,9 @@ def _audit_etcd_host(
                     "server_version": None,
                     "auth_required": None,
                     "api_auth_required": {"v2": None, "v3": None},
+                    "api_has_access": {"v2": False, "v3": False},
                     "key_count": None,
+                    "key_count_by_api": {"v2": None, "v3": None},
                     "key_count_state": "unknown",
                     "key_count_error": "service is not etcd",
                     "show_keys": show_keys,
@@ -813,8 +1012,10 @@ def _audit_etcd_host(
                     "keys": None,
                     "key_values": None,
                     "key_value_entries": None,
+                    "key_value_entries_by_api": {},
                     "query_key_value": None,
                     "query_key_entry": None,
+                    "query_key_entries_by_api": {},
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": "service is not etcd",
                 }
@@ -838,6 +1039,7 @@ def _audit_etcd_host(
                 "server_version": server_version,
                 "auth_required": auth_required,
                 "api_auth_required": api_auth_required,
+                "api_has_access": api_has_access,
                 "provided_credentials": provided_credentials,
                 "provided_username": provided_username,
                 "provided_password": provided_password,
@@ -851,6 +1053,7 @@ def _audit_etcd_host(
                 "effective_password": effective_password,
                 "credential_attempts": credential_attempts,
                 "key_count": key_count,
+                "key_count_by_api": key_count_by_api,
                 "key_count_state": "known" if isinstance(key_count, int) else "unknown",
                 "key_count_error": key_count_error,
                 "show_keys": show_keys,
@@ -860,8 +1063,10 @@ def _audit_etcd_host(
                 "keys": keys,
                 "key_values": key_values,
                 "key_value_entries": key_value_entries,
+                "key_value_entries_by_api": key_value_entries_by_api,
                 "query_key_value": query_key_value,
                 "query_key_entry": query_key_entry,
+                "query_key_entries_by_api": query_key_entries_by_api,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
                 "error": error,
             }
@@ -881,7 +1086,9 @@ def _audit_etcd_host(
         "server_version": None,
         "auth_required": None,
         "api_auth_required": {"v2": None, "v3": None},
+        "api_has_access": {"v2": False, "v3": False},
         "key_count": None,
+        "key_count_by_api": {"v2": None, "v3": None},
         "key_count_state": "unknown",
         "key_count_error": last_error or "connection failed",
         "show_keys": show_keys,
@@ -891,8 +1098,10 @@ def _audit_etcd_host(
         "keys": None,
         "key_values": None,
         "key_value_entries": None,
+        "key_value_entries_by_api": {},
         "query_key_value": None,
         "query_key_entry": None,
+        "query_key_entries_by_api": {},
         "elapsed_ms": None,
         "error": last_error or "connection failed",
     }
@@ -1150,6 +1359,7 @@ def _call_audit_etcd_host_with_stage_debug(
     run_deep_checks: bool,
     debug: bool,
     debug_emit: Callable[[str], None] | None,
+    target_spec: Any | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     audit_limit_kwargs: dict[str, Any] = (
@@ -1168,36 +1378,37 @@ def _call_audit_etcd_host_with_stage_debug(
     audit_kwargs["defcreds"] = defcreds
     if credential_candidates:
         audit_kwargs["credential_candidates"] = credential_candidates
-    try:
-        record = _audit_etcd_host(
-            host,
-            port,
-            timeout,
-            retries,
-            show_keys if run_deep_checks else False,
-            dump_keys if run_deep_checks else False,
-            query_key if run_deep_checks else None,
-            **audit_kwargs,
-        )
-    except TypeError as exc:
-        # Backward-compat: tests patch _audit_etcd_host with a legacy signature.
-        if not is_signature_compat_typeerror(
-            exc,
-            expected_keywords={"username", "password", "defcreds", "credential_candidates"},
-        ):
-            raise
-        for legacy_key in ("username", "password", "defcreds", "credential_candidates"):
-            audit_kwargs.pop(legacy_key, None)
-        record = _audit_etcd_host(
-            host,
-            port,
-            timeout,
-            retries,
-            show_keys if run_deep_checks else False,
-            dump_keys if run_deep_checks else False,
-            query_key if run_deep_checks else None,
-            **audit_kwargs,
-        )
+    with http_target_context(target_spec, api_prefixes=("/version", "/v2", "/v3", "/v3beta", "/v3alpha")):
+        try:
+            record = _audit_etcd_host(
+                host,
+                port,
+                timeout,
+                retries,
+                show_keys if run_deep_checks else False,
+                dump_keys if run_deep_checks else False,
+                query_key if run_deep_checks else None,
+                **audit_kwargs,
+            )
+        except TypeError as exc:
+            # Backward-compat: tests patch _audit_etcd_host with a legacy signature.
+            if not is_signature_compat_typeerror(
+                exc,
+                expected_keywords={"username", "password", "defcreds", "credential_candidates"},
+            ):
+                raise
+            for legacy_key in ("username", "password", "defcreds", "credential_candidates"):
+                audit_kwargs.pop(legacy_key, None)
+            record = _audit_etcd_host(
+                host,
+                port,
+                timeout,
+                retries,
+                show_keys if run_deep_checks else False,
+                dump_keys if run_deep_checks else False,
+                query_key if run_deep_checks else None,
+                **audit_kwargs,
+            )
 
     result: dict[str, Any] = dict(record)
     status = str(result.get("status") or "fail")

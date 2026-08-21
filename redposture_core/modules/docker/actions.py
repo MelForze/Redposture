@@ -13,7 +13,6 @@ from ...clients.docker_engine import (
     DockerEngineError,
     DockerEngineHTTPError,
     find_container_id,
-    is_auth_required_error,
     normalize_docker_error,
 )
 from ...console import Console
@@ -67,6 +66,7 @@ def _base_record(host: str, port: int) -> dict[str, Any]:
         "auth_required": None,
         "transport_mode": None,
         "tls_required": None,
+        "tls_client_cert_used": False,
         "api_version": None,
         "server_version": None,
         "ostype": None,
@@ -77,6 +77,9 @@ def _base_record(host: str, port: int) -> dict[str, Any]:
         "system": {},
         "exec_result": None,
         "capabilities": {},
+        "partial": False,
+        "partial_errors": {},
+        "data_complete": None,
     }
 
 
@@ -139,10 +142,19 @@ def _probe_docker(
                     "ApiVersion": info.get("ApiVersion"),
                     "Os": info.get("OSType"),
                 }
-            if version or client.info():
+            if _looks_like_docker_version(version):
                 return client, version, transport, None, auth_required
+            info = client.info()
+            if _looks_like_docker_info(info):
+                version = {
+                    "Version": info.get("ServerVersion"),
+                    "ApiVersion": info.get("ApiVersion"),
+                    "Os": info.get("OSType"),
+                }
+                return client, version, transport, None, auth_required
+            last_error = "not Docker Engine API endpoint (fingerprint mismatch)"
         except DockerEngineHTTPError as exc:
-            if exc.status in {401, 403}:
+            if exc.status in {401, 403} and _docker_http_error_has_fingerprint(exc):
                 auth_required = True
                 return client, None, transport, normalize_docker_error(exc), auth_required
             if exc.status in {404, 405}:
@@ -151,12 +163,40 @@ def _probe_docker(
                 last_error = normalize_docker_error(exc)
         except DockerEngineConnectionError as exc:
             last_error = normalize_docker_error(exc)
-            if is_auth_required_error(exc):
-                auth_required = True
-                return client, None, transport, last_error, auth_required
+            # A TLS client-certificate alert proves only that the peer uses
+            # mTLS, not that it is Docker. Confirm auth-required Docker only
+            # from a Docker-fingerprinted HTTP response above.
         except (DockerEngineError, ValueError, json.JSONDecodeError) as exc:
             last_error = normalize_docker_error(exc)
     return None, None, None, last_error, auth_required
+
+
+def _looks_like_docker_version(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    api_version = payload.get("ApiVersion") or payload.get("APIVersion")
+    if not isinstance(api_version, str) or not api_version.strip():
+        return False
+    markers = ("Version", "Os", "OSType", "GitCommit", "GoVersion", "Platform", "Components")
+    return any(payload.get(marker) not in (None, "", [], {}) for marker in markers)
+
+
+def _looks_like_docker_info(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    identity_markers = ("ID", "DockerRootDir", "Driver", "OperatingSystem", "ServerVersion", "OSType")
+    inventory_markers = ("Containers", "Images", "NCPU", "MemTotal")
+    return any(marker in payload for marker in identity_markers) and any(
+        marker in payload for marker in inventory_markers
+    )
+
+
+def _docker_http_error_has_fingerprint(exc: DockerEngineHTTPError) -> bool:
+    headers = {str(key).lower(): str(value) for key, value in exc.headers.items()}
+    server = headers.get("server", "").lower()
+    if "docker" in server:
+        return True
+    return any(key in headers for key in ("api-version", "docker-experimental", "ostype"))
 
 
 def _container_count(record: dict[str, Any]) -> int:
@@ -254,7 +294,8 @@ def _audit_docker_host(
         record.update({"status": status, "error": error, "auth_required": None})
         return record
 
-    status = "valid_credentials" if tls_cert or tls_key else "open_no_auth"
+    client_certificate_used = bool(transport == "tls" and tls_cert and tls_key)
+    status = "valid_credentials" if client_certificate_used else "open_no_auth"
     record.update(
         {
             "is_docker": True,
@@ -265,7 +306,7 @@ def _audit_docker_host(
             "api_version": version.get("ApiVersion") or version.get("APIVersion"),
             "server_version": version.get("Version"),
             "ostype": version.get("Os") or version.get("OSType"),
-            "tls_client_cert_used": bool(tls_cert or tls_key),
+            "tls_client_cert_used": client_certificate_used,
         }
     )
 
@@ -349,6 +390,25 @@ def _audit_docker_host(
             capabilities["can_exec"] = False
 
     record["capabilities"] = capabilities
+    partial_errors: dict[str, str] = {}
+    for field in ("containers_error", "images_error", "networks_error", "volumes_error"):
+        value = record.get(field)
+        if value:
+            partial_errors[field.removesuffix("_error")] = str(value)
+    system_payload = as_dict(record.get("system"))
+    for field in ("info_error", "df_error"):
+        value = system_payload.get(field)
+        if value:
+            partial_errors[f"system_{field.removesuffix('_error')}"] = str(value)
+    exec_payload = as_dict(record.get("exec_result"))
+    if exec_payload.get("error"):
+        partial_errors["exec"] = str(exec_payload["error"])
+    requested_data = any(
+        (show_containers, show_images, show_networks, show_volumes, show_system, container_selector is not None)
+    )
+    record["partial_errors"] = partial_errors
+    record["partial"] = bool(partial_errors)
+    record["data_complete"] = (not partial_errors) if requested_data else None
     return record
 
 
@@ -404,8 +464,10 @@ def _audit_docker_host_stage(
     telemetry.stage(_STAGE_AUTH_INFERENCE, auth_result, detect_error if auth_result == "error" else None, 0)
     if run_deep_checks and status in _DOCKER_DEEP_STATUSES:
         telemetry.stage(_STAGE_ACCESS_CAPABILITIES, "ok", None, 0)
-        exec_result = as_dict(record.get("exec_result"))
-        data_error = exec_result.get("error") if exec_result and not exec_result.get("ok") else None
+        partial_errors = as_dict(record.get("partial_errors"))
+        data_error = (
+            "; ".join(f"{name}: {str(error)}" for name, error in partial_errors.items() if str(error).strip()) or None
+        )
         telemetry.stage(
             _STAGE_DATA, "error" if data_error else "ok", str(data_error) if data_error else None, elapsed_ms
         )
@@ -652,6 +714,22 @@ def _format_exec_lines(record: dict[str, Any], output_format: str, *, debug: boo
     if len(lines) == 1:
         lines.append(f"{prefix} <no output>")
     return lines
+
+
+def _format_partial_error_lines(record: dict[str, Any], output_format: str) -> list[str]:
+    """Render failed requested sections without hiding successful inventory."""
+
+    if output_format == "json":
+        return []
+    errors = as_dict(record.get("partial_errors"))
+    if not errors:
+        return []
+    prefix = _nxc_prefix(record)
+    return [
+        f"{prefix} [!] partial {name} failed err={_clip(str(error), 160)}"
+        for name, error in errors.items()
+        if str(error).strip()
+    ]
 
 
 def _render_colored_docker_line(console: Console, line: str) -> bool:

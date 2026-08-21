@@ -7,6 +7,7 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.http_api import http_target_context
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -15,6 +16,7 @@ from ...stage_runtime import (
     build_basic_audit_plan,
     merge_audit_credential_runs,
     run_basic_host_audit,
+    sort_default_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -26,10 +28,13 @@ _PRODUCTION_AUDIT_HOST = actions._audit_grafana_host
 
 def build_grafana_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
     token = str(getattr(args, "apitoken", "") or "").strip() or None
     token_runs = (AuditCredentialRun(token=token, source="provided"),) if token is not None else ()
     default_runs = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source=source)
             for username, password, source in actions._build_credential_candidates(None, None, True)
         )
@@ -79,21 +84,19 @@ def build_grafana_spec(args: Any) -> ModuleAuditSpec:
     )
 
     def _detect(ctx: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(actions.detect_grafana(ctx, options), module="grafana", service="grafana")
+        with http_target_context(ctx.target, api_prefixes=("/api", "/login")):
+            result = actions.detect_grafana(ctx, options)
+        return AuditRecord.from_mapping(result, module="grafana", service="grafana")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.authenticate_grafana(ctx, record, options),
-            module="grafana",
-            service="grafana",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/api", "/login")):
+            result = actions.authenticate_grafana(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="grafana", service="grafana")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.collect_grafana_data(ctx, record, options),
-            module="grafana",
-            service="grafana",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/api", "/login")):
+            result = actions.collect_grafana_data(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="grafana", service="grafana")
 
     return ModuleAuditSpec(
         module="grafana",

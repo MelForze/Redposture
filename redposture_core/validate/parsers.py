@@ -1016,8 +1016,35 @@ def _extract_vulnerable_credentials_from_hit(hit: dict[str, str | int]) -> tuple
 def _extract_vulnerable_login_pairs_from_text(text: str) -> list[tuple[str, str]]:
     sample = str(text or "")
     pairs: list[tuple[str, str]] = []
-    usernames: list[str] = []
-    passwords: list[str] = []
+
+    def _collect_structured_pairs(value: Any) -> None:
+        if isinstance(value, list):
+            for child in value:
+                _collect_structured_pairs(child)
+            return
+        if not isinstance(value, dict):
+            return
+
+        usernames_here: list[str] = []
+        passwords_here: list[str] = []
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip()
+            if isinstance(raw_value, (dict, list)):
+                _collect_structured_pairs(raw_value)
+                continue
+            candidate = _clean_value_text(str(raw_value or ""))
+            if _key_looks_username(key) and _vulnerable_username_allowed(candidate):
+                usernames_here.append(candidate)
+            elif (
+                _key_looks_sensitive(key)
+                and _vulnerable_key_bucket(key) == "passwords"
+                and _vulnerable_secret_allowed(key, candidate)
+            ):
+                passwords_here.append(candidate)
+        users = _vulnerable_dedupe(usernames_here)
+        secrets = _vulnerable_dedupe(passwords_here)
+        if len(users) == 1 and len(secrets) == 1:
+            pairs.append((users[0], secrets[0]))
 
     for match in _URL_CANDIDATE_RE.finditer(sample):
         candidate = match.group(0).rstrip("),]")
@@ -1035,6 +1062,13 @@ def _extract_vulnerable_login_pairs_from_text(text: str) -> list[tuple[str, str]
         ):
             pairs.append((username, password))
 
+    try:
+        structured = json.loads(sample)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        structured = None
+    if structured is not None:
+        _collect_structured_pairs(structured)
+
     for match in _AUTH_BASIC_RE.finditer(sample):
         decoded = _safe_decode_basic(str(match.group(1) or ""))
         if not decoded or ":" not in decoded:
@@ -1045,33 +1079,30 @@ def _extract_vulnerable_login_pairs_from_text(text: str) -> list[tuple[str, str]
         ):
             pairs.append((username, password))
 
-    for pattern in (_TEXT_GENERIC_KV_RE, _CMD_FLAG_GENERIC_RE):
-        for match in pattern.finditer(sample):
-            key = str(match.group(1) or "").strip()
-            value = _clean_value_text(str(match.group(2) or ""))
-            if not key or not value:
-                continue
-            if _key_looks_username(key) and _vulnerable_username_allowed(value):
-                usernames.append(value)
-            elif _key_looks_sensitive(key) and _vulnerable_secret_allowed(key, value):
-                bucket = _vulnerable_key_bucket(key)
-                if bucket == "passwords":
-                    passwords.append(value)
-
-    redis_match = _REDIS_PASS_RE.search(sample)
-    if redis_match and _vulnerable_secret_allowed(str(redis_match.group(1)), str(redis_match.group(2))):
-        passwords.append(str(redis_match.group(2)))
-
-    usernames = _vulnerable_dedupe(usernames)
-    passwords = _vulnerable_dedupe(passwords)
-    paired_passwords = {password for _username, password in pairs}
-    passwords = [password for password in passwords if password not in paired_passwords]
-    if passwords and usernames:
-        if len(usernames) == len(passwords):
-            pairs.extend(zip(usernames, passwords, strict=False))
-        else:
-            username = usernames[0] if usernames else ""
-            pairs.extend((username, password) for password in passwords)
+    # Unstructured values are paired only when both occur in the same line.
+    # Global zip/first-user fallbacks fabricated credentials when unrelated
+    # settings happened to share one response body.
+    for raw_line in sample.splitlines() or [sample]:
+        usernames_here: list[str] = []
+        passwords_here: list[str] = []
+        for pattern in (_TEXT_GENERIC_KV_RE, _CMD_FLAG_GENERIC_RE):
+            for match in pattern.finditer(raw_line):
+                key = str(match.group(1) or "").strip()
+                value = _clean_value_text(str(match.group(2) or ""))
+                if not key or not value:
+                    continue
+                if _key_looks_username(key) and _vulnerable_username_allowed(value):
+                    usernames_here.append(value)
+                elif (
+                    _key_looks_sensitive(key)
+                    and _vulnerable_key_bucket(key) == "passwords"
+                    and _vulnerable_secret_allowed(key, value)
+                ):
+                    passwords_here.append(value)
+        users = _vulnerable_dedupe(usernames_here)
+        secrets = _vulnerable_dedupe(passwords_here)
+        if len(users) == 1 and len(secrets) == 1:
+            pairs.append((users[0], secrets[0]))
 
     result: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -1271,16 +1302,17 @@ def _apply_cross_line_correlation(
         for raw_line in lines
     ]
 
-    any_strong = False
-    any_medium = False
     per_hit_signals: list[list[str]] = []
+    strong_lines: set[int] = set()
+    medium_lines: set[int] = set()
     for hit in hits:
         signals = _split_reason_signals(str(hit.get("reason") or ""))
         per_hit_signals.append(signals)
+        line_no = int(hit.get("line_no") or 0)
         if any(_is_strong_signal(signal) for signal in signals):
-            any_strong = True
+            strong_lines.add(line_no)
         if any(_has_medium_signal(signal) for signal in signals):
-            any_medium = True
+            medium_lines.add(line_no)
 
     for idx, hit in enumerate(hits):
         signals = per_hit_signals[idx]
@@ -1294,10 +1326,11 @@ def _apply_cross_line_correlation(
 
         correlated = False
         if not has_strong:
-            if any_strong:
+            nearby_lines = {line_no - 1, line_no, line_no + 1}
+            if strong_lines.intersection(nearby_lines):
                 _maybe_add_reason(signals, "correlated_with_strong")
                 correlated = True
-            elif not has_medium and any_medium:
+            elif not has_medium and medium_lines.intersection(nearby_lines):
                 _maybe_add_reason(signals, "correlated_with_medium")
                 correlated = True
 

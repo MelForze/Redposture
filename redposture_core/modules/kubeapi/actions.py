@@ -16,7 +16,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig
+from ...clients.http_api import (
+    HttpApiClient,
+    HttpClientConfig,
+    build_http_target_url,
+    format_http_authority,
+    join_http_target_path,
+)
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
@@ -45,7 +51,9 @@ class KubeApiLifecycleState:
     tls_auto_insecure: bool = False
     ca_file: str | None = None
     anonymous_namespaces: list[str] | None = None
+    anonymous_namespaces_error: str | None = None
     access_namespaces: list[str] | None = None
+    access_namespaces_error: str | None = None
     token: str | None = None
     username: str | None = None
     password: str | None = None
@@ -139,7 +147,7 @@ def _http_request(
     body: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     scheme = "https" if use_https else "http"
-    url = f"{scheme}://{host}:{port}{path}"
+    url = build_http_target_url(host, port, path, default_scheme=scheme)
     request_headers = {
         "User-Agent": "RedPosture/1.0",
         "Accept": "application/json",
@@ -197,9 +205,14 @@ def _api_get_json(
         return status, None, headers, None
 
 
-def _recv_exact(sock: socket.socket, size: int) -> bytes:
+def _recv_exact(sock: socket.socket, size: int, buffer: bytearray | None = None) -> bytes:
     chunks: list[bytes] = []
     remaining = size
+    if buffer:
+        take = min(remaining, len(buffer))
+        chunks.append(bytes(buffer[:take]))
+        del buffer[:take]
+        remaining -= take
     while remaining > 0:
         part = sock.recv(remaining)
         if not part:
@@ -209,35 +222,44 @@ def _recv_exact(sock: socket.socket, size: int) -> bytes:
     return b"".join(chunks)
 
 
-def _ws_recv_frame(sock: socket.socket) -> tuple[int, bytes]:
-    header = _recv_exact(sock, 2)
+def _ws_recv_frame_details(sock: socket.socket, buffer: bytearray | None = None) -> tuple[bool, int, bytes]:
+    header = _recv_exact(sock, 2, buffer)
     b0 = header[0]
     b1 = header[1]
+    fin = bool(b0 & 0x80)
     opcode = b0 & 0x0F
     masked = bool(b1 & 0x80)
     length = b1 & 0x7F
     if length == 126:
-        length = int.from_bytes(_recv_exact(sock, 2), "big")
+        length = int.from_bytes(_recv_exact(sock, 2, buffer), "big")
     elif length == 127:
-        length = int.from_bytes(_recv_exact(sock, 8), "big")
-    mask_key = _recv_exact(sock, 4) if masked else b""
-    payload = _recv_exact(sock, length) if length else b""
+        length = int.from_bytes(_recv_exact(sock, 8, buffer), "big")
+    mask_key = _recv_exact(sock, 4, buffer) if masked else b""
+    payload = _recv_exact(sock, length, buffer) if length else b""
     if masked and payload:
         payload = bytes(byte ^ mask_key[idx % 4] for idx, byte in enumerate(payload))
+    return fin, opcode, payload
+
+
+def _ws_recv_frame(sock: socket.socket) -> tuple[int, bytes]:
+    _fin, opcode, payload = _ws_recv_frame_details(sock)
     return opcode, payload
 
 
-def _ws_send_close(sock: socket.socket) -> None:
-    payload = b""
+def _ws_send_control(sock: socket.socket, opcode: int, payload: bytes = b"") -> None:
+    if len(payload) > 125:
+        raise ValueError("websocket control payload is too large")
     mask_key = os.urandom(4)
-    masked_payload = payload
-    frame = bytearray()
-    frame.append(0x88)  # FIN + close opcode
-    frame.append(0x80 | len(masked_payload))
+    masked_payload = bytes(byte ^ mask_key[idx % 4] for idx, byte in enumerate(payload))
+    frame = bytearray((0x80 | (opcode & 0x0F), 0x80 | len(payload)))
     frame.extend(mask_key)
     frame.extend(masked_payload)
+    sock.sendall(bytes(frame))
+
+
+def _ws_send_close(sock: socket.socket) -> None:
     try:
-        sock.sendall(bytes(frame))
+        _ws_send_control(sock, 0x8)
     except OSError:
         return
 
@@ -313,7 +335,7 @@ def _kube_exec_ws(
     headers = _kube_api_headers(token, username, password)
     sec_key = base64.b64encode(os.urandom(16)).decode("ascii")
     request_headers = {
-        "Host": f"{host}:{port}",
+        "Host": format_http_authority(host, port),
         "Connection": "Upgrade",
         "Upgrade": "websocket",
         "Sec-WebSocket-Version": "13",
@@ -337,7 +359,8 @@ def _kube_exec_ws(
                 raise ValueError("failed to initialize TLS context")
             sock = ctx.wrap_socket(raw_sock, server_hostname=host)
 
-        req_lines = [f"GET {exec_path} HTTP/1.1"] + [f"{k}: {v}" for k, v in request_headers.items()] + ["", ""]
+        request_exec_path = join_http_target_path(exec_path)
+        req_lines = [f"GET {request_exec_path} HTTP/1.1"] + [f"{k}: {v}" for k, v in request_headers.items()] + ["", ""]
         sock.sendall("\r\n".join(req_lines).encode("utf-8"))
 
         response_buf = bytearray()
@@ -375,26 +398,27 @@ def _kube_exec_ws(
         if header_map.get("sec-websocket-accept") != expected_accept:
             result["error"] = "exec websocket handshake failed: invalid server accept"
             return result
+        if (
+            "upgrade" not in header_map.get("connection", "").lower()
+            or header_map.get("upgrade", "").lower() != "websocket"
+        ):
+            result["error"] = "exec websocket handshake failed: invalid upgrade headers"
+            return result
 
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         error_parts: list[str] = []
         exit_code: int | None = None
+        terminal_status_seen = False
+        timed_out = False
+        frame_buffer = bytearray(remaining)
+        fragmented_opcode: int | None = None
+        fragmented_payload = bytearray()
 
-        # Consume websocket stream until close or timeout.
-        sock.settimeout(max(timeout, _KUBE_WS_READ_TIMEOUT))
-        while True:
-            try:
-                opcode, payload = _ws_recv_frame(sock)
-            except TimeoutError:
-                break
-            if opcode == 0x8:  # close
-                break
-            if opcode == 0x9:  # ping
-                # Ignore pings; close soon after command completes.
-                continue
-            if opcode not in {0x1, 0x2} or not payload:
-                continue
+        def _consume_message(payload: bytes) -> None:
+            nonlocal exit_code, terminal_status_seen
+            if not payload:
+                return
             channel = payload[0]
             data_bytes = payload[1:]
             text = data_bytes.decode("utf-8", errors="replace")
@@ -404,24 +428,71 @@ def _kube_exec_ws(
                 stderr_parts.append(text)
             elif channel == 3:
                 parsed_exit, parsed_msg, parsed_success = _kube_exec_status_from_error_channel(text)
+                if parsed_success is not None:
+                    terminal_status_seen = True
                 if parsed_exit is not None:
                     exit_code = parsed_exit
+                elif parsed_success is True:
+                    exit_code = 0
                 if parsed_success is True:
-                    continue
+                    return
                 if parsed_msg:
                     error_parts.append(parsed_msg)
                 elif text.strip():
                     error_parts.append(text)
+
+        # Consume websocket stream until close or timeout.
+        sock.settimeout(max(timeout, _KUBE_WS_READ_TIMEOUT))
+        while True:
+            try:
+                fin, opcode, payload = _ws_recv_frame_details(sock, frame_buffer)
+            except TimeoutError:
+                timed_out = True
+                break
+            if opcode == 0x8:  # close
+                break
+            if opcode == 0x9:  # ping
+                _ws_send_control(sock, 0xA, payload)
+                continue
+            if opcode == 0xA:  # pong
+                continue
+            if opcode == 0x0:
+                if fragmented_opcode is None:
+                    error_parts.append("unexpected websocket continuation frame")
+                    break
+                fragmented_payload.extend(payload)
+                if fin:
+                    _consume_message(bytes(fragmented_payload))
+                    fragmented_opcode = None
+                    fragmented_payload.clear()
+                continue
+            if opcode not in {0x1, 0x2}:
+                continue
+            if fragmented_opcode is not None:
+                error_parts.append("interleaved websocket fragmented messages")
+                break
+            if fin:
+                _consume_message(payload)
+            else:
+                fragmented_opcode = opcode
+                fragmented_payload.extend(payload)
 
         result["stdout"] = "".join(stdout_parts)
         result["stderr"] = "".join(stderr_parts)
         if exit_code is not None:
             result["exit_code"] = exit_code
         error_text = " ".join(part.strip() for part in error_parts if part.strip()).strip()
+        if fragmented_opcode is not None and not error_text:
+            error_text = "exec websocket closed with an incomplete fragmented message"
+        if not terminal_status_seen and not error_text:
+            error_text = (
+                "exec websocket timed out before terminal status"
+                if timed_out
+                else "exec websocket closed before terminal status"
+            )
         if error_text:
             result["error"] = _clip(error_text, 200)
-        # K8s exec often reports success via channel 3 status payload with no exit code.
-        result["ok"] = (exit_code in {None, 0}) and not bool(result["error"])
+        result["ok"] = terminal_status_seen and exit_code == 0 and not bool(result["error"])
         return result
     except (OSError, ssl.SSLError, ValueError, ConnectionError) as exc:
         result["error"] = _friendly_error_from_exception(exc)
@@ -590,14 +661,17 @@ def _kube_list_items(
         )
         last_status = status
         if error:
-            return None, status, error
+            return (items if items else None), status, f"partial: {error}" if items else error
         if status != 200:
-            return None, status, _kube_status_message(status, payload) or f"unexpected status={status}"
+            error_text = _kube_status_message(status, payload) or f"unexpected status={status}"
+            return (items if items else None), status, f"partial: {error_text}" if items else error_text
         if not isinstance(payload, dict):
-            return None, status, "invalid kubernetes list response"
+            error_text = "invalid kubernetes list response"
+            return (items if items else None), status, f"partial: {error_text}" if items else error_text
         raw_items = payload.get("items")
         if not isinstance(raw_items, list):
-            return None, status, "invalid kubernetes list items payload"
+            error_text = "invalid kubernetes list items payload"
+            return (items if items else None), status, f"partial: {error_text}" if items else error_text
         for item in raw_items:
             if isinstance(item, dict):
                 items.append(item)
@@ -610,7 +684,7 @@ def _kube_list_items(
         if not next_token:
             return items, status, None
         continue_token = next_token
-    return items, last_status, "pagination limit exceeded"
+    return items, last_status, "partial: pagination limit exceeded"
 
 
 def _metadata_name(item: dict[str, Any]) -> str:
@@ -676,7 +750,7 @@ def _list_namespaces(
     if items is None:
         return None, status, error
     out = sorted({_metadata_name(item) for item in items if _metadata_name(item) != "-"})
-    return out, status, None
+    return out, status, error
 
 
 def _list_pods(
@@ -713,6 +787,7 @@ def _list_pods(
         )
         if items is None:
             return None, error
+        partial_errors: list[str] = [error] if error else []
         for item in items:
             spec = item.get("spec")
             status_obj = item.get("status")
@@ -735,6 +810,7 @@ def _list_pods(
                 }
             )
     else:
+        partial_errors = []
         for namespace in target_namespaces:
             encoded_ns = urllib.parse.quote(namespace, safe="")
             items, _status, error = _kube_list_items(
@@ -750,7 +826,13 @@ def _list_pods(
                 password=password,
             )
             if items is None:
-                return None, f"{namespace}: {error}" if error else f"{namespace}: request failed"
+                error_text = f"{namespace}: {error}" if error else f"{namespace}: request failed"
+                if results:
+                    partial_errors.append(f"partial: {error_text}")
+                    break
+                return None, error_text
+            if error:
+                partial_errors.append(f"{namespace}: {error}")
             for item in items:
                 spec = item.get("spec")
                 status_obj = item.get("status")
@@ -773,7 +855,7 @@ def _list_pods(
                     }
                 )
     results.sort(key=lambda item: (str(item.get("namespace") or ""), str(item.get("name") or "")))
-    return results, None
+    return results, "; ".join(partial_errors) or None
 
 
 def _list_secrets(
@@ -805,9 +887,11 @@ def _list_secrets(
         )
         if items is None:
             return None, error
+        partial_errors: list[str] = [error] if error else []
         iter_items: list[tuple[str | None, dict[str, Any]]] = [(None, item) for item in items]
     else:
         per_ns_items: list[tuple[str | None, dict[str, Any]]] = []
+        partial_errors = []
         for namespace in namespaces:
             encoded_ns = urllib.parse.quote(namespace, safe="")
             items, _status, error = _kube_list_items(
@@ -823,7 +907,13 @@ def _list_secrets(
                 password=password,
             )
             if items is None:
-                return None, f"{namespace}: {error}" if error else f"{namespace}: request failed"
+                error_text = f"{namespace}: {error}" if error else f"{namespace}: request failed"
+                if per_ns_items:
+                    partial_errors.append(f"partial: {error_text}")
+                    break
+                return None, error_text
+            if error:
+                partial_errors.append(f"{namespace}: {error}")
             per_ns_items.extend((namespace, item) for item in items)
         iter_items = per_ns_items
 
@@ -842,7 +932,7 @@ def _list_secrets(
             }
         )
     results.sort(key=lambda item: (str(item.get("namespace") or ""), str(item.get("name") or "")))
-    return results, None
+    return results, "; ".join(partial_errors) or None
 
 
 def _auth_label(token: str | None, username: str | None, password: str | None) -> str:
@@ -1350,6 +1440,7 @@ def _audit_kubeapi_host(
                     )
                     if ns_items is not None:
                         namespaces_out = ns_items
+                        namespaces_error = ns_error
                     else:
                         namespaces_error = ns_error
 
@@ -1948,7 +2039,9 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             ca_file=state.ca_file,
         )
         state.anonymous_namespaces = namespaces
+        state.anonymous_namespaces_error = ns_error
         state.access_namespaces = namespaces
+        state.access_namespaces_error = ns_error
         auth_required = False if namespaces is not None else True if ns_status in {401, 403} else None
         return {
             "timestamp": utc_now_iso(),
@@ -2006,10 +2099,22 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
         username=credential.username,
         password=credential.password,
     )
-    ok = namespaces is not None
+    # Kubernetes deliberately distinguishes unauthenticated (401) from an
+    # authenticated principal that lacks this cluster-wide capability (403).
+    # Namespace-scoped service-account tokens must not be rejected solely
+    # because they cannot list every namespace.
+    # A Kubernetes bearer token can be valid while being forbidden from the
+    # cluster-wide namespaces collection.  Do not apply that inference to
+    # Basic credentials: a generic 403 does not prove that pair was accepted.
     anonymous_open = state.anonymous_namespaces is not None
+    # A 403 can prove that a bearer token was authenticated only when the
+    # anonymous baseline itself was not usable. If anonymous access is open,
+    # the same forbidden response cannot distinguish an accepted token from an
+    # ignored/invalid one and must not be promoted to auth_valid.
+    ok = namespaces is not None or (status == 403 and credential.token is not None and not anonymous_open)
     if ok:
         state.access_namespaces = namespaces
+        state.access_namespaces_error = error
         state.token, state.username, state.password = credential.token, credential.username, credential.password
     record.update(
         {
@@ -2017,9 +2122,15 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
             "status": "auth_valid" if ok else "invalid_credentials_anonymous" if anonymous_open else "auth_failed",
             "auth_mode": "token" if credential.token else "basic",
             "auth_valid": bool(ok),
-            "auth_error": None if ok else error or f"authentication failed status={status}",
-            "namespaces_error": None if ok else error,
-            "can_list_namespaces": bool(ok) or anonymous_open,
+            "auth_error": (
+                "credential accepted but cluster-wide namespace listing is forbidden"
+                if ok and namespaces is None and status == 403
+                else None
+                if ok
+                else error or f"authentication failed status={status}"
+            ),
+            "namespaces_error": error,
+            "can_list_namespaces": namespaces is not None,
         }
     )
     return record
@@ -2108,7 +2219,7 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
             "pods": pods_out if options["show_pods"] else [],
             "secrets": secrets_out,
             "exec_result": exec_result,
-            "namespaces_error": None,
+            "namespaces_error": state.access_namespaces_error,
             "pods_error": pods_error,
             "secrets_error": secrets_error,
             "can_list_pods": None if not options["show_pods"] else pods_error is None,

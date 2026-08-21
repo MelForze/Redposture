@@ -1,0 +1,310 @@
+[
+  {
+    "access_level": "unknown",
+    "anonymous_root_status": 401,
+    "api_key_probe_error": null,
+    "api_key_probe_status": "not_run",
+    "attempted_credentials": [
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "admin",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "changeme",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "password",
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "changeme",
+        "source": "default",
+        "status": "auth_required",
+        "username": "elastic",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "elastic",
+        "source": "default",
+        "status": "auth_required",
+        "username": "elastic",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "password",
+        "source": "default",
+        "status": "auth_required",
+        "username": "elastic",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "changeme",
+        "source": "default",
+        "status": "auth_required",
+        "username": "kibana",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "kibana",
+        "source": "default",
+        "status": "auth_required",
+        "username": "kibana",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": null,
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 200,
+        "auth_probe_status": "verified",
+        "error": null,
+        "network_attempted": true,
+        "password": "logstash",
+        "source": "default",
+        "status": "weak_default_creds",
+        "username": "logstash",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "changeme",
+        "source": "default",
+        "status": "auth_required",
+        "username": "logstash_system",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "opensearch",
+        "source": "default",
+        "status": "auth_required",
+        "username": "opensearch",
+        "verification_capability": "identity_endpoint_supported"
+      },
+      {
+        "auth_error_detail": {
+          "reason": "Unauthorized",
+          "root_cause": [],
+          "status": 401,
+          "type": "http_error"
+        },
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 401,
+        "auth_probe_status": "rejected",
+        "error": "authentication failed",
+        "network_attempted": true,
+        "password": "password",
+        "source": "default",
+        "status": "auth_required",
+        "username": "opensearch",
+        "verification_capability": "identity_endpoint_supported"
+      }
+    ],
+    "auth_error_detail": null,
+    "auth_probe_endpoint": "/_plugins/_security/authinfo",
+    "auth_probe_http_status": 200,
+    "auth_probe_status": "verified",
+    "auth_required": true,
+    "auth_valid": true,
+    "can_manage": null,
+    "can_manage_security": null,
+    "can_read": null,
+    "can_write": null,
+    "cat_endpoints": null,
+    "cat_plugins": null,
+    "cluster_error": null,
+    "cluster_health": null,
+    "cluster_nodes": null,
+    "credential_verification": {
+      "capability": "identity_endpoint_supported",
+      "status": "verified",
+      "supported_endpoint": "/_plugins/_security/authinfo",
+      "unsupported_endpoints": []
+    },
+    "credentials_source": "default",
+    "defcreds_enabled": true,
+    "detect_confidence": "high",
+    "detect_probe_trace": [
+      {
+        "error": null,
+        "scheme": "https",
+        "signal_kind": "hard_positive",
+        "signals": [
+          "opensearch_security_realm"
+        ],
+        "status": 401,
+        "transport_error": null,
+        "vendor": "opensearch"
+      }
+    ],
+    "detect_signals": [
+      "opensearch_security_realm"
+    ],
+    "discover": false,
+    "discover_error": null,
+    "discover_error_detail": null,
+    "discover_results": null,
+    "effective_username": "logstash",
+    "endpoint_diagnostics": null,
+    "endpoints_error": null,
+    "error": null,
+    "host": "127.0.0.1",
+    "insecure_effective": true,
+    "is_elastic": true,
+    "misconfig_error": null,
+    "misconfig_findings": null,
+    "module": "elastic",
+    "network_attempted": true,
+    "plugins_error": null,
+    "port": 29201,
+    "provided_credentials": false,
+    "provided_token": false,
+    "provided_username": "logstash",
+    "rights_error": null,
+    "scheme": "https",
+    "service": "elastic",
+    "show_cluster": false,
+    "show_endpoints": false,
+    "show_plugins": false,
+    "show_users": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "auth_required",
+        "stage_name": "auth_inference_credentials"
+      }
+    ],
+    "status": "weak_default_creds",
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
+    "users": null,
+    "users_error": null,
+    "vendor": "opensearch",
+    "verification_capability": "identity_endpoint_supported"
+  }
+]

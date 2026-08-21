@@ -112,6 +112,15 @@ def test_registered_module_stage_files_are_not_vcs_ignored() -> None:
     assert result.returncode == 1, f"registered module stage files are VCS-ignored:\n{result.stdout}"
 
 
+def test_local_lab_tree_is_unconditionally_vcs_ignored() -> None:
+    rules = [
+        line.split("#", 1)[0].strip() for line in (Path.cwd() / ".gitignore").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert "lab/" in rules
+    assert not any(rule == "!lab" or rule.startswith("!lab/") for rule in rules)
+
+
 def test_module_registry_reports_bad_runner_specs() -> None:
     missing_module = CommandSpec(
         name="missing",

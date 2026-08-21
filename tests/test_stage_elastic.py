@@ -82,32 +82,32 @@ def test_elastic_headers_prefer_apikey_over_basic() -> None:
 
 def test_elastic_default_credential_runs_are_exact_and_deduplicated() -> None:
     assert elastic_stage._build_credential_runs(None, None, True) == [
+        ("admin", "admin"),
+        ("admin", "changeme"),
+        ("admin", "password"),
         ("elastic", "changeme"),
         ("elastic", "elastic"),
         ("elastic", "password"),
-        ("admin", "admin"),
-        ("admin", "password"),
-        ("admin", "changeme"),
-        ("opensearch", "opensearch"),
-        ("opensearch", "password"),
-        ("kibana", "kibana"),
         ("kibana", "changeme"),
+        ("kibana", "kibana"),
         ("logstash", "logstash"),
         ("logstash_system", "changeme"),
+        ("opensearch", "opensearch"),
+        ("opensearch", "password"),
     ]
     assert elastic_stage._build_credential_runs("elastic", "elastic", True) == [
         ("elastic", "elastic"),
+        ("admin", "admin"),
+        ("admin", "changeme"),
+        ("admin", "password"),
         ("elastic", "changeme"),
         ("elastic", "password"),
-        ("admin", "admin"),
-        ("admin", "password"),
-        ("admin", "changeme"),
-        ("opensearch", "opensearch"),
-        ("opensearch", "password"),
-        ("kibana", "kibana"),
         ("kibana", "changeme"),
+        ("kibana", "kibana"),
         ("logstash", "logstash"),
         ("logstash_system", "changeme"),
+        ("opensearch", "opensearch"),
+        ("opensearch", "password"),
     ]
     assert elastic_stage._build_credential_runs(None, None, False) == [(None, None)]
 
@@ -196,6 +196,26 @@ def test_classify_detect_probe_accepts_opensearch_markers() -> None:
     assert classified["signal_kind"] == "hard_positive"
     assert "vendor_opensearch_tagline" in classified["signals"]
     assert classified["vendor"] == "opensearch"
+
+
+def test_classify_detect_probe_accepts_opensearch_security_realm_without_credentials() -> None:
+    classified = _classify_detect_probe(
+        "/",
+        401,
+        b"Unauthorized",
+        {
+            "Content-Type": "text/plain",
+            "WWW-Authenticate": 'Basic realm="OpenSearch Security"',
+        },
+        None,
+    )
+
+    assert classified == {
+        "signal_kind": "hard_positive",
+        "signals": ["opensearch_security_realm"],
+        "version": None,
+        "vendor": "opensearch",
+    }
 
 
 def test_detect_decision_policy_matrix() -> None:
@@ -420,6 +440,35 @@ def test_verify_authenticate_and_privileges(monkeypatch: pytest.MonkeyPatch) -> 
     )
     assert (can_read, can_write, can_manage, can_manage_security) == (True, False, False, False)
     assert rights_error is None
+
+
+def test_opensearch_privileges_remain_unknown_without_unsupported_network_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_elastic_request",
+        lambda *_args, **_kwargs: pytest.fail("OpenSearch privilege verification must not issue a request"),
+    )
+
+    result = _check_privileges(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="https",
+        insecure=True,
+        ca_file=None,
+        auth_headers={"Authorization": "Basic test"},
+        vendor="opensearch",
+    )
+
+    assert result == (
+        None,
+        None,
+        None,
+        None,
+        "privilege verification unsupported for OpenSearch",
+    )
 
 
 def test_verify_api_key_probe_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1215,7 +1264,8 @@ def test_audit_elastic_host_with_auth_and_features(monkeypatch: pytest.MonkeyPat
     assert "[*] Misconfig Findings" in detail_text
     assert "key=xpack.security.enabled value=false reason=security is disabled" in detail_text
     assert "[*] 1 Users" in detail_text
-    assert "[*] 1 Secret Findings (high:1)" in detail_text
+    assert "[*] 1 Secret Findings" in detail_text
+    assert "(high:1)" not in detail_text
     assert 'value="secret"' in detail_text
     assert "Discover coverage status=partial" in detail_text
     assert '{"password": "secret"}' not in detail_text
@@ -1223,6 +1273,68 @@ def test_audit_elastic_host_with_auth_and_features(monkeypatch: pytest.MonkeyPat
     detail_json = [_json for _json in _format_detail_records(record, "json")]
     parsed_json = [json.loads(item) for item in detail_json]
     assert any(item.get("type") == "misconfig_dump" for item in parsed_json)
+
+
+def test_opensearch_privilege_limitation_is_structured_but_not_a_stage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_request_with_tls_fallback",
+        lambda *_args, **_kwargs: (
+            401,
+            b"Unauthorized",
+            {"WWW-Authenticate": 'Basic realm="OpenSearch Security"'},
+            None,
+            "https",
+            True,
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        elastic_stage,
+        "_probe_authenticate",
+        lambda *_args, **_kwargs: ElasticAuthProbeResult(
+            valid=True,
+            error=None,
+            username="admin",
+            status=200,
+            endpoint="/_plugins/_security/authinfo",
+            detail=None,
+        ),
+    )
+    monkeypatch.setattr(
+        elastic_stage,
+        "_fetch_cat_endpoints",
+        lambda *_args, **_kwargs: (["/_cat/health"], None, []),
+    )
+
+    record = _audit_elastic_host(
+        "127.0.0.1",
+        29201,
+        1.0,
+        0,
+        username="admin",
+        password="secret",
+        api_token=None,
+        ca_file=None,
+        show_endpoints=True,
+        show_plugins=False,
+        show_cluster=False,
+        show_users=False,
+        discover=False,
+        preferred_scheme="https",
+    )
+
+    assert record["status"] == "valid_credentials"
+    assert record["vendor"] == "opensearch"
+    assert record["error"] is None
+    assert record["rights_error"] == "privilege verification unsupported for OpenSearch"
+    access_stage = next(stage for stage in record["stages"] if stage["stage_name"] == "access_capabilities")
+    assert access_stage["result"] == "ok"
+    assert access_stage["error"] is None
+    assert "privilege verification unsupported" not in _format_record(record, "txt")
+    assert "privilege verification unsupported" in _format_record(record, "json")
 
 
 def test_audit_targets_and_renderers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1444,18 +1556,18 @@ def test_run_elastic_stage_defcreds_expands_default_pairs(monkeypatch: pytest.Mo
     assert rc == 0
     assert captured == [
         (None, None, False),
+        ("admin", "admin", True),
+        ("admin", "changeme", True),
+        ("admin", "password", True),
         ("elastic", "changeme", True),
         ("elastic", "elastic", True),
         ("elastic", "password", True),
-        ("admin", "admin", True),
-        ("admin", "password", True),
-        ("admin", "changeme", True),
-        ("opensearch", "opensearch", True),
-        ("opensearch", "password", True),
-        ("kibana", "kibana", True),
         ("kibana", "changeme", True),
+        ("kibana", "kibana", True),
         ("logstash", "logstash", True),
         ("logstash_system", "changeme", True),
+        ("opensearch", "opensearch", True),
+        ("opensearch", "password", True),
     ]
 
 
@@ -1560,7 +1672,7 @@ def test_run_elastic_stage_multi_group_uses_single_global_progress(monkeypatch: 
         ca_file=None,
     )
     rc = run_elastic_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
-    assert rc == 0
+    assert rc == 1
     assert len(captured) == 2
     assert [call["port"] for call in captured] == [9200, 9201]
     assert all(call["run_deep_checks"] is (call["username"] is not None) for call in captured)
@@ -1909,7 +2021,8 @@ def test_elastic_misconfig_helpers_and_fetch_paths(monkeypatch: pytest.MonkeyPat
     assert "security is disabled" in reasons
     assert "http tls is disabled" in reasons
     assert "service is bound to all interfaces" in reasons
-    assert "script execution appears permissive" in reasons
+    assert "script execution appears permissive" not in reasons
+    assert "inline script execution is enabled" in reasons
     assert "inline script execution is enabled" in reasons
     assert "cors allows wildcard origins" in reasons
 
@@ -2054,6 +2167,188 @@ def test_elastic_users_and_indices_helpers(monkeypatch: pytest.MonkeyPatch) -> N
     )
     assert indices_error is None
     assert indices == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    ("first_status", "expected_error", "expected_paths"),
+    [
+        (401, "Access Denied", ["/_plugins/_security/api/internalusers"]),
+        (403, "Access Denied", ["/_plugins/_security/api/internalusers"]),
+        (404, None, ["/_plugins/_security/api/internalusers", "/_security/user"]),
+    ],
+)
+def test_opensearch_security_users_use_vendor_endpoint_and_safe_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    first_status: int,
+    expected_error: str | None,
+    expected_paths: list[str],
+) -> None:
+    paths: list[str] = []
+
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        **_kwargs: object,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        paths.append(path)
+        if path == "/_plugins/_security/api/internalusers":
+            return first_status, b"{}", {"Content-Type": "application/json"}, None
+        assert path == "/_security/user"
+        return (
+            200,
+            json.dumps(
+                {
+                    "fallback": {
+                        "roles": ["viewer"],
+                        "enabled": True,
+                        "full_name": "Fallback User",
+                    }
+                }
+            ).encode(),
+            {"Content-Type": "application/json"},
+            None,
+        )
+
+    monkeypatch.setattr(elastic_stage, "_elastic_request", fake_request)
+    users, error = elastic_stage._fetch_security_users(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="https",
+        insecure=True,
+        ca_file=None,
+        auth_headers={"Authorization": "Basic test"},
+        vendor="opensearch",
+    )
+
+    assert paths == expected_paths
+    assert error == expected_error
+    if first_status == 404:
+        assert users == [
+            {
+                "username": "fallback",
+                "roles": ["viewer"],
+                "enabled": True,
+                "full_name": "Fallback User",
+            }
+        ]
+    else:
+        assert users is None
+
+
+@pytest.mark.parametrize(
+    ("vendor", "responses", "expected_paths"),
+    [
+        (
+            "elasticsearch",
+            [(405, b'{"error":"Incorrect HTTP method for uri [/_security/user]"}')],
+            ["/_security/user"],
+        ),
+        (
+            "opensearch",
+            [
+                (400, b'{"error":"no handler found for uri [/_plugins/_security/api/internalusers]"}'),
+                (400, b'{"error":"no handler found for uri [/_security/user]"}'),
+            ],
+            ["/_plugins/_security/api/internalusers", "/_security/user"],
+        ),
+    ],
+)
+def test_security_users_disabled_api_is_reported_as_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+    vendor: str,
+    responses: list[tuple[int, bytes]],
+    expected_paths: list[str],
+) -> None:
+    paths: list[str] = []
+
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        **_kwargs: object,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        paths.append(path)
+        status, payload = responses[len(paths) - 1]
+        return status, payload, {"Content-Type": "application/json"}, None
+
+    monkeypatch.setattr(elastic_stage, "_elastic_request", fake_request)
+    users, error = elastic_stage._fetch_security_users(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="https" if vendor == "opensearch" else "http",
+        insecure=vendor == "opensearch",
+        ca_file=None,
+        auth_headers={},
+        vendor=vendor,
+    )
+
+    assert paths == expected_paths
+    assert users is None
+    assert error == "security users API unsupported"
+
+
+def test_opensearch_security_users_normalize_internal_user_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_request(
+        _host: str,
+        _port: int,
+        path: str,
+        _timeout: float,
+        **_kwargs: object,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        assert path == "/_plugins/_security/api/internalusers"
+        return (
+            200,
+            json.dumps(
+                {
+                    "admin": {
+                        "backend_roles": ["admin", "ops"],
+                        "reserved": True,
+                        "description": "Demo admin",
+                    },
+                    "observer": {
+                        "backend_roles": ["redposture_observer"],
+                        "opendistro_security_roles": ["observer_role", "redposture_observer"],
+                        "disabled": False,
+                    },
+                    "invalid": "skip-me",
+                }
+            ).encode(),
+            {"Content-Type": "application/json"},
+            None,
+        )
+
+    monkeypatch.setattr(elastic_stage, "_elastic_request", fake_request)
+    users, error = elastic_stage._fetch_security_users(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="https",
+        insecure=True,
+        ca_file=None,
+        auth_headers={"Authorization": "Basic test"},
+        vendor="opensearch",
+    )
+
+    assert error is None
+    assert users == [
+        {
+            "username": "admin",
+            "roles": ["admin", "ops"],
+            "enabled": None,
+            "full_name": "Demo admin",
+        },
+        {
+            "username": "observer",
+            "roles": ["redposture_observer", "observer_role"],
+            "enabled": True,
+            "full_name": "",
+        },
+    ]
 
 
 def test_elastic_low_level_error_and_tls_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2422,13 +2717,24 @@ def test_elastic_fetch_helpers_and_rendering_branches(monkeypatch: pytest.Monkey
     assert [entry["endpoint"] for entry in diagnostics[:2]] == ["/_cat?help", "/_cat/"]
     assert calls == ["/_cat?help", "/_cat/"]
 
+    cluster_paths: list[str] = []
     responses = iter(
         [
             (200, b'{"cluster_name":"c"}', {}, None),
-            (200, b'{"nodes":{"n2":{"name":"b"},"n1":{"name":"a"}}}', {}, None),
+            (
+                200,
+                b'{"nodes":{"n2":{"name":"b","version":"2.19.1"},"n1":{"name":"a","version":"2.19.1"}}}',
+                {},
+                None,
+            ),
         ]
     )
-    monkeypatch.setattr(elastic_stage, "_elastic_request", lambda *_args, **_kwargs: next(responses))
+
+    def cluster_request(_host: str, _port: int, path: str, _timeout: float, **_kwargs):
+        cluster_paths.append(path)
+        return next(responses)
+
+    monkeypatch.setattr(elastic_stage, "_elastic_request", cluster_request)
     health, nodes, cluster_error = elastic_stage._fetch_cluster_data(
         "127.0.0.1",
         9200,
@@ -2442,6 +2748,9 @@ def test_elastic_fetch_helpers_and_rendering_branches(monkeypatch: pytest.Monkey
     assert isinstance(health, dict)
     assert isinstance(nodes, list)
     assert [item["name"] for item in nodes] == ["a", "b"]
+    assert [item["version"] for item in nodes] == ["2.19.1", "2.19.1"]
+    assert "nodes.*.version" in cluster_paths[1]
+    assert elastic_stage._server_version_from_cluster_nodes(nodes) == "2.19.1"
 
     monkeypatch.setattr(
         elastic_stage,
@@ -2811,3 +3120,30 @@ def test_call_audit_elastic_wrapper_propagates_unexpected_typeerror(
             run_deep_checks=True,
             debug_emit=None,
         )
+
+
+def test_elastic_403_accepts_credential_without_claiming_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        elastic_stage,
+        "_elastic_request",
+        lambda *_args, **_kwargs: (
+            403,
+            b'{"error":{"type":"security_exception","reason":"action unauthorized"}}',
+            {"content-type": "application/json"},
+            None,
+        ),
+    )
+
+    result = elastic_stage._probe_authenticate(
+        "elastic.local",
+        9200,
+        1.0,
+        scheme="https",
+        insecure=False,
+        ca_file=None,
+        auth_headers={"Authorization": "ApiKey scoped"},
+    )
+
+    assert result.valid is True
+    assert result.username is None
+    assert result.verification_capability == "credential_accepted_identity_unavailable"

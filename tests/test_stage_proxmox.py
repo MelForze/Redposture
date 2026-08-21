@@ -32,6 +32,7 @@ from redposture_core.stage_proxmox import (
     _format_discovered_urls_detail_records,
     _format_findings_detail_records,
     _format_nodes_detail_records,
+    _format_partial_detail_records,
     _format_record,
     _format_users_detail_records,
     _friendly_error_text,
@@ -42,6 +43,7 @@ from redposture_core.stage_proxmox import (
     _is_permission_denied_message,
     _key_looks_sensitive,
     _looks_like_cloud_init_secret_blob,
+    _looks_like_proxmox_response,
     _normalize_add_user_id,
     _proxmox_request,
     _proxmox_request_once,
@@ -301,16 +303,16 @@ def test_proxmox_lifecycle_auth_failure_preserves_requested_action_contract(
 
 def test_proxmox_default_credentials_are_exact() -> None:
     assert _PROXMOX_DEFAULT_CREDENTIALS == (
-        ("root@pam", "root"),
+        ("admin@pam", "admin"),
+        ("admin@pve", "admin"),
+        ("admin@pve", "password"),
         ("root@pam", "admin"),
+        ("root@pam", "changeme"),
         ("root@pam", "password"),
         ("root@pam", "proxmox"),
         ("root@pam", "Proxmox123"),
-        ("root@pam", "changeme"),
+        ("root@pam", "root"),
         ("root@pam", "toor"),
-        ("admin@pve", "admin"),
-        ("admin@pve", "password"),
-        ("admin@pam", "admin"),
     )
 
 
@@ -755,6 +757,7 @@ def test_audit_proxmox_add_user_success(monkeypatch) -> None:
         insecure=True,
         proxy=None,
         add_user="scanner-bot",
+        grant_role="Administrator",
         show_users=True,
     )
 
@@ -813,6 +816,7 @@ def test_audit_proxmox_add_user_shows_error_when_creation_fails(monkeypatch) -> 
         insecure=True,
         proxy=None,
         add_user="scanner-bot",
+        grant_role="Administrator",
     )
 
     assert record["status"] == "token_ok"
@@ -907,6 +911,7 @@ def test_audit_proxmox_add_user_reports_acl_grant_error(monkeypatch) -> None:
         insecure=True,
         proxy=None,
         add_user="scanner-bot",
+        grant_role="Administrator",
     )
 
     assert record["status"] == "token_ok"
@@ -1425,6 +1430,26 @@ def test_proxmox_detail_renderers_cover_findings_nodes_users_text_and_json() -> 
     assert any('"type": "users_dump"' in line for line in _format_users_detail_records(record, "json"))
 
 
+def test_proxmox_partial_response_is_visible_in_text_and_renderer_dispatch() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 8006,
+        "partial": True,
+        "responses_truncated": 2,
+        "partial_error": "2 endpoint response(s) exceeded the body limit",
+    }
+
+    assert _format_partial_detail_records(record, "json") == []
+    assert _format_partial_detail_records(record, "txt") == [
+        "PROXMOX \t127.0.0.1\t8006\t [!] partial results responses_truncated=2 "
+        "err=2 endpoint response(s) exceeded the body limit"
+    ]
+    assert (
+        "_format_partial_detail_records"
+        in __import__("redposture_core.modules.proxmox.render", fromlist=["__all__"]).__all__
+    )
+
+
 def test_format_record_covers_auth_and_fail_statuses() -> None:
     assert "token valid but insufficient privileges" in _format_record(
         {"host": "127.0.0.1", "port": 8006, "status": "insufficient_privileges"}, "txt"
@@ -1604,7 +1629,7 @@ def test_audit_proxmox_targets_can_suppress_fail_status_lines(monkeypatch) -> No
 
     assert (total, token_ok, insufficient, auth_failed, fail, credential_hits) == (1, 0, 0, 0, 1, 0)
     assert len(lines) == 1
-    assert "No PROXMOX service detected" in lines[0]
+    assert "PROXMOX audit inconclusive" in lines[0]
     assert all("Connection refused" not in line and "timed out" not in line for line in lines)
 
 
@@ -1798,8 +1823,8 @@ def test_run_proxmox_stage_validation_and_group_scheme_override(monkeypatch) -> 
     )
 
     rc = run_proxmox_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None))
-    assert rc == 2
-    assert any("--pveapitoken, -u/-p, or --defcreds is required" in item for item in fake_console.errors)
+    assert rc == 1
+    assert not any("--pveapitoken, -u/-p, or --defcreds is required" in item for item in fake_console.errors)
 
     fake_console.errors.clear()
     calls: list[dict[str, object]] = []
@@ -2036,7 +2061,7 @@ def test_run_proxmox_stage_multi_instance_uses_single_global_progress(monkeypatc
         insecure=True,
     )
     rc = run_proxmox_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
-    assert rc == 0
+    assert rc == 1
     assert not fake_console.errors
     assert [call["port"] for call in calls] == [8006, 18061, 18062]
     assert all(call["run_deep_checks"] is False for call in calls)
@@ -2098,3 +2123,39 @@ def test_proxmox_request_once_and_retry_paths(monkeypatch) -> None:
     )
     assert retry_calls["count"] == 2
     assert (status, payload, error) == (200, b'{"ok":1}', None)
+
+
+def test_proxmox_add_user_does_not_grant_global_acl_implicitly(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(_host, _port, path, _timeout, _retries, **kwargs):
+        method = str(kwargs.get("method") or "GET")
+        calls.append((method, path))
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"permissions": {"/": {"User.Modify": 1}}}), {}, None
+        if path == "/access/users" and method == "POST":
+            return 200, _json_payload(None), {}, None
+        if path == "/access/acl":
+            raise AssertionError("ACL endpoint must require explicit --grant-role")
+        return 404, b"{}", {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    record = _audit_proxmox_host(
+        "127.0.0.1",
+        8006,
+        1.0,
+        0,
+        "monitor@pve!audit=token",
+        True,
+        True,
+        None,
+        add_user="scanner-bot",
+    )
+
+    assert record["added_user"] == "scanner-bot@pve"
+    assert record["grant_role"] is None
+    assert record["add_user_privileges_granted"] is None
+    assert not any(path == "/access/acl" for _method, path in calls)
+    assert _looks_like_proxmox_response(200, b"<html>login</html>", {}) is False

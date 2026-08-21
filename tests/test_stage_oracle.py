@@ -454,7 +454,7 @@ def test_run_oracle_stage_credential_file_debug_and_unreachable_warning(
 
         def run_plan(self, plan):
             captured["plan"] = plan
-            return type("Result", (), {"detected_count": 0})()
+            return type("Result", (), {"detected_count": 0, "operational_failure_count": 1})()
 
     monkeypatch.setattr(oracle, "AuditCommandRunner", ZeroDetectionRunner)
     args = _args(
@@ -465,7 +465,7 @@ def test_run_oracle_stage_credential_file_debug_and_unreachable_warning(
         output_format="json",
     )
 
-    assert oracle.run_oracle_stage(args, logger=object()) == 0
+    assert oracle.run_oracle_stage(args, logger=object()) == 1
 
     plan = captured["plan"]
     assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
@@ -519,26 +519,26 @@ def test_oracle_helpers_parse_credentials_and_targets(tmp_path: Path) -> None:
     runs = oracle._credential_runs(None, None, defcreds=True, combo_list=str(combo))
     assert {item["username"] for item in runs} >= {"system", "scott"}
     assert oracle._ORACLE_DEFAULT_CREDS == (
-        ("system", "oracle"),
-        ("sys", "oracle"),
-        ("system", "manager"),
-        ("sys", "change_on_install"),
-        ("scott", "tiger"),
-        ("dbsnmp", "dbsnmp"),
-        ("pdbadmin", "oracle"),
-        ("admin", "oracle"),
-        ("system", "system"),
-        ("sys", "sys"),
-        ("pdbadmin", "pdbadmin"),
         ("admin", "admin"),
-        ("scott", "scott"),
+        ("admin", "changeme"),
+        ("admin", "oracle"),
+        ("admin", "password"),
+        ("dbsnmp", "dbsnmp"),
+        ("dev", "dev"),
         ("hr", "hr"),
         ("outln", "outln"),
-        ("admin", "password"),
-        ("admin", "changeme"),
-        ("user", "user"),
+        ("pdbadmin", "oracle"),
+        ("pdbadmin", "pdbadmin"),
+        ("scott", "scott"),
+        ("scott", "tiger"),
+        ("sys", "change_on_install"),
+        ("sys", "oracle"),
+        ("sys", "sys"),
+        ("system", "manager"),
+        ("system", "oracle"),
+        ("system", "system"),
         ("test", "test"),
-        ("dev", "dev"),
+        ("user", "user"),
     )
     deduplicated = oracle._credential_runs("admin", "password", defcreds=True)
     assert [(item["username"], item["password"], item["default"], item["source"]) for item in deduplicated] == [
@@ -860,6 +860,93 @@ def test_oracle_auth_error_statuses(monkeypatch: pytest.MonkeyPatch) -> None:
         **base_kwargs,
     )
     assert expired["status"] == "account_expired"
+
+
+def test_oracle_closed_connection_with_credentials_is_not_service_or_auth_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        oracle.socket,
+        "create_connection",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("connection reset")),
+    )
+    monkeypatch.setattr(
+        oracle,
+        "_probe_listener_targets",
+        lambda *_args, **_kwargs: [
+            {
+                "protocol": "tcp",
+                "service": "FREEPDB1",
+                "sid": None,
+                "status": "fail",
+                "exists": None,
+                "auth_required": None,
+                "error": "database or network closed the connection",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        oracle,
+        "_try_credentials",
+        lambda *_args, **_kwargs: (
+            None,
+            [
+                {
+                    "username": "scott",
+                    "password": "tiger",
+                    "ok": False,
+                    "error": "database or network closed the connection",
+                }
+            ],
+            None,
+        ),
+    )
+    record = oracle._audit_oracle_host(
+        "127.0.0.1",
+        1521,
+        1.0,
+        0,
+        protocol="tcp",
+        service="FREEPDB1",
+        sid=None,
+        wallet=None,
+        ssl_server_dn=None,
+        insecure=False,
+        credential_candidates=[{"username": "scott", "password": "tiger"}],
+        as_sysdba=False,
+        show_pdbs=False,
+        show_users=False,
+        show_roles=False,
+        show_privs=False,
+        show_schemas=False,
+        show_tables=False,
+        schema=None,
+        table=None,
+        dump_rows=False,
+        dump_limit=None,
+        query=None,
+        privesc_check=False,
+        privesc_chain=False,
+        exec_cmd=None,
+        exec_method="auto",
+        reverse_shell=None,
+        reverse_shell_type="bash",
+        os_read=None,
+        os_write=None,
+        download=None,
+        delete=None,
+        wallet_search=False,
+        hashes=False,
+        sensitive_scan=False,
+        dblink_check=False,
+    )
+    assert record["is_oracle"] is False
+    assert record["status"] == "fail"
+    assert record["auth_required"] is None
+
+
+def test_oracle_default_ports_include_conventional_tcps_listener() -> None:
+    assert oracle._DEFAULT_PORTS == (1521, 2484, 11521)
 
 
 def test_oracle_formatters_render_json_and_text() -> None:

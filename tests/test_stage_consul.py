@@ -286,12 +286,12 @@ def test_request_with_tls_fallback_probe_and_put_helpers(monkeypatch: pytest.Mon
         use_https=True,
         insecure=False,
     )
-    assert status == 200
-    assert payload == b'{"ok":true}'
+    assert status == 0
+    assert payload == b""
     assert headers == {}
-    assert error is None
-    assert effective_insecure is True
-    assert tls_auto is True
+    assert "tls verification failed" in str(error)
+    assert effective_insecure is False
+    assert tls_auto is False
 
     probe_responses = iter(
         [
@@ -633,6 +633,11 @@ def test_audit_consul_host_full_auth_flow_with_actions_and_revshell(monkeypatch:
 
     monkeypatch.setattr(consul, "_consul_access_matrix", fake_access_matrix)
     monkeypatch.setattr(consul, "_agent_self_probe", fake_self_probe)
+    monkeypatch.setattr(
+        consul,
+        "_acl_token_self_probe",
+        lambda *_args, **_kwargs: {"ok": True, "error": None, "accessor_id": "root-token"},
+    )
     monkeypatch.setattr(consul, "_consul_kv_keys_list", lambda *_args, **_kwargs: (["secret/app"], None))
     monkeypatch.setattr(
         consul,
@@ -2136,6 +2141,11 @@ def test_audit_consul_host_core_with_rich_flow(monkeypatch: pytest.MonkeyPatch) 
             }
         ),
     )
+    monkeypatch.setattr(
+        consul,
+        "_acl_token_self_probe",
+        lambda *_a, **_k: {"ok": True, "error": None, "accessor_id": "root"},
+    )
     monkeypatch.setattr(consul, "_consul_kv_keys_list", lambda *_a, **_k: (["a", "b"], None))
     monkeypatch.setattr(
         consul,
@@ -2866,3 +2876,115 @@ def test_consul_detail_lines_cover_inventory_action_and_revshell_branches() -> N
     cleanup_lines = consul._detail_lines(cleanup, "txt", debug=True)
     assert "Reverse-shell cleanup" in "\n".join(cleanup_lines)
     assert "check deregister failed id=bad err=status=500" in "\n".join(cleanup_lines)
+
+
+def test_consul_leaderless_response_is_not_fingerprint_and_scoped_token_is_valid() -> None:
+    assert consul._looks_like_consul_payload(200, b'""') is False
+    scoped = _scope_fixture(False, True, False)
+    assert consul._all_scopes_ok(scoped) is False
+    assert consul._any_scope_ok(scoped) is True
+    assert (
+        consul._consul_service_status(
+            _scope_fixture(False, False, False),
+            auth_mode="token",
+            auth_valid=consul._any_scope_ok(scoped),
+            auth_required=True,
+        )
+        == "valid_credentials"
+    )
+
+
+def test_consul_http_request_brackets_ipv6_and_uses_tls_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class _Response:
+        status = 200
+        body = b'""'
+        headers: dict[str, str] = {}
+        error = None
+
+    class _FakeClient:
+        def __init__(self, config) -> None:
+            captured["config"] = config
+
+        def request(self, method, url, **kwargs):
+            captured["request"] = (method, url, kwargs)
+            return _Response()
+
+    monkeypatch.setattr(consul, "HttpApiClient", _FakeClient)
+    state = consul.ConsulLifecycleState(
+        scheme="https",
+        ca_file="ca.pem",
+        client_cert="client.pem",
+        client_key="client.key",
+    )
+    with consul._ConsulLifecycleReplay(state):
+        result = consul._http_request(
+            "2001:db8::10",
+            8501,
+            "GET",
+            "/v1/status/leader?stale=true",
+            1.0,
+            use_https=True,
+            insecure=False,
+        )
+    assert result[:2] == (200, b'""')
+    assert captured["request"][1] == "https://[2001:db8::10]:8501/v1/status/leader?stale=true"
+    config = captured["config"]
+    assert config.ca_file == "ca.pem"
+    assert config.client_cert == "client.pem"
+    assert config.client_key == "client.key"
+    assert config.insecure is False
+
+
+def test_consul_explicit_https_does_not_downgrade(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts: list[bool] = []
+
+    def _fail_request(*_args, use_https: bool, **_kwargs):
+        attempts.append(use_https)
+        return 0, b"", {}, "tls verification failed", False, False
+
+    monkeypatch.setattr(consul, "_request_with_tls_fallback", _fail_request)
+    detected = consul._probe_consul_scheme(
+        "consul.internal",
+        8501,
+        1.0,
+        preferred_scheme="https",
+        allow_scheme_fallback=False,
+    )
+    assert detected[0] is False
+    assert attempts == [True]
+
+
+def test_consul_probe_honors_explicit_insecure_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts: list[tuple[bool, bool]] = []
+
+    def _request(*_args, use_https: bool, insecure: bool, **_kwargs):
+        attempts.append((use_https, insecure))
+        return 200, b'"127.0.0.1:8300"', {}, None, insecure, False
+
+    monkeypatch.setattr(consul, "_request_with_tls_fallback", _request)
+    state = consul.ConsulLifecycleState(insecure=True)
+    with consul._ConsulLifecycleReplay(state):
+        detected = consul._probe_consul_scheme(
+            "consul.internal",
+            8501,
+            1.0,
+            preferred_scheme="https",
+            allow_scheme_fallback=False,
+        )
+    assert detected[:5] == (True, "https", True, False, "127.0.0.1:8300")
+    assert attempts == [(True, True)]
+
+
+def test_consul_default_plan_includes_https_and_uses_scheme_port() -> None:
+    bare_args = _consul_args(port=None, targets="consul.internal")
+    bare_args._port_option_provided = False
+    bare_plan = consul.build_consul_plan(bare_args)
+    assert bare_plan.ports == (8500, 8501)
+
+    https_args = _consul_args(port=None, targets="https://consul.internal")
+    https_args._port_option_provided = False
+    https_plan = consul.build_consul_plan(https_args)
+    targets = [(host, port) for _idx, host, port, _spec in https_plan.iter_target_specs()]
+    assert targets == [("consul.internal", 8501)]

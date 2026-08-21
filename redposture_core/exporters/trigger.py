@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ssl
 import time
 import urllib.error
 import urllib.parse
@@ -11,6 +12,7 @@ from typing import Any
 from ..constants import SCAN_EXPORTERS
 from ..logger import AttemptLogger
 from ..scheduler import BoundedScheduler
+from .http_client import activate_exporter_tls_context, build_http_url, format_http_host
 from .output import extract_display_port
 
 HttpGetText = Callable[[str, float, int], tuple[int, str]]
@@ -25,10 +27,11 @@ def detect_trigger_exporter_task(
     http_get_text_fn: HttpGetText,
     log_trigger_events_only: bool = False,
     emit_trigger_event: Callable[[dict[str, Any]], None] | None = None,
+    scheme: str = "http",
 ) -> dict[str, Any]:
     exporter_name = str(exporter["name"])
     port = int(exporter["port"])
-    detect_url = f"http://{host}:{port}{exporter['detect_path']}"
+    detect_url = build_http_url(host, port, str(exporter["detect_path"]), scheme=scheme)
 
     result: dict[str, Any] = {
         "host": host,
@@ -51,7 +54,7 @@ def detect_trigger_exporter_task(
         return result
 
     markers = tuple(str(item) for item in exporter["markers"])
-    if status >= 500 or not any(marker in body for marker in markers):
+    if status < 200 or status >= 300 or not any(marker in body for marker in markers):
         return result
 
     result["detected"] = True
@@ -89,6 +92,7 @@ def trigger_detected_exporter_task(
     retries: int,
     http_get_text_fn: HttpGetText,
     emit_trigger_event: Callable[[dict[str, Any]], None] | None = None,
+    scheme: str = "http",
 ) -> dict[str, Any]:
     exporter_name = str(exporter["name"])
     port = int(exporter["port"])
@@ -98,18 +102,28 @@ def trigger_detected_exporter_task(
         "port": port,
         "detected": True,
         "attempted": 0,
+        "accepted": 0,
+        "unconfirmed": 0,
         "success": 0,
-        "by_callback": {target: {"attempted": 0, "success": 0, "fail": 0} for target in callback_targets},
+        "by_callback": {
+            target: {"attempted": 0, "accepted": 0, "unconfirmed": 0, "success": 0, "fail": 0}
+            for target in callback_targets
+        },
     }
 
     for callback_target in callback_targets:
-        target = str(exporter["target_fmt"]).format(our_host=callback_target)
+        target = str(exporter["target_fmt"]).format(our_host=format_http_host(callback_target))
         callback_port = extract_display_port(target)
         query_parts = [f"target={urllib.parse.quote(target, safe=':/')}"]
         extra_query = str(exporter.get("trigger_query") or "").strip()
         if extra_query:
             query_parts.append(extra_query.lstrip("?"))
-        trigger_url = f"http://{host}:{port}{exporter['trigger_path']}?{'&'.join(query_parts)}"
+        trigger_url = build_http_url(
+            host,
+            port,
+            f"{exporter['trigger_path']}?{'&'.join(query_parts)}",
+            scheme=scheme,
+        )
 
         if emit_trigger_event is not None:
             emit_trigger_event(
@@ -143,9 +157,12 @@ def trigger_detected_exporter_task(
                     probe_success = None
                 break
 
-            trigger_ok = trigger_status < 400
-            if probe_success is not None:
-                trigger_ok = trigger_ok and probe_success
+            request_accepted = 200 <= trigger_status < 300
+            trigger_ok = request_accepted and probe_success is True
+
+            if request_accepted:
+                result["accepted"] += 1
+                result["by_callback"][callback_target]["accepted"] += 1
 
             if trigger_ok:
                 if emit_trigger_event is not None:
@@ -161,6 +178,8 @@ def trigger_detected_exporter_task(
                             "trigger_url": trigger_url,
                             "status": trigger_status,
                             "probe_success": probe_success,
+                            "accepted": request_accepted,
+                            "confirmed": True,
                             "success": True,
                         }
                     )
@@ -178,9 +197,14 @@ def trigger_detected_exporter_task(
                         probe_success=probe_success,
                     )
             else:
-                error_text = f"status={trigger_status}"
+                error_text: str | None = f"status={trigger_status}"
                 if probe_success is False:
                     error_text = "probe_success=0"
+                elif request_accepted:
+                    # A 2xx response only proves that the exporter accepted
+                    # the request.  It does not prove that the outbound probe
+                    # reached the callback target.
+                    error_text = None
                 if emit_trigger_event is not None:
                     emit_trigger_event(
                         {
@@ -194,17 +218,23 @@ def trigger_detected_exporter_task(
                             "trigger_url": trigger_url,
                             "status": trigger_status,
                             "probe_success": probe_success,
+                            "accepted": request_accepted,
+                            "confirmed": False,
                             "success": False,
-                            "error": error_text,
+                            **({"error": error_text} if error_text is not None else {}),
                         }
                     )
-                result["by_callback"][callback_target]["fail"] += 1
+                if request_accepted and probe_success is None:
+                    result["unconfirmed"] += 1
+                    result["by_callback"][callback_target]["unconfirmed"] += 1
+                else:
+                    result["by_callback"][callback_target]["fail"] += 1
                 if logger is not None:
                     logger.log(
                         "scanner",
                         (host, port),
                         exporter=exporter_name,
-                        phase="trigger_error",
+                        phase="trigger_accepted" if request_accepted and probe_success is None else "trigger_error",
                         callback_target=callback_target,
                         trigger_url=trigger_url,
                         status=trigger_status,
@@ -256,11 +286,21 @@ def scan_exporters_and_trigger(
     progress_advance: Callable[[int], None] | None = None,
     progress_add_total: Callable[[int], None] | None = None,
     http_get_text_fn: HttpGetText | None = None,
+    scheme: str = "http",
+    tls_context: ssl.SSLContext | None = None,
 ) -> dict[str, Any]:
     if http_get_text_fn is None:
         from .http_client import http_get_text
 
         http_get_text_fn = http_get_text
+    if tls_context is not None:
+        base_http_get_text_fn = http_get_text_fn
+
+        def _tls_http_get_text(url: str, request_timeout: float, request_retries: int) -> tuple[int, str]:
+            with activate_exporter_tls_context(tls_context):
+                return base_http_get_text_fn(url, request_timeout, request_retries)
+
+        http_get_text_fn = _tls_http_get_text
 
     exporters = list(trigger_exporters or SCAN_EXPORTERS)
     callback_list = list(dict.fromkeys(callback_targets))
@@ -268,18 +308,31 @@ def scan_exporters_and_trigger(
 
     total_detected = 0
     total_attempted = 0
+    total_accepted = 0
+    total_unconfirmed = 0
     total_success = 0
 
     host_detected: dict[str, bool] = {host: False for host in hosts}
     by_host: dict[str, dict[str, int]] = {
-        host: {"detected": 0, "attempted": 0, "success": 0, "fail": 0} for host in hosts
+        host: {"detected": 0, "attempted": 0, "accepted": 0, "unconfirmed": 0, "success": 0, "fail": 0}
+        for host in hosts
     }
     by_callback: dict[str, dict[str, int]] = {
-        target: {"attempted": 0, "success": 0, "fail": 0} for target in callback_list
+        target: {"attempted": 0, "accepted": 0, "unconfirmed": 0, "success": 0, "fail": 0} for target in callback_list
     }
     by_exporter: dict[str, dict[str, int]] = {
-        str(exporter.get("name") or ""): {"detected": 0, "attempted": 0, "success": 0, "fail": 0}
+        str(exporter.get("name") or ""): {
+            "detected": 0,
+            "attempted": 0,
+            "accepted": 0,
+            "unconfirmed": 0,
+            "success": 0,
+            "fail": 0,
+        }
         for exporter in exporters
+    }
+    attempts_by_exporter_host: dict[str, dict[str, int]] = {
+        str(exporter.get("name") or ""): {} for exporter in exporters
     }
 
     detected_pairs: list[tuple[str, dict[str, Any]]] = []
@@ -305,6 +358,7 @@ def scan_exporters_and_trigger(
             http_get_text_fn,
             log_trigger_events_only,
             emit_trigger_event,
+            scheme,
         )
 
     for (host, exporter), result in detect_scheduler.iter_completed(detect_jobs, _detect_job):
@@ -374,26 +428,40 @@ def scan_exporters_and_trigger(
             retries,
             http_get_text_fn,
             emit_trigger_event,
+            scheme,
         )
 
     for _job, result in deep_scheduler.iter_completed(detected_pairs, _deep_job):
         host = str(result["host"])
 
         attempted = int(result["attempted"])
+        accepted = int(result.get("accepted", 0))
+        unconfirmed = int(result.get("unconfirmed", 0))
         success = int(result["success"])
-        fail = attempted - success
+        fail = sum(
+            int(stats.get("fail", 0)) for stats in result.get("by_callback", {}).values() if isinstance(stats, dict)
+        )
 
         total_attempted += attempted
+        total_accepted += accepted
+        total_unconfirmed += unconfirmed
         total_success += success
 
         by_host[host]["attempted"] += attempted
+        by_host[host]["accepted"] += accepted
+        by_host[host]["unconfirmed"] += unconfirmed
         by_host[host]["success"] += success
         by_host[host]["fail"] += fail
         exporter_name = str(result.get("exporter") or "")
         if exporter_name in by_exporter:
             by_exporter[exporter_name]["attempted"] += attempted
+            by_exporter[exporter_name]["accepted"] += accepted
+            by_exporter[exporter_name]["unconfirmed"] += unconfirmed
             by_exporter[exporter_name]["success"] += success
             by_exporter[exporter_name]["fail"] += fail
+            if attempted > 0:
+                exporter_hosts = attempts_by_exporter_host[exporter_name]
+                exporter_hosts[host] = exporter_hosts.get(host, 0) + attempted
 
         try:
             callback_data = result["by_callback"]
@@ -402,6 +470,8 @@ def scan_exporters_and_trigger(
                     if target not in by_callback or not isinstance(stats, dict):
                         continue
                     by_callback[target]["attempted"] += int(stats.get("attempted", 0))
+                    by_callback[target]["accepted"] += int(stats.get("accepted", 0))
+                    by_callback[target]["unconfirmed"] += int(stats.get("unconfirmed", 0))
                     by_callback[target]["success"] += int(stats.get("success", 0))
                     by_callback[target]["fail"] += int(stats.get("fail", 0))
         finally:
@@ -449,11 +519,14 @@ def scan_exporters_and_trigger(
         "hosts": len(hosts),
         "detected_exporters": total_detected,
         "attempted": total_attempted,
+        "accepted": total_accepted,
         "triggered": total_success,
-        "failed": total_attempted - total_success,
+        "unconfirmed": total_unconfirmed,
+        "failed": sum(int(stats.get("fail", 0)) for stats in by_host.values()),
         "by_host": by_host,
         "by_callback": by_callback,
         "by_exporter": by_exporter,
+        "attempts_by_exporter_host": attempts_by_exporter_host,
     }
 
 

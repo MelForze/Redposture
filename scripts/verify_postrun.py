@@ -30,7 +30,6 @@ _EXPECTED_MODULES = (
     "grpc",
     "kafka",
     "zookeeper",
-    "keeper",
     "proxmox",
 )
 
@@ -39,23 +38,23 @@ _EXPECTED_LABELS = (
     "exporters_collect",
     "exporters_trigger",
     "exporters_scan_url_http",
-    "exporters_scan_url_https_reject",
+    "exporters_scan_url_https_transport_fail",
     "exporters_collect_url_http",
-    "exporters_collect_url_https_reject",
+    "exporters_collect_url_https_transport_fail",
     "exporters_trigger_url_http",
-    "exporters_trigger_url_https_reject",
+    "exporters_trigger_url_https_transport_mismatch",
     "registry_open",
     "registry_auth",
     "registry_harbor",
     "registry_gitlab",
     "registry_nexus",
     "registry_url_http",
-    "registry_url_https_reject",
+    "registry_url_https_transport_fail",
     "registry_multi_instance_urls",
     "grafana_default",
     "grafana_apitoken",
     "grafana_url_http",
-    "grafana_url_https_reject",
+    "grafana_url_https_transport_fail",
     "grafana_ssrf_edge",
     "grafana_multi_instance_urls",
     "gitlab_public",
@@ -125,17 +124,23 @@ _EXPECTED_LABELS = (
     "etcd_auth_defcreds",
     "etcd_auth_user_pass",
     "etcd_url_http",
-    "etcd_url_https_reject",
+    "etcd_url_https_transport_fail",
     "etcd_multi_instance_urls",
     "qdrant_default",
     "qdrant_url_http",
-    "qdrant_url_https_reject",
+    "qdrant_url_https_transport_fail",
     "qdrant_multi_instance_urls",
     "elastic_open",
     "elastic_auth",
     "elastic_url_hint_https",
     "elastic_plugins_edge",
     "elastic_multi_instance_urls",
+    "opensearch_detect",
+    "opensearch_open",
+    "opensearch_auth",
+    "opensearch_observer",
+    "opensearch_defcreds",
+    "opensearch_debug_smoke",
     "grpc_open",
     "grpc_auth_token",
     "grpc_auth_defcreds",
@@ -233,9 +238,6 @@ _EXTENDED_EXPECTED_LABELS = (
     "zookeeper_debug_smoke",
     "zookeeper_extended_znode_limits",
     "zookeeper_extended_empty_password",
-    "keeper_debug_smoke",
-    "keeper_force_plaintext",
-    "keeper_force_tls",
     "proxmox_debug_smoke",
     "proxmox_extended_ports_flag",
     "proxmox_extended_defcreds",
@@ -286,7 +288,6 @@ _EXTENDED_EXPECTED_LABELS = (
     "fuzz_grpc_missing_targets",
     "fuzz_kafka_missing_targets",
     "fuzz_zookeeper_missing_targets",
-    "fuzz_keeper_missing_targets",
     "fuzz_proxmox_missing_targets",
     "fuzz_registry_username_without_password",
     "fuzz_registry_token_basic_conflict",
@@ -347,11 +348,9 @@ _EXTENDED_EXPECTED_LABELS = (
     "fuzz_clickhouse_os_shell_execute_conflict",
     "fuzz_zookeeper_zero_max_znodes",
     "fuzz_zookeeper_zero_enum_workers",
-    "fuzz_keeper_incomplete_mtls",
-    "fuzz_keeper_incomplete_mtls_key",
-    "fuzz_keeper_ca_insecure_conflict",
-    "fuzz_keeper_removed_tls_flag",
-    "fuzz_keeper_removed_no_tls_flag",
+    "fuzz_zookeeper_incomplete_mtls",
+    "fuzz_zookeeper_incomplete_mtls_key",
+    "fuzz_zookeeper_ca_insecure_conflict",
     "fuzz_redis_invalid_port_negative",
     "fuzz_redis_invalid_port_huge",
     "fuzz_redis_zero_dump",
@@ -459,10 +458,25 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
         '"provided_username": "zk"',
         "digest-acl-late-default-hit",
     ),
-    "keeper_cluster": ("/redposture/app/api_key", "rp-keeper-key-2026", "clickhouse-keeper"),
-    "keeper_tls": ("clickhouse-keeper", '"transport": "tls"'),
-    "keeper_no4lw": ('"service": "zookeeper-compatible"', '"fingerprint_confidence": "unconfirmed"'),
-    "keeper_apache_control": ('"service": "apache-zookeeper"', '"status": "not_keeper"'),
+    "keeper_cluster": (
+        "/redposture/app/api_key",
+        "rp-keeper-key-2026",
+        '"service": "zookeeper"',
+        '"implementation": "clickhouse-keeper"',
+    ),
+    "keeper_tls": ('"implementation": "clickhouse-keeper"', '"transport": "tls"'),
+    "keeper_no4lw": (
+        '"service": "zookeeper"',
+        '"implementation": "zookeeper-compatible"',
+        '"implementation_confidence": "unconfirmed"',
+    ),
+    "keeper_apache_control": (
+        '"service": "zookeeper"',
+        '"implementation": "apache-zookeeper"',
+        '"implementation_confidence": "confirmed"',
+        '"vendor": "apache"',
+        '"is_keeper": false',
+    ),
     "proxmox_admin": ("credential_hit", "pve-edge-01", "pve-core-02", "GitLabCloudInit!2026"),
     "registry_extended_tags_metadata": ("redposture/demo-api", "latest"),
     "consul_extended_inventory_filters": ("redposture/kafka/sasl_password", "svc-redposture-api"),
@@ -532,6 +546,19 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     # grafana). Substrings extracted from real matrix JSON artifacts; verified before use.
     "elastic_open": ('"discover_schema_version": 2', '"discover_findings"', "elastic-prod-api-key-2026"),
     "elastic_auth": (".security-7", "user-observer", '"can_read": true'),
+    "opensearch_detect": ('"vendor": "opensearch"', '"is_elastic": true'),
+    "opensearch_open": ('"vendor": "opensearch"', '"discover_schema_version": 2'),
+    "opensearch_auth": (
+        '"vendor": "opensearch"',
+        '"effective_username": "admin"',
+        '"roles": ["redposture_observer"]',
+    ),
+    "opensearch_observer": ('"vendor": "opensearch"', '"effective_username": "observer"'),
+    "opensearch_defcreds": (
+        '"vendor": "opensearch"',
+        '"status": "weak_default_creds"',
+        '"effective_username": "logstash"',
+    ),
     "elastic_extended_all_actions": (".security-7", '"can_write": true', '"effective_username": "elastic"'),
     "elastic_extended_ports_defcreds": ('"discover_results"',),
     "kubeapi_open": ("v1.31.6+k3s1", '"auth_mode": "none"'),
@@ -572,6 +599,409 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "exporters_collect_url_http": ('"exporter":',),
     "exporters_trigger_url_http": ('"exporter":',),
 }
+
+
+_DISCOVER_CORPUS_MANIFEST = Path("tests/fixtures/elastic_discover/discover_corpus_expected.json")
+_DISCOVER_LAB_CONTRACTS: dict[str, dict[str, object]] = {
+    "elastic_open": {
+        "vendor": "elasticsearch",
+        "scheme": "http",
+        "auth_required": False,
+        "server_version": "8.13.4",
+    },
+    "elastic_auth": {
+        "vendor": "elasticsearch",
+        "scheme": "http",
+        "auth_required": True,
+        "username": "elastic",
+        "server_version": "8.13.4",
+    },
+    "opensearch_open": {
+        "vendor": "opensearch",
+        "scheme": "http",
+        "auth_required": False,
+        "server_version": "2.19.1",
+    },
+    "opensearch_auth": {
+        "vendor": "opensearch",
+        "scheme": "https",
+        "auth_required": True,
+        "username": "admin",
+        "server_version": "2.19.1",
+    },
+    "opensearch_observer": {
+        "vendor": "opensearch",
+        "scheme": "https",
+        "auth_required": True,
+        "username": "observer",
+        "corpus_scope": "documents",
+        "server_version": "2.19.1",
+    },
+}
+
+
+def _load_discover_corpus_manifest(path: Path = _DISCOVER_CORPUS_MANIFEST) -> dict[str, object]:
+    if not path.exists():
+        raise SystemExit(f"discover corpus manifest is missing: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"discover corpus manifest is invalid: {path}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise SystemExit(f"discover corpus manifest must be a JSON object: {path}")
+    findings = payload.get("findings")
+    if not isinstance(findings, list) or not findings:
+        raise SystemExit("discover corpus manifest must contain a non-empty findings list")
+    expected_types = payload.get("expected_secret_types")
+    if (
+        not isinstance(expected_types, list)
+        or not expected_types
+        or not all(isinstance(item, str) and item for item in expected_types)
+    ):
+        raise SystemExit("discover corpus manifest must contain non-empty expected_secret_types")
+    return payload
+
+
+def _manifest_findings_for_vendor(manifest: dict[str, object], vendor: str) -> list[dict[str, object]]:
+    selected: list[dict[str, object]] = []
+    raw_findings = manifest.get("findings")
+    if not isinstance(raw_findings, list):
+        raise SystemExit("discover corpus manifest findings must be a list")
+    for item in raw_findings:
+        if not isinstance(item, dict):
+            raise SystemExit("discover corpus manifest finding must be an object")
+        vendors = item.get("vendors")
+        if vendors is not None:
+            if not isinstance(vendors, list) or not all(isinstance(value, str) for value in vendors):
+                raise SystemExit("discover corpus manifest finding vendors must be a string list")
+            if vendor not in vendors:
+                continue
+        secret_type = item.get("secret_type")
+        value = item.get("value")
+        locations = item.get("locations")
+        if not isinstance(secret_type, str) or not secret_type or not isinstance(value, str) or not value:
+            raise SystemExit("discover corpus manifest finding requires secret_type and value")
+        if not isinstance(locations, list) or not locations or not all(isinstance(loc, dict) for loc in locations):
+            raise SystemExit("discover corpus manifest finding requires non-empty locations")
+        selected.append(item)
+    if not selected:
+        raise SystemExit(f"discover corpus manifest has no findings for vendor={vendor}")
+    return selected
+
+
+def _manifest_locations(finding: dict[str, object]) -> list[dict[str, object]]:
+    locations = finding.get("locations")
+    if not isinstance(locations, list) or not all(isinstance(location, dict) for location in locations):
+        raise SystemExit("discover corpus manifest finding locations must be an object list")
+    return locations
+
+
+def _location_matches(expected: dict[str, object], actual: dict[str, object]) -> bool:
+    # index/id are intentionally optional in the manifest so configuration surfaces
+    # can use the same contract as document findings.
+    for key in ("source_kind", "object", "path", "index", "id"):
+        value = expected.get(key)
+        if value is not None and actual.get(key) != value:
+            return False
+    return True
+
+
+def _finding_is_in_manifest_scope(
+    finding: dict[str, object],
+    *,
+    expected_objects: set[str],
+    expected_indices: set[str],
+    required_source_kind: str | None = None,
+) -> bool:
+    locations = finding.get("locations")
+    if not isinstance(locations, list):
+        return False
+    if required_source_kind is not None and not any(
+        isinstance(location, dict) and location.get("source_kind") == required_source_kind for location in locations
+    ):
+        return False
+    value = str(finding.get("value") or "")
+    if "Corpus" in value or "Q29ycHVz" in value:
+        return True
+    for location in locations:
+        if not isinstance(location, dict):
+            continue
+        if str(location.get("object") or "") in expected_objects:
+            return True
+        if str(location.get("index") or "") in expected_indices:
+            return True
+    return False
+
+
+def _validate_discover_lab_contracts(
+    rows: list[dict[str, str]],
+    *,
+    manifest_path: Path = _DISCOVER_CORPUS_MANIFEST,
+) -> None:
+    relevant = [row for row in rows if row.get("label") in _DISCOVER_LAB_CONTRACTS and row.get("exit_code") == "0"]
+    if not relevant:
+        return
+    manifest = _load_discover_corpus_manifest(manifest_path)
+    forbidden_values = manifest.get("forbidden_values", [])
+    if not isinstance(forbidden_values, list) or not all(isinstance(item, str) for item in forbidden_values):
+        raise SystemExit("discover corpus manifest forbidden_values must be a string list")
+    expected_surfaces = manifest.get("expected_surfaces", {})
+    if not isinstance(expected_surfaces, dict):
+        raise SystemExit("discover corpus manifest expected_surfaces must be an object")
+
+    for row in relevant:
+        label = row["label"]
+        contract = _DISCOVER_LAB_CONTRACTS[label]
+        vendor = str(contract["vendor"])
+        corpus_scope = str(contract.get("corpus_scope") or "full")
+        records = list(_iter_audit_records_for_row(row))
+        if len(records) != 1:
+            raise SystemExit(f"discover contract for '{label}' expected one audit record, got {len(records)}")
+        record = records[0]
+        for field in ("vendor", "scheme", "auth_required", "server_version"):
+            if field not in contract:
+                continue
+            if record.get(field) != contract[field]:
+                raise SystemExit(
+                    f"discover contract for '{label}' failed: {field}={record.get(field)!r}, "
+                    f"expected {contract[field]!r}"
+                )
+        username = contract.get("username")
+        if username is not None:
+            if record.get("auth_valid") is not True or record.get("effective_username") != username:
+                raise SystemExit(f"discover contract for '{label}' did not verify identity {username!r}")
+        if record.get("is_elastic") is not True or record.get("discover") is not True:
+            raise SystemExit(f"discover contract for '{label}' did not run a detected API discovery")
+        if record.get("error") is not None:
+            raise SystemExit(f"discover contract for '{label}' returned top-level error={record.get('error')!r}")
+        if record.get("discover_schema_version") != 2:
+            raise SystemExit(f"discover contract for '{label}' did not emit schema version 2")
+        if record.get("discover_error") is not None or record.get("discover_error_detail") is not None:
+            raise SystemExit(
+                f"discover contract for '{label}' returned discover_error={record.get('discover_error')!r}"
+            )
+
+        findings = record.get("discover_findings")
+        coverage = record.get("discover_coverage")
+        if not isinstance(findings, list) or not all(isinstance(item, dict) for item in findings):
+            raise SystemExit(f"discover contract for '{label}' has invalid discover_findings")
+        if not isinstance(coverage, dict):
+            raise SystemExit(f"discover contract for '{label}' has invalid discover_coverage")
+        if coverage.get("timed_out") is True or coverage.get("truncated") is True:
+            raise SystemExit(f"discover contract for '{label}' unexpectedly timed out or truncated")
+        if int(coverage.get("indices_failed") or 0) != 0 or coverage.get("shard_failures"):
+            raise SystemExit(f"discover contract for '{label}' contains failed indices/shards")
+        if int(coverage.get("indices_scanned") or 0) <= 0 or int(coverage.get("documents_scanned") or 0) <= 0:
+            raise SystemExit(f"discover contract for '{label}' scanned no indices/documents")
+
+        expected_findings = _manifest_findings_for_vendor(manifest, vendor)
+        if corpus_scope == "documents":
+            expected_findings = [
+                item
+                for item in expected_findings
+                if any(location.get("source_kind") == "document" for location in _manifest_locations(item))
+            ]
+            if not expected_findings:
+                raise SystemExit(f"discover corpus manifest has no document findings for vendor={vendor}")
+        expected_pairs = {(str(item["secret_type"]), str(item["value"])) for item in expected_findings}
+        expected_objects = {
+            str(location.get("object") or "")
+            for item in expected_findings
+            for location in _manifest_locations(item)
+            if location.get("object")
+        }
+        expected_indices = {
+            str(location.get("index") or "")
+            for item in expected_findings
+            for location in _manifest_locations(item)
+            if location.get("index")
+        }
+        scoped_findings = [
+            item
+            for item in findings
+            if _finding_is_in_manifest_scope(
+                item,
+                expected_objects=expected_objects,
+                expected_indices=expected_indices,
+                required_source_kind="document" if corpus_scope == "documents" else None,
+            )
+        ]
+        actual_pairs = {(str(item.get("secret_type") or ""), str(item.get("value") or "")) for item in scoped_findings}
+        missing = sorted(expected_pairs - actual_pairs)
+        unexpected = sorted(actual_pairs - expected_pairs)
+        if missing or unexpected:
+            raise SystemExit(f"discover corpus mismatch for '{label}': missing={missing!r} unexpected={unexpected!r}")
+        if corpus_scope == "documents":
+            expected_types = {pair[0] for pair in expected_pairs}
+        else:
+            expected_types_raw = manifest.get("expected_secret_types")
+            if not isinstance(expected_types_raw, list):
+                raise SystemExit("discover corpus manifest expected_secret_types must be a list")
+            expected_types = {str(item) for item in expected_types_raw}
+        actual_types = {pair[0] for pair in actual_pairs}
+        if actual_types != expected_types:
+            raise SystemExit(
+                f"discover secret types mismatch for '{label}': actual={sorted(actual_types)!r} "
+                f"expected={sorted(expected_types)!r}"
+            )
+
+        fingerprints: set[str] = set()
+        for finding in findings:
+            fingerprint = str(finding.get("fingerprint") or "")
+            if not fingerprint.startswith("sha256:") or fingerprint in fingerprints:
+                raise SystemExit(f"discover contract for '{label}' has invalid/duplicate fingerprint {fingerprint!r}")
+            fingerprints.add(fingerprint)
+            score = finding.get("score")
+            confidence = finding.get("confidence")
+            if not isinstance(score, int) or not 55 <= score <= 100:
+                raise SystemExit(f"discover contract for '{label}' has invalid score {score!r}")
+            if confidence not in {"medium", "high", "very_high"}:
+                raise SystemExit(f"discover contract for '{label}' has invalid confidence {confidence!r}")
+
+        values = {str(item.get("value") or "") for item in findings}
+        leaked_negatives = sorted(value for value in forbidden_values if value in values)
+        if leaked_negatives:
+            raise SystemExit(f"discover contract for '{label}' emitted forbidden false positives: {leaked_negatives!r}")
+        by_pair = {(str(item.get("secret_type") or ""), str(item.get("value") or "")): item for item in findings}
+        for expected in expected_findings:
+            pair = (str(expected["secret_type"]), str(expected["value"]))
+            actual = by_pair[pair]
+            occurrence_min_raw = expected.get("occurrence_count_min", 1)
+            if not isinstance(occurrence_min_raw, (int, str)):
+                raise SystemExit(f"discover finding {pair!r} has invalid occurrence_count_min")
+            occurrence_min = int(occurrence_min_raw)
+            occurrence_count = actual.get("occurrence_count")
+            if not isinstance(occurrence_count, int) or occurrence_count < occurrence_min:
+                raise SystemExit(
+                    f"discover finding {pair!r} in '{label}' has occurrence_count={occurrence_count!r}, "
+                    f"expected >= {occurrence_min}"
+                )
+            actual_locations = actual.get("locations")
+            if not isinstance(actual_locations, list):
+                raise SystemExit(f"discover finding {pair!r} in '{label}' has no locations")
+            for expected_location in _manifest_locations(expected):
+                if not any(
+                    isinstance(location, dict) and _location_matches(expected_location, location)
+                    for location in actual_locations
+                ):
+                    raise SystemExit(
+                        f"discover finding {pair!r} in '{label}' is missing location {expected_location!r}"
+                    )
+
+        surfaces = coverage.get("surfaces")
+        if not isinstance(surfaces, dict):
+            raise SystemExit(f"discover contract for '{label}' has no surface coverage")
+        if corpus_scope == "documents":
+            inventory = surfaces.get("index_inventory")
+            if not isinstance(inventory, dict) or inventory.get("status") != "complete":
+                raise SystemExit(f"least-privilege discover contract for '{label}' did not enumerate indices")
+            denied_surfaces = []
+            for name in ("index_templates", "component_templates", "legacy_templates", "ingest_pipelines"):
+                surface = surfaces.get(name)
+                if isinstance(surface, dict) and surface.get("status") == "denied":
+                    denied_surfaces.append(name)
+            if not denied_surfaces or coverage.get("status") != "partial" or coverage.get("complete") is not False:
+                raise SystemExit(
+                    f"least-privilege discover contract for '{label}' did not report honest partial/denied coverage"
+                )
+            if int(coverage.get("indices_denied") or 0) <= 0:
+                raise SystemExit(f"least-privilege discover contract for '{label}' did not account for denied indices")
+            continue
+        if coverage.get("status") != "complete" or coverage.get("complete") is not True:
+            raise SystemExit(f"full discover contract for '{label}' did not complete all manifest surfaces")
+        for surface_name, expected_surface in expected_surfaces.items():
+            if not isinstance(expected_surface, dict):
+                raise SystemExit(f"manifest expected surface {surface_name!r} must be an object")
+            actual_surface = surfaces.get(surface_name)
+            if not isinstance(actual_surface, dict):
+                raise SystemExit(f"discover contract for '{label}' is missing surface {surface_name!r}")
+            statuses = expected_surface.get("allowed_statuses", expected_surface.get("statuses", ["complete"]))
+            if not isinstance(statuses, list) or actual_surface.get("status") not in statuses:
+                raise SystemExit(
+                    f"discover surface {surface_name!r} in '{label}' has status={actual_surface.get('status')!r}, "
+                    f"expected one of {statuses!r}"
+                )
+            minimum_raw = expected_surface.get(
+                "objects_scanned_min",
+                expected_surface.get("min_objects_scanned", 0),
+            )
+            if not isinstance(minimum_raw, (int, str)):
+                raise SystemExit(f"manifest expected surface {surface_name!r} has invalid minimum")
+            minimum = int(minimum_raw)
+            if int(actual_surface.get("objects_scanned") or 0) < minimum:
+                raise SystemExit(
+                    f"discover surface {surface_name!r} in '{label}' scanned "
+                    f"{actual_surface.get('objects_scanned')!r}, expected >= {minimum}"
+                )
+
+
+_OPENSEARCH_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
+    ("admin", "admin"),
+    ("admin", "changeme"),
+    ("admin", "password"),
+    ("elastic", "changeme"),
+    ("elastic", "elastic"),
+    ("elastic", "password"),
+    ("kibana", "changeme"),
+    ("kibana", "kibana"),
+    ("logstash", "logstash"),
+    ("logstash_system", "changeme"),
+    ("opensearch", "opensearch"),
+    ("opensearch", "password"),
+)
+
+
+def _validate_opensearch_defcreds_contract(rows: list[dict[str, str]]) -> None:
+    relevant = [row for row in rows if row.get("label") == "opensearch_defcreds" and row.get("exit_code") == "0"]
+    for row in relevant:
+        records = list(_iter_audit_records_for_row(row))
+        if len(records) != 1:
+            raise SystemExit(f"OpenSearch defcreds contract expected one audit record, got {len(records)}")
+        record = records[0]
+        expected_fields: dict[str, object] = {
+            "vendor": "opensearch",
+            "scheme": "https",
+            "status": "weak_default_creds",
+            "auth_required": True,
+            "auth_valid": True,
+            "effective_username": "logstash",
+            "error": None,
+        }
+        for field, expected in expected_fields.items():
+            if record.get(field) != expected:
+                raise SystemExit(
+                    f"OpenSearch defcreds contract failed: {field}={record.get(field)!r}, expected {expected!r}"
+                )
+        attempts = record.get("attempted_credentials")
+        if not isinstance(attempts, list) or not all(isinstance(attempt, dict) for attempt in attempts):
+            raise SystemExit("OpenSearch defcreds contract has invalid attempted_credentials")
+        pairs = [(str(attempt.get("username") or ""), str(attempt.get("password") or "")) for attempt in attempts]
+        if pairs != list(_OPENSEARCH_DEFAULT_CREDENTIALS):
+            raise SystemExit(f"OpenSearch defcreds order mismatch: {pairs!r}")
+        for index, attempt in enumerate(attempts):
+            is_winner = index == 8
+            expected_status = "weak_default_creds" if is_winner else "auth_required"
+            expected_probe = "verified" if is_winner else "rejected"
+            expected_http = 200 if is_winner else 401
+            if (
+                attempt.get("source") != "default"
+                or attempt.get("status") != expected_status
+                or attempt.get("auth_probe_status") != expected_probe
+                or attempt.get("auth_probe_http_status") != expected_http
+                or attempt.get("auth_probe_endpoint") != "/_plugins/_security/authinfo"
+                or attempt.get("network_attempted") is not True
+                or attempt.get("verification_capability") != "identity_endpoint_supported"
+            ):
+                raise SystemExit(f"OpenSearch defcreds attempt #{index + 1} has an invalid verification contract")
+            if is_winner and (attempt.get("error") is not None or attempt.get("auth_error_detail") is not None):
+                raise SystemExit("OpenSearch defcreds winning attempt unexpectedly contains an error")
+            if not is_winner:
+                detail = attempt.get("auth_error_detail")
+                if attempt.get("error") != "authentication failed" or not isinstance(detail, dict):
+                    raise SystemExit(f"OpenSearch defcreds rejected attempt #{index + 1} lost error detail")
+                if detail.get("status") != 401:
+                    raise SystemExit(f"OpenSearch defcreds rejected attempt #{index + 1} has non-401 detail")
+
 
 _RICH_OUTPUT_FORBIDDEN_SUBSTRINGS = {
     "kafka_open": ("<no messages>",),
@@ -1041,12 +1471,8 @@ _MIXED_STATUS_MULTI_RECORD = frozenset(
 )
 
 
-def _record_has_meaningful_outcome(record: dict[str, object], *, label: str) -> bool:
+def _record_has_meaningful_outcome(record: dict[str, object]) -> bool:
     status = str(record.get("status") or "").strip().lower()
-    if label == "keeper_apache_control" and status == "not_keeper":
-        return (
-            str(record.get("service") or "").strip().lower() == "apache-zookeeper" and record.get("is_keeper") is False
-        )
     if not status or status == "fail" or status.startswith(("unknown", "not_")):
         return False
     return True
@@ -1069,7 +1495,7 @@ def _validate_meaningful_outcomes(rows: list[dict[str, str]]) -> None:
         records = list(_iter_audit_records_for_row(row))
         if not records:
             raise SystemExit(f"label '{row['label']}' exited 0 without an audit record")
-        if not any(_record_has_meaningful_outcome(record, label=row["label"]) for record in records):
+        if not any(_record_has_meaningful_outcome(record) for record in records):
             statuses = sorted({str(record.get("status") or "") for record in records})
             raise SystemExit(f"label '{row['label']}' exited 0 without a meaningful outcome: statuses={statuses}")
 
@@ -1101,7 +1527,7 @@ def _validate_multi_record_consistency(rows: list[dict[str, str]]) -> None:
         invalid_targets = [
             f"{record.get('host')}:{record.get('port')}={record.get('status')}"
             for record in records
-            if not _record_has_meaningful_outcome(record, label=label)
+            if not _record_has_meaningful_outcome(record)
         ]
         if invalid_targets:
             raise SystemExit(
@@ -1145,7 +1571,6 @@ _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
     "etcd": ("key_count", "keys", "key_values", "server_version"),
     "consul": ("version", "leader"),
     "zookeeper": ("znode_count", "znodes", "znode_values", "version"),
-    "keeper": ("znode_count", "znodes", "znode_values", "version", "fingerprint_confidence"),
     "kafka": ("topic_count", "topics"),
     "qdrant": ("collections_count", "collections", "version"),
     "clickhouse": ("database_names", "table_names", "effective_username", "auth_attempts"),
@@ -1431,6 +1856,34 @@ _ACTION_EXPECTED_VALUES: dict[str, dict[str, object]] = {
         "discover": True,
         "is_elastic": True,
     },
+    "opensearch_detect": {
+        "vendor": "opensearch",
+        "is_elastic": True,
+    },
+    "opensearch_open": {
+        "vendor": "opensearch",
+        "show_endpoints": True,
+        "show_plugins": True,
+        "show_cluster": True,
+        "discover": True,
+        "is_elastic": True,
+    },
+    "opensearch_auth": {
+        "vendor": "opensearch",
+        "show_endpoints": True,
+        "show_plugins": True,
+        "show_cluster": True,
+        "show_users": True,
+        "discover": True,
+        "is_elastic": True,
+    },
+    "opensearch_observer": {
+        "vendor": "opensearch",
+        "show_endpoints": True,
+        "show_cluster": True,
+        "discover": True,
+        "is_elastic": True,
+    },
     "grpc_invoke_health": {"invoke_result.status": "ok", "is_grpc": True},
     "grpc_proto_invoke": {"invoke_result.status": "ok", "is_grpc": True},
     "grpc_protoset_invoke": {"invoke_result.status": "ok", "is_grpc": True},
@@ -1440,7 +1893,16 @@ _ACTION_EXPECTED_VALUES: dict[str, dict[str, object]] = {
         "invoke_result.metadata": [{"key": "x-redposture-matrix", "value": "extended"}],
         "is_grpc": True,
     },
-    "keeper_cluster": {"is_keeper": True, "is_zookeeper_compatible": True},
+    "keeper_cluster": {
+        "service": "zookeeper",
+        "protocol": "zookeeper",
+        "implementation": "clickhouse-keeper",
+        "implementation_confidence": "confirmed",
+        "vendor": "clickhouse",
+        "is_zookeeper": True,
+        "is_zookeeper_compatible": True,
+        "is_keeper": True,
+    },
     "proxmox_audit": {"show_nodes": True, "show_users": True, "is_proxmox": True},
     "proxmox_admin": {"show_nodes": True, "show_users": True, "discover_creds": True, "is_proxmox": True},
     "proxmox_url_override_https": {"use_https": True, "show_nodes": True, "is_proxmox": True},
@@ -1493,6 +1955,16 @@ _ACTION_NONEMPTY_FIELDS: dict[str, tuple[str, ...]] = {
         "users",
         "discover_results",
     ),
+    "opensearch_open": ("cat_endpoints", "cluster_health", "discover_results", "discover_findings"),
+    "opensearch_auth": (
+        "cat_endpoints",
+        "cat_plugins",
+        "cluster_health",
+        "users",
+        "discover_results",
+        "discover_findings",
+    ),
+    "opensearch_observer": ("cat_endpoints", "cluster_health", "discover_results", "discover_findings"),
     "keeper_cluster": ("znode_values",),
     "proxmox_audit": ("nodes", "users"),
     "proxmox_admin": ("nodes", "users", "findings"),
@@ -1643,9 +2115,7 @@ def _validate_action_contracts(rows: list[dict[str, str]]) -> None:
         list_contains = _ACTION_LIST_CONTAINS.get(label, {})
         if expected_values is None and not nonempty_fields and not list_contains:
             continue
-        records = [
-            record for record in _iter_audit_records_for_row(row) if _record_has_meaningful_outcome(record, label=label)
-        ]
+        records = [record for record in _iter_audit_records_for_row(row) if _record_has_meaningful_outcome(record)]
         if not records:
             raise SystemExit(f"typed action contract for '{label}' has no meaningful audit records")
         for record in records:
@@ -1762,8 +2232,27 @@ _MODULE_SCHEMA_REQUIRED: dict[str, tuple[str, ...]] = {
     "clickhouse": ("is_clickhouse", "protocol", "database", "defcreds_enabled"),
     "consul": ("is_consul", "scheme", "auth_mode", "auth_valid"),
     "kafka": ("is_kafka", "show_topics", "dump", "max_messages"),
-    "zookeeper": ("is_zookeeper", "max_znodes", "show_znodes", "dump"),
-    "keeper": ("is_zookeeper_compatible", "is_keeper", "fingerprint_confidence", "transport"),
+    "zookeeper": (
+        "service",
+        "is_zookeeper",
+        "is_zookeeper_compatible",
+        "implementation",
+        "implementation_confidence",
+        "vendor",
+        "protocol",
+        "transport",
+        "is_keeper",
+        "version",
+        "server_state",
+        "read_only",
+        "connections",
+        "latency_ms",
+        "raft",
+        "quorum_status",
+        "max_znodes",
+        "show_znodes",
+        "dump",
+    ),
     "qdrant": ("is_qdrant", "anonymous_access", "show_collections"),
     "elastic": ("is_elastic", "scheme", "show_endpoints", "show_plugins"),
     "oracle": ("is_oracle", "transport", "transport_mode", "defcreds_enabled"),
@@ -1839,18 +2328,16 @@ _MISSING_TARGET_MODULES = (
     "grpc",
     "kafka",
     "zookeeper",
-    "keeper",
     "proxmox",
 )
 
 _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
-    "exporters_scan_url_https_reject": ("exporters scan accepts only http://",),
-    "exporters_collect_url_https_reject": ("exporters collect accepts only http://",),
-    "exporters_trigger_url_https_reject": ("exporters trigger accepts only http://",),
-    "registry_url_https_reject": ("registry accepts only http://",),
-    "grafana_url_https_reject": ("grafana accepts only http://",),
-    "etcd_url_https_reject": ("etcd accepts only http://",),
-    "qdrant_url_https_reject": ("qdrant accepts only http://",),
+    "exporters_scan_url_https_transport_fail": ("scan inconclusive: no exporter confirmed",),
+    "exporters_collect_url_https_transport_fail": ("collect inconclusive: no exporter confirmed",),
+    "registry_url_https_transport_fail": ("audit inconclusive: no service confirmed",),
+    "grafana_url_https_transport_fail": ("audit inconclusive: no service confirmed",),
+    "etcd_url_https_transport_fail": ("audit inconclusive: no service confirmed",),
+    "qdrant_url_https_transport_fail": ("audit inconclusive: no service confirmed",),
     "mongodb_extended_invalid_document_query": ("--document cannot be combined with --query",),
     "docker_extended_tls_files_pairing_error": ("--tls-cert and --tls-key must be used together",),
     "kafka_extended_dump_max_conflict": ("--dump count cannot conflict with --max-messages",),
@@ -1923,11 +2410,9 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "fuzz_clickhouse_os_shell_execute_conflict": ("--os-shell cannot be combined with --execute",),
     "fuzz_zookeeper_zero_max_znodes": ("value must be > 0",),
     "fuzz_zookeeper_zero_enum_workers": ("value must be > 0",),
-    "fuzz_keeper_incomplete_mtls": ("--tls-cert and --tls-key must be used together",),
-    "fuzz_keeper_incomplete_mtls_key": ("--tls-cert and --tls-key must be used together",),
-    "fuzz_keeper_ca_insecure_conflict": ("--ca-file cannot be combined with --insecure",),
-    "fuzz_keeper_removed_tls_flag": ("ambiguous option: --tls",),
-    "fuzz_keeper_removed_no_tls_flag": ("unrecognized arguments: --no-tls",),
+    "fuzz_zookeeper_incomplete_mtls": ("--tls-cert and --tls-key must be used together",),
+    "fuzz_zookeeper_incomplete_mtls_key": ("--tls-cert and --tls-key must be used together",),
+    "fuzz_zookeeper_ca_insecure_conflict": ("--ca-file cannot be combined with --insecure",),
     "fuzz_redis_invalid_port_negative": ("failed to parse --port", "invalid port range"),
     "fuzz_redis_invalid_port_huge": ("port must be in range",),
     "fuzz_redis_zero_dump": ("value must be > 0",),
@@ -2178,7 +2663,7 @@ _GOLDEN_VOLATILE_FIELDS = frozenset(
 # the audit contract. Keep this narrow: typed/status assertions above still validate
 # these records before golden comparison.
 _GOLDEN_MODULE_VOLATILE_FIELDS: dict[str, frozenset[str]] = {
-    "keeper": frozenset(
+    "zookeeper": frozenset(
         {
             "connections",  # includes the verifier connection itself
             "latency_ms",  # 4lw timing depends on host load
@@ -2195,13 +2680,6 @@ _GOLDEN_LABEL_VOLATILE_FIELDS: dict[str, frozenset[str]] = {
             "server_state",  # leader/follower assignment changes on every cold start
         }
     ),
-    "keeper_force_plaintext": frozenset(
-        {
-            "quorum_status",  # port 9181 is another member of the same elected cluster
-            "raft",
-            "server_state",
-        }
-    ),
     "zookeeper_extended_znode_limits": frozenset(
         {
             # The bounded concurrent traversal may reach a different valid subset before
@@ -2209,6 +2687,39 @@ _GOLDEN_LABEL_VOLATILE_FIELDS: dict[str, frozenset[str]] = {
             # asserted separately; only the subset itself is non-deterministic.
             "znode_details",
             "znodes",
+        }
+    ),
+    # The Security plugin writes audit documents while the authenticated and
+    # least-privilege cases are running.  Their raw candidate pages and byte/page
+    # counters therefore grow with the audit itself.  The dedicated OpenSearch
+    # discover contract below verifies the complete shared corpus, coverage status,
+    # denied surfaces and truncation independently; keep the snapshot focused on
+    # stable service/auth/action semantics and the actual findings.
+    "opensearch_auth": frozenset(
+        {
+            # OpenSearch's security audit index records the discover requests and
+            # their matching documents.  Scanning it can legitimately add the same
+            # corpus values with fresh audit-document locations.  The strict corpus
+            # verifier below validates the stable findings and occurrence minima.
+            "discover_findings",
+            "discover_results",
+            "documents_scanned",
+            "source_bytes_scanned",
+            "pages_scanned",
+            "query_candidates",
+            "duplicate_documents",
+            "suppressed_indicators",
+        }
+    ),
+    "opensearch_observer": frozenset(
+        {
+            "discover_results",
+            "documents_scanned",
+            "source_bytes_scanned",
+            "pages_scanned",
+            "query_candidates",
+            "duplicate_documents",
+            "suppressed_indicators",
         }
     ),
 }
@@ -2487,14 +2998,13 @@ def _validate_module_schema(rows: list[dict[str, str]]) -> None:
 # and asserts `len(record[field]) <= flag_value`.
 #
 # Only pairs where the documented contract is "limit applies to JSON" are included.
-# zookeeper `--show-znodes` is documented as render-only (the JSON cap is `--max-znodes`),
-# so it stays excluded by design.
 _LIMIT_FLAG_TO_FIELD: dict[tuple[str, str], str] = {
     ("redis", "--show-keys"): "keys",
     ("etcd", "--show-keys"): "keys",
     ("postgres", "--show-columns"): "table_columns_info",
     ("clickhouse", "--show-databases"): "database_names",
     ("clickhouse", "--show-tables"): "table_names",
+    ("zookeeper", "--show-znodes"): "znodes",
 }
 
 
@@ -2610,10 +3120,13 @@ def _validate_progress_target_mappings(
                     targets_count = len([item for item in target_value.split(",") if item.strip()])
                 break
         ports_count = 1
-        if "--ports" in tokens and tokens.index("--ports") + 1 < len(tokens):
-            ports_value = tokens[tokens.index("--ports") + 1]
+        for port_flag in ("--port", "--ports"):
+            if port_flag not in tokens or tokens.index(port_flag) + 1 >= len(tokens):
+                continue
+            ports_value = tokens[tokens.index(port_flag) + 1]
             if "$" not in ports_value:
                 ports_count = len([item for item in ports_value.split(",") if item.strip()])
+            break
         inferred = targets_count * ports_count
         if inferred != expected:
             raise SystemExit(f"progress target mapping mismatch for '{label}': verifier={expected} matrix={inferred}")
@@ -2712,6 +3225,8 @@ def main() -> int:
 
     _validate_output_sanity(rows)
     _validate_rich_lab_outputs(rows)
+    _validate_discover_lab_contracts(rows)
+    _validate_opensearch_defcreds_contract(rows)
     _validate_tee_when_output_set(rows)
     _validate_dump_not_empty(rows)
     _validate_status_coherence(rows)

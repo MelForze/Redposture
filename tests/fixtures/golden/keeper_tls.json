@@ -1,14 +1,19 @@
 [
   {
+    "anonymous_auth_probe_results": {
+      "/": "ok"
+    },
     "auth_error": null,
     "auth_inference_source": "root_ok",
+    "auth_mechanism": "digest",
     "auth_probe_trace": [
       "/:ok"
     ],
     "auth_required": false,
-    "can_create_znode": true,
-    "can_delete_znode": true,
+    "can_create_znode": null,
+    "can_delete_znode": null,
     "connect_error": null,
+    "credential_auth_probe_results": {},
     "credential_verdict": null,
     "defcreds_enabled": false,
     "dump": true,
@@ -19,11 +24,13 @@
     "fingerprint_confidence": "confirmed",
     "fingerprint_errors": {},
     "host": "127.0.0.1",
+    "implementation": "clickhouse-keeper",
+    "implementation_confidence": "confirmed",
     "is_keeper": true,
     "is_zookeeper": true,
     "is_zookeeper_compatible": true,
-    "max_znodes": 2000,
-    "module": "keeper",
+    "max_znodes": 10,
+    "module": "zookeeper",
     "port": 19281,
     "protocol": "zookeeper",
     "provided_credentials": false,
@@ -55,7 +62,7 @@
     },
     "read_only": false,
     "server_state": "standalone",
-    "service": "clickhouse-keeper",
+    "service": "zookeeper",
     "show_znodes": true,
     "stage2_error": null,
     "stages": [
@@ -86,6 +93,8 @@
     ],
     "status": "open_no_auth",
     "transport": "tls",
+    "vendor": "clickhouse",
+    "verification_capability": "available",
     "version": "v24.8.14.39-stable-502d03925cf2c9c6629ed5c1b2d16b5de46e4362",
     "znode_capability_error": null,
     "znode_count": 3,
@@ -112,6 +121,7 @@
         "state": "readable"
       }
     ],
+    "znode_truncated_reason": null,
     "znode_values": [
       "/keeper:<empty>",
       "/keeper/api_version:2",

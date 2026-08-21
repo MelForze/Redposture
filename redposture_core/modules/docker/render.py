@@ -8,6 +8,7 @@ from .actions import (
     _format_exec_lines,
     _format_image_lines,
     _format_network_lines,
+    _format_partial_error_lines,
     _format_record,
     _format_system_lines,
     _format_volume_lines,
@@ -25,5 +26,6 @@ __all__ = [
     "_format_volume_lines",
     "_format_system_lines",
     "_format_exec_lines",
+    "_format_partial_error_lines",
     "_render_colored_docker_line",
 ]

@@ -9,9 +9,11 @@ import json
 import re
 import secrets
 import socket
+import ssl
 import time
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,21 +55,21 @@ _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _POSTGRES_DEEP_STATUSES = {"open_no_auth", "weak_default_creds", "valid_credentials", "invalid_credentials_anonymous"}
 _POSTGRES_DEFAULT_CREDENTIALS = (
-    ("postgres", "postgres"),
+    ("admin", "admin"),
+    ("admin", "password"),
+    ("admin", "postgres"),
+    ("dev", "dev"),
     ("pgbouncer", "pgbouncer"),
     ("pgbouncer_exporter", "pgbouncer_exporter"),
-    ("postgres", "password"),
+    ("pgsql", "pgsql"),
     ("postgres", "admin"),
     ("postgres", "changeme"),
-    ("admin", "admin"),
-    ("admin", "postgres"),
-    ("pgsql", "pgsql"),
-    ("admin", "password"),
-    ("user", "user"),
-    ("user", "password"),
+    ("postgres", "password"),
+    ("postgres", "postgres"),
     ("service", "service"),
     ("test", "test"),
-    ("dev", "dev"),
+    ("user", "password"),
+    ("user", "user"),
 )
 
 
@@ -90,6 +92,93 @@ class _PgAuditError(Exception):
         self.sqlstate = sqlstate
         self.failure_phase = failure_phase
         self.error_kind = error_kind
+
+
+@dataclass(frozen=True)
+class _PgTlsConfig:
+    sslmode: str = "disable"
+    ca_file: str | None = None
+    cert_file: str | None = None
+    key_file: str | None = None
+    server_name: str | None = None
+
+
+def _pg_tls_config(
+    sslmode: str = "disable",
+    ca_file: str | None = None,
+    cert_file: str | None = None,
+    key_file: str | None = None,
+    server_name: str | None = None,
+) -> _PgTlsConfig:
+    mode = str(sslmode or "disable").strip().lower()
+    if mode not in {"disable", "prefer", "require", "verify-ca", "verify-full"}:
+        raise ValueError(f"unsupported PostgreSQL sslmode: {sslmode}")
+    return _PgTlsConfig(mode, ca_file, cert_file, key_file, server_name)
+
+
+@contextmanager
+def _pg_open_socket(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    tls_config: _PgTlsConfig | None = None,
+) -> Iterator[socket.socket]:
+    """Open a PostgreSQL socket and perform the protocol SSLRequest first.
+
+    PostgreSQL TLS is not implicit TLS: the client must send the eight-byte
+    SSLRequest and only wrap the socket after the server answers ``S``.
+    """
+
+    config = tls_config or _PgTlsConfig()
+    raw = socket.create_connection((host, port), timeout=timeout)
+    active: socket.socket | None = raw
+    try:
+        raw.settimeout(timeout)
+        if config.sslmode != "disable":
+            raw.sendall((8).to_bytes(4, "big") + (80877103).to_bytes(4, "big"))
+            response = _recv_exact(raw, 1)
+            if response == b"S":
+                if config.sslmode in {"verify-ca", "verify-full"} or config.ca_file:
+                    context = ssl.create_default_context(cafile=config.ca_file)
+                    context.check_hostname = config.sslmode == "verify-full"
+                else:
+                    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    context.check_hostname = False
+                    context.verify_mode = ssl.CERT_NONE
+                if config.cert_file:
+                    context.load_cert_chain(config.cert_file, keyfile=config.key_file)
+                server_hostname = config.server_name or host
+                active = context.wrap_socket(raw, server_hostname=server_hostname)
+                active.settimeout(timeout)
+            elif response == b"N":
+                if config.sslmode != "prefer":
+                    raise _PgAuditError(
+                        "PostgreSQL server refused TLS",
+                        detected=True,
+                        failure_phase="tls",
+                        error_kind="tls_required",
+                    )
+            else:
+                raise _PgAuditError(
+                    f"invalid PostgreSQL SSL negotiation response: {response!r}",
+                    detected=False,
+                    failure_phase="tls",
+                    error_kind="protocol_error",
+                )
+        assert active is not None
+        yield active
+    finally:
+        if active is not None:
+            try:
+                active.close()
+            except OSError:
+                pass
+        if raw is not None and raw is not active:
+            try:
+                raw.close()
+            except OSError:
+                pass
 
 
 @dataclass
@@ -958,33 +1047,43 @@ def _pg_collect_privesc_checks(
     secdef_evidence = f"accessible SECURITY DEFINER functions={security_definer_count}"
     if security_definer_examples:
         secdef_evidence += f" examples={','.join(security_definer_examples)}"
-    checks.append(
-        _pg_privesc_check_record(
-            "MEDIUM",
-            "security_definer_accessible",
-            "SECURITY DEFINER functions accessible",
-            "callable privileged functions may expose escalation paths",
-            None if security_definer_count is None else security_definer_count > 0,
-            secdef_evidence,
-            security_definer_error,
-        )
+    secdef_record = _pg_privesc_check_record(
+        "MEDIUM",
+        "security_definer_accessible",
+        "SECURITY DEFINER functions accessible",
+        "inventory for manual owner/body/search_path review; accessibility alone is not privilege escalation",
+        None if security_definer_count is None else False,
+        secdef_evidence,
+        security_definer_error,
     )
+    secdef_record.update(
+        {
+            "observed": bool(security_definer_count),
+            "assessment": "review_required" if security_definer_count else "not_observed",
+        }
+    )
+    checks.append(secdef_record)
 
     create_db_privilege, create_db_error = _pg_query_scalar_bool(
         sock,
         "SELECT has_database_privilege(current_database(), 'CREATE')",
     )
-    checks.append(
-        _pg_privesc_check_record(
-            "MEDIUM",
-            "database_create_privilege",
-            "CREATE privilege on database",
-            "extension loading",
-            create_db_privilege,
-            f"has CREATE on current_database()={_pg_bool_text(create_db_privilege)}",
-            create_db_error,
-        )
+    create_db_record = _pg_privesc_check_record(
+        "MEDIUM",
+        "database_create_privilege",
+        "CREATE privilege on database",
+        "inventory only; database CREATE does not prove unsafe extension loading or superuser execution",
+        None if create_db_privilege is None else False,
+        f"has CREATE on current_database()={_pg_bool_text(create_db_privilege)}",
+        create_db_error,
     )
+    create_db_record.update(
+        {
+            "observed": create_db_privilege is True,
+            "assessment": "review_required" if create_db_privilege is True else "not_observed",
+        }
+    )
+    checks.append(create_db_record)
 
     return checks, _pg_privesc_summary(checks)
 
@@ -1426,21 +1525,22 @@ def _pg_execute_remote_command(
     password: str | None,
     database: str,
     command: str,
+    tls_config: _PgTlsConfig | None = None,
 ) -> tuple[list[str] | None, str | None]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
     for attempt in range(attempts):
         sock: socket.socket | None = None
         try:
-            sock = socket.create_connection((host, port), timeout=timeout)
-            sock.settimeout(timeout)
-            _pg_startup_and_auth(sock, username=username, password=password, database=database)
-            output, exec_error = _pg_try_execute_command(sock, command, max_lines=500)
-            try:
-                _pg_send_terminate(sock)
-            except Exception:
-                pass
-            return output, exec_error
+            with _pg_open_socket(host, port, timeout, tls_config=tls_config) as opened_sock:
+                sock = opened_sock
+                _pg_startup_and_auth(sock, username=username, password=password, database=database)
+                output, exec_error = _pg_try_execute_command(sock, command, max_lines=500)
+                try:
+                    _pg_send_terminate(sock)
+                except Exception:
+                    pass
+                return output, exec_error
         except _PgAuditError as exc:
             return None, str(exc)
         except (OSError, ValueError, ConnectionError) as exc:
@@ -1466,21 +1566,22 @@ def _pg_execute_sql_query(
     password: str | None,
     database: str,
     query: str,
+    tls_config: _PgTlsConfig | None = None,
 ) -> tuple[list[str] | None, str | None]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
     for attempt in range(attempts):
         sock: socket.socket | None = None
         try:
-            sock = socket.create_connection((host, port), timeout=timeout)
-            sock.settimeout(timeout)
-            _pg_startup_and_auth(sock, username=username, password=password, database=database)
-            output, query_error = _pg_try_query_sql(sock, query, max_rows=500)
-            try:
-                _pg_send_terminate(sock)
-            except Exception:
-                pass
-            return output, query_error
+            with _pg_open_socket(host, port, timeout, tls_config=tls_config) as opened_sock:
+                sock = opened_sock
+                _pg_startup_and_auth(sock, username=username, password=password, database=database)
+                output, query_error = _pg_try_query_sql(sock, query, max_rows=500)
+                try:
+                    _pg_send_terminate(sock)
+                except Exception:
+                    pass
+                return output, query_error
         except _PgAuditError as exc:
             return None, str(exc)
         except (OSError, ValueError, ConnectionError) as exc:
@@ -1735,32 +1836,33 @@ def _pg_collect_database_artifacts_remote(
     table_columns: list[str],
     dump_table_rows: bool,
     dump_row_limit: int | None,
+    tls_config: _PgTlsConfig | None = None,
 ) -> tuple[list[str] | None, list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int | None, str | None]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
     for attempt in range(attempts):
         sock: socket.socket | None = None
         try:
-            sock = socket.create_connection((host, port), timeout=timeout)
-            sock.settimeout(timeout)
-            _pg_startup_and_auth(sock, username=username, password=password, database=database_name)
-            result = _pg_collect_database_artifacts(
-                sock,
-                database_name=database_name,
-                include_database_prefix=include_database_prefix,
-                show_tables=show_tables,
-                show_row_counts=show_row_counts,
-                show_columns=show_columns,
-                table_targets=table_targets,
-                table_columns=table_columns,
-                dump_table_rows=dump_table_rows,
-                dump_row_limit=dump_row_limit,
-            )
-            try:
-                _pg_send_terminate(sock)
-            except Exception:
-                pass
-            return result
+            with _pg_open_socket(host, port, timeout, tls_config=tls_config) as opened_sock:
+                sock = opened_sock
+                _pg_startup_and_auth(sock, username=username, password=password, database=database_name)
+                result = _pg_collect_database_artifacts(
+                    sock,
+                    database_name=database_name,
+                    include_database_prefix=include_database_prefix,
+                    show_tables=show_tables,
+                    show_row_counts=show_row_counts,
+                    show_columns=show_columns,
+                    table_targets=table_targets,
+                    table_columns=table_columns,
+                    dump_table_rows=dump_table_rows,
+                    dump_row_limit=dump_row_limit,
+                )
+                try:
+                    _pg_send_terminate(sock)
+                except Exception:
+                    pass
+                return result
         except _PgAuditError as exc:
             return None, [], [], [], None, str(exc)
         except (OSError, ValueError, ConnectionError) as exc:
@@ -1802,6 +1904,11 @@ def _audit_postgres_host(
     show_databases_limit: int | None = None,
     show_tables_limit: int | None = None,
     show_columns_limit: int | None = None,
+    sslmode: str = "disable",
+    ssl_ca: str | None = None,
+    ssl_cert: str | None = None,
+    ssl_key: str | None = None,
+    ssl_server_name: str | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -1810,6 +1917,7 @@ def _audit_postgres_host(
     implicit_table_summary = bool(table_targets) and not show_columns and not dump_table_rows
     effective_show_tables = show_tables_requested or show_row_counts_requested
     effective_show_row_counts = show_row_counts_requested or show_tables_requested or implicit_table_summary
+    tls_config = _pg_tls_config(sslmode, ssl_ca, ssl_cert, ssl_key, ssl_server_name)
 
     provided_credentials = (password is not None or username is not None) and not defcreds
     if provided_credentials:
@@ -1825,9 +1933,7 @@ def _audit_postgres_host(
     for attempt in range(attempts):
         started = time.monotonic()
         try:
-            with socket.create_connection((host, port), timeout=timeout) as sock:
-                sock.settimeout(timeout)
-
+            with _pg_open_socket(host, port, timeout, tls_config=tls_config) as sock:
                 target_database = str(database or "").strip() or None
                 startup_database = target_database or "postgres"
                 effective_table_targets_by_database = dict(table_targets_by_database)
@@ -1945,6 +2051,7 @@ def _audit_postgres_host(
                             table_columns=table_columns,
                             dump_table_rows=dump_table_rows,
                             dump_row_limit=dump_row_limit,
+                            tls_config=tls_config,
                         )
 
                     query_error = _merge_query_error(query_error, database_query_error)
@@ -2079,6 +2186,8 @@ def _audit_postgres_host(
                     "privesc_checks": privesc_checks,
                     "privesc_summary": privesc_summary,
                     "server_version": session.server_version,
+                    "sslmode": tls_config.sslmode,
+                    "tls_used": isinstance(sock, ssl.SSLSocket),
                     "superuser": superuser,
                     "can_execute_commands": can_execute_commands,
                     "can_read_tables": can_read_tables,
@@ -2922,6 +3031,11 @@ def _call_audit_postgres_host_with_stage_debug(
     show_databases_limit: int | None = None,
     show_tables_limit: int | None = None,
     show_columns_limit: int | None = None,
+    sslmode: str = "disable",
+    ssl_ca: str | None = None,
+    ssl_cert: str | None = None,
+    ssl_key: str | None = None,
+    ssl_server_name: str | None = None,
     *,
     run_deep_checks: bool,
     debug: bool,
@@ -2953,6 +3067,11 @@ def _call_audit_postgres_host_with_stage_debug(
         show_databases_limit=show_databases_limit if run_deep_checks else None,
         show_tables_limit=show_tables_limit if run_deep_checks else None,
         show_columns_limit=show_columns_limit if run_deep_checks else None,
+        sslmode=sslmode,
+        ssl_ca=ssl_ca,
+        ssl_cert=ssl_cert,
+        ssl_key=ssl_key,
+        ssl_server_name=ssl_server_name,
     )
 
     result: dict[str, Any] = dict(record)

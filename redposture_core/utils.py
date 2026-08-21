@@ -19,6 +19,7 @@ from .targeting import (
     ScanExecutionGroup,
     ScanTargetSpec,
     StreamingTargetPlan,
+    TargetExclusions,
     TargetParsePolicy,
     build_scan_execution_groups,
     chunked_hosts,
@@ -28,6 +29,7 @@ from .targeting import (
     normalize_ip_literal,
     normalize_scan_host,
     parse_scan_target_specs,
+    parse_target_exclusions,
     stream_scan_target_specs,
 )
 
@@ -35,6 +37,7 @@ __all__ = [
     "ScanExecutionGroup",
     "ScanTargetSpec",
     "StreamingTargetPlan",
+    "TargetExclusions",
     "TargetParsePolicy",
     "DEFAULT_MAX_NETWORK_HOSTS",
     "DEFAULT_STREAM_TARGET_WINDOW_SIZE",
@@ -53,6 +56,7 @@ __all__ = [
     "is_http_inline_command",
     "is_http_request_prefix",
     "is_signature_compat_typeerror",
+    "parse_target_exclusions",
     "normalize_ip_literal",
     "normalize_scan_host",
     "parse_scan_target_specs",
@@ -171,8 +175,11 @@ def parse_username_password_credential_file(
     has_plain = False
     with open(raw_username, encoding="utf-8") as fh:
         for line_no, raw in enumerate(fh, start=1):
-            line = raw.strip()
-            if not line:
+            # Only remove the physical line terminator. Password whitespace is
+            # credential data (not formatting), notably for ZooKeeper digest
+            # auth where the exact byte sequence is hashed by the server.
+            line = raw.rstrip("\r\n")
+            if not line.strip():
                 continue
             if ":" in line:
                 has_colon = True
@@ -180,7 +187,7 @@ def parse_username_password_credential_file(
                 user = user.strip()
                 if not user:
                     raise ValueError(f"{raw_username}:{line_no}: username must not be empty")
-                entries.append((user, secret.strip()))
+                entries.append((user, secret))
             else:
                 has_plain = True
                 user = line.strip()

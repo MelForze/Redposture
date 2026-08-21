@@ -47,26 +47,26 @@ _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _ORACLE_DEEP_STATUSES = {"open_no_auth", "valid_credentials", "weak_default_creds"}
 _ORACLE_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
-    ("system", "oracle"),
-    ("sys", "oracle"),
-    ("system", "manager"),
-    ("sys", "change_on_install"),
-    ("scott", "tiger"),
-    ("dbsnmp", "dbsnmp"),
-    ("pdbadmin", "oracle"),
-    ("admin", "oracle"),
-    ("system", "system"),
-    ("sys", "sys"),
-    ("pdbadmin", "pdbadmin"),
     ("admin", "admin"),
-    ("scott", "scott"),
+    ("admin", "changeme"),
+    ("admin", "oracle"),
+    ("admin", "password"),
+    ("dbsnmp", "dbsnmp"),
+    ("dev", "dev"),
     ("hr", "hr"),
     ("outln", "outln"),
-    ("admin", "password"),
-    ("admin", "changeme"),
-    ("user", "user"),
+    ("pdbadmin", "oracle"),
+    ("pdbadmin", "pdbadmin"),
+    ("scott", "scott"),
+    ("scott", "tiger"),
+    ("sys", "change_on_install"),
+    ("sys", "oracle"),
+    ("sys", "sys"),
+    ("system", "manager"),
+    ("system", "oracle"),
+    ("system", "system"),
     ("test", "test"),
-    ("dev", "dev"),
+    ("user", "user"),
 )
 _ORACLE_DEFAULT_SERVICES = ("FREEPDB1", "ORCLPDB1", "XEPDB1", "ORCL", "XE", "FREE", "PDB1")
 _ORACLE_DEFAULT_SIDS = ("FREE", "XE", "ORCLCDB", "ORCL", "PDB1")
@@ -96,6 +96,7 @@ def _is_transient_oracle_connect_error(error: str | None) -> bool:
             "timed out",
             "timeout",
             "connection reset",
+            "closed the connection",
         )
     )
 
@@ -1169,6 +1170,26 @@ def _audit_oracle_host(
                 )
                 return record
             if active_client is None:
+                # Credential-driver failures are not sufficient service
+                # evidence.  In particular DPY-4011 is emitted for a generic
+                # peer/network close, so preserve the inconclusive/non-Oracle
+                # result unless a TNS probe or listener command proved Oracle.
+                if not listener_reachable:
+                    record.update(
+                        {
+                            "is_oracle": False,
+                            "status": "fail",
+                            "auth_required": None,
+                            "transport_mode": selected_protocol,
+                            "connect_service": selected_service,
+                            "connect_sid": selected_sid,
+                            "credential_attempts": credential_attempts,
+                            "error": last_auth_error
+                            if "last_auth_error" in locals() and last_auth_error
+                            else (probe_errors[-1] if probe_errors else "Oracle/TNS evidence not observed"),
+                        }
+                    )
+                    return record
                 record.update(
                     {
                         "is_oracle": True,

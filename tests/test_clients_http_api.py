@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ssl
 import urllib.error
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,6 +15,8 @@ from redposture_core.clients.http_api import (
     _flush_tls_outgoing,
     _parse_http_response_bytes,
     _tls_over_tls_exchange,
+    build_http_target_url,
+    http_target_context,
     normalize_http_error,
 )
 
@@ -21,9 +24,16 @@ from redposture_core.clients.http_api import (
 class _FakeResponse:
     status = 200
 
-    def __init__(self, body: bytes = b'{"ok":true}', headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        body: bytes = b'{"ok":true}',
+        headers: dict[str, str] | None = None,
+        *,
+        final_url: str | None = None,
+    ) -> None:
         self._body = body
         self.headers = headers or {"Content-Type": "application/json"}
+        self.final_url = final_url
 
     def __enter__(self) -> _FakeResponse:
         return self
@@ -39,6 +49,9 @@ class _FakeResponse:
 
     def getcode(self) -> int:
         return int(self.status)
+
+    def geturl(self) -> str | None:
+        return self.final_url
 
 
 class _FakeOpener:
@@ -69,6 +82,43 @@ def test_http_api_client_get_success(monkeypatch) -> None:
     assert req.get_method() == "GET"
     assert timeout == 2.5
     assert req.get_header("Accept") == "application/json"
+
+
+def test_http_api_client_records_redirect_and_rejects_cross_origin(monkeypatch) -> None:
+    source = "https://service.local/api/health"
+    same_origin = "https://service.local/login"
+    monkeypatch.setattr(
+        "redposture_core.clients.http_api.urllib.request.urlopen",
+        _FakeOpener(_FakeResponse(b"login", final_url=same_origin)).open,
+    )
+
+    response = HttpApiClient().get(source)
+
+    assert response.error is None
+    assert response.request_url == source
+    assert response.final_url == same_origin
+    assert response.redirect_history == (source,)
+    assert response.redirected is True
+
+    cross_origin = "https://login.other.local/sign-in"
+    monkeypatch.setattr(
+        "redposture_core.clients.http_api.urllib.request.urlopen",
+        _FakeOpener(_FakeResponse(b"login", final_url=cross_origin)).open,
+    )
+    response = HttpApiClient().get(source)
+
+    assert response.status == 200
+    assert response.final_url == cross_origin
+    assert response.error == f"cross-origin redirect blocked: {source} -> {cross_origin}"
+
+
+def test_http_target_context_preserves_https_ipv6_and_reverse_proxy_base_path() -> None:
+    target = SimpleNamespace(scheme="https", path="/proxy/api/v4/version")
+
+    with http_target_context(target, api_prefixes=("/api/v4",)):
+        url = build_http_target_url("2001:db8::10", 8443, "/api/v4/user", default_scheme="http")
+
+    assert url == "https://[2001:db8::10]:8443/proxy/api/v4/user"
 
 
 def test_http_api_client_post_json_and_response_cap(monkeypatch) -> None:

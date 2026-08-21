@@ -14,6 +14,7 @@ from ...stage_runtime import (
     build_basic_credential_runs,
     merge_audit_credential_runs,
     run_basic_host_audit,
+    sort_default_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -45,7 +46,7 @@ def _redis_use_lifecycle_hooks() -> bool:
 def _prepare_redis_credential_runs(args: Any) -> None:
     supplied_runs = build_basic_credential_runs(args)
     default_runs = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source="default")
             for username, password in actions._REDIS_DEFAULT_CREDENTIALS
         )

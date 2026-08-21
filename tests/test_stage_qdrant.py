@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from types import SimpleNamespace
 
@@ -102,7 +103,7 @@ def test_semver_in_half_open_range() -> None:
 
 def test_qdrant_payload_helpers() -> None:
     assert qdrant._qdrant_is_root_payload({"title": "Qdrant - Vector DB"}) is True
-    assert qdrant._qdrant_is_root_payload({"version": "1.0", "result": {}}) is True
+    assert qdrant._qdrant_is_root_payload({"version": "1.0", "result": {}}) is False
     assert qdrant._qdrant_is_root_payload({"hello": "world"}) is False
 
     assert qdrant._qdrant_error_text({"status": {"error": " failed  reason "}}) == "failed reason"
@@ -116,7 +117,7 @@ def test_qdrant_error_and_response_helpers_cover_extra_shapes() -> None:
     assert qdrant._qdrant_error_text("", fallback_status=404) is None
 
     assert qdrant._qdrant_looks_like_response({"result": {}, "status": "ok"}) is True
-    assert qdrant._qdrant_looks_like_response({"status": {"error": "forbidden"}}) is True
+    assert qdrant._qdrant_looks_like_response({"status": {"error": "forbidden"}}) is False
     assert qdrant._qdrant_looks_like_response({"hello": "world"}) is False
 
 
@@ -158,6 +159,29 @@ def test_normalize_ssrf_urls_rejects_oversized_cidr_targets() -> None:
 
 def test_normalize_ssrf_urls_returns_empty_on_invalid_path() -> None:
     assert qdrant._normalize_ssrf_urls("127.0.0.1", "6333", "http://[::1") == []
+
+
+def test_qdrant_listener_port_rewrite_covers_omitted_range_and_file(tmp_path) -> None:
+    ports_file = tmp_path / "ports.txt"
+    ports_file.write_text("18082\n18083\n", encoding="utf-8")
+    cases = (
+        (None, "http://callback.local:18080/hit"),
+        ("18080-18081", "callback.local"),
+        (str(ports_file), "callback.local"),
+    )
+
+    for ports, target in cases:
+        urls = qdrant._normalize_ssrf_urls(target, ports, "/hit")
+        rewritten = qdrant._rewrite_ssrf_urls_port(urls, 24567)
+        assert rewritten
+        assert {urllib.parse.urlsplit(url).port for url in rewritten} == {24567}
+
+
+def test_qdrant_fingerprint_requires_product_specific_shape() -> None:
+    assert qdrant._qdrant_is_root_payload({"title": "Qdrant - vector search engine", "version": "1.15.0"})
+    assert not qdrant._qdrant_is_root_payload({"version": "1.15.0", "result": {}})
+    assert not qdrant._qdrant_looks_like_response({"status": {"error": "forbidden"}})
+    assert qdrant._qdrant_looks_like_response({"status": {"error": "invalid api key"}})
 
 
 def test_format_detect_and_summary_records() -> None:
@@ -302,7 +326,7 @@ def test_audit_qdrant_host_uses_api_key_when_anonymous_is_denied(monkeypatch: py
     def fake_root(*_args, headers=None, **_kwargs):
         if headers is None:
             return 401, {"status": {"error": "forbidden"}}, None
-        return 200, {"version": "1.16.0"}, None
+        return 200, {"title": "Qdrant - Vector Search Engine", "version": "1.16.0"}, None
 
     def fake_collections(*_args, headers=None, **_kwargs):
         if headers is None:
@@ -355,7 +379,15 @@ def test_audit_qdrant_host_uses_api_key_when_anonymous_is_denied(monkeypatch: py
 
 
 def test_audit_qdrant_auth_required_dump_and_unknown_auth_edges(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(qdrant, "_qdrant_get_root_info", lambda *_args, **_kwargs: (200, {"version": "1.15.0"}, None))
+    monkeypatch.setattr(
+        qdrant,
+        "_qdrant_get_root_info",
+        lambda *_args, **_kwargs: (
+            200,
+            {"title": "Qdrant - Vector Search Engine", "version": "1.15.0"},
+            None,
+        ),
+    )
     monkeypatch.setattr(
         qdrant,
         "_qdrant_get_collections",
@@ -674,8 +706,9 @@ def test_qdrant_ssrf_capture_listener_records_requests(monkeypatch: pytest.Monke
     monkeypatch.setattr(qdrant, "_QdrantSsrfCaptureServer", _FakeServer)
     monkeypatch.setattr(qdrant.threading, "Thread", _FakeThread)
 
-    listener = qdrant._start_qdrant_ssrf_capture_listener(19000)
+    listener = qdrant._start_qdrant_ssrf_capture_listener(0)
     assert listener["started"] is True
+    assert listener["port"] == 19000
     server = listener["server"]
     assert server is not None
     listener["hits"].append({"method": "GET", "path": "/debug/vars?full=1"})
@@ -975,6 +1008,9 @@ def test_audit_qdrant_targets_and_run_stage_paths(
 
         def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
             return False
+
+        def _paint(self, text: str, _color: str, _stream: object) -> str:
+            return text
 
     fake_console = _FakeConsole()
     monkeypatch.setattr(qdrant, "Console", lambda debug=False: fake_console)
@@ -1329,7 +1365,7 @@ def test_run_qdrant_stage_multi_instance_uses_single_global_progress(monkeypatch
         api_key=None,
     )
     rc = qdrant.run_qdrant_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
-    assert rc == 0
+    assert rc == 1
     assert not fake_console.errors
     assert [call["port"] for call in calls] == [6333, 26333, 26334]
     assert all(call["run_deep_checks"] is False for call in calls)
@@ -1406,7 +1442,7 @@ def test_run_qdrant_stage_ssrf_url_parse_errors(monkeypatch: pytest.MonkeyPatch)
     assert any("failed to build SSRF URLs" in item for item in fake_console.errors)
 
 
-def test_run_qdrant_stage_rejects_https_url_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_qdrant_stage_accepts_https_url_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     class _FakeConsole:
         def __init__(self, debug: bool = False) -> None:
             _ = debug
@@ -1428,6 +1464,9 @@ def test_run_qdrant_stage_rejects_https_url_targets(monkeypatch: pytest.MonkeyPa
         def render_tagged_payload_line(self, *_args: object, **_kwargs: object) -> bool:
             return False
 
+        def _paint(self, text: str, _color: str, _stream: object) -> str:
+            return text
+
     fake_console = _FakeConsole()
     monkeypatch.setattr(qdrant, "Console", lambda debug=False: fake_console)
     monkeypatch.setattr(qdrant, "collect_scan_ports", lambda *_a, **_k: [6333])
@@ -1435,6 +1474,11 @@ def test_run_qdrant_stage_rejects_https_url_targets(monkeypatch: pytest.MonkeyPa
         qdrant,
         "collect_scan_target_specs",
         lambda *_a, **_k: [SimpleNamespace(host="api.example.local", scheme="https", explicit_port=6333)],
+    )
+    patch_module_host_stage_for_test(
+        monkeypatch,
+        "qdrant",
+        lambda **kwargs: _qdrant_host_record(kwargs, status="open_no_auth", detected=True),
     )
 
     args = SimpleNamespace(
@@ -1460,5 +1504,5 @@ def test_run_qdrant_stage_rejects_https_url_targets(monkeypatch: pytest.MonkeyPa
     )
 
     rc = qdrant.run_qdrant_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
-    assert rc == 2
-    assert any("accepts only http:// URL targets" in msg for msg in fake_console.errors)
+    assert rc == 0
+    assert not any("accepts only http:// URL targets" in msg for msg in fake_console.errors)

@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig
+from ...clients.http_api import HttpApiClient, HttpClientConfig, format_http_authority
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
@@ -59,8 +59,14 @@ class ConsulLifecycleState:
     anonymous_self: dict[str, Any] | None = None
     auth_scopes: dict[str, Any] | None = None
     auth_self: dict[str, Any] | None = None
+    auth_identity: dict[str, Any] | None = None
     auth_headers: dict[str, str] | None = None
     deep_record: dict[str, Any] | None = None
+    ca_file: str | None = None
+    client_cert: str | None = None
+    client_key: str | None = None
+    preferred_scheme: str | None = None
+    strict_scheme: bool = False
 
 
 class _ConsulLifecycleReplay:
@@ -159,15 +165,29 @@ def _http_request(
     body: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     scheme = "https" if use_https else "http"
-    url = f"{scheme}://{host}:{port}{path}"
+    parsed_path = urllib.parse.urlsplit(path)
+    url = urllib.parse.urlunsplit(
+        (scheme, format_http_authority(host, port), parsed_path.path or "/", parsed_path.query, "")
+    )
     request_headers = {
         "User-Agent": "RedPosture/1.0",
         "Accept": "application/json",
     }
     if headers:
         request_headers.update(headers)
+    replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
+    ca_file = replay.ca_file if use_https and isinstance(replay, ConsulLifecycleState) else None
+    client_cert = replay.client_cert if use_https and isinstance(replay, ConsulLifecycleState) else None
+    client_key = replay.client_key if use_https and isinstance(replay, ConsulLifecycleState) else None
     response = HttpApiClient(
-        HttpClientConfig(timeout=timeout, insecure=bool(use_https and insecure), response_size_cap=10 * 1024 * 1024)
+        HttpClientConfig(
+            timeout=timeout,
+            insecure=bool(use_https and insecure),
+            ca_file=ca_file,
+            client_cert=client_cert,
+            client_key=client_key,
+            response_size_cap=10 * 1024 * 1024,
+        )
     ).request(method, url, headers=request_headers, body=body, timeout=timeout)
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
@@ -189,10 +209,6 @@ def _request_with_tls_fallback(
     status, payload, resp_headers, error = _http_request(
         host, port, method, path, timeout, use_https=use_https, insecure=insecure, headers=headers, body=body
     )
-    if use_https and not insecure and error and _is_tls_verify_error_text(error):
-        return _http_request(
-            host, port, method, path, timeout, use_https=use_https, insecure=True, headers=headers, body=body
-        ) + (True, True)
     return status, payload, resp_headers, error, insecure, False
 
 
@@ -270,14 +286,18 @@ def _probe_consul_scheme(
     timeout: float,
     *,
     preferred_scheme: str | None = None,
+    allow_scheme_fallback: bool = True,
 ) -> tuple[bool, str | None, bool, bool, str | None, str | None]:
     replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
     if isinstance(replay, ConsulLifecycleState) and replay.scheme is not None:
         return True, replay.scheme, replay.insecure, replay.tls_auto_insecure, replay.leader, None
+    requested_insecure = bool(replay.insecure) if isinstance(replay, ConsulLifecycleState) else False
     normalized_scheme = str(preferred_scheme or "").strip().lower()
-    if normalized_scheme in {"http", "https"}:
+    if normalized_scheme in {"http", "https"} and allow_scheme_fallback:
         alternate = "https" if normalized_scheme == "http" else "http"
         preferred_schemes = [normalized_scheme, alternate]
+    elif normalized_scheme in {"http", "https"}:
+        preferred_schemes = [normalized_scheme]
     else:
         preferred_schemes = ["https", "http"] if port == 8501 else ["http", "https"]
     last_error: str | None = None
@@ -290,7 +310,7 @@ def _probe_consul_scheme(
             "/v1/status/leader",
             timeout,
             use_https=(scheme == "https"),
-            insecure=False,
+            insecure=requested_insecure,
         )
         if error:
             last_error = error
@@ -470,6 +490,63 @@ def _agent_self_probe(
     return result
 
 
+def _acl_token_self_probe(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    scheme: str,
+    insecure: bool,
+    headers: dict[str, str],
+) -> dict[str, Any]:
+    """Validate the supplied token against Consul's identity endpoint."""
+
+    replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
+    if isinstance(replay, ConsulLifecycleState) and replay.auth_identity is not None and replay.auth_headers == headers:
+        return dict(replay.auth_identity)
+    status, payload, error, effective_insecure, tls_auto = _consul_get_json_any(
+        host,
+        port,
+        "/v1/acl/token/self",
+        timeout,
+        use_https=(scheme == "https"),
+        insecure=insecure,
+        headers=headers,
+    )
+    result: dict[str, Any] = {
+        "status": status,
+        "ok": None,
+        "error": None,
+        "accessor_id": None,
+        "description": None,
+        "local": None,
+        "tls_auto_insecure": tls_auto,
+        "insecure_effective": effective_insecure,
+    }
+    if error:
+        result["error"] = error
+        return result
+    if status == 200 and isinstance(payload, dict):
+        accessor_id = payload.get("AccessorID")
+        if isinstance(accessor_id, str) and accessor_id.strip():
+            result["ok"] = True
+            result["accessor_id"] = accessor_id.strip()
+            description = payload.get("Description")
+            result["description"] = description if isinstance(description, str) else None
+            local = payload.get("Local")
+            result["local"] = local if isinstance(local, bool) else None
+            return result
+        result["ok"] = False
+        result["error"] = "unexpected token identity response"
+        return result
+    result["ok"] = False
+    if _unauthorized_status(status):
+        result["error"] = "Unauthorized" if status == 401 else "Forbidden"
+    else:
+        result["error"] = f"unexpected status={status}"
+    return result
+
+
 def _consul_access_matrix(
     host: str,
     port: int,
@@ -521,6 +598,10 @@ def _consul_access_matrix(
 
 def _all_scopes_ok(scopes: dict[str, Any]) -> bool:
     return all(bool((scopes.get(name) or {}).get("ok")) for name in _CONSUL_SCOPE_NAMES)
+
+
+def _any_scope_ok(scopes: dict[str, Any]) -> bool:
+    return any(bool((scopes.get(name) or {}).get("ok")) for name in _CONSUL_SCOPE_NAMES)
 
 
 def _no_scopes_ok(scopes: dict[str, Any]) -> bool:
@@ -1951,6 +2032,7 @@ def _audit_consul_host_core(
             auth_error: str | None = None
             auth_scopes: dict[str, Any] = {}
             auth_self: dict[str, Any] | None = None
+            auth_identity: dict[str, Any] | None = None
 
             auth_headers = _consul_headers(token, username, password)
             if token:
@@ -1965,15 +2047,29 @@ def _audit_consul_host_core(
                 auth_self = _agent_self_probe(
                     host, port, timeout, scheme=scheme, insecure=insecure_effective, headers=auth_headers
                 )
-                auth_valid = _all_scopes_ok(auth_scopes) or bool(auth_self.get("ok"))
-                if auth_valid is False and _no_scopes_ok(auth_scopes):
-                    for name in _CONSUL_SCOPE_NAMES:
-                        entry = auth_scopes.get(name) or {}
-                        if entry.get("error"):
-                            auth_error = str(entry.get("error"))
-                            break
-                if auth_error is None and isinstance(auth_self, dict) and auth_self.get("error"):
-                    auth_error = str(auth_self.get("error"))
+                if auth_mode == "token":
+                    auth_identity = _acl_token_self_probe(
+                        host,
+                        port,
+                        timeout,
+                        scheme=scheme,
+                        insecure=insecure_effective,
+                        headers=auth_headers,
+                    )
+                    identity_ok = auth_identity.get("ok")
+                    auth_valid = identity_ok if isinstance(identity_ok, bool) else None
+                    if auth_valid is not True and auth_identity.get("error"):
+                        auth_error = str(auth_identity.get("error"))
+                else:
+                    auth_valid = _any_scope_ok(auth_scopes) or bool(auth_self.get("ok"))
+                    if auth_valid is False and _no_scopes_ok(auth_scopes):
+                        for name in _CONSUL_SCOPE_NAMES:
+                            entry = auth_scopes.get(name) or {}
+                            if entry.get("error"):
+                                auth_error = str(entry.get("error"))
+                                break
+                    if auth_error is None and isinstance(auth_self, dict) and auth_self.get("error"):
+                        auth_error = str(auth_self.get("error"))
 
             version = None
             local_script_checks = None
@@ -2273,7 +2369,7 @@ def _audit_consul_host_core(
 
             service_result: dict[str, Any] | None = None
             if service_name:
-                service_headers = auth_headers if auth_mode else None
+                service_headers = auth_headers if auth_mode and auth_valid is True else None
                 service_result = _consul_service_action(
                     host,
                     port,
@@ -2288,7 +2384,7 @@ def _audit_consul_host_core(
 
             ssrf_results: list[dict[str, Any]] = []
             if do_ssrf and ssrf_urls:
-                ssrf_headers = auth_headers if auth_mode else None
+                ssrf_headers = auth_headers if auth_mode and auth_valid is True else None
                 for target_url in ssrf_urls:
                     ssrf_results.append(
                         _consul_ssrf_probe(
@@ -2306,7 +2402,7 @@ def _audit_consul_host_core(
             if revshell_enabled or delete_revshell:
                 # Keep behavior consistent with other active operations (SSRF/service actions):
                 # if user supplied auth, try it for the agent write endpoint.
-                script_headers = auth_headers if auth_mode else None
+                script_headers = auth_headers if auth_mode and auth_valid is True else None
                 if delete_revshell:
                     script_revshell_result = _consul_script_revshell_cleanup(
                         host,
@@ -2362,6 +2458,9 @@ def _audit_consul_host_core(
                 "auth_valid": auth_valid,
                 "auth_scopes": auth_scopes,
                 "auth_error": auth_error,
+                "auth_identity": auth_identity,
+                "auth_identity_ok": auth_identity.get("ok") if auth_identity else None,
+                "auth_identity_error": auth_identity.get("error") if auth_identity else None,
                 "anonymous_self_ok": anonymous_self.get("ok"),
                 "anonymous_self_error": anonymous_self.get("error"),
                 "local_script_checks": local_script_checks,
@@ -2483,6 +2582,8 @@ def _consul_service_status(
         if auth_valid is True:
             return "valid_credentials"
         if auth_valid is False:
+            if _all_scopes_ok(anonymous_scopes) and not auth_required:
+                return "invalid_credentials_anonymous"
             return "auth_required"
         return "unknown_auth"
     if _all_scopes_ok(anonymous_scopes) and not auth_required:
@@ -2872,6 +2973,7 @@ def _audit_consul_host(
             auth_error: str | None = None
             auth_scopes: dict[str, Any] = {}
             auth_self: dict[str, Any] | None = None
+            auth_identity: dict[str, Any] | None = None
             if token:
                 auth_mode = "token"
             elif username is not None or password is not None:
@@ -2884,15 +2986,29 @@ def _audit_consul_host(
                 auth_self = _agent_self_probe(
                     host, port, timeout, scheme=scheme, insecure=insecure_effective, headers=auth_headers
                 )
-                auth_valid = _all_scopes_ok(auth_scopes) or bool(auth_self.get("ok"))
-                if auth_valid is False and _no_scopes_ok(auth_scopes):
-                    for scope_name in _CONSUL_SCOPE_NAMES:
-                        scope_item = auth_scopes.get(scope_name) or {}
-                        if scope_item.get("error"):
-                            auth_error = str(scope_item.get("error"))
-                            break
-                if auth_error is None and isinstance(auth_self, dict) and auth_self.get("error"):
-                    auth_error = str(auth_self.get("error"))
+                if auth_mode == "token":
+                    auth_identity = _acl_token_self_probe(
+                        host,
+                        port,
+                        timeout,
+                        scheme=scheme,
+                        insecure=insecure_effective,
+                        headers=auth_headers,
+                    )
+                    identity_ok = auth_identity.get("ok")
+                    auth_valid = identity_ok if isinstance(identity_ok, bool) else None
+                    if auth_valid is not True and auth_identity.get("error"):
+                        auth_error = str(auth_identity.get("error"))
+                else:
+                    auth_valid = _any_scope_ok(auth_scopes) or bool(auth_self.get("ok"))
+                    if auth_valid is False and _no_scopes_ok(auth_scopes):
+                        for scope_name in _CONSUL_SCOPE_NAMES:
+                            scope_item = auth_scopes.get(scope_name) or {}
+                            if scope_item.get("error"):
+                                auth_error = str(scope_item.get("error"))
+                                break
+                    if auth_error is None and isinstance(auth_self, dict) and auth_self.get("error"):
+                        auth_error = str(auth_self.get("error"))
 
             version = None
             local_script_checks = None
@@ -2945,6 +3061,9 @@ def _audit_consul_host(
                 "auth_valid": auth_valid,
                 "auth_scopes": auth_scopes,
                 "auth_error": auth_error,
+                "auth_identity": auth_identity,
+                "auth_identity_ok": auth_identity.get("ok") if auth_identity else None,
+                "auth_identity_error": auth_identity.get("error") if auth_identity else None,
                 "anonymous_self_ok": anonymous_self.get("ok"),
                 "anonymous_self_error": anonymous_self.get("error"),
                 "local_script_checks": local_script_checks,
@@ -2994,7 +3113,7 @@ def _audit_consul_host(
                 _debug(f"attempt={attempt + 1}/{attempts} detect-only result={service_status}")
                 return _record(base_record, attempts_done=attempt + 1, max_attempts=attempts)
 
-            if service_status not in {"open_no_auth", "valid_credentials"}:
+            if service_status not in {"open_no_auth", "valid_credentials", "invalid_credentials_anonymous"}:
                 return _record(base_record, attempts_done=attempt + 1, max_attempts=attempts)
 
             stage3_started = time.monotonic()
@@ -3186,6 +3305,9 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
         "auth_valid",
         "auth_scopes",
         "auth_error",
+        "auth_identity",
+        "auth_identity_ok",
+        "auth_identity_error",
         "anonymous_self_ok",
         "anonymous_self_error",
         "local_script_checks",
@@ -3783,7 +3905,7 @@ def _consul_lifecycle_call(ctx: Any, options: dict[str, Any], *, run_deep_checks
         raise TypeError("consul lifecycle state is unavailable")
     credential = ctx.credential
     with _ConsulLifecycleReplay(state):
-        return _call_audit_consul_host_with_thread_debug(
+        result = _call_audit_consul_host_with_thread_debug(
             str(ctx.host),
             int(ctx.port),
             float(getattr(ctx.args, "timeout", 5.0)),
@@ -3821,6 +3943,8 @@ def _consul_lifecycle_call(ctx: Any, options: dict[str, Any], *, run_deep_checks
             debug_emit=ctx.debug_emit,
             dump_limit=options["dump_limit"],
         )
+    result["tls_client_cert_used"] = bool(state.scheme == "https" and state.client_cert and state.client_key)
+    return result
 
 
 def detect_consul(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
@@ -3828,35 +3952,39 @@ def detect_consul(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(state, ConsulLifecycleState):
         raise TypeError("consul lifecycle state is unavailable")
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
-    preferred = str(ctx.target.scheme) if ctx.target is not None and ctx.target.scheme else None
+    target_preferred = str(ctx.target.scheme) if ctx.target is not None and ctx.target.scheme else None
+    preferred = state.preferred_scheme or target_preferred
     for attempt in range(attempts):
-        detected, scheme, insecure, tls_auto, leader, error = _probe_consul_scheme(
-            str(ctx.host),
-            int(ctx.port),
-            float(getattr(ctx.args, "timeout", 5.0)),
-            preferred_scheme=preferred,
-        )
+        with _ConsulLifecycleReplay(state):
+            detected, scheme, insecure, tls_auto, leader, error = _probe_consul_scheme(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                preferred_scheme=preferred,
+                allow_scheme_fallback=not state.strict_scheme,
+            )
         if detected and scheme is not None:
             state.scheme = scheme
             state.insecure = insecure
             state.tls_auto_insecure = tls_auto
             state.leader = leader
-            state.anonymous_scopes = _consul_access_matrix(
-                str(ctx.host),
-                int(ctx.port),
-                float(getattr(ctx.args, "timeout", 5.0)),
-                scheme=scheme,
-                insecure=insecure,
-                headers=None,
-            )
-            state.anonymous_self = _agent_self_probe(
-                str(ctx.host),
-                int(ctx.port),
-                float(getattr(ctx.args, "timeout", 5.0)),
-                scheme=scheme,
-                insecure=insecure,
-                headers=None,
-            )
+            with _ConsulLifecycleReplay(state):
+                state.anonymous_scopes = _consul_access_matrix(
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    scheme=scheme,
+                    insecure=insecure,
+                    headers=None,
+                )
+                state.anonymous_self = _agent_self_probe(
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    scheme=scheme,
+                    insecure=insecure,
+                    headers=None,
+                )
             anonymous_ctx = type("_AnonymousConsulContext", (), {})()
             anonymous_ctx.args = ctx.args
             anonymous_ctx.host = ctx.host
@@ -3891,23 +4019,34 @@ def authenticate_consul(ctx: Any, _detect_record: Any, options: dict[str, Any]) 
     if credential.token is None and credential.username is None and credential.password is None:
         return _consul_lifecycle_call(ctx, options, run_deep_checks=False)
     headers = _consul_headers(credential.token, credential.username, credential.password)
-    state.auth_scopes = _consul_access_matrix(
-        str(ctx.host),
-        int(ctx.port),
-        float(getattr(ctx.args, "timeout", 5.0)),
-        scheme=state.scheme,
-        insecure=state.insecure,
-        headers=headers,
-    )
-    state.auth_self = _agent_self_probe(
-        str(ctx.host),
-        int(ctx.port),
-        float(getattr(ctx.args, "timeout", 5.0)),
-        scheme=state.scheme,
-        insecure=state.insecure,
-        headers=headers,
-    )
     state.auth_headers = headers
+    state.auth_identity = None
+    with _ConsulLifecycleReplay(state):
+        state.auth_scopes = _consul_access_matrix(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            scheme=state.scheme,
+            insecure=state.insecure,
+            headers=headers,
+        )
+        state.auth_self = _agent_self_probe(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            scheme=state.scheme,
+            insecure=state.insecure,
+            headers=headers,
+        )
+        if credential.token is not None:
+            state.auth_identity = _acl_token_self_probe(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                scheme=state.scheme,
+                insecure=state.insecure,
+                headers=headers,
+            )
     return _consul_lifecycle_call(ctx, options, run_deep_checks=False)
 
 

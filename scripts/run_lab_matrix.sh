@@ -187,11 +187,11 @@ run_case exporters exporters_collect 0 exporters collect -t 127.0.0.1 -p "${EXPO
 run_case exporters exporters_trigger 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19308" --with-listen --listen-seconds 8 \
   --postgres-port 15432 --redis-port 16379 --proxmox-port 28006 --blackbox-port 29115
 run_case exporters exporters_scan_url_http 0 exporters scan -t "http://127.0.0.1:19100/metrics?from=matrix"
-run_case exporters exporters_scan_url_https_reject 2 exporters scan -t "https://127.0.0.1:19100/metrics"
+run_case exporters exporters_scan_url_https_transport_fail 1 exporters scan -t "https://127.0.0.1:19100/metrics"
 run_case exporters exporters_collect_url_http 0 exporters collect -t "http://127.0.0.1:19100/debug/vars" --exporters node --save-responses-dir "${OUT_DIR}/collect_raw_url"
-run_case exporters exporters_collect_url_https_reject 2 exporters collect -t "https://127.0.0.1:19100/debug/vars"
+run_case exporters exporters_collect_url_https_transport_fail 1 exporters collect -t "https://127.0.0.1:19100/debug/vars"
 run_case exporters exporters_trigger_url_http 0 exporters trigger -t "http://127.0.0.1:19121/scrape?target=redis://127.0.0.1:6379" --callback-dns host.docker.internal --no-with-listen
-run_case exporters exporters_trigger_url_https_reject 2 exporters trigger -t "https://127.0.0.1:19121/scrape" --callback-dns host.docker.internal --no-with-listen
+run_case exporters exporters_trigger_url_https_transport_mismatch 0 exporters trigger -t "https://127.0.0.1:19121/scrape" --callback-dns host.docker.internal --no-with-listen
 
 run_case registry registry_open 0 registry -t 127.0.0.1 --port 15000 --docker --images
 run_case registry registry_auth 0 registry -t 127.0.0.1 --port 15001 -u admin -p admin --docker --images
@@ -199,12 +199,12 @@ run_case registry registry_harbor 0 registry -t 127.0.0.1 --port 15002 --harbor 
 run_case registry registry_gitlab 0 registry -t 127.0.0.1 --port 15003 --token glrt-lab-token --gitlab --images
 run_case registry registry_nexus 0 registry -t 127.0.0.1 --port 15004 --nexus --assets
 run_case registry registry_url_http 0 registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --docker --images
-run_case registry registry_url_https_reject 2 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
+run_case registry registry_url_https_transport_fail 1 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
 run_case registry registry_multi_instance_urls 0 registry -t "http://127.0.0.1:15000/v2/_catalog,http://127.0.0.1:15010/v2/_catalog,http://127.0.0.1:15011/v2/_catalog,http://127.0.0.1:15012/v2/_catalog,http://127.0.0.1:15013/v2/_catalog" --docker --images
 
 run_case grafana grafana_default 0 grafana -t 127.0.0.1 --defcreds --show-datasources
 run_case grafana grafana_url_http 0 grafana -t "http://127.0.0.1:3000/login?next=%2F" --defcreds --show-datasources
-run_case grafana grafana_url_https_reject 2 grafana -t "https://127.0.0.1:3000/login"
+run_case grafana grafana_url_https_transport_fail 1 grafana -t "https://127.0.0.1:3000/login"
 run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --defcreds --ssrf-target "http://grafana-2:3000/api/health" --show-datasources
 run_case grafana grafana_multi_instance_urls 0 grafana -t "http://127.0.0.1:3000/login,http://127.0.0.1:13001/login,http://127.0.0.1:13002/login,http://127.0.0.1:13003/login,http://127.0.0.1:13004/login" --defcreds
 
@@ -285,12 +285,12 @@ run_case redis redis_multi_ports 0 redis -t 127.0.0.1 -u redis -p redis --ports 
 run_case etcd etcd_open 0 etcd -t 127.0.0.1 --port 2379 --show-keys --dump
 run_case etcd etcd_auth 0 etcd -t 127.0.0.1 --port 22379 --show-keys --dump
 run_case etcd etcd_url_http 0 etcd -t "http://127.0.0.1:2379/v2/keys?recursive=true" --show-keys --dump
-run_case etcd etcd_url_https_reject 2 etcd -t "https://127.0.0.1:2379/v2/keys?recursive=true" --show-keys
+run_case etcd etcd_url_https_transport_fail 1 etcd -t "https://127.0.0.1:2379/v2/keys?recursive=true" --show-keys
 run_case etcd etcd_multi_instance_urls 0 etcd -t "http://127.0.0.1:2379/v2/keys,http://127.0.0.1:23790/v2/keys,http://127.0.0.1:23791/v2/keys,http://127.0.0.1:23792/v2/keys,http://127.0.0.1:23793/v2/keys" --show-keys
 
 run_case qdrant qdrant_default 0 qdrant -t 127.0.0.1 --collections --dump
 run_case qdrant qdrant_url_http 0 qdrant -t "http://127.0.0.1:6333/collections?from=matrix" --collections --dump
-run_case qdrant qdrant_url_https_reject 2 qdrant -t "https://127.0.0.1:6333/collections" --collections
+run_case qdrant qdrant_url_https_transport_fail 1 qdrant -t "https://127.0.0.1:6333/collections" --collections
 run_case qdrant qdrant_multi_instance_urls 0 qdrant -t "http://127.0.0.1:6333/collections,http://127.0.0.1:26333/collections,http://127.0.0.1:26334/collections,http://127.0.0.1:26335/collections,http://127.0.0.1:26336/collections" --collections --dump
 
 run_case elastic elastic_open 0 elastic -t 127.0.0.1 --port 19200 --endpoints --cluster --discover
@@ -299,7 +299,7 @@ run_case elastic elastic_url_hint_https 0 elastic -t "http://127.0.0.1:19201/" -
 run_case elastic elastic_plugins_edge 0 elastic -t 127.0.0.1 --port 19201 -u elastic -p changeme --plugins
 run_case elastic elastic_multi_instance_urls 0 elastic -t "http://127.0.0.1:19200/,http://127.0.0.1:19202/,http://127.0.0.1:19203/,http://127.0.0.1:19204/,http://127.0.0.1:19205/" --endpoints
 
-run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051 --analyze
+run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051 --plaintext --analyze
 run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --token "grpc-lab-token-2026" --analyze
 run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --defcreds --analyze
 run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055" --analyze
@@ -310,13 +310,13 @@ run_case grpc grpc_invoke_health 0 grpc -t 127.0.0.1 --port 50051 --invoke /grpc
 run_case grpc grpc_proto_invoke 0 grpc -t 127.0.0.1 --port 50051 --proto redposture_core/proto/grpc_health.proto --proto-path redposture_core/proto --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
 run_case grpc grpc_protoset_invoke 0 grpc -t 127.0.0.1 --port 50051 --protoset "${GRPC_PROTOSET}" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
 run_case grpc grpc_openapi_export 0 grpc -t 127.0.0.1 --port 50051 --openapi "${OUT_DIR}/json/grpc_openapi.json"
-run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071
+run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071 --plaintext
 
 run_case kafka kafka_open 0 kafka -t 127.0.0.1 --port 9092 --show-topics --dump --max-messages 50
 run_case kafka kafka_auth 0 kafka -t 127.0.0.1 --port 29092 -u metrics -p metricspass --show-topics --dump --max-messages 50
 run_case kafka kafka_multi_ports 0 kafka -t 127.0.0.1 --ports "9092,39092,39093,39094,39095" --show-topics --dump --max-messages 10
-run_case kafka kafka_tls_defcreds 0 kafka -t 127.0.0.1 --port 29093 --defcreds --show-topics --dump --max-messages 5
-run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 -u admin -p admin --show-topics --dump --max-messages 5
+run_case kafka kafka_tls_defcreds 0 kafka -t 127.0.0.1 --port 29093 --tls --insecure --tls-server-name kafka-tls --defcreds --show-topics --dump --max-messages 5
+run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 --tls --insecure -u admin -p admin --show-topics --dump --max-messages 5
 
 run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --show-znodes --dump
 run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes --dump

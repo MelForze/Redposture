@@ -8,6 +8,7 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.http_api import http_target_context
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -63,21 +64,19 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
     )
 
     def _detect(ctx: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(actions.detect_gitlab(ctx, options), module="gitlab", service="gitlab")
+        with http_target_context(ctx.target, api_prefixes=("/api/v4", "/users/sign_in", "/-")):
+            result = actions.detect_gitlab(ctx, options)
+        return AuditRecord.from_mapping(result, module="gitlab", service="gitlab")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.authenticate_gitlab(ctx, record, options),
-            module="gitlab",
-            service="gitlab",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/api/v4", "/users/sign_in", "/-")):
+            result = actions.authenticate_gitlab(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="gitlab", service="gitlab")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.collect_gitlab_data(ctx, record, options),
-            module="gitlab",
-            service="gitlab",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/api/v4", "/users/sign_in", "/-")):
+            result = actions.collect_gitlab_data(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="gitlab", service="gitlab")
 
     return ModuleAuditSpec(
         module="gitlab",

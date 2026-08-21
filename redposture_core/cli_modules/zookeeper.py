@@ -20,6 +20,7 @@ def configure_zookeeper_parser(
     positive_int: Callable[[str], int],
 ) -> None:
     common = parser.add_argument_group("Common")
+    transport = parser.add_argument_group("TLS (transport auto-detected)")
     auth = parser.add_argument_group("Auth")
     actions = parser.add_argument_group("Actions")
     add_output_flags(common)
@@ -39,9 +40,9 @@ def configure_zookeeper_parser(
         default=None,
         metavar="port",
         help=(
-            "ZooKeeper port spec: single port, list/range, or file "
-            "(examples: 2181, 2181,22181, ./ports.txt). "
-            "If omitted, scans 2181, 12181."
+            "ZooKeeper-compatible port spec: single port, list/range, or file "
+            "(examples: 2181, 2181,9181,12181, ./ports.txt). "
+            "If omitted, scans 2181, 9181, 12181."
         ),
     )
     add_multi_ports_flag(common)
@@ -52,6 +53,31 @@ def configure_zookeeper_parser(
         default=3,
         metavar="count",
         help="Parallel workers for znode enumeration during deep checks.",
+    )
+    transport.add_argument(
+        "--ca-file",
+        default=None,
+        metavar="file",
+        help="CA certificate for ZooKeeper-compatible TLS verification.",
+    )
+    transport.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Allow an untrusted or self-signed ZooKeeper-compatible TLS certificate.",
+    )
+    transport.add_argument(
+        "--tls-cert",
+        dest="tls_cert",
+        default=None,
+        metavar="file",
+        help="TLS client certificate for mTLS.",
+    )
+    transport.add_argument(
+        "--tls-key",
+        dest="tls_key",
+        default=None,
+        metavar="file",
+        help="TLS client key for mTLS.",
     )
     auth.add_argument(
         "-u",
@@ -80,7 +106,8 @@ def configure_zookeeper_parser(
     actions.add_argument(
         "--show-znodes",
         **optional_show_count_kwargs(
-            "Show znode paths after successful access/auth. Optional count overrides --max-znodes for display."
+            "Show znode paths after successful access/auth. Optional count is a hard traversal limit and "
+            "overrides --max-znodes."
         ),
     )
     actions.add_argument(
@@ -103,7 +130,7 @@ def configure_zookeeper_parser(
         type=positive_int,
         default=2000,
         metavar="count",
-        help="Maximum znodes to include in --show-znodes/--dump output per target (znode count remains full).",
+        help="Hard maximum number of znodes visited by --show-znodes/--dump per target.",
     )
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(

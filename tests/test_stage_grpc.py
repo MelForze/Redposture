@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 import redposture_core.stage_grpc as grpc_stage
+from redposture_core.cli_args import parse_args
 from redposture_core.stage_grpc import (
     _auth_attempt_entries,
     _decode_grpc_frames,
@@ -812,29 +813,29 @@ def test_auth_attempt_entries_defcreds_appends_default_tokens_and_basics() -> No
     attempts = grpc_stage._auth_attempt_entries(token=None, username=None, password=None, defcreds=True)
     assert [item["token"] for item in attempts if item["type"] == "token"] == [
         "admin",
-        "token",
-        "secret",
         "changeme",
-        "grpc",
         "default-token",
+        "grpc",
+        "secret",
+        "token",
     ]
     assert [(item["username"], item["password"]) for item in attempts if item["type"] == "basic"] == [
         ("admin", "admin"),
+        ("admin", "changeme"),
         ("admin", "password"),
-        ("root", "root"),
-        ("root", "admin"),
+        ("dev", "dev"),
+        ("grpc", "admin"),
         ("grpc", "grpc"),
+        ("grpc", "password"),
+        ("guest", "guest"),
+        ("root", "admin"),
+        ("root", "password"),
+        ("root", "root"),
+        ("service", "password"),
         ("service", "service"),
         ("test", "test"),
         ("user", "password"),
-        ("admin", "changeme"),
-        ("root", "password"),
-        ("grpc", "password"),
-        ("grpc", "admin"),
-        ("service", "password"),
         ("user", "user"),
-        ("guest", "guest"),
-        ("dev", "dev"),
     ]
     assert all(a["source"] == "defcreds" for a in attempts)
 
@@ -852,3 +853,69 @@ def test_auth_required_from_grpc_status_classification() -> None:
     assert grpc_stage._auth_required_from_grpc_status(7) is True  # PERMISSION_DENIED
     assert grpc_stage._auth_required_from_grpc_status(0) is False  # OK -> auth not required
     assert grpc_stage._auth_required_from_grpc_status(None) is None  # unknown
+
+
+def test_grpc_explicit_transport_and_tls_server_name_reach_lifecycle_state() -> None:
+    tls_args = parse_args(
+        [
+            "grpc",
+            "-t",
+            "192.0.2.10",
+            "--tls",
+            "--tls-server-name",
+            "grpc.service.internal",
+        ]
+    )
+    tls_state = grpc_stage.build_grpc_spec(tls_args).lifecycle_state_factory(None)
+    assert tls_state.requested_use_tls is True
+    assert tls_state.tls_config.server_name == "grpc.service.internal"
+
+    plaintext_args = parse_args(["grpc", "-t", "192.0.2.10", "--plaintext"])
+    plaintext_state = grpc_stage.build_grpc_spec(plaintext_args).lifecycle_state_factory(None)
+    assert plaintext_state.requested_use_tls is False
+
+    automatic_args = parse_args(["grpc", "-t", "https://grpc.service.internal"])
+    automatic_state = grpc_stage.build_grpc_spec(automatic_args).lifecycle_state_factory(None)
+    assert automatic_state.requested_use_tls is None
+
+
+@pytest.mark.parametrize("requested_use_tls", [False, True])
+def test_grpc_explicit_transport_disables_opposite_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    requested_use_tls: bool,
+) -> None:
+    observed_modes: list[bool] = []
+
+    def _health(*_args, **kwargs):
+        observed_modes.append(bool(kwargs["use_tls"]))
+        return {
+            "call": {"is_grpc": True, "transport_ok": True, "use_tls": kwargs["use_tls"], "http_status": 200},
+            "grpc_status": 0,
+            "health_supported": True,
+            "error": None,
+        }
+
+    def _reflection(*_args, **kwargs):
+        observed_modes.append(bool(kwargs["use_tls"]))
+        return {
+            "call": {"is_grpc": True, "transport_ok": True, "use_tls": kwargs["use_tls"], "http_status": 200},
+            "grpc_status": 12,
+            "reflection_enabled": False,
+            "reflection_version": None,
+            "error": None,
+        }
+
+    monkeypatch.setattr(grpc_stage, "_health_check_call", _health)
+    monkeypatch.setattr(grpc_stage, "_reflection_capability_call", _reflection)
+    state = grpc_stage.GrpcLifecycleState(requested_use_tls=requested_use_tls)
+    result = grpc_stage._detect_grpc_target(
+        "192.0.2.10",
+        50051,
+        timeout=1.0,
+        preferred_scheme=None,
+        _session_state=state,
+    )
+
+    assert result["is_grpc"] is True
+    assert result["transport_mode"] == ("tls" if requested_use_tls else "plaintext")
+    assert observed_modes == [requested_use_tls, requested_use_tls]

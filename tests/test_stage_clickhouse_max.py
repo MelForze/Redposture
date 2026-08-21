@@ -417,7 +417,10 @@ def test_collect_capabilities_from_grants(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(
         clickhouse_stage,
         "_query_show_grants",
-        lambda *_args, **_kwargs: (["GRANT SELECT ON *.*", "GRANT CREATE ON *.*", "ACCESS MANAGEMENT"], None),
+        lambda *_args, **_kwargs: (
+            ["GRANT SELECT ON *.*", "GRANT CREATE ON *.*", "GRANT ACCESS MANAGEMENT ON *.*"],
+            None,
+        ),
     )
     read, execute, admin, db_count, db_names, err = clickhouse_stage._collect_capabilities(_session())
     assert (read, execute, admin, db_count, db_names, err) == (True, True, True, 1, ["default"], None)
@@ -441,14 +444,19 @@ def test_collect_capabilities_upgrades_read_when_probe_succeeds(
     monkeypatch.setattr(clickhouse_stage, "_query_rows", fake_query_rows)
 
     read, execute, admin, db_count, db_names, err = clickhouse_stage._collect_capabilities(_session())
-    assert (read, execute, admin, db_count, db_names, err) == (True, True, False, 1, ["default"], None)
+    assert (read, execute, admin, db_count, db_names, err) == (False, True, False, 1, ["default"], None)
 
 
 @pytest.mark.parametrize(
     ("probe_error", "expected_read", "expected_execute", "expected_err"),
     [
-        (None, True, True, "db error; grants error"),
-        ("Code: 516. Authentication failed", False, False, "db error; grants error"),
+        (None, None, True, "db error; grants error"),
+        (
+            "Code: 516. Authentication failed",
+            None,
+            False,
+            "db error; grants error; system.tables metadata probe denied",
+        ),
         ("other error", None, None, "db error; grants error; other error"),
     ],
 )
@@ -999,7 +1007,7 @@ def test_run_clickhouse_stage_calls_audit_with_port_protocols(monkeypatch: pytes
         _base_args(debug=False, output=None),
         logger=SimpleNamespace(log=lambda *_a, **_k: None),
     )
-    assert exit_code == 0
+    assert exit_code == 1
     assert len(calls) == 1
     assert calls[0]["port"] == 9000
     assert calls[0]["protocol"] == "native"

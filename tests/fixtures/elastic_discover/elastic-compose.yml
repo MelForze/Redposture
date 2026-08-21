@@ -1,0 +1,97 @@
+# Real Elasticsearch 8.13.4 lab for the Elastic/OpenSearch audit module.
+# Run from the repository root:
+#   docker compose -f lab/services/elastic/docker-compose.yml up -d --wait
+
+services:
+  elastic-open:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: redposture-lab-elastic-open
+    environment:
+      discovery.type: single-node
+      cluster.name: redposture-elastic-open
+      node.name: elastic-open-1
+      xpack.security.enabled: "false"
+      xpack.security.enrollment.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "127.0.0.1:19200:9200"
+      - "127.0.0.1:19202:9200"
+      - "127.0.0.1:19203:9200"
+      - "127.0.0.1:19204:9200"
+      - "127.0.0.1:19205:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 25s
+    restart: unless-stopped
+
+  elastic-open-seed:
+    image: curlimages/curl:8.12.1
+    container_name: redposture-lab-elastic-open-seed
+    depends_on:
+      elastic-open:
+        condition: service_healthy
+    environment:
+      ELASTIC_URL: "http://elastic-open:9200"
+      SEARCH_VENDOR: "elasticsearch"
+    command: ["sh", "/seed/seed_elastic.sh"]
+    volumes:
+      - ./seed_elastic.sh:/seed/seed_elastic.sh:ro
+      - ./discover_corpus_mapping.json:/seed/discover_corpus_mapping.json:ro
+      - ./discover_corpus.ndjson:/seed/discover_corpus.ndjson:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/redposture-search-seed-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 180
+      start_period: 1s
+    restart: unless-stopped
+
+  elastic-auth:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: redposture-lab-elastic-auth
+    environment:
+      discovery.type: single-node
+      cluster.name: redposture-elastic-auth
+      node.name: elastic-auth-1
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false"
+      xpack.security.transport.ssl.enabled: "false"
+      xpack.security.enrollment.enabled: "false"
+      ELASTIC_PASSWORD: "changeme"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "127.0.0.1:19201:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -u elastic:changeme http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 25s
+    restart: unless-stopped
+
+  elastic-auth-seed:
+    image: curlimages/curl:8.12.1
+    container_name: redposture-lab-elastic-auth-seed
+    depends_on:
+      elastic-auth:
+        condition: service_healthy
+    environment:
+      ELASTIC_URL: "http://elastic-auth:9200"
+      ELASTIC_USER: "elastic"
+      ELASTIC_PASSWORD: "changeme"
+      SEARCH_VENDOR: "elasticsearch"
+    command: ["sh", "/seed/seed_elastic.sh"]
+    volumes:
+      - ./seed_elastic.sh:/seed/seed_elastic.sh:ro
+      - ./discover_corpus_mapping.json:/seed/discover_corpus_mapping.json:ro
+      - ./discover_corpus.ndjson:/seed/discover_corpus.ndjson:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/redposture-search-seed-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 180
+      start_period: 1s
+    restart: unless-stopped

@@ -31,6 +31,8 @@ DEFAULT_MAX_FINDINGS = 10_000
 DEFAULT_MAX_LOCATIONS = 100
 MAX_QUERY_CLAUSES = 24
 MAPPING_BATCH_SIZE = 20
+MAX_PAGINATION_CONTEXT_RECOVERIES = 1
+MAX_LEGACY_SEARCH_ADJUSTMENTS = 5
 
 _STRONG_FIELDS = {
     "password",
@@ -737,15 +739,24 @@ def _candidate(value: str, secret_type: str, score: int, *detectors: str) -> Det
     )
 
 
+def _split_user_password(value: str) -> tuple[str, str] | None:
+    """Parse one decoded credential pair without mistaking JSON/config blobs for it."""
+
+    if "\r" in value or "\n" in value or ":" not in value:
+        return None
+    username, password = value.split(":", 1)
+    if not password or re.fullmatch(r"[A-Za-z0-9_.@\\/+-]{1,256}", username) is None:
+        return None
+    return username, password
+
+
 def _decode_basic(value: str) -> str | None:
     try:
         decoded = base64.b64decode(value, validate=True).decode("utf-8")
     except (ValueError, UnicodeDecodeError, binascii.Error):
         return None
-    if ":" not in decoded:
-        return None
-    _username, password = decoded.split(":", 1)
-    return password or None
+    pair = _split_user_password(decoded)
+    return pair[1] if pair is not None else None
 
 
 def _decode_credential_base64(value: str) -> str | None:
@@ -929,16 +940,14 @@ def analyze_value(
         if allow_base64 and normalized.endswith(base64_contexts):
             decoded = _decode_credential_base64(stripped)
             if decoded:
-                if ":" in decoded:
-                    _username, password = decoded.split(":", 1)
-                    if password:
-                        detections.append(_candidate(password, "password", 92, "base64_credential", "credential_pair"))
-                        decoded_value_added = True
+                if decoded.lstrip().startswith(("{", "[")):
+                    detections.append(_candidate(decoded, "encoded_credentials", 78, "base64_credential"))
+                    decoded_value_added = True
                 elif _PRIVATE_KEY_RE.search(decoded):
                     detections.append(_candidate(decoded, "private_key", 99, "base64_credential", "private_key_pem"))
                     decoded_value_added = True
-                elif decoded.lstrip().startswith(("{", "[")):
-                    detections.append(_candidate(decoded, "encoded_credentials", 78, "base64_credential"))
+                elif (pair := _split_user_password(decoded)) is not None:
+                    detections.append(_candidate(pair[1], "password", 92, "base64_credential", "credential_pair"))
                     decoded_value_added = True
                 elif not _looks_placeholder(decoded):
                     detections.append(_candidate(decoded, secret_type, 88, "base64_credential", "sensitive_field"))
@@ -1327,6 +1336,92 @@ def _error_detail(response: DiscoverResponse, parsed: Any = None) -> JsonObject:
     return detail
 
 
+def _is_missing_search_context(response: DiscoverResponse, parsed: Any = None) -> bool:
+    """Return whether a failed search lost its server-side PIT/scroll context.
+
+    Elasticsearch and OpenSearch commonly wrap ``search_context_missing_exception``
+    in ``search_phase_execution_exception``.  Some releases instead return a
+    ``resource_not_found_exception`` whose reason mentions a PIT.  Restrict the
+    textual fallback to search/PIT context wording so an unrelated 404 (for
+    example a deleted index) is not retried as pagination expiry.
+    """
+
+    if response.error or response.status not in {400, 404, 500, 503}:
+        return False
+    if not isinstance(parsed, Mapping):
+        parsed = _load_json(response.payload)
+    if not isinstance(parsed, Mapping):
+        return False
+
+    pending: list[Any] = [parsed.get("error", parsed)]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, Mapping):
+            error_type = str(value.get("type") or "").strip().lower()
+            reason = str(value.get("reason") or "").strip().lower()
+            if error_type in {
+                "search_context_missing_exception",
+                "point_in_time_missing_exception",
+            }:
+                return True
+            if "no search context found" in reason:
+                return True
+            mentions_context = (
+                "search context" in reason or "point in time" in reason or re.search(r"\bpit\b", reason) is not None
+            )
+            if mentions_context and any(marker in reason for marker in ("missing", "not found", "expired")):
+                return True
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+    return False
+
+
+def _legacy_search_adjustment(
+    response: DiscoverResponse,
+    parsed: Any,
+    body: Mapping[str, Any],
+    path: str,
+    legacy_path: str,
+) -> tuple[JsonObject, str, tuple[str, ...]] | None:
+    """Remove only optional modern search elements explicitly rejected by 1.x.
+
+    The response must be a parse/unknown-element HTTP 400 and name the exact
+    request element.  This deliberately avoids replaying arbitrary bad queries
+    and authorization/transport failures.
+    """
+
+    if response.error or response.status != 400:
+        return None
+    error_value = parsed.get("error") if isinstance(parsed, Mapping) else parsed
+    error_text = json.dumps(error_value, ensure_ascii=False, default=str).lower()
+    compatibility_markers = (
+        "no parser for element",
+        "unknown key",
+        "unknown field",
+        "unknown parameter",
+        "unrecognized parameter",
+        "not supported",
+        "unsupported",
+    )
+    if not any(marker in error_text for marker in compatibility_markers):
+        return None
+
+    adjusted = dict(body)
+    changes: list[str] = []
+    for name in ("track_total_hits", "stored_fields", "docvalue_fields", "runtime_mappings"):
+        if name in adjusted and name in error_text:
+            adjusted.pop(name, None)
+            changes.append(name)
+    adjusted_path = path
+    if path != legacy_path and "expand_wildcards" in error_text:
+        adjusted_path = legacy_path
+        changes.append("expand_wildcards")
+    if not changes:
+        return None
+    return adjusted, adjusted_path, tuple(changes)
+
+
 def _surface_status(response: DiscoverResponse) -> SurfaceStatus:
     if response.status in {401, 403}:
         return "denied"
@@ -1537,6 +1632,73 @@ class DiscoverEngine:
         legacy["total_hits_relation"] = "lower_bound"
         legacy["truncated"] = True
 
+    def _record_pagination_recovery(
+        self,
+        index: str,
+        response: DiscoverResponse,
+        parsed: Any,
+        *,
+        operation: str,
+        attempt: int,
+    ) -> None:
+        """Keep recovered context failures observable without making them terminal."""
+
+        legacy = self._legacy_result(index)
+        detail = dict(_error_detail(response, parsed))
+        detail["operation"] = operation
+        detail["recovery_attempt"] = attempt
+        partial_errors = legacy.get("partial_error_details")
+        if isinstance(partial_errors, list):
+            partial_errors.append(detail)
+        legacy["retried"] = True
+        legacy["retry_chunks"] = int(legacy.get("retry_chunks") or 0) + 1
+
+    def _clear_pit_fallback_error(self, index: str) -> None:
+        """Clear a terminal PIT error after scroll/single-page fallback succeeds."""
+
+        legacy = self._legacy_result(index)
+        if str(legacy.get("error") or "").startswith(("PIT search:", "PIT reopen:")):
+            legacy["error"] = None
+            legacy["error_detail"] = None
+
+    def _request_search_with_legacy_fallback(
+        self,
+        index: str,
+        body: JsonObject,
+        path: str,
+        legacy_path: str,
+        *,
+        operation: str,
+    ) -> tuple[DiscoverResponse, Any, JsonObject, str]:
+        """Issue an initial search with bounded, error-driven ES 1.x fixes."""
+
+        effective_body = dict(body)
+        effective_path = path
+        for attempt in range(1, MAX_LEGACY_SEARCH_ADJUSTMENTS + 2):
+            response, parsed = self._request("POST", effective_path, body=effective_body)
+            if response.status == 200 and isinstance(parsed, Mapping):
+                return response, parsed, effective_body, effective_path
+            if attempt > MAX_LEGACY_SEARCH_ADJUSTMENTS:
+                return response, parsed, effective_body, effective_path
+            adjustment = _legacy_search_adjustment(
+                response,
+                parsed,
+                effective_body,
+                effective_path,
+                legacy_path,
+            )
+            if adjustment is None:
+                return response, parsed, effective_body, effective_path
+            self._record_pagination_recovery(
+                index,
+                response,
+                parsed,
+                operation=operation,
+                attempt=attempt,
+            )
+            effective_body, effective_path, _changes = adjustment
+        raise AssertionError("unreachable legacy search retry loop")
+
     def _set_surface_failure(
         self,
         name: str,
@@ -1671,14 +1833,28 @@ class DiscoverEngine:
             surface.objects_scanned += 1
             return inventory, None, None
 
-        cat_response, cat_parsed = self._request(
-            "GET",
-            "/_cat/indices?format=json&expand_wildcards=all&h=index,status",
-        )
+        cat_response, cat_parsed = self._request("GET", "/_cat/indices?format=json&expand_wildcards=all&h=index,status")
         cat_inventory = self._parse_cat_inventory(cat_parsed) if cat_response.status == 200 else None
         if cat_inventory is not None and not cat_response.truncated:
             surface.objects_scanned += 1
             return cat_inventory, None, None
+
+        # Elasticsearch 1.x predates ``expand_wildcards`` on this CAT API.
+        # Retry only syntax/API incompatibility; authorization failures and
+        # transport errors remain authoritative and are never hidden.
+        if cat_response.status in {400, 404}:
+            for legacy_path in (
+                "/_cat/indices?format=json&h=index,status",
+                "/_cat/indices?format=json",
+            ):
+                legacy_response, legacy_parsed = self._request("GET", legacy_path)
+                legacy_inventory = self._parse_cat_inventory(legacy_parsed) if legacy_response.status == 200 else None
+                if legacy_inventory is not None and not legacy_response.truncated:
+                    surface.objects_scanned += 1
+                    return legacy_inventory, None, None
+                cat_response, cat_parsed = legacy_response, legacy_parsed
+                if legacy_response.status not in {400, 404}:
+                    break
         if response.truncated or cat_response.truncated:
             surface.status = "partial"
             self.coverage.mark_truncated("index_inventory:response_size_cap")
@@ -1694,18 +1870,28 @@ class DiscoverEngine:
         *,
         suffix: str,
         surface_name: str,
+        legacy_suffix: str | None = None,
     ) -> JsonObject:
         merged: JsonObject = {}
         surface = self.coverage.surfaces.setdefault(surface_name, SurfaceCoverage())
         requested = set(indices)
         scanned: set[str] = set()
         surface.objects_attempted += len(requested)
+        use_legacy_suffix = False
 
         def fetch(batch: Sequence[str]) -> None:
+            nonlocal use_legacy_suffix
             if not batch or self.budget.stopped:
                 return
-            path = f"/{_quote_indices(batch)}/{suffix}"
+            selected_suffix = legacy_suffix if use_legacy_suffix and legacy_suffix else suffix
+            path = f"/{_quote_indices(batch)}/{selected_suffix}"
             response, parsed = self._request("GET", path)
+            if legacy_suffix and not use_legacy_suffix and response.status in {400, 404} and not response.error:
+                legacy_path = f"/{_quote_indices(batch)}/{legacy_suffix}"
+                legacy_response, legacy_parsed = self._request("GET", legacy_path)
+                if legacy_response.status == 200 and isinstance(legacy_parsed, Mapping):
+                    use_legacy_suffix = True
+                response, parsed = legacy_response, legacy_parsed
             valid = response.status == 200 and isinstance(parsed, Mapping)
             if valid:
                 for key, value in parsed.items():
@@ -2006,6 +2192,7 @@ class DiscoverEngine:
         search_after: list[Any] | None = None
         previous_sort: list[Any] | None = None
         successful_pages = 0
+        context_recoveries = 0
         try:
             while not self.budget.stopped:
                 body = dict(query)
@@ -2017,7 +2204,40 @@ class DiscoverEngine:
                     body["track_total_hits"] = False
                 response, parsed = self._request("POST", "/_search", body=body)
                 if response.status != 200 or not isinstance(parsed, Mapping):
-                    if successful_pages:
+                    if (
+                        _is_missing_search_context(response, parsed)
+                        and context_recoveries < MAX_PAGINATION_CONTEXT_RECOVERIES
+                    ):
+                        context_recoveries += 1
+                        self._record_pagination_recovery(
+                            index,
+                            response,
+                            parsed,
+                            operation="pit",
+                            attempt=context_recoveries,
+                        )
+                        expired_pit = current_pit
+                        current_pit = ""
+                        self._close_pit(expired_pit)
+                        reopened_pit, reopen_response, reopen_parsed = self._open_pit(index)
+                        if not reopened_pit:
+                            self._record_pagination_recovery(
+                                index,
+                                reopen_response,
+                                reopen_parsed,
+                                operation="pit_reopen",
+                                attempt=context_recoveries,
+                            )
+                            return False
+                        current_pit = reopened_pit
+                        # ``_shard_doc`` sort values belong to the old PIT.  A
+                        # restart from page one is the only safe continuation;
+                        # document/finding deduplication keeps it exact-once.
+                        search_after = None
+                        previous_sort = None
+                        successful_pages = 0
+                        continue
+                    if successful_pages or _is_missing_search_context(response, parsed):
                         self._record_index_error(index, response, parsed, prefix="PIT search")
                     return False
                 successful_pages += 1
@@ -2039,7 +2259,8 @@ class DiscoverEngine:
                 search_after = last_sort
             return True
         finally:
-            self._close_pit(current_pit)
+            if current_pit:
+                self._close_pit(current_pit)
 
     def _clear_scroll(self, scroll_id: str) -> None:
         self._request(
@@ -2062,42 +2283,28 @@ class DiscoverEngine:
         body = dict(query)
         body["size"] = self.options.page_size
         body["sort"] = ["_doc"]
-        response, parsed = self._request(
-            "POST",
-            f"/{quoted}/_search?scroll={keep_alive}&expand_wildcards=open",
-            body=body,
-        )
-        if response.status != 200 or not isinstance(parsed, Mapping):
-            return False
-        scroll_id_raw = parsed.get("_scroll_id")
-        scroll_id = str(scroll_id_raw) if isinstance(scroll_id_raw, str) and scroll_id_raw else ""
+        search_path = f"/{quoted}/_search?scroll={keep_alive}&expand_wildcards=open"
+        legacy_search_path = f"/{quoted}/_search?scroll={keep_alive}"
+        scroll_id = ""
+        context_recoveries = 0
+        started = False
         try:
-            hits, _last_sort, _pit = self._consume_search_page(
-                index,
-                response,
-                parsed,
-                candidate=candidate,
-                payload_complete=payload_complete,
-            )
-            if hits and not scroll_id:
-                self.coverage.mark_truncated(f"search:{index}:scroll_id_missing")
-                self._legacy_result(index)["total_hits_relation"] = "lower_bound"
-                self._legacy_result(index)["truncated"] = True
-                return True
-            completed = True
-            while hits and scroll_id and not self.budget.stopped:
-                response, parsed = self._request(
-                    "POST",
-                    "/_search/scroll",
-                    body={"scroll": self.options.pit_keep_alive, "scroll_id": scroll_id},
+            while not self.budget.stopped:
+                response, parsed, body, search_path = self._request_search_with_legacy_fallback(
+                    index,
+                    body,
+                    search_path,
+                    legacy_search_path,
+                    operation="legacy_scroll_search",
                 )
                 if response.status != 200 or not isinstance(parsed, Mapping):
-                    self._record_index_error(index, response, parsed, prefix="scroll")
-                    completed = False
-                    break
-                new_scroll_id = parsed.get("_scroll_id")
-                if isinstance(new_scroll_id, str) and new_scroll_id:
-                    scroll_id = new_scroll_id
+                    if started:
+                        self._record_index_error(index, response, parsed, prefix="scroll restart")
+                        return True
+                    return False
+                started = True
+                scroll_id_raw = parsed.get("_scroll_id")
+                scroll_id = str(scroll_id_raw) if isinstance(scroll_id_raw, str) and scroll_id_raw else ""
                 hits, _last_sort, _pit = self._consume_search_page(
                     index,
                     response,
@@ -2105,11 +2312,54 @@ class DiscoverEngine:
                     candidate=candidate,
                     payload_complete=payload_complete,
                 )
-            if completed and not self.budget.stopped:
-                legacy = self._legacy_result(index)
-                if str(legacy.get("error") or "").startswith("PIT search:"):
-                    legacy["error"] = None
-                    legacy["error_detail"] = None
+                if hits and not scroll_id:
+                    self.coverage.mark_truncated(f"search:{index}:scroll_id_missing")
+                    self._legacy_result(index)["total_hits_relation"] = "lower_bound"
+                    self._legacy_result(index)["truncated"] = True
+                    return True
+
+                restart = False
+                while hits and scroll_id and not self.budget.stopped:
+                    response, parsed = self._request(
+                        "POST",
+                        "/_search/scroll",
+                        body={"scroll": self.options.pit_keep_alive, "scroll_id": scroll_id},
+                    )
+                    if response.status != 200 or not isinstance(parsed, Mapping):
+                        if (
+                            _is_missing_search_context(response, parsed)
+                            and context_recoveries < MAX_PAGINATION_CONTEXT_RECOVERIES
+                        ):
+                            context_recoveries += 1
+                            self._record_pagination_recovery(
+                                index,
+                                response,
+                                parsed,
+                                operation="scroll",
+                                attempt=context_recoveries,
+                            )
+                            expired_scroll = scroll_id
+                            scroll_id = ""
+                            self._clear_scroll(expired_scroll)
+                            restart = True
+                            break
+                        self._record_index_error(index, response, parsed, prefix="scroll")
+                        return True
+                    new_scroll_id = parsed.get("_scroll_id")
+                    if isinstance(new_scroll_id, str) and new_scroll_id:
+                        scroll_id = new_scroll_id
+                    hits, _last_sort, _pit = self._consume_search_page(
+                        index,
+                        response,
+                        parsed,
+                        candidate=candidate,
+                        payload_complete=payload_complete,
+                    )
+                if restart:
+                    continue
+                if not self.budget.stopped:
+                    self._clear_pit_fallback_error(index)
+                return True
             return True
         finally:
             if scroll_id:
@@ -2127,10 +2377,12 @@ class DiscoverEngine:
         body = dict(query)
         body["size"] = self.options.page_size
         body.pop("sort", None)
-        response, parsed = self._request(
-            "POST",
+        response, parsed, _effective_body, _effective_path = self._request_search_with_legacy_fallback(
+            index,
+            body,
             f"/{quoted}/_search?expand_wildcards=open",
-            body=body,
+            f"/{quoted}/_search",
+            operation="legacy_single_page_search",
         )
         self._consume_search_page(
             index,
@@ -2139,7 +2391,11 @@ class DiscoverEngine:
             candidate=candidate,
             payload_complete=payload_complete,
         )
-        self.coverage.mark_truncated(f"search:{index}:pagination_unavailable")
+        hits_container = parsed.get("hits") if isinstance(parsed, Mapping) else None
+        valid_hits_payload = isinstance(hits_container, Mapping) and isinstance(hits_container.get("hits"), list)
+        if response.status == 200 and valid_hits_payload:
+            self._clear_pit_fallback_error(index)
+            self.coverage.mark_truncated(f"search:{index}:pagination_unavailable")
 
     def _search_query(self, index: str, query: JsonObject, *, candidate: bool) -> None:
         if self.budget.stopped:
@@ -2259,11 +2515,13 @@ class DiscoverEngine:
                 open_indices,
                 suffix="_mapping?expand_wildcards=open,hidden",
                 surface_name="mappings",
+                legacy_suffix="_mapping",
             )
             settings = self._fetch_index_resource(
                 open_indices,
                 suffix="_settings?expand_wildcards=open,hidden&flat_settings=false&include_defaults=false",
                 surface_name="index_settings",
+                legacy_suffix="_settings",
             )
 
         mapping_configuration = _extract_mapping_configuration(mappings)
@@ -2296,7 +2554,7 @@ class DiscoverEngine:
 
         for name, path in (
             ("cluster_settings", "/_cluster/settings?flat_settings=false&include_defaults=false"),
-            ("node_settings", "/_nodes/settings?flat_settings=false&include_defaults=false"),
+            ("node_settings", "/_nodes/settings?flat_settings=false"),
             ("index_templates", "/_index_template"),
             ("component_templates", "/_component_template"),
             ("legacy_templates", "/_template"),

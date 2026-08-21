@@ -53,20 +53,20 @@ def test_configure_clickhouse_loggers_suppresses_warning_propagation() -> None:
 def test_build_credential_candidates_with_defcreds() -> None:
     candidates = clickhouse_stage._build_credential_candidates(None, None, True)
     assert candidates == [
-        ("default", "", "default"),
-        ("default", "default", "default"),
-        ("default", "password", "default"),
-        ("default", "clickhouse", "default"),
+        ("admin", "admin", "default"),
+        ("admin", "changeme", "default"),
+        ("admin", "password", "default"),
         ("clickhouse", "clickhouse", "default"),
         ("clickhouse", "password", "default"),
-        ("admin", "admin", "default"),
-        ("admin", "password", "default"),
-        ("root", "root", "default"),
-        ("user", "user", "default"),
+        ("default", "", "default"),
         ("default", "changeme", "default"),
-        ("admin", "changeme", "default"),
+        ("default", "clickhouse", "default"),
+        ("default", "default", "default"),
+        ("default", "password", "default"),
         ("root", "password", "default"),
+        ("root", "root", "default"),
         ("user", "password", "default"),
+        ("user", "user", "default"),
     ]
 
 
@@ -74,19 +74,19 @@ def test_build_credential_candidates_with_provided_and_defcreds_deduplicates() -
     candidates = clickhouse_stage._build_credential_candidates("default", "", True)
     assert candidates == [
         ("default", "", "provided"),
-        ("default", "default", "default"),
-        ("default", "password", "default"),
-        ("default", "clickhouse", "default"),
+        ("admin", "admin", "default"),
+        ("admin", "changeme", "default"),
+        ("admin", "password", "default"),
         ("clickhouse", "clickhouse", "default"),
         ("clickhouse", "password", "default"),
-        ("admin", "admin", "default"),
-        ("admin", "password", "default"),
-        ("root", "root", "default"),
-        ("user", "user", "default"),
         ("default", "changeme", "default"),
-        ("admin", "changeme", "default"),
+        ("default", "clickhouse", "default"),
+        ("default", "default", "default"),
+        ("default", "password", "default"),
         ("root", "password", "default"),
+        ("root", "root", "default"),
         ("user", "password", "default"),
+        ("user", "user", "default"),
     ]
 
 
@@ -195,8 +195,8 @@ def test_audit_clickhouse_defcreds_sweeps_all_pairs_and_keeps_first_success(
     )
 
     assert record["status"] == "weak_default_creds"
-    assert record["effective_username"] == "default"
-    assert record["effective_password"] == ""
+    assert record["effective_username"] == "admin"
+    assert record["effective_password"] == "admin"
     assert int(record["attempted_credentials"]) == 14
     attempts = record.get("auth_attempts")
     assert isinstance(attempts, list)
@@ -687,7 +687,8 @@ def test_audit_clickhouse_targets_suppresses_timeout_and_refused_failures(monkey
 
     assert totals == (1, 0, 0, 0, 0, 1)
     assert len(emitted) == 1
-    assert "No CLICKHOUSE service detected" in emitted[0]
+    assert "CLICKHOUSE audit inconclusive" in emitted[0]
+    assert "unreachable or failed before detection" in emitted[0]
     assert all("Connection refused" not in line and "timed out" not in line for line in emitted)
 
 
@@ -1170,19 +1171,19 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
         ("default", ""),
         ("bad", "bad"),
         ("admin", "admin"),
-        ("default", ""),
-        ("default", "default"),
-        ("default", "password"),
-        ("default", "clickhouse"),
+        ("admin", "changeme"),
+        ("admin", "password"),
         ("clickhouse", "clickhouse"),
         ("clickhouse", "password"),
-        ("admin", "password"),
-        ("root", "root"),
-        ("user", "user"),
+        ("default", ""),
         ("default", "changeme"),
-        ("admin", "changeme"),
+        ("default", "clickhouse"),
+        ("default", "default"),
+        ("default", "password"),
         ("root", "password"),
+        ("root", "root"),
         ("user", "password"),
+        ("user", "user"),
     ]
     assert emitted_records[0]["status"] == "valid_credentials"
     assert emitted_records[0]["credentials_source"] == "file"
@@ -1190,19 +1191,19 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
     assert [(item["username"], item["password"], item["source"]) for item in emitted_records[0]["auth_attempts"]] == [
         ("bad", "bad", "file"),
         ("admin", "admin", "file"),
-        ("default", "", "default"),
-        ("default", "default", "default"),
-        ("default", "password", "default"),
-        ("default", "clickhouse", "default"),
+        ("admin", "changeme", "default"),
+        ("admin", "password", "default"),
         ("clickhouse", "clickhouse", "default"),
         ("clickhouse", "password", "default"),
-        ("admin", "password", "default"),
-        ("root", "root", "default"),
-        ("user", "user", "default"),
+        ("default", "", "default"),
         ("default", "changeme", "default"),
-        ("admin", "changeme", "default"),
+        ("default", "clickhouse", "default"),
+        ("default", "default", "default"),
+        ("default", "password", "default"),
         ("root", "password", "default"),
+        ("root", "root", "default"),
         ("user", "password", "default"),
+        ("user", "user", "default"),
     ]
     assert len(shell_calls) == 1
     assert shell_calls[0]["username"] == "admin"
@@ -1668,6 +1669,137 @@ def test_clickhouse_capability_and_exec_sql_helpers(monkeypatch: pytest.MonkeyPa
     assert connect_calls == ["analytics", "default"]
 
 
+def test_clickhouse_grant_parser_does_not_confuse_system_database_with_system_privilege() -> None:
+    assert clickhouse_stage._parse_clickhouse_grants(["GRANT SELECT ON system.tables TO auditor"]) == (
+        False,
+        False,
+    )
+    assert clickhouse_stage._parse_clickhouse_grants(
+        ["GRANT SELECT ON analytics.* TO auditor", "GRANT SYSTEM RELOAD CONFIG ON *.* TO auditor"]
+    ) == (True, True)
+    assert clickhouse_stage._parse_clickhouse_grants(
+        ['GRANT SELECT ON "system"."tables" TO auditor', "GRANT ALL ON analytics.events TO auditor"]
+    ) == (True, False)
+    assert clickhouse_stage._parse_clickhouse_grants(["GRANT ALL ON *.* TO auditor"]) == (True, True)
+
+
+def test_clickhouse_tls_options_reach_native_and_http_drivers(monkeypatch: pytest.MonkeyPatch) -> None:
+    native_calls: list[dict[str, object]] = []
+
+    def fake_native(**kwargs: object) -> object:
+        native_calls.append(dict(kwargs))
+        return object()
+
+    monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: fake_native)
+    tls = clickhouse_stage._ChTlsConfig(
+        enabled=True,
+        verify=False,
+        ca_file="ca.pem",
+        cert_file="client.pem",
+        key_file="client.key",
+        server_name="ch.internal",
+    )
+    clickhouse_stage._open_clickhouse_client("native", "10.0.0.5", 9440, 1.0, "default", "", "default", tls_config=tls)
+    native = native_calls[0]
+    assert native["secure"] is True
+    assert native["verify"] is False
+    assert native["ca_certs"] == "ca.pem"
+    assert native["certfile"] == "client.pem"
+    assert native["keyfile"] == "client.key"
+    assert native["server_hostname"] == "ch.internal"
+
+    http_calls: list[dict[str, object]] = []
+    module = SimpleNamespace(get_client=lambda **kwargs: http_calls.append(dict(kwargs)) or object())
+    monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_connect_module", lambda: module)
+    clickhouse_stage._open_clickhouse_client(
+        "http",
+        "10.0.0.5",
+        8443,
+        1.0,
+        "default",
+        "",
+        "default",
+        tls_config=tls,
+        proxy="http://127.0.0.1:8080",
+    )
+    http = http_calls[0]
+    assert http["interface"] == "https"
+    assert http["secure"] is True
+    assert http["client_cert"] == "client.pem"
+    assert http["client_cert_key"] == "client.key"
+    assert http["https_proxy"] == "http://127.0.0.1:8080"
+
+
+def test_clickhouse_database_fallback_is_explicit_and_uses_effective_database(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = clickhouse_stage.ClickHouseLifecycleState(anonymous_session=_session(database="default"))
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        host="127.0.0.1",
+        port=9000,
+        args=SimpleNamespace(retries=0),
+    )
+    monkeypatch.setattr(
+        clickhouse_stage,
+        "_open_operational_session",
+        lambda *_args, **_kwargs: (
+            _session(database="default"),
+            "database 'analytics' unavailable; connected to default",
+        ),
+    )
+    seen_database: list[str] = []
+
+    def fake_actions(_session_obj: object, **kwargs: object) -> dict[str, object]:
+        seen_database.append(str(kwargs["database"]))
+        return _empty_clickhouse_action_result()
+
+    monkeypatch.setattr(clickhouse_stage, "_run_clickhouse_actions_on_session", fake_actions)
+    monkeypatch.setattr(clickhouse_stage, "_close_client", lambda *_args: None)
+    options = {
+        "database": "analytics",
+        "protocol": "native",
+        "show_databases": False,
+        "show_tables": False,
+        "show_columns": False,
+        "table_targets": [],
+        "table_columns": [],
+        "dump_table_rows": False,
+        "dump_row_limit": None,
+        "execute_command": None,
+        "sql_command": None,
+        "show_databases_limit": None,
+        "show_tables_limit": None,
+    }
+    result = clickhouse_stage.collect_clickhouse_data(
+        ctx,
+        {"status": "open_no_auth", "auth_attempts": []},
+        options,
+    )
+    assert seen_database == ["default"]
+    assert result["requested_database"] == "analytics"
+    assert result["effective_database"] == "default"
+    assert result["database_fallback"] is True
+    assert result["partial"] is True
+    assert "connected to default" in str(result["error"])
+    fallback_lines = clickhouse_stage._format_database_fallback_detail_records(result, "txt")
+    assert "database=analytics unavailable" in fallback_lines[0]
+    assert "database=default (partial result)" in fallback_lines[0]
+
+
+def test_clickhouse_tls_plan_defaults_and_native_proxy_fail_closed() -> None:
+    native_tls = parse_args(["clickhouse", "-t", "ch.local", "--tls"])
+    assert clickhouse_stage.build_clickhouse_plan(native_tls).ports == (9440,)
+    http_tls = parse_args(["clickhouse", "-t", "ch.local", "--http", "--tls"])
+    assert clickhouse_stage.build_clickhouse_plan(http_tls).ports == (8443,)
+
+    console = _ValidationConsole()
+    args = _clickhouse_validation_args(proxy="socks5://127.0.0.1:1080")
+    assert clickhouse_policy.validate_args(args, console) == 2
+    assert any("cannot guarantee --proxy" in message for message in console.messages)
+
+
 def test_render_colored_clickhouse_line_smoke() -> None:
     class _Painter:
         def __init__(self) -> None:
@@ -1839,20 +1971,20 @@ def test_clickhouse_defcreds_plan_preserves_provided_then_default_order() -> Non
     plan = clickhouse_stage.build_clickhouse_plan(args)
     assert [(run.username, run.password, run.source) for run in plan.credential_runs] == [
         ("app", "secret", "provided"),
-        ("default", "", "default"),
-        ("default", "default", "default"),
-        ("default", "password", "default"),
-        ("default", "clickhouse", "default"),
+        ("admin", "admin", "default"),
+        ("admin", "changeme", "default"),
+        ("admin", "password", "default"),
         ("clickhouse", "clickhouse", "default"),
         ("clickhouse", "password", "default"),
-        ("admin", "admin", "default"),
-        ("admin", "password", "default"),
-        ("root", "root", "default"),
-        ("user", "user", "default"),
+        ("default", "", "default"),
         ("default", "changeme", "default"),
-        ("admin", "changeme", "default"),
+        ("default", "clickhouse", "default"),
+        ("default", "default", "default"),
+        ("default", "password", "default"),
         ("root", "password", "default"),
+        ("root", "root", "default"),
         ("user", "password", "default"),
+        ("user", "user", "default"),
     ]
 
 
@@ -1898,10 +2030,10 @@ def test_clickhouse_lifecycle_renders_every_attempt_until_first_success_without_
         for username, password, _source in clickhouse_stage._build_credential_candidates(None, None, True)
     ]
     assert auth_pairs == expected_pairs
-    assert action_sessions == [("default", "default")]
+    assert action_sessions == [("admin", "admin")]
     assert result.records[0]["status"] == "weak_default_creds"
-    assert result.records[0]["effective_username"] == "default"
-    assert result.records[0]["effective_password"] == "default"
+    assert result.records[0]["effective_username"] == "admin"
+    assert result.records[0]["effective_password"] == "admin"
     assert [
         (item["username"], item["password"], item["source"], item["ok"]) for item in result.records[0]["auth_attempts"]
     ] == [
@@ -1915,8 +2047,8 @@ def test_clickhouse_lifecycle_renders_every_attempt_until_first_success_without_
     ]
     attempt_lines = [line for line in emitted if " [+] " in line or " [-] " in line]
     assert len(attempt_lines) == len(expected_pairs)
-    selected_line = next(line for line in attempt_lines if "[+] default:default" in line)
-    later_success_line = next(line for line in attempt_lines if "[+] admin:admin" in line)
+    selected_line = next(line for line in attempt_lines if "[+] admin:admin" in line)
+    later_success_line = next(line for line in attempt_lines if "[+] default:default" in line)
     assert "(read:true)" in selected_line
     assert "(read:" not in later_success_line
 

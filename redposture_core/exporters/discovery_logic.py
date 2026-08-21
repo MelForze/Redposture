@@ -6,6 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..scheduler import BoundedScheduler
+from .http_client import build_http_url
 
 HttpGetDetails = Callable[..., dict[str, Any]]
 
@@ -95,11 +96,12 @@ def fetch_fingerprint_bodies(
     timeout: float,
     retries: int,
     *,
+    scheme: str = "http",
     http_get_details_fn: HttpGetDetails,
     max_bytes: int,
 ) -> tuple[str, str]:
-    vars_url = f"http://{host}:{port}/debug/vars"
-    cmdline_url = f"http://{host}:{port}/debug/pprof/cmdline?debug=1"
+    vars_url = build_http_url(host, port, "/debug/vars", scheme=scheme)
+    cmdline_url = build_http_url(host, port, "/debug/pprof/cmdline?debug=1", scheme=scheme)
 
     scheduler: BoundedScheduler[tuple[str, str], dict[str, Any]] = BoundedScheduler(max_workers=2, max_inflight=2)
     results: dict[str, dict[str, Any]] = {}

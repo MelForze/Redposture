@@ -9,7 +9,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,9 +25,12 @@ class HttpClientConfig:
     backoff: float = 0.15
     insecure: bool = False
     ca_file: str | None = None
+    client_cert: str | None = None
+    client_key: str | None = None
     proxy: ProxyConfig | str | None = None
     response_size_cap: int = 10 * 1024 * 1024
     default_headers: Mapping[str, str] = field(default_factory=dict)
+    allow_cross_origin_redirects: bool = False
 
 
 @dataclass(frozen=True)
@@ -44,6 +49,9 @@ class HttpResponse:
     headers: dict[str, str]
     error: str | None = None
     truncated: bool = False
+    request_url: str | None = None
+    final_url: str | None = None
+    redirect_history: tuple[str, ...] = ()
 
     @property
     def text(self) -> str:
@@ -51,6 +59,131 @@ class HttpResponse:
 
     def json(self) -> Any:
         return json.loads(self.text)
+
+    @property
+    def redirected(self) -> bool:
+        return bool(self.redirect_history)
+
+
+@dataclass(frozen=True)
+class HttpTargetBinding:
+    """URL information preserved from a parsed CLI target for one audit hook."""
+
+    scheme: str | None = None
+    base_path: str = ""
+
+
+_HTTP_TARGET_BINDING: ContextVar[HttpTargetBinding | None] = ContextVar(
+    "redposture_http_target_binding",
+    default=None,
+)
+
+
+def _normalize_url_path(path: str) -> str:
+    raw = str(path or "").strip()
+    if not raw or raw == "/":
+        return ""
+    return "/" + raw.strip("/")
+
+
+def infer_http_base_path(path: str, api_prefixes: tuple[str, ...] = ()) -> str:
+    """Infer a reverse-proxy prefix from a target URL path.
+
+    A target such as ``/prefix/api/v4/version`` denotes the same service base
+    as ``/prefix``.  Known API prefixes let modules accept either spelling
+    without duplicating the endpoint path on subsequent requests.
+    """
+
+    normalized = _normalize_url_path(path)
+    if not normalized:
+        return ""
+    for raw_prefix in api_prefixes:
+        prefix = _normalize_url_path(raw_prefix)
+        if not prefix:
+            continue
+        index = normalized.find(prefix)
+        if index < 0:
+            continue
+        # ``prefix`` is normalized with a leading slash, so a match already
+        # starts on a path-segment boundary.
+        before_ok = index == 0 or prefix.startswith("/")
+        after_index = index + len(prefix)
+        after_ok = after_index == len(normalized) or normalized[after_index] in {"/", "?"}
+        if before_ok and after_ok:
+            return _normalize_url_path(normalized[:index])
+    return normalized
+
+
+@contextmanager
+def http_target_context(target: Any, *, api_prefixes: tuple[str, ...] = ()) -> Iterator[None]:
+    """Bind a parsed target's scheme/base path for synchronous module calls."""
+
+    scheme_raw = str(getattr(target, "scheme", "") or "").strip().lower()
+    scheme = scheme_raw if scheme_raw in {"http", "https"} else None
+    base_path = infer_http_base_path(str(getattr(target, "path", "") or ""), api_prefixes)
+    token = _HTTP_TARGET_BINDING.set(HttpTargetBinding(scheme=scheme, base_path=base_path))
+    try:
+        yield
+    finally:
+        _HTTP_TARGET_BINDING.reset(token)
+
+
+def current_http_target_binding() -> HttpTargetBinding:
+    return _HTTP_TARGET_BINDING.get() or HttpTargetBinding()
+
+
+def join_http_target_path(path: str) -> str:
+    endpoint = str(path or "/")
+    parsed = urllib.parse.urlsplit(endpoint)
+    endpoint_path = parsed.path or "/"
+    if not endpoint_path.startswith("/"):
+        endpoint_path = "/" + endpoint_path
+    base_path = current_http_target_binding().base_path
+    if base_path and endpoint_path != base_path and not endpoint_path.startswith(base_path + "/"):
+        endpoint_path = base_path + endpoint_path
+    return urllib.parse.urlunsplit(("", "", endpoint_path, parsed.query, ""))
+
+
+def format_http_authority(host: str, port: int) -> str:
+    normalized = str(host or "").strip()
+    if normalized.startswith("[") and normalized.endswith("]"):
+        normalized = normalized[1:-1]
+    rendered_host = f"[{normalized}]" if ":" in normalized else normalized
+    return f"{rendered_host}:{int(port)}"
+
+
+def build_http_target_url(host: str, port: int, path: str, *, default_scheme: str) -> str:
+    binding = current_http_target_binding()
+    scheme = binding.scheme or str(default_scheme or "http").strip().lower()
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"unsupported HTTP scheme: {scheme or '-'}")
+    parsed_path = urllib.parse.urlsplit(join_http_target_path(path))
+    return urllib.parse.urlunsplit((scheme, format_http_authority(host, port), parsed_path.path, parsed_path.query, ""))
+
+
+def _url_origin(url: str) -> tuple[str, str, int | None]:
+    parsed = urllib.parse.urlsplit(str(url or ""))
+    scheme = parsed.scheme.lower()
+    default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    try:
+        port = parsed.port or default_port
+    except ValueError:
+        port = None
+    return scheme, str(parsed.hostname or "").lower(), port
+
+
+def _response_final_url(response: Any, request_url: str) -> str:
+    getter = getattr(response, "geturl", None)
+    if callable(getter):
+        try:
+            return str(getter() or request_url)
+        except Exception:
+            pass
+    return request_url
+
+
+def _redirect_metadata(request_url: str, final_url: str) -> tuple[str, ...]:
+    return (request_url,) if final_url != request_url else ()
 
 
 def normalize_http_error(exc: BaseException) -> str:
@@ -60,11 +193,20 @@ def normalize_http_error(exc: BaseException) -> str:
     return text or exc.__class__.__name__
 
 
-def _ssl_context(insecure: bool, ca_file: str | None = None) -> ssl.SSLContext:
+def _ssl_context(
+    insecure: bool,
+    ca_file: str | None = None,
+    client_cert: str | None = None,
+    client_key: str | None = None,
+) -> ssl.SSLContext:
     context = ssl.create_default_context(cafile=ca_file or None)
     if insecure:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
+    if client_cert or client_key:
+        if not client_cert or not client_key:
+            raise ValueError("TLS client certificate and key must be provided together")
+        context.load_cert_chain(certfile=client_cert, keyfile=client_key)
     return context
 
 
@@ -235,8 +377,13 @@ class HttpApiClient:
     def __init__(self, config: HttpClientConfig | None = None) -> None:
         self.config = config or HttpClientConfig()
         self._context = (
-            _ssl_context(self.config.insecure, self.config.ca_file)
-            if self.config.insecure or self.config.ca_file
+            _ssl_context(
+                self.config.insecure,
+                self.config.ca_file,
+                self.config.client_cert,
+                self.config.client_key,
+            )
+            if self.config.insecure or self.config.ca_file or self.config.client_cert or self.config.client_key
             else None
         )
 
@@ -315,9 +462,18 @@ class HttpApiClient:
             if response.error is None:
                 return response
             last_error = response.error
+            if response.error.startswith("cross-origin redirect blocked:"):
+                return response
             if attempt < attempts:
                 time.sleep(max(0.0, float(self.config.backoff)) * attempt)
-        return HttpResponse(status=0, body=b"", headers={}, error=last_error or "request failed")
+        return HttpResponse(
+            status=0,
+            body=b"",
+            headers={},
+            error=last_error or "request failed",
+            request_url=request.url,
+            final_url=request.url,
+        )
 
     def _send_once(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:
         headers = {str(key): str(value) for key, value in self.config.default_headers.items()}
@@ -357,12 +513,24 @@ class HttpApiClient:
                 truncated = len(payload) > response_cap
                 if truncated:
                     payload = payload[:response_cap]
+                final_url = _response_final_url(resp, request.url)
+                redirect_history = _redirect_metadata(request.url, final_url)
+                redirect_error = None
+                if (
+                    redirect_history
+                    and not self.config.allow_cross_origin_redirects
+                    and _url_origin(request.url) != _url_origin(final_url)
+                ):
+                    redirect_error = f"cross-origin redirect blocked: {request.url} -> {final_url}"
                 return HttpResponse(
                     status=int(getattr(resp, "status", 0) or resp.getcode()),
                     body=payload,
                     headers={str(key): str(value) for key, value in getattr(resp, "headers", {}).items()},
-                    error=None,
+                    error=redirect_error,
                     truncated=truncated,
+                    request_url=request.url,
+                    final_url=final_url,
+                    redirect_history=redirect_history,
                 )
         except urllib.error.HTTPError as exc:
             response_cap = max(0, int(self.config.response_size_cap))
@@ -377,15 +545,31 @@ class HttpApiClient:
             truncated = len(payload) > response_cap
             if truncated:
                 payload = payload[:response_cap]
+            # urllib's HTTPError URL is not a redirect history: adapters and
+            # tests may normalize it independently (for example dropping an
+            # explicit port).  Without a successful response there is no
+            # reliable chain to report, so retain the original request URL.
+            final_url = request.url
+            redirect_history = ()
             return HttpResponse(
                 status=int(exc.code),
                 body=payload,
                 headers={str(key): str(value) for key, value in exc.headers.items()},
                 error=None,
                 truncated=truncated,
+                request_url=request.url,
+                final_url=final_url,
+                redirect_history=redirect_history,
             )
         except Exception as exc:
-            return HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc))
+            return HttpResponse(
+                status=0,
+                body=b"",
+                headers={},
+                error=normalize_http_error(exc),
+                request_url=request.url,
+                final_url=request.url,
+            )
 
     def _requires_manual_https_proxy_tunnel(self, url: str) -> bool:
         proxy = self._proxy_config()
@@ -412,11 +596,25 @@ class HttpApiClient:
     ) -> HttpResponse:
         proxy = self._proxy_config()
         if proxy is None:
-            return HttpResponse(status=0, body=b"", headers={}, error="missing https proxy config")
+            return HttpResponse(
+                status=0,
+                body=b"",
+                headers={},
+                error="missing https proxy config",
+                request_url=req.full_url,
+                final_url=req.full_url,
+            )
         parsed = urllib.parse.urlsplit(req.full_url)
         host = str(parsed.hostname or "").strip()
         if not host:
-            return HttpResponse(status=0, body=b"", headers={}, error="invalid target host")
+            return HttpResponse(
+                status=0,
+                body=b"",
+                headers={},
+                error="invalid target host",
+                request_url=req.full_url,
+                final_url=req.full_url,
+            )
         port = int(parsed.port or 443)
         path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
         timeout_value = float(timeout if timeout is not None else self.config.timeout)
@@ -441,7 +639,12 @@ class HttpApiClient:
         try:
             outer = open_connection_via_proxy(proxy, (host, port), timeout=timeout_value)
             outer.settimeout(timeout_value)
-            tls_context = self._context or _ssl_context(False, self.config.ca_file)
+            tls_context = self._context or _ssl_context(
+                False,
+                self.config.ca_file,
+                self.config.client_cert,
+                self.config.client_key,
+            )
             response_raw, response_truncated = _tls_over_tls_exchange(
                 outer,
                 tls_context,
@@ -460,9 +663,18 @@ class HttpApiClient:
                 headers=response_headers,
                 error=None,
                 truncated=response_truncated,
+                request_url=req.full_url,
+                final_url=req.full_url,
             )
         except Exception as exc:
-            return HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc))
+            return HttpResponse(
+                status=0,
+                body=b"",
+                headers={},
+                error=normalize_http_error(exc),
+                request_url=req.full_url,
+                final_url=req.full_url,
+            )
         finally:
             if outer is not None:
                 try:
@@ -476,6 +688,13 @@ __all__ = [
     "HttpClientConfig",
     "HttpRequest",
     "HttpResponse",
+    "HttpTargetBinding",
+    "build_http_target_url",
+    "current_http_target_binding",
+    "format_http_authority",
+    "http_target_context",
+    "infer_http_base_path",
+    "join_http_target_path",
     "normalize_http_error",
     "resolve_http_scheme",
 ]
@@ -527,6 +746,10 @@ def resolve_http_scheme(
     if force_scheme in ("http", "https"):
         return force_scheme
 
+    bound_scheme = current_http_target_binding().scheme
+    if bound_scheme in {"http", "https"}:
+        return bound_scheme
+
     key = (host, int(port))
     with _SCHEME_CACHE_LOCK:
         cached = _SCHEME_CACHE.get(key)
@@ -540,7 +763,7 @@ def resolve_http_scheme(
 
     def _probe(scheme: str) -> tuple[bool, str]:
         client = client_https if scheme == "https" else client_http
-        url = f"{scheme}://{host}:{int(port)}{probe_path}"
+        url = build_http_target_url(host, port, probe_path, default_scheme=scheme)
         try:
             response = client.request("GET", url, timeout=timeout)
         except Exception as exc:  # noqa: BLE001 - probe swallows every transport error

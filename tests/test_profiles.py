@@ -142,6 +142,30 @@ def test_trigger_discovery_collect_validators_reject_invalid_shapes() -> None:
         _validate_collect_exporters([{"port": 9100}])
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("detect_path", "metrics", "detect_path must start"),
+        ("trigger_path", "probe", "trigger_path must start"),
+        ("target_fmt", "redis://static:6379", "exactly one"),
+        ("target_fmt", "redis://{unknown}:6379", "exactly one"),
+        ("target_fmt", "redis://{our_host!r}:6379", "must not use conversion"),
+    ],
+)
+def test_trigger_profile_rejects_runtime_malformed_paths_and_templates(field: str, value: str, message: str) -> None:
+    profile = {
+        "name": "redis_exporter",
+        "port": 9121,
+        "detect_path": "/metrics",
+        "markers": ["redis_up"],
+        "trigger_path": "/scrape",
+        "target_fmt": "{our_host}:6379",
+    }
+    profile[field] = value
+    with pytest.raises(ValueError, match=message):
+        _validate_trigger_exporters([profile])
+
+
 def test_collect_endpoint_validator_rejects_invalid_entries() -> None:
     assert _validate_collect_endpoints(["/debug/vars"]) == ("/debug/vars",)
 

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from dataclasses import field as dc_field
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
+from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, resolve_http_scheme
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
@@ -45,6 +45,8 @@ _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _THREAD_LOCAL_DEBUG_EMIT = threading.local()
+_BEARER_TOKEN_CACHE: dict[tuple[str, str, str, str], str] = {}
+_BEARER_TOKEN_CACHE_LOCK = threading.Lock()
 
 _RegistryProbe = tuple[int, bytes, dict[str, str], str | None]
 _RegistryCredentialKey = tuple[str | None, str | None, str | None, str]
@@ -149,6 +151,68 @@ def _auth_headers(username: str | None, password: str | None, token: str | None)
     return {}
 
 
+def _fetch_registry_bearer_token(
+    challenge: str,
+    timeout: float,
+    *,
+    request_headers: Mapping[str, str],
+) -> tuple[str | None, str | None]:
+    scheme, params = _parse_www_authenticate(challenge)
+    if scheme != "bearer":
+        return None, "unsupported registry authentication challenge"
+    realm = str(params.get("realm") or "").strip()
+    if not realm:
+        return None, "registry bearer challenge is missing realm"
+    try:
+        parsed = urllib.parse.urlsplit(realm)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None, "registry bearer realm URL is invalid"
+    except ValueError:
+        return None, "registry bearer realm URL is invalid"
+
+    service = str(params.get("service") or "").strip()
+    scope = str(params.get("scope") or "").strip()
+    authorization = next(
+        (str(value) for key, value in request_headers.items() if str(key).lower() == "authorization"),
+        "",
+    )
+    basic_authorization = authorization if authorization.lower().startswith("basic ") else ""
+    cache_key = (realm, service, scope, basic_authorization)
+    with _BEARER_TOKEN_CACHE_LOCK:
+        cached = _BEARER_TOKEN_CACHE.get(cache_key)
+    if cached:
+        return cached, None
+
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if service and "service" not in query:
+        query["service"] = [service]
+    if scope and "scope" not in query:
+        query["scope"] = [scope]
+    token_url = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path or "/", urllib.parse.urlencode(query, doseq=True), "")
+    )
+    token_headers = {"User-Agent": "RedPosture/1.0", "Accept": "application/json"}
+    if basic_authorization:
+        token_headers["Authorization"] = basic_authorization
+    response = HttpApiClient(
+        HttpClientConfig(timeout=timeout, response_size_cap=1024 * 1024, insecure=parsed.scheme == "https")
+    ).get(token_url, headers=token_headers, timeout=timeout)
+    if response.error:
+        return None, _friendly_error_text(response.error)
+    if response.status != 200:
+        return None, f"registry bearer realm returned status {response.status}"
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None, "registry bearer realm returned invalid JSON"
+    token = str(payload.get("token") or payload.get("access_token") or "").strip() if isinstance(payload, dict) else ""
+    if not token:
+        return None, "registry bearer realm did not return a token"
+    with _BEARER_TOKEN_CACHE_LOCK:
+        _BEARER_TOKEN_CACHE[cache_key] = token
+    return token, None
+
+
 def _http_request(
     host: str,
     port: int,
@@ -160,7 +224,7 @@ def _http_request(
     body: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     scheme = resolve_http_scheme(host, port, timeout, probe_path="/v2/")
-    url = f"{scheme}://{host}:{port}{_normalize_path(path)}"
+    url = build_http_target_url(host, port, _normalize_path(path), default_scheme=scheme)
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
@@ -175,7 +239,30 @@ def _http_request(
     )
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
-    return int(response.status), response.body, {str(k).lower(): str(v) for k, v in response.headers.items()}, None
+    response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+    if int(response.status) == 401:
+        challenge = response_headers.get("www-authenticate", "")
+        challenge_scheme, _challenge_params = _parse_www_authenticate(challenge)
+        if challenge_scheme == "bearer":
+            bearer_token, bearer_error = _fetch_registry_bearer_token(
+                challenge,
+                timeout,
+                request_headers=req_headers,
+            )
+            if bearer_token:
+                retry_headers = dict(req_headers)
+                retry_headers["Authorization"] = f"Bearer {bearer_token}"
+                retry_response = HttpApiClient(
+                    HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True)
+                ).request(method, url, headers=retry_headers, body=body, timeout=timeout)
+                if retry_response.error:
+                    return 0, b"", {}, _friendly_error_text(retry_response.error)
+                retry_response_headers = {str(key).lower(): str(value) for key, value in retry_response.headers.items()}
+                retry_response_headers["x-redposture-bearer-exchanged"] = "true"
+                return int(retry_response.status), retry_response.body, retry_response_headers, None
+            if bearer_error:
+                response_headers["x-redposture-bearer-error"] = bearer_error
+    return int(response.status), response.body, response_headers, None
 
 
 def _http_request_url(
@@ -211,11 +298,11 @@ def _http_download(
     headers: dict[str, str] | None = None,
 ) -> tuple[int, int, str | None]:
     scheme = resolve_http_scheme(host, port, timeout, probe_path="/v2/")
-    url = f"{scheme}://{host}:{port}{_normalize_path(path)}"
+    url = build_http_target_url(host, port, _normalize_path(path), default_scheme=scheme)
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
-    status, size, error = HttpApiClient(HttpClientConfig(timeout=timeout)).download_to_file(
+    status, size, error = HttpApiClient(HttpClientConfig(timeout=timeout, insecure=scheme == "https")).download_to_file(
         url,
         out_path,
         headers=req_headers,
@@ -249,23 +336,32 @@ def _fetch_registry_catalog(
     seen: set[str] = set()
     next_path = "/v2/_catalog?n=1000"
     pages = 0
+    visited_paths: set[str] = set()
 
     while next_path:
+        if next_path in visited_paths:
+            repositories.sort()
+            return repositories, "partial: registry catalog pagination loop detected"
+        visited_paths.add(next_path)
         pages += 1
         if pages > 30:
-            break
+            repositories.sort()
+            return repositories, "partial: registry catalog pagination limit exceeded"
         status, body, resp_headers, error = _http_request(host, port, "GET", next_path, timeout, headers=headers)
         if error:
-            return None, error
+            return (repositories if repositories else None), f"partial: {error}" if repositories else error
         if status in (401, 403):
-            return None, "authentication required"
+            error_text = "authentication required"
+            return (repositories if repositories else None), f"partial: {error_text}" if repositories else error_text
         if status != 200:
-            return None, f"{next_path} returned status {status}"
+            error_text = f"{next_path} returned status {status}"
+            return (repositories if repositories else None), f"partial: {error_text}" if repositories else error_text
 
         try:
             payload = _json_loads_bytes(body)
         except json.JSONDecodeError:
-            return None, f"{next_path} returned invalid JSON"
+            error_text = f"{next_path} returned invalid JSON"
+            return (repositories if repositories else None), f"partial: {error_text}" if repositories else error_text
         items = payload.get("repositories") if isinstance(payload, dict) else None
         if isinstance(items, list):
             for item in items:
@@ -288,26 +384,38 @@ def _fetch_repository_tags(
     *,
     headers: dict[str, str],
 ) -> tuple[list[str] | None, str | None]:
-    path = f"/v2/{_quote_repo(repository)}/tags/list?n=1000"
-    status, body, _resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=headers)
-    if error:
-        return None, error
-    if status in (401, 403):
-        return None, "authentication required"
-    if status == 404:
-        return [], None
-    if status != 200:
-        return None, f"{path} returned status {status}"
-    try:
-        payload = _json_loads_bytes(body)
-    except json.JSONDecodeError:
-        return None, f"{path} returned invalid JSON"
+    next_path = f"/v2/{_quote_repo(repository)}/tags/list?n=1000"
+    tags: set[str] = set()
+    visited_paths: set[str] = set()
+    for _page in range(30):
+        if next_path in visited_paths:
+            return sorted(tags), "partial: registry tag pagination loop detected"
+        visited_paths.add(next_path)
+        status, body, response_headers, error = _http_request(host, port, "GET", next_path, timeout, headers=headers)
+        if error:
+            return (sorted(tags) if tags else None), f"partial: {error}" if tags else error
+        if status in (401, 403):
+            error_text = "authentication required"
+            return (sorted(tags) if tags else None), f"partial: {error_text}" if tags else error_text
+        if status == 404:
+            return sorted(tags), None
+        if status != 200:
+            error_text = f"{next_path} returned status {status}"
+            return (sorted(tags) if tags else None), f"partial: {error_text}" if tags else error_text
+        try:
+            payload = _json_loads_bytes(body)
+        except json.JSONDecodeError:
+            error_text = f"{next_path} returned invalid JSON"
+            return (sorted(tags) if tags else None), f"partial: {error_text}" if tags else error_text
 
-    tags_raw = payload.get("tags") if isinstance(payload, dict) else None
-    if not isinstance(tags_raw, list):
-        return [], None
-    tags = sorted({str(item or "").strip() for item in tags_raw if str(item or "").strip()})
-    return tags, None
+        tags_raw = payload.get("tags") if isinstance(payload, dict) else None
+        if isinstance(tags_raw, list):
+            tags.update(str(item or "").strip() for item in tags_raw if str(item or "").strip())
+        parsed_next = _parse_link_next(response_headers.get("link"))
+        if not parsed_next:
+            return sorted(tags), None
+        next_path = parsed_next
+    return sorted(tags), "partial: registry tag pagination limit exceeded"
 
 
 def _split_image_reference(value: str) -> tuple[str, str]:
@@ -733,6 +841,53 @@ def _fetch_harbor_info(
     return payload, None
 
 
+def _fetch_harbor_pages(
+    host: str,
+    port: int,
+    base_path: str,
+    timeout: float,
+    *,
+    headers: dict[str, str],
+    page_size: int,
+) -> tuple[list[Any] | None, str | None]:
+    items: list[Any] = []
+    parsed_base = urllib.parse.urlsplit(base_path)
+    existing_query = urllib.parse.parse_qsl(parsed_base.query, keep_blank_values=True)
+    for page in range(1, 31):
+        query = urllib.parse.urlencode([("page", str(page)), ("page_size", str(page_size)), *existing_query])
+        path = urllib.parse.urlunsplit(("", "", parsed_base.path, query, ""))
+        status, body, response_headers, error = _http_request(
+            host,
+            port,
+            "GET",
+            path,
+            timeout,
+            headers=headers,
+        )
+        if error:
+            return (items if items else None), f"partial: {error}" if items else error
+        if status in {401, 403}:
+            message = "authentication required"
+            return (items if items else None), f"partial: {message}" if items else message
+        if status != 200:
+            message = f"{path} returned status {status}"
+            return (items if items else None), f"partial: {message}" if items else message
+        try:
+            payload = _json_loads_bytes(body)
+        except json.JSONDecodeError:
+            message = f"{path} returned invalid JSON"
+            return (items if items else None), f"partial: {message}" if items else message
+        if not isinstance(payload, list):
+            message = f"{path} payload is invalid"
+            return (items if items else None), f"partial: {message}" if items else message
+        items.extend(payload)
+        total_raw = str(response_headers.get("x-total-count") or "").strip()
+        total = int(total_raw) if total_raw.isdigit() else None
+        if len(payload) < page_size or (total is not None and len(items) >= total):
+            return items, None
+    return items, "partial: harbor pagination limit exceeded"
+
+
 def _fetch_harbor_projects(
     host: str,
     port: int,
@@ -740,26 +895,18 @@ def _fetch_harbor_projects(
     *,
     headers: dict[str, str],
 ) -> tuple[list[str] | None, str | None]:
-    status, body, _resp_headers, error = _http_request(
+    payload, page_error = _fetch_harbor_pages(
         host,
         port,
-        "GET",
-        "/api/v2.0/projects?page=1&page_size=200",
+        "/api/v2.0/projects",
         timeout,
         headers=headers,
+        page_size=200,
     )
-    if error:
-        return None, error
-    if status in (401, 403):
-        return None, "authentication required"
-    if status != 200:
-        return None, f"/api/v2.0/projects returned status {status}"
-    try:
-        payload = _json_loads_bytes(body)
-    except json.JSONDecodeError:
-        return None, "harbor projects payload is invalid JSON"
-    if not isinstance(payload, list):
-        return None, "harbor projects payload is invalid"
+    if payload is None:
+        if page_error and "payload is invalid" in page_error:
+            return None, "harbor projects payload is invalid"
+        return None, page_error
     projects: list[str] = []
     for item in payload:
         if not isinstance(item, dict):
@@ -767,7 +914,7 @@ def _fetch_harbor_projects(
         name = str(item.get("name") or "").strip()
         if name:
             projects.append(name)
-    return sorted(set(projects)), None
+    return sorted(set(projects)), page_error
 
 
 def _fetch_harbor_repositories(
@@ -779,20 +926,10 @@ def _fetch_harbor_repositories(
     headers: dict[str, str],
 ) -> tuple[list[str] | None, str | None]:
     quoted_project = urllib.parse.quote(project, safe="")
-    path = f"/api/v2.0/projects/{quoted_project}/repositories?page=1&page_size=200"
-    status, body, _resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=headers)
-    if error:
-        return None, error
-    if status in (401, 403):
-        return None, "authentication required"
-    if status != 200:
-        return None, f"{path} returned status {status}"
-    try:
-        payload = _json_loads_bytes(body)
-    except json.JSONDecodeError:
-        return None, f"{path} returned invalid JSON"
-    if not isinstance(payload, list):
-        return None, f"{path} payload is invalid"
+    path = f"/api/v2.0/projects/{quoted_project}/repositories"
+    payload, page_error = _fetch_harbor_pages(host, port, path, timeout, headers=headers, page_size=200)
+    if payload is None:
+        return None, page_error
     repositories: list[str] = []
     for item in payload:
         if not isinstance(item, dict):
@@ -800,7 +937,7 @@ def _fetch_harbor_repositories(
         name = str(item.get("name") or "").strip()
         if name:
             repositories.append(name)
-    return sorted(set(repositories)), None
+    return sorted(set(repositories)), page_error
 
 
 def _fetch_harbor_artifacts(
@@ -814,20 +951,10 @@ def _fetch_harbor_artifacts(
 ) -> tuple[list[str] | None, str | None]:
     quoted_project = urllib.parse.quote(project, safe="")
     quoted_repo = urllib.parse.quote(repository, safe="")
-    path = f"/api/v2.0/projects/{quoted_project}/repositories/{quoted_repo}/artifacts?page=1&page_size=20&with_tag=true"
-    status, body, _resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=headers)
-    if error:
-        return None, error
-    if status in (401, 403):
-        return None, "authentication required"
-    if status != 200:
-        return None, f"{path} returned status {status}"
-    try:
-        payload = _json_loads_bytes(body)
-    except json.JSONDecodeError:
-        return None, f"{path} returned invalid JSON"
-    if not isinstance(payload, list):
-        return None, f"{path} payload is invalid"
+    path = f"/api/v2.0/projects/{quoted_project}/repositories/{quoted_repo}/artifacts?with_tag=true"
+    payload, page_error = _fetch_harbor_pages(host, port, path, timeout, headers=headers, page_size=20)
+    if payload is None:
+        return None, page_error
 
     artifacts: list[str] = []
     for item in payload:
@@ -847,7 +974,7 @@ def _fetch_harbor_artifacts(
                 artifacts.append(f"{repository}:{tag}@{digest}")
         elif digest:
             artifacts.append(f"{repository}@{digest}")
-    return sorted(set(artifacts)), None
+    return sorted(set(artifacts)), page_error
 
 
 def _parse_www_authenticate(header_value: str) -> tuple[str, dict[str, str]]:
@@ -1142,31 +1269,37 @@ def _fetch_nexus_components(
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
     components: list[dict[str, Any]] = []
     continuation: str | None = None
+    seen_tokens: set[str] = set()
     pages = 0
 
     while True:
         pages += 1
         if pages > 30:
-            break
+            return components, "partial: nexus component pagination limit exceeded"
         query = {"repository": repository}
         if continuation:
             query["continuationToken"] = continuation
         path = "/service/rest/v1/components?" + urllib.parse.urlencode(query)
         status, body, _resp_headers, error = _http_request(host, port, "GET", path, timeout, headers=headers)
         if error:
-            return None, error
+            return (components if components else None), f"partial: {error}" if components else error
         if status in (401, 403):
-            return None, "authentication required"
+            message = "authentication required"
+            return (components if components else None), f"partial: {message}" if components else message
         if status == 404:
-            return None, "nexus components API unavailable"
+            message = "nexus components API unavailable"
+            return (components if components else None), f"partial: {message}" if components else message
         if status != 200:
-            return None, f"{path} returned status {status}"
+            message = f"{path} returned status {status}"
+            return (components if components else None), f"partial: {message}" if components else message
         try:
             payload = _json_loads_bytes(body)
         except json.JSONDecodeError:
-            return None, f"{path} returned invalid JSON"
+            message = f"{path} returned invalid JSON"
+            return (components if components else None), f"partial: {message}" if components else message
         if not isinstance(payload, dict):
-            return None, f"{path} payload is invalid"
+            message = f"{path} payload is invalid"
+            return (components if components else None), f"partial: {message}" if components else message
 
         items = payload.get("items")
         if isinstance(items, list):
@@ -1178,6 +1311,9 @@ def _fetch_nexus_components(
         continuation = str(token_raw).strip() if token_raw not in (None, "") else None
         if not continuation:
             break
+        if continuation in seen_tokens:
+            return components, "partial: nexus component pagination loop detected"
+        seen_tokens.add(continuation)
 
     return components, None
 
@@ -1345,14 +1481,48 @@ def _registry_has_lifecycle_stage(payload: Mapping[str, Any], stage_name: str) -
     )
 
 
+def _registry_probe_has_fingerprint(status: int, body: bytes, headers: Mapping[str, str]) -> bool:
+    docker_header = str(headers.get("docker-distribution-api-version") or "").strip().lower()
+    if "registry/2.0" in docker_header:
+        return True
+    if str(headers.get("x-redposture-bearer-exchanged") or "").lower() == "true":
+        return True
+    challenge = str(headers.get("www-authenticate") or "")
+    challenge_scheme, challenge_params = _parse_www_authenticate(challenge)
+    challenge_scope = str(challenge_params.get("scope") or "").lower()
+    challenge_service = str(challenge_params.get("service") or "").lower()
+    if challenge_scheme == "bearer" and (
+        challenge_scope.startswith(("registry:", "repository:"))
+        or "registry" in challenge_service
+        or "registry" in str(challenge_params.get("realm") or "").lower()
+    ):
+        return True
+    try:
+        payload = _json_loads_bytes(body)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    errors = payload.get("errors")
+    if isinstance(errors, list):
+        for item in errors:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("code") or "").upper()
+            if code in {"UNAUTHORIZED", "DENIED", "NAME_UNKNOWN", "MANIFEST_UNKNOWN"}:
+                return True
+    # Status alone is deliberately insufficient: generic reverse proxies and
+    # login portals commonly return 200/401/403 at /v2/.
+    return False
+
+
 def _registry_probe_state(probe: _RegistryProbe) -> tuple[bool, str, bool | None]:
     status, body, headers, error = probe
     if error:
         return False, "fail", None
     body_text = body.decode("utf-8", errors="replace").strip().lower()
-    docker_header = str(headers.get("docker-distribution-api-version") or "").lower()
     unauthorized = "unauthorized" in body_text or "authentication required" in body_text
-    is_registry = status in {200, 401} or "registry/2.0" in docker_header or (status == 403 and "v2/" in body_text)
+    is_registry = _registry_probe_has_fingerprint(status, body, headers)
     if not is_registry:
         return False, "not_registry", None
     if status == 200:
@@ -1753,12 +1923,9 @@ def _audit_registry_host_core(
             if error:
                 raise OSError(error)
 
-            docker_header = str(resp_headers.get("docker-distribution-api-version") or "").lower()
             body_text = body.decode("utf-8", errors="replace").strip().lower()
             unauthorized_body = "unauthorized" in body_text or "authentication required" in body_text
-            is_registry = (
-                status in {200, 401} or "registry/2.0" in docker_header or (status == 403 and "v2/" in body_text)
-            )
+            is_registry = _registry_probe_has_fingerprint(status, body, resp_headers)
             www_authenticate = str(resp_headers.get("www-authenticate") or "")
 
             gitlab_info, gitlab_error = _fetch_gitlab_info(
@@ -1964,9 +2131,12 @@ def _audit_registry_host_core(
             if show_images and not can_access_registry_data:
                 images_error = "authentication required"
 
-            # Always enumerate catalog/tags when registry is accessible so image_count
-            # is consistent even without --images.
-            need_catalog = can_access_registry_data
+            # Catalog and per-repository tag enumeration can be very expensive
+            # on production registries. Only perform it for actions that
+            # explicitly need whole-registry inventory.
+            need_catalog = can_access_registry_data and bool(
+                show_images or gitlab or (inspect and image_raw is None) or (download and image_raw is None)
+            )
             if need_catalog:
                 repos, images_error = _fetch_registry_catalog(host, port, timeout, headers=auth_headers)
                 if repos is None:
@@ -1981,6 +2151,8 @@ def _audit_registry_host_core(
                             if images_error is None and tag_error:
                                 images_error = f"{repo}: {tag_error}"
                             continue
+                        if tag_error and images_error is None:
+                            images_error = f"{repo}: {tag_error}"
                         repo_tags_map[repo] = list(tags_list)
                         if not tags_list:
                             image_refs.append(f"{repo}:<untagged>")
@@ -2020,6 +2192,8 @@ def _audit_registry_host_core(
                                 images_error = f"{repository_raw}: {tag_error}"
                         else:
                             selected_repository_tags = sorted(set(tags_list))
+                            if tag_error and images_error is None:
+                                images_error = f"{repository_raw}: {tag_error}"
 
                 if metadata and repository_raw and tag_raw:
                     metadata_result = _inspect_image(host, port, repository_raw, tag_raw, timeout, headers=auth_headers)
@@ -2160,7 +2334,7 @@ def _audit_registry_host_core(
                 "inspect": inspect,
                 "image": image_raw,
                 "download": download,
-                "image_count": len(image_refs or []),
+                "image_count": len(image_refs or []) if need_catalog else None,
                 # Keep full list only when it may be rendered/used directly.
                 "images": image_refs if (show_images or inspect or (download and image_raw is None)) else None,
                 "images_error": images_error,

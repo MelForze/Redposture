@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.http_api import http_target_context
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -18,6 +19,7 @@ from ...stage_runtime import (
     build_basic_credential_runs,
     merge_audit_credential_runs,
     run_basic_host_audit,
+    sort_default_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -38,7 +40,11 @@ class _ProxmoxLifecycleState:
 
 
 def build_proxmox_plan(args: Any) -> AuditCommandPlan:
-    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
+    return plan
 
 
 def _proxmox_lifecycle_state_factory(_ctx: AuditHookContext) -> _ProxmoxLifecycleState:
@@ -97,6 +103,9 @@ def _proxmox_requested_action_fields(args: Any) -> dict[str, Any]:
         "show_nodes": bool(getattr(args, "nodes", False) or getattr(args, "show_nodes", False)),
         "show_users": bool(getattr(args, "users", False) or getattr(args, "show_users", False)),
         "add_user": str(getattr(args, "add_user", "") or "").strip() or None,
+        "grant_role": str(getattr(args, "grant_role", "") or "").strip() or None,
+        "grant_path": str(getattr(args, "grant_path", "/") or "/").strip(),
+        "grant_propagate": bool(getattr(args, "grant_propagate", True)),
     }
 
 
@@ -142,7 +151,7 @@ def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
             ctx.lifecycle_state.detect_record = record
         return record
     started = time.monotonic()
-    status, payload, _headers, error = actions._proxmox_request(
+    status, payload, response_headers, error = actions._proxmox_request(
         ctx.host,
         ctx.port,
         "/access",
@@ -154,11 +163,14 @@ def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
         proxy=_proxmox_proxy(ctx.args),
         auth_headers={},
     )
-    detected = status in {200, 401, 403}
+    detected = actions._looks_like_proxmox_response(status, payload, response_headers)
     if error:
         record_status = "fail"
         detected = False
         error_text = error
+    elif not detected:
+        record_status = "fail"
+        error_text = "service is not proxmox"
     elif status == 200:
         record_status = "open_no_auth"
         error_text = None
@@ -177,7 +189,7 @@ def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
             "module": "proxmox",
             "is_proxmox": detected,
             "status": record_status,
-            "auth_required": status in {401, 403},
+            "auth_required": detected and status in {401, 403},
             "auth_method": "anonymous",
             "auth_attempts": [],
             "use_https": use_https,
@@ -241,6 +253,9 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
                     show_nodes=bool(options["show_nodes"]),
                     show_users=bool(options["show_users"]),
                     add_user=options["add_user"],
+                    grant_role=options["grant_role"],
+                    grant_path=options["grant_path"],
+                    grant_propagate=options["grant_propagate"],
                     run_deep_checks=True,
                     debug=cfg.debug,
                     debug_emit=ctx.debug_emit,
@@ -439,6 +454,9 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
             show_nodes=bool(options["show_nodes"]),
             show_users=bool(options["show_users"]),
             add_user=options["add_user"],
+            grant_role=options["grant_role"],
+            grant_path=options["grant_path"],
+            grant_propagate=options["grant_propagate"],
             run_deep_checks=True,
             debug=cfg.debug,
             debug_emit=ctx.debug_emit,
@@ -463,6 +481,9 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         show_nodes=bool(options["show_nodes"]),
         show_users=bool(options["show_users"]),
         add_user=options["add_user"],
+        grant_role=options["grant_role"],
+        grant_path=options["grant_path"],
+        grant_propagate=options["grant_propagate"],
         on_status_ready=options["on_status_ready"],
         on_discovered_url=options["on_discovered_url"],
         on_credential_finding=options["on_credential_finding"],
@@ -490,7 +511,7 @@ def _prepare_proxmox_credential_runs(args: Any) -> None:
     token_runs = (AuditCredentialRun(token=token, source="provided"),) if token else ()
     supplied_runs = build_basic_credential_runs(args)
     default_runs = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source="default")
             for username, password in actions._PROXMOX_DEFAULT_CREDENTIALS
         )
@@ -515,15 +536,28 @@ def _build_proxmox_host_stage_options(args: Any) -> dict[str, Any]:
 
 def build_proxmox_spec(args: Any) -> ModuleAuditSpec:
     full_credential_sweep = bool(getattr(args, "defcreds", False))
+
+    def _detect_with_target(ctx: AuditHookContext) -> AuditRecord:
+        with http_target_context(ctx.target, api_prefixes=("/api2/json",)):
+            return _proxmox_detect(ctx)
+
+    def _auth_with_target(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        with http_target_context(ctx.target, api_prefixes=("/api2/json",)):
+            return _proxmox_auth(ctx, record)
+
+    def _data_with_target(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        with http_target_context(ctx.target, api_prefixes=("/api2/json",)):
+            return _proxmox_data(ctx, record)
+
     return ModuleAuditSpec(
         module="proxmox",
         label="PROXMOX",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
         host_stage_options=_build_proxmox_host_stage_options(args),
-        detect=_proxmox_detect,
-        auth=_proxmox_auth,
-        data=_proxmox_data,
+        detect=_detect_with_target,
+        auth=_auth_with_target,
+        data=_data_with_target,
         lifecycle_state_factory=_proxmox_lifecycle_state_factory,
         record_all_credential_attempts=full_credential_sweep,
         continue_after_credential_success=full_credential_sweep,
@@ -531,6 +565,7 @@ def build_proxmox_spec(args: Any) -> ModuleAuditSpec:
         credential_attempt_detail_fields=("auth_method",),
         render_module=render,
         colorize=render._render_colored_proxmox_line,
+        keep_anonymous_open_no_auth=False,
     )
 
 

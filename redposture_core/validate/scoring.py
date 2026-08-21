@@ -76,8 +76,6 @@ def _is_strong_signal(signal: str) -> bool:
     base = _signal_base_code(signal)
     if not base:
         return False
-    if base == "correlated_with_strong":
-        return True
     if base in {
         "authorization_basic",
         "authorization_bearer",
@@ -96,9 +94,7 @@ def _is_strong_signal(signal: str) -> bool:
 
 def _signal_score(signal: str) -> tuple[int, str]:
     base = _signal_base_code(signal)
-    if base == "correlated_with_strong":
-        return _SCORE_STRONG, "strong:correlated_with_strong"
-    if base in {"correlated_with_medium", "correlated_user_password"}:
+    if base in {"correlated_with_strong", "correlated_with_medium", "correlated_user_password"}:
         return _SCORE_MEDIUM, f"medium:{base}"
     if _is_strong_signal(signal):
         return _SCORE_STRONG, f"strong:{base}"

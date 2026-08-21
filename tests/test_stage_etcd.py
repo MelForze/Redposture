@@ -81,36 +81,36 @@ def _etcd_args(**overrides: object) -> argparse.Namespace:
 
 def test_etcd_default_credentials_are_exact_and_explicit_overlap_is_deduplicated() -> None:
     assert etcd._ETCD_DEFAULT_CREDS == (
-        ("root", "root"),
-        ("root", "etcd"),
-        ("etcd", "etcd"),
-        ("root", "password"),
-        ("root", "admin"),
-        ("root", "rootpass"),
-        ("etcd", "password"),
         ("admin", "admin"),
-        ("admin", "password"),
-        ("admin", "etcd"),
         ("admin", "changeme"),
-        ("user", "user"),
-        ("user", "password"),
+        ("admin", "etcd"),
+        ("admin", "password"),
+        ("etcd", "etcd"),
+        ("etcd", "password"),
+        ("root", "admin"),
+        ("root", "etcd"),
+        ("root", "password"),
+        ("root", "root"),
+        ("root", "rootpass"),
         ("service", "service"),
+        ("user", "password"),
+        ("user", "user"),
     )
     assert etcd._build_etcd_credential_candidates("root", "root", True) == [
         ("root", "root", "provided"),
-        ("root", "etcd", "default"),
-        ("etcd", "etcd", "default"),
-        ("root", "password", "default"),
-        ("root", "admin", "default"),
-        ("root", "rootpass", "default"),
-        ("etcd", "password", "default"),
         ("admin", "admin", "default"),
-        ("admin", "password", "default"),
-        ("admin", "etcd", "default"),
         ("admin", "changeme", "default"),
-        ("user", "user", "default"),
-        ("user", "password", "default"),
+        ("admin", "etcd", "default"),
+        ("admin", "password", "default"),
+        ("etcd", "etcd", "default"),
+        ("etcd", "password", "default"),
+        ("root", "admin", "default"),
+        ("root", "etcd", "default"),
+        ("root", "password", "default"),
+        ("root", "rootpass", "default"),
         ("service", "service", "default"),
+        ("user", "password", "default"),
+        ("user", "user", "default"),
     ]
 
 
@@ -506,11 +506,11 @@ def test_audit_etcd_authenticated_reads_propagate_token_and_render_selected_defa
 
     def fake_auth(_host, _port, _timeout, username, password):
         auth_attempts.append((username, password))
-        if (username, password) == ("root", "root"):
-            raise OSError("candidate transport failure")
-        if (username, password) == ("root", "etcd"):
-            return "token-123", None
         if (username, password) == ("admin", "admin"):
+            raise OSError("candidate transport failure")
+        if (username, password) == ("admin", "changeme"):
+            return "token-123", None
+        if (username, password) == ("root", "etcd"):
             return "token-later", None
         return None, "authentication failed"
 
@@ -533,18 +533,18 @@ def test_audit_etcd_authenticated_reads_propagate_token_and_render_selected_defa
     assert record["status"] == "weak_default_creds"
     assert record["key_count"] == 0
     assert record["key_count_state"] == "known"
-    assert record["effective_username"] == "root"
-    assert record["effective_password"] == "etcd"
+    assert record["effective_username"] == "admin"
+    assert record["effective_password"] == "changeme"
     assert "candidate transport failure" in str(record["credential_attempts"][0]["error"])
     assert len(token_calls) == 3
     assert all(token == "token-123" for _payload, token in token_calls)
     assert _format_record(record, "txt") == ""
     rendered = _format_credential_attempts_records(record, "txt")
     assert len(rendered) == len(etcd._ETCD_DEFAULT_CREDS)
-    selected_line = next(line for line in rendered if "[+] root:etcd" in line)
-    later_success_line = next(line for line in rendered if "[+] admin:admin" in line)
-    assert selected_line.endswith("[+] root:etcd (keys:0)")
-    assert later_success_line.endswith("[+] admin:admin")
+    selected_line = next(line for line in rendered if "[+] admin:changeme" in line)
+    later_success_line = next(line for line in rendered if "[+] root:etcd" in line)
+    assert selected_line.endswith("[+] admin:changeme (keys:0)")
+    assert later_success_line.endswith("[+] root:etcd")
 
 
 def test_audit_etcd_defcreds_full_failure_renders_each_pair_once(monkeypatch) -> None:
@@ -1025,12 +1025,12 @@ def test_run_etcd_stage_validation_paths(
     assert any(expected in msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "error")
 
 
-def test_run_etcd_stage_rejects_https_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_etcd_stage_accepts_https_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     _ConsoleCapture.instances.clear()
     monkeypatch.setattr(etcd, "Console", _ConsoleCapture)
     rc = etcd.run_etcd_stage(_etcd_args(targets="https://127.0.0.1:2379"), logger=object())
-    assert rc == 2
-    assert any(
+    assert rc == 1
+    assert not any(
         "etcd accepts only http:// URL targets for -t/--targets" in msg
         for level, msg in _ConsoleCapture.instances[-1].messages
         if level == "error"
@@ -1063,7 +1063,7 @@ def test_run_etcd_stage_debug_flow_uses_single_global_progress(monkeypatch: pyte
 
     patch_module_host_stage_for_test(monkeypatch, "etcd", fake_audit_targets)
     rc = etcd.run_etcd_stage(_etcd_args(debug=True), logger=object())
-    assert rc == 0
+    assert rc == 1
     assert len(calls) == 2
     assert [call["port"] for call in calls] == [2379, 22379]
     assert all(call["run_deep_checks"] is False for call in calls)
@@ -1118,7 +1118,7 @@ def test_run_etcd_stage_verbose_multi_group_uses_single_global_progress(monkeypa
     )
 
     rc = etcd.run_etcd_stage(_etcd_args(show_keys=True), logger=object())
-    assert rc == 0
+    assert rc == 1
     assert len(calls) == 2
     assert [call["port"] for call in calls] == [2379, 22379]
     assert all(call["run_deep_checks"] is False for call in calls)
@@ -1151,7 +1151,7 @@ def test_run_etcd_stage_suppresses_unreachable_summary_without_debug(monkeypatch
         ),
     )
     rc = etcd.run_etcd_stage(_etcd_args(), logger=object())
-    assert rc == 0
+    assert rc == 1
     warns = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
     assert not any("all etcd targets are unreachable" in msg for msg in warns)
 
@@ -1292,3 +1292,47 @@ def test_audit_etcd_host_v3_dump_streams_paged_ranges(monkeypatch) -> None:
     # Streamed across two range pages; key names derived from the dumped entries.
     assert record["key_values"] == ["/a:1", "/b:2", "/c:3"]
     assert record["keys"] == ["/a", "/b", "/c"]
+
+
+def test_etcd_rejects_login_html_and_falls_back_to_v3beta_gateway(monkeypatch) -> None:
+    original_http_json_request = etcd._http_json_request
+    monkeypatch.setattr(etcd, "_http_json_request", lambda *_args, **_kwargs: (200, "<html>login</html>"))
+    record = _audit_etcd_host(
+        host="127.0.0.1",
+        port=2379,
+        timeout=1.0,
+        retries=0,
+        show_keys=False,
+        dump_keys=False,
+        query_key=None,
+    )
+    assert record["is_etcd"] is False
+    monkeypatch.setattr(etcd, "_http_json_request", original_http_json_request)
+
+    calls: list[str] = []
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def request(self, _method, url, **_kwargs):
+            calls.append(url)
+            if "/v3/auth/status" in url:
+                return SimpleNamespace(status=404, text="{}", error=None)
+            return SimpleNamespace(status=200, text='{"enabled":false}', error=None)
+
+    etcd._ETCD_V3_PREFIX_CACHE.clear()
+    monkeypatch.setattr(etcd, "resolve_http_scheme", lambda *_args, **_kwargs: "http")
+    monkeypatch.setattr(etcd, "HttpApiClient", _Client)
+
+    assert etcd._http_json_request("etcd.local", 2379, "POST", "/v3/auth/status", 1.0) == (
+        200,
+        '{"enabled":false}',
+    )
+    assert calls == [
+        "http://etcd.local:2379/v3/auth/status",
+        "http://etcd.local:2379/v3beta/auth/status",
+    ]
+    calls.clear()
+    etcd._http_json_request("etcd.local", 2379, "POST", "/v3/kv/range", 1.0, payload={})
+    assert calls == ["http://etcd.local:2379/v3beta/kv/range"]

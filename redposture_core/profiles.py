@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import string
 from typing import Any
 
 from .constants import COLLECT_DEBUG_ENDPOINTS, COLLECT_EXPORTERS, DISCOVERY_EXPORTERS, SCAN_EXPORTERS
@@ -59,10 +60,33 @@ def _validate_trigger_exporters(raw: Any) -> list[dict[str, Any]]:
             raise ValueError(f"{context}: name is required")
         if not validated[-1]["detect_path"]:
             raise ValueError(f"{context}: detect_path is required")
+        if not validated[-1]["detect_path"].startswith("/"):
+            raise ValueError(f"{context}: detect_path must start with '/'")
         if not validated[-1]["trigger_path"]:
             raise ValueError(f"{context}: trigger_path is required")
+        if not validated[-1]["trigger_path"].startswith("/"):
+            raise ValueError(f"{context}: trigger_path must start with '/'")
         if not validated[-1]["target_fmt"]:
             raise ValueError(f"{context}: target_fmt is required")
+        try:
+            parsed_fields = list(string.Formatter().parse(validated[-1]["target_fmt"]))
+            fields = [
+                field_name
+                for _literal, field_name, _format_spec, _conversion in parsed_fields
+                if field_name is not None
+            ]
+        except ValueError as exc:
+            raise ValueError(f"{context}: target_fmt is not a valid format string") from exc
+        if fields != ["our_host"]:
+            raise ValueError(f"{context}: target_fmt must contain exactly one '{{our_host}}' placeholder")
+        if any(
+            format_spec or conversion for _literal, field_name, format_spec, conversion in parsed_fields if field_name
+        ):
+            raise ValueError(f"{context}: target_fmt placeholder must not use conversion or format specifiers")
+        try:
+            validated[-1]["target_fmt"].format(our_host="127.0.0.1")
+        except (IndexError, KeyError, ValueError) as exc:
+            raise ValueError(f"{context}: target_fmt is not a valid format string") from exc
     return validated
 
 

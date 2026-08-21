@@ -3,15 +3,19 @@ from __future__ import annotations
 import re
 import struct
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 import redposture_core.stage_zookeeper as zookeeper_stage
 from redposture_core.audit_models import AuditRecord
 from redposture_core.cli_args import parse_args
+from redposture_core.clients.zookeeper import ZkImplementationFingerprint, ZkTransportConfig
 from redposture_core.modules.zookeeper import actions as lifecycle_actions
+from redposture_core.modules.zookeeper import engine as implementation_engine
 from redposture_core.modules.zookeeper import stage as lifecycle_stage
-from redposture_core.stage_runtime import AuditCommandRunner
+from redposture_core.modules.zookeeper.types import ZooKeeperFingerprintCache
+from redposture_core.stage_runtime import AuditCommandRunner, AuditCredentialRun, AuditHookContext
 from redposture_core.stage_zookeeper import (
     _ZK_ERR_NOAUTH,
     _ZK_ERR_NONODE,
@@ -37,6 +41,11 @@ from redposture_core.stage_zookeeper import (
     run_zookeeper_stage,
 )
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+def test_canonical_zookeeper_stage_has_no_keeper_package_dependency() -> None:
+    assert lifecycle_stage.engine is implementation_engine
+    assert not hasattr(lifecycle_stage, "keeper_actions")
 
 
 def _zk_string(value: str) -> bytes:
@@ -139,7 +148,7 @@ def test_clip_and_error_helpers() -> None:
 def test_parse_children_and_stat_invalid_payloads() -> None:
     with pytest.raises(ValueError):
         _parse_children_vector(b"\x00\x00\x00")
-    assert _parse_children_vector(struct.pack(">i", -1)) == ([], 4)
+    assert _parse_children_vector(struct.pack(">i", -1)) == (None, 4)
     with pytest.raises(ValueError):
         _parse_stat(b"\x00" * 67)
 
@@ -238,9 +247,8 @@ def test_zkclient_auth_children_data_create_delete(monkeypatch: pytest.MonkeyPat
     assert err == "authentication failed: AUTHFAILED"
 
     monkeypatch.setattr(client, "_request_with_xid", lambda *_a, **_k: (_ for _ in ()).throw(TimeoutError("boom")))
-    ok, err = client.auth_digest("admin", "bad")
-    assert ok is False
-    assert err == "connection timeout"
+    with pytest.raises(TimeoutError, match="boom"):
+        client.auth_digest("admin", "bad")
 
     monkeypatch.setattr(client, "_request", lambda *_a, **_k: (-102, b""))
     children, code, stat = client.get_children2("/")
@@ -360,10 +368,10 @@ def test_enumerate_znodes_handles_noauth_and_truncation() -> None:
             return [], _ZK_ERR_NONODE, None
 
     nodes, total_count, truncated, meta, error = _enumerate_znodes(_FakeClient(), 2)
-    assert nodes == ["/brokers", "/brokers/ids"]
-    assert total_count == 3
+    assert nodes == ["/brokers"]
+    assert total_count == 1
     assert truncated is True
-    assert meta["/brokers/ids"]["error"] == "Access Denied"
+    assert meta["/brokers"]["error"] is None
     assert error is None
 
 
@@ -386,8 +394,8 @@ def test_enumerate_znodes_count_only_mode_skips_path_collection() -> None:
         collect_paths=False,
     )
     assert nodes == []
-    assert total_count == 3
-    assert truncated is False
+    assert total_count == 1
+    assert truncated is True
     assert meta == {}
     assert error is None
 
@@ -424,7 +432,7 @@ def test_enumerate_znodes_progress_is_time_throttled_and_uses_window_metrics(
         assert int(second.get("interval_count") or 0) < int(second.get("total_count") or 0)
 
 
-def test_audit_host_uses_count_only_enumeration_when_details_not_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_host_does_not_count_tree_when_details_not_requested(monkeypatch: pytest.MonkeyPatch) -> None:
     collect_flags: list[bool] = []
 
     class _FakeZkClient:
@@ -475,10 +483,10 @@ def test_audit_host_uses_count_only_enumeration_when_details_not_requested(monke
         max_znodes=100,
     )
 
-    assert collect_flags == [False]
+    assert collect_flags == []
     assert record["status"] == "open_no_auth"
-    assert record["znode_count"] == 3210
-    assert record["znodes"] == []
+    assert record["znode_count"] is None
+    assert record["znodes"] is None
     assert record["znode_details"] is None
 
 
@@ -518,7 +526,7 @@ def test_audit_zookeeper_suppresses_unexpected_eof_when_suppression_enabled(monk
 
     assert (total, open_no_auth, valid, auth_required, failed) == (1, 0, 0, 0, 1)
     assert len(lines) == 1
-    assert "No ZOOKEEPER service detected" in lines[0]
+    assert "ZOOKEEPER audit inconclusive" in lines[0]
     assert all("Connection refused" not in line for line in lines)
 
 
@@ -579,7 +587,7 @@ def test_audit_zookeeper_emits_records_in_input_order(monkeypatch: pytest.Monkey
     )
 
     assert totals == (2, 2, 0, 0, 0)
-    detect_lines = [line for line in lines if "ZooKeeper Service" in line]
+    detect_lines = [line for line in lines if "ZooKeeper-compatible" in line]
     status_lines = [line for line in lines if "anonymous access" in line]
     assert len(detect_lines) == 2
     assert status_lines == []
@@ -779,7 +787,7 @@ def test_audit_zookeeper_debug_pass_markers_and_stage2_gate_reasons(monkeypatch:
     assert any("pass=2 deep complete processed=2" in line for line in debug_lines)
 
 
-def test_audit_zookeeper_live_debug_streaming_avoids_duplicates(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_zookeeper_without_actions_skips_enumeration_debug(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
         lambda *_a, **_k: (False, "root_ok", ["/:ok"]),
@@ -858,8 +866,69 @@ def test_audit_zookeeper_live_debug_streaming_avoids_duplicates(monkeypatch: pyt
     assert totals == (1, 1, 0, 0, 0)
     progress_matches = [line for line in debug_lines if "enumerate progress discovered=1" in line]
     done_matches = [line for line in debug_lines if "enumerate done discovered=1" in line]
-    assert len(progress_matches) == 1
-    assert len(done_matches) == 1
+    assert progress_matches == []
+    assert done_matches == []
+
+
+def test_direct_host_stage_without_actions_skips_write_probe_and_tree_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def connect(self) -> None:
+            calls.append("connect")
+
+        def get_children2(self, path: str):
+            calls.append(f"children:{path}")
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def close(self) -> None:
+            calls.append("close")
+
+    monkeypatch.setattr(lifecycle_actions, "_ZkClient", Client)
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_infer_auth_required_from_anonymous_probes",
+        lambda *_args, **_kwargs: (False, "root_ok", ["/:ok"]),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_probe_znode_create_delete",
+        lambda *_args, **_kwargs: pytest.fail("write capability probe must not run without an action"),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_enumerate_znodes",
+        lambda *_args, **_kwargs: pytest.fail("tree traversal must not run without an action"),
+    )
+
+    record = lifecycle_actions.host_stage(
+        host="127.0.0.1",
+        port=2181,
+        timeout=0.1,
+        retries=0,
+        username=None,
+        password=None,
+        show_znodes=False,
+        dump=False,
+        query_znode=None,
+        max_znodes=100,
+        debug=False,
+        run_deep_checks=True,
+        enum_workers=3,
+        debug_emit=None,
+    )
+
+    assert calls == ["connect", "children:/", "close"]
+    assert record["status"] == "open_no_auth"
+    assert record["znode_count"] is None
+    assert record["znodes"] is None
+    assert record["can_create_znode"] is None
+    assert record["can_delete_znode"] is None
 
 
 def test_merge_stage2_record_marks_unknown_partial_and_timeout_note() -> None:
@@ -919,7 +988,9 @@ def test_merge_stage2_record_marks_unknown_partial_and_timeout_note() -> None:
     assert any("timeouts=3s,3s,3s" in line for line in detail_lines)
 
 
-def test_audit_host_runs_capability_probe_before_enumeration(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_host_show_action_enumerates_without_write_capability_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     call_order: list[str] = []
 
     monkeypatch.setattr(
@@ -945,16 +1016,15 @@ def test_audit_host_runs_capability_probe_before_enumeration(monkeypatch: pytest
         def get_data(self, _path: str):
             return b"", _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
 
-    def _probe(*_args, **_kwargs):
-        call_order.append("probe")
-        return True, True, None
-
     def _enumerate(*_args, **_kwargs):
         call_order.append("enumerate")
         return [], 0, False, {}, None
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _Client)
-    monkeypatch.setattr("redposture_core.stage_zookeeper._probe_znode_create_delete", _probe)
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._probe_znode_create_delete",
+        lambda *_args, **_kwargs: pytest.fail("read-only action must not issue a write probe"),
+    )
     monkeypatch.setattr("redposture_core.stage_zookeeper._enumerate_znodes", _enumerate)
 
     rec = _audit_zookeeper_host(
@@ -964,13 +1034,15 @@ def test_audit_host_runs_capability_probe_before_enumeration(monkeypatch: pytest
         retries=0,
         username=None,
         password=None,
-        show_znodes=False,
+        show_znodes=True,
         dump=False,
         query_znode=None,
         max_znodes=100,
     )
     assert rec["status"] == "open_no_auth"
-    assert call_order[:2] == ["probe", "enumerate"]
+    assert call_order == ["enumerate"]
+    assert rec["can_create_znode"] is None
+    assert rec["can_delete_znode"] is None
 
 
 def test_stage_trace_contains_all_stages_for_success_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1120,7 +1192,7 @@ def test_stage4_throttled_operation_retries_with_shared_policy(monkeypatch: pyte
         retries=2,
         username=None,
         password=None,
-        show_znodes=False,
+        show_znodes=True,
         dump=False,
         query_znode=None,
         max_znodes=100,
@@ -1186,7 +1258,7 @@ def test_audit_zookeeper_digest_on_open_target_is_unverified(monkeypatch) -> Non
     assert record["credential_verdict"] == "unverified_anonymous"
     assert record["auth_required"] is False
     rendered = _format_record(record, "txt")
-    assert rendered == ""
+    assert "[!] admin:admin (unverified)" in rendered
     assert "(auth required:False)" in zookeeper_stage._format_detect_record(record, "txt")
     assert any("/clickhouse:<Access Denied>" in line for line in _format_znodes_detail_records(record, "txt"))
 
@@ -1545,9 +1617,7 @@ def test_audit_zookeeper_session_closed_requires_auth_without_retry(
     assert record["auth_inference_source"] == "session_closed_requires_auth"
     assert record["auth_probe_trace"] == ["/:sessionclosedrequiresaslauth"]
     rendered = _format_record(record, "txt")
-    assert "authentication required by server policy" in rendered
-    assert "connection failed" not in rendered
-    assert "-124" not in rendered
+    assert rendered == ""
 
 
 def test_audit_zookeeper_invalid_credentials_on_anonymous_target_are_reported(monkeypatch) -> None:
@@ -1792,12 +1862,10 @@ def test_audit_zookeeper_session_policy_auth_required_txt_is_not_connection_fail
     assert record["auth_required"] is True
     assert record["auth_inference_source"] == "session_closed_requires_auth"
     rendered = _format_record(record, "txt")
-    assert "authentication required by server policy" in rendered
-    assert "connection failed" not in rendered
-    assert "ERR_-124" not in rendered
+    assert rendered == ""
 
 
-def test_audit_zookeeper_digest_frame_without_access_is_not_valid_credentials(monkeypatch) -> None:
+def test_audit_zookeeper_sasl_required_after_digest_is_unsupported(monkeypatch) -> None:
     class _RetryableAfterDigestClient:
         def __init__(self, *_args, **_kwargs) -> None:
             self.authed = False
@@ -1840,10 +1908,12 @@ def test_audit_zookeeper_digest_frame_without_access_is_not_valid_credentials(mo
     )
 
     assert record["status"] == "auth_required"
-    assert record["provided_credentials_ok"] is False
-    assert record["credential_verdict"] == "rejected"
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unsupported_sasl"
+    assert record["auth_mechanism"] == "sasl"
+    assert record["verification_capability"] == "unsupported"
     rendered = _format_record(record, "txt")
-    assert "[-] admin:admin" in rendered
+    assert "[!] admin:admin (unsupported:SASL)" in rendered
     assert "connection failed" not in rendered
 
 
@@ -1897,6 +1967,34 @@ def test_format_record_suppresses_open_no_auth_txt_but_preserves_json() -> None:
     assert '"znode_count": 2050' in rendered_json
 
 
+def test_format_record_shows_single_unverified_explicit_credential() -> None:
+    record = {
+        "status": "open_no_auth",
+        "host": "127.0.0.1",
+        "port": 2181,
+        "provided_credentials": True,
+        "provided_username": "admin",
+        "provided_password": "secret",
+        "provided_credentials_ok": None,
+        "credential_verdict": "unverified_anonymous",
+    }
+
+    assert "[!] admin:secret (unverified)" in _format_record(record, "txt")
+
+
+def test_format_record_does_not_repeat_auth_required_without_credentials() -> None:
+    record = {
+        "status": "auth_required",
+        "host": "127.0.0.1",
+        "port": 2181,
+        "provided_credentials": False,
+        "auth_required": True,
+        "auth_inference_source": "root_noauth",
+    }
+
+    assert _format_record(record, "txt") == ""
+
+
 def test_format_znodes_detail_records_shows_truncation_note() -> None:
     record = {
         "timestamp": "2026-03-27T00:00:00Z",
@@ -1919,7 +2017,9 @@ def test_format_znodes_detail_records_shows_truncation_note() -> None:
     assert any("/b:<Access Denied>" in line for line in txt_lines)
 
 
-def test_audit_zookeeper_sets_create_delete_capabilities_success(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_zookeeper_legacy_action_path_keeps_success_capabilities_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _FakeZkClient:
         def __init__(self, host: str, port: int, timeout: float) -> None:
             _ = (host, port, timeout)
@@ -1940,11 +2040,11 @@ def test_audit_zookeeper_sets_create_delete_capabilities_success(monkeypatch: py
 
         def create(self, path: str, data: bytes = b"", flags: int = 1) -> int:
             _ = (path, data, flags)
-            return _ZK_ERR_OK
+            pytest.fail("read-only znode action must not call create")
 
         def delete(self, path: str, version: int = -1) -> int:
             _ = (path, version)
-            return _ZK_ERR_OK
+            pytest.fail("read-only znode action must not call delete")
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
     record = _audit_zookeeper_host(
@@ -1956,16 +2056,18 @@ def test_audit_zookeeper_sets_create_delete_capabilities_success(monkeypatch: py
         password=None,
         show_znodes=False,
         dump=False,
-        query_znode=None,
+        query_znode="/",
         max_znodes=100,
     )
     assert record["status"] == "open_no_auth"
-    assert record["can_create_znode"] is True
-    assert record["can_delete_znode"] is True
+    assert record["can_create_znode"] is None
+    assert record["can_delete_znode"] is None
     assert record["znode_capability_error"] is None
 
 
-def test_audit_zookeeper_sets_create_delete_capabilities_denied(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_zookeeper_legacy_action_path_keeps_denied_capabilities_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _FakeZkClient:
         def __init__(self, host: str, port: int, timeout: float) -> None:
             _ = (host, port, timeout)
@@ -1986,11 +2088,11 @@ def test_audit_zookeeper_sets_create_delete_capabilities_denied(monkeypatch: pyt
 
         def create(self, path: str, data: bytes = b"", flags: int = 1) -> int:
             _ = (path, data, flags)
-            return _ZK_ERR_NOAUTH
+            pytest.fail("read-only znode action must not call create")
 
         def delete(self, path: str, version: int = -1) -> int:
             _ = (path, version)
-            return _ZK_ERR_OK
+            pytest.fail("read-only znode action must not call delete")
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
     record = _audit_zookeeper_host(
@@ -2002,16 +2104,18 @@ def test_audit_zookeeper_sets_create_delete_capabilities_denied(monkeypatch: pyt
         password=None,
         show_znodes=False,
         dump=False,
-        query_znode=None,
+        query_znode="/",
         max_znodes=100,
     )
     assert record["status"] == "open_no_auth"
-    assert record["can_create_znode"] is False
-    assert record["can_delete_znode"] is False
-    assert record["znode_capability_error"] == "NOAUTH"
+    assert record["can_create_znode"] is None
+    assert record["can_delete_znode"] is None
+    assert record["znode_capability_error"] is None
 
 
-def test_audit_zookeeper_sets_create_true_delete_false(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_zookeeper_legacy_action_path_never_tests_delete_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _FakeZkClient:
         def __init__(self, host: str, port: int, timeout: float) -> None:
             _ = (host, port, timeout)
@@ -2032,11 +2136,11 @@ def test_audit_zookeeper_sets_create_true_delete_false(monkeypatch: pytest.Monke
 
         def create(self, path: str, data: bytes = b"", flags: int = 1) -> int:
             _ = (path, data, flags)
-            return _ZK_ERR_OK
+            pytest.fail("read-only znode action must not call create")
 
         def delete(self, path: str, version: int = -1) -> int:
             _ = (path, version)
-            return _ZK_ERR_NOAUTH
+            pytest.fail("read-only znode action must not call delete")
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _FakeZkClient)
     record = _audit_zookeeper_host(
@@ -2048,13 +2152,13 @@ def test_audit_zookeeper_sets_create_true_delete_false(monkeypatch: pytest.Monke
         password=None,
         show_znodes=False,
         dump=False,
-        query_znode=None,
+        query_znode="/",
         max_znodes=100,
     )
     assert record["status"] == "open_no_auth"
-    assert record["can_create_znode"] is True
-    assert record["can_delete_znode"] is False
-    assert record["znode_capability_error"] == "NOAUTH"
+    assert record["can_create_znode"] is None
+    assert record["can_delete_znode"] is None
+    assert record["znode_capability_error"] is None
 
 
 def test_audit_zookeeper_targets_suppresses_auth_required_and_connection_fail(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2137,7 +2241,7 @@ def test_audit_zookeeper_targets_suppresses_auth_required_and_connection_fail(mo
         suppress_connection_refused_status_lines=True,
     )
     assert totals == (2, 0, 0, 1, 1)
-    assert any("ZooKeeper Service" in line for line in emitted)
+    assert any("ZooKeeper-compatible" in line for line in emitted)
     assert not any("authentication required" in line for line in emitted if "[-]" in line)
     assert not any("connection failed" in line for line in emitted)
     assert len(logged) == 1
@@ -2285,7 +2389,7 @@ def test_run_zookeeper_stage_trims_and_forwards_credentials(monkeypatch: pytest.
 
     rc = run_zookeeper_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 0
-    assert captured == {"username": "admin", "password": "secret"}
+    assert captured == {"username": "admin", "password": " secret "}
     assert fake_console.errors == []
 
     captured.clear()
@@ -2369,7 +2473,7 @@ def test_run_zookeeper_stage_multi_port_uses_single_global_progress(monkeypatch:
         enum_workers=3,
     )
     rc = run_zookeeper_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
-    assert rc == 0
+    assert rc == 1
     assert len(captured) == 2
     assert [call["port"] for call in captured] == [2181, 2182]
     assert all(call["run_deep_checks"] is False for call in captured)
@@ -2491,6 +2595,38 @@ def test_run_anonymous_probe_and_infer_unknown_lines(monkeypatch: pytest.MonkeyP
     assert any(item.endswith("error:unknown") for item in trace)
 
 
+def test_auth_inference_checks_explicit_znode_even_when_root_is_public(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probed_paths: list[str] = []
+
+    def fake_probe(_host, _port, _timeout, path, **_kwargs):
+        probed_paths.append(path)
+        return _ZK_ERR_NOAUTH, None
+
+    monkeypatch.setattr(lifecycle_actions, "_run_anonymous_auth_probe", fake_probe)
+
+    auth_required, source, trace = lifecycle_actions._infer_auth_required_from_anonymous_probes(
+        "127.0.0.1",
+        2181,
+        0.2,
+        _ZK_ERR_OK,
+        "secure",
+    )
+
+    assert auth_required is True
+    assert source == "probe_noauth"
+    assert trace == ["/:ok", "/secure:noauth"]
+    assert probed_paths == ["/secure"]
+
+
+def test_credential_verification_paths_replay_protected_trace_with_colon() -> None:
+    assert lifecycle_actions._credential_verification_paths(
+        None,
+        ["/:ok", "/tenants/acme:prod:noauth"],
+    ) == ("/", "/tenants/acme:prod")
+
+
 def test_format_detect_record_and_record_json_branches() -> None:
     record = {
         "timestamp": "2026-04-09T00:00:00Z",
@@ -2504,6 +2640,37 @@ def test_format_detect_record_and_record_json_branches() -> None:
     detect_json = zookeeper_stage._format_detect_record(record, "json")
     assert '"type": "detect"' in detect_json
     assert '"auth_required": true' in detect_json
+    assert '"implementation": "zookeeper-compatible"' in detect_json
+    assert '"implementation_confidence": "unconfirmed"' in detect_json
+    assert '"vendor": null' in detect_json
+    assert '"protocol": "zookeeper"' in detect_json
+    assert '"transport": "plaintext"' in detect_json
+
+    compatible_line = zookeeper_stage._format_detect_record(record, "txt")
+    assert "[*] ZooKeeper-compatible Service (implementation:unconfirmed)" in compatible_line
+    assert "(auth required:True) (transport:plaintext) (version:-)" in compatible_line
+    apache_line = zookeeper_stage._format_detect_record(
+        {
+            **record,
+            "implementation": "apache-zookeeper",
+            "is_keeper": False,
+            "transport": "tls",
+            "version": "3.9.3",
+        },
+        "txt",
+    )
+    assert "[*] Apache ZooKeeper" in apache_line
+    assert "(transport:tls) (version:3.9.3)" in apache_line
+    keeper_line = zookeeper_stage._format_detect_record(
+        {
+            **record,
+            "implementation": "clickhouse-keeper",
+            "is_keeper": True,
+            "version": "v25.1",
+        },
+        "txt",
+    )
+    assert "[*] ClickHouse Keeper" in keeper_line
 
     record_json = zookeeper_stage._format_record(
         {
@@ -2516,7 +2683,7 @@ def test_format_detect_record_and_record_json_branches() -> None:
     )
     assert '"status": "fail"' in record_json
     line = zookeeper_stage._format_record({"status": "auth_required", "host": "h", "port": 1}, "txt")
-    assert "authentication required" in line
+    assert line == ""
     line = zookeeper_stage._format_record({"status": "fail", "host": "h", "port": 1, "error": None}, "txt")
     assert "[!] connection failed" in line
 
@@ -2760,7 +2927,7 @@ def test_run_stage_additional_error_paths_and_output_modes(monkeypatch: pytest.M
     fake_console.warns.clear()
     fake_console.infos.clear()
     rc = run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None))
-    assert rc == 0
+    assert rc == 1
     assert any("all zookeeper targets are unreachable" in msg for msg in fake_console.warns)
     assert any("zookeeper audit started" in msg for msg in fake_console.infos)
 
@@ -2956,13 +3123,7 @@ def test_audit_host_additional_branches(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _QueryDumpClient)
     monkeypatch.setattr(
         "redposture_core.stage_zookeeper._enumerate_znodes",
-        lambda *_a, **_k: (
-            ["/q"],
-            0,
-            False,
-            {"/q": {"path": "/q", "children": 0, "bytes": 0, "error": None}},
-            "enum warn",
-        ),
+        lambda *_a, **_k: pytest.fail("--znode must not traverse the tree"),
     )
     rec = _audit_zookeeper_host(
         host="127.0.0.1",
@@ -2978,8 +3139,8 @@ def test_audit_host_additional_branches(monkeypatch: pytest.MonkeyPatch) -> None
     )
     assert rec["query_znode_value"] == "/missing:<not found>"
     assert rec["query_znode_dump_error"] == "znode not found"
-    assert rec["error"] == "enum warn"
-    assert rec["znode_count"] == 1
+    assert rec["znode_count"] is None
+    assert rec["error"] is None
 
     rec = _audit_zookeeper_host(
         host="127.0.0.1",
@@ -3728,7 +3889,7 @@ def test_audit_host_debug_events_and_phase_fields(monkeypatch: pytest.MonkeyPatc
         retries=0,
         username=None,
         password=None,
-        show_znodes=False,
+        show_znodes=True,
         dump=False,
         query_znode=None,
         max_znodes=50,
@@ -3879,6 +4040,7 @@ def _lifecycle_options() -> dict[str, object]:
         "dump_limit": None,
         "query_znode": None,
         "max_znodes": 100,
+        "enum_workers": 3,
         "transport_config": None,
     }
 
@@ -3972,6 +4134,47 @@ def test_lifecycle_detect_success_defers_complete_stage_contract_to_runner(
     assert record["stage_attempts"] == {}
 
 
+def test_lifecycle_detect_retries_transient_root_protocol_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_statuses = iter([-7, _ZK_ERR_OK])  # OPERATIONTIMEOUT, then success
+    events: list[str] = []
+
+    class FakeClient:
+        selected_transport = "plaintext"
+
+        def connect(self) -> None:
+            events.append("connect")
+
+        def get_children2(self, path: str):
+            events.append(f"children:{path}")
+            return [], next(root_statuses), {}
+
+        def close(self) -> None:
+            events.append("close")
+
+    monkeypatch.setattr(lifecycle_actions, "_zookeeper_lifecycle_client", lambda *_args, **_kwargs: FakeClient())
+    monkeypatch.setattr(lifecycle_actions.time, "sleep", lambda _delay: events.append("sleep"))
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_infer_auth_required_from_anonymous_probes",
+        lambda *_args, **_kwargs: (False, "root_ok", ["/:ok"]),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=lifecycle_actions.ZooKeeperLifecycleState(),
+        args=SimpleNamespace(retries=1, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+    )
+
+    record = lifecycle_actions.detect_zookeeper(ctx, _lifecycle_options())
+
+    assert events == ["connect", "children:/", "close", "sleep", "connect", "children:/"]
+    assert record["status"] == "open_no_auth"
+    assert record["attempts"] == 2
+
+
 def test_lifecycle_auth_refresh_preserves_runner_stage_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeClient:
         def connect(self) -> None:
@@ -4029,42 +4232,1035 @@ def test_lifecycle_auth_refresh_preserves_runner_stage_telemetry(monkeypatch: py
     assert record["debug_events_streamed"] is True
 
 
+def test_lifecycle_without_action_flags_is_read_only_and_skips_tree_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def close(self) -> None:
+            return
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=FakeClient())
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: (state.anonymous_client, None),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_probe_znode_create_delete",
+        lambda *_args, **_kwargs: pytest.fail("create/delete probe must not run"),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_enumerate_zookeeper_lifecycle",
+        lambda *_args, **_kwargs: pytest.fail("tree traversal must not run"),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+
+    record = lifecycle_actions.collect_zookeeper_data(
+        ctx,
+        {"status": "open_no_auth", "can_create_znode": None, "can_delete_znode": None},
+        _lifecycle_options(),
+    )
+
+    assert record["znode_count"] is None
+    assert record["znodes"] is None
+    assert record["can_create_znode"] is None
+    assert record["can_delete_znode"] is None
+    assert record["znode_count_partial"] is False
+
+
+def test_lifecycle_znode_query_is_direct_only_and_dump_is_scoped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeClient:
+        def get_children2(self, path: str):
+            calls.append(("children", path))
+            return ["child"], _ZK_ERR_OK, {"data_length": 6}
+
+        def get_data(self, path: str):
+            calls.append(("data", path))
+            return b"secret", _ZK_ERR_OK, {"data_length": 6}
+
+        def close(self) -> None:
+            return
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=FakeClient())
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: (state.anonymous_client, None),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_probe_znode_create_delete",
+        lambda *_args, **_kwargs: pytest.fail("create/delete probe must not run"),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_enumerate_zookeeper_lifecycle",
+        lambda *_args, **_kwargs: pytest.fail("tree traversal must not run for --znode"),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+    options = {
+        **_lifecycle_options(),
+        "query_znode": "/secret",
+        "show_znodes": True,
+        "dump": True,
+    }
+
+    record = lifecycle_actions.collect_zookeeper_data(ctx, {"status": "open_no_auth"}, options)
+
+    assert calls == [("children", "/secret"), ("data", "/secret")]
+    assert record["query_znode_value"] == "/secret (children:1,bytes:6)"
+    assert record["query_znode_dump"] == "secret"
+    assert record["znode_count"] is None
+    assert record["znodes"] == []
+    assert record["can_create_znode"] is None
+    assert record["can_delete_znode"] is None
+
+
+def test_lifecycle_direct_znode_reconnects_after_transient_children_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class InitialClient:
+        def get_children2(self, path: str):
+            calls.append(("initial-children", path))
+            return [], -4, {}  # CONNECTIONLOSS
+
+        def close(self) -> None:
+            return
+
+    class RetryClient:
+        def get_children2(self, path: str):
+            calls.append(("retry-children", path))
+            return ["child"], _ZK_ERR_OK, {"data_length": 7}
+
+        def close(self) -> None:
+            return
+
+    initial = InitialClient()
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=initial)
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: (initial, None),
+    )
+
+    def fake_reopen(_ctx, _state, *, authenticated: bool):
+        calls.append(("reopen", authenticated))
+        return RetryClient()
+
+    monkeypatch.setattr(lifecycle_actions, "_reopen_zookeeper_lifecycle_client", fake_reopen)
+    monkeypatch.setattr(lifecycle_actions.time, "sleep", lambda _delay: calls.append(("sleep", _delay)))
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=1, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+    options = {**_lifecycle_options(), "query_znode": "/secret"}
+
+    record = lifecycle_actions.collect_zookeeper_data(ctx, {"status": "open_no_auth"}, options)
+
+    assert [call[0] for call in calls] == ["initial-children", "sleep", "reopen", "retry-children"]
+    assert calls[2] == ("reopen", False)
+    assert record["query_znode_value"] == "/secret (children:1,bytes:7)"
+    assert record["query_error"] is None
+    assert record["attempts"] == 2
+    assert record["stage_attempts"]["data"] == 2
+
+
+def test_lifecycle_direct_znode_dump_reconnects_with_selected_digest_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class InitialClient:
+        def get_children2(self, path: str):
+            calls.append(("children", path))
+            return [], _ZK_ERR_OK, {"data_length": 5}
+
+        def get_data(self, path: str):
+            calls.append(("initial-data", path))
+            raise ConnectionResetError("connection reset by peer")
+
+        def close(self) -> None:
+            return
+
+    class RetryClient:
+        def get_data(self, path: str):
+            calls.append(("retry-data", path))
+            return b"fresh", _ZK_ERR_OK, {"data_length": 5}
+
+        def close(self) -> None:
+            return
+
+    credential = SimpleNamespace(username="zk", password="zookeeper", source="default")
+    initial = InitialClient()
+    state = lifecycle_actions.ZooKeeperLifecycleState()
+    state.credential_clients[(credential.username, credential.password, credential.source)] = cast(Any, initial)
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: (initial, None),
+    )
+
+    def fake_reopen(_ctx, _state, *, authenticated: bool):
+        calls.append(("reopen", authenticated))
+        return RetryClient()
+
+    monkeypatch.setattr(lifecycle_actions, "_reopen_zookeeper_lifecycle_client", fake_reopen)
+    monkeypatch.setattr(lifecycle_actions.time, "sleep", lambda _delay: None)
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=1, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=credential,
+        debug_emit=None,
+    )
+    options = {**_lifecycle_options(), "query_znode": "/secret", "dump": True}
+
+    record = lifecycle_actions.collect_zookeeper_data(ctx, {"status": "weak_default_creds"}, options)
+
+    assert calls == [
+        ("children", "/secret"),
+        ("initial-data", "/secret"),
+        ("reopen", True),
+        ("retry-data", "/secret"),
+    ]
+    assert record["query_znode_value"] == "/secret (children:0,bytes:5)"
+    assert record["query_znode_dump"] == "fresh"
+    assert record["query_znode_dump_error"] is None
+    assert record["dump_error"] is None
+
+
+def test_lifecycle_tree_dump_retries_only_failed_get_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Client:
+        def __init__(self, name: str, *, transient: bool = False) -> None:
+            self.name = name
+            self.transient = transient
+
+        def get_data(self, path: str):
+            calls.append((f"data:{self.name}", path))
+            if self.transient:
+                return b"", -122, {}  # REQUESTTIMEOUT
+            return b"value", _ZK_ERR_OK, {}
+
+        def close(self) -> None:
+            return
+
+    enumerate_client = Client("enumerate")
+    dump_client = Client("dump", transient=True)
+    retry_client = Client("retry")
+    refresh_clients = iter([enumerate_client, dump_client])
+
+    def fake_refresh(*_args, **_kwargs):
+        client = next(refresh_clients)
+        calls.append(("refresh", client.name))
+        return client, None
+
+    def fake_enumerate(_ctx, _options, _state, client, **_kwargs):
+        calls.append(("enumerate", client.name))
+        return ["/secret"], 1, False, {"/secret": {}}, None
+
+    def fake_reopen(_ctx, _state, *, authenticated: bool):
+        calls.append(("reopen", authenticated))
+        return retry_client
+
+    monkeypatch.setattr(lifecycle_actions, "_refresh_zookeeper_lifecycle_client", fake_refresh)
+    monkeypatch.setattr(lifecycle_actions, "_enumerate_zookeeper_lifecycle", fake_enumerate)
+    monkeypatch.setattr(lifecycle_actions, "_reopen_zookeeper_lifecycle_client", fake_reopen)
+    monkeypatch.setattr(lifecycle_actions.time, "sleep", lambda _delay: None)
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=Client("stale"))
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=1, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+
+    record = lifecycle_actions.collect_zookeeper_data(
+        ctx,
+        {"status": "open_no_auth"},
+        {**_lifecycle_options(), "dump": True},
+    )
+
+    assert calls == [
+        ("refresh", "enumerate"),
+        ("enumerate", "enumerate"),
+        ("refresh", "dump"),
+        ("data:dump", "/secret"),
+        ("reopen", False),
+        ("data:retry", "/secret"),
+    ]
+    assert record["znode_values"] == ["/secret:value"]
+    assert record["dump_error"] is None
+    assert record["attempts"] == 2
+
+
+def test_lifecycle_direct_znode_retry_is_bounded_and_skips_definitive_statuses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transient_calls = 0
+    reopen_calls = 0
+
+    class TransientClient:
+        def get_children2(self, _path: str):
+            nonlocal transient_calls
+            transient_calls += 1
+            return [], -4, {}  # CONNECTIONLOSS
+
+        def close(self) -> None:
+            return
+
+    initial = TransientClient()
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=initial)
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: (initial, None),
+    )
+
+    def fake_reopen(_ctx, _state, *, authenticated: bool):
+        nonlocal reopen_calls
+        assert authenticated is False
+        reopen_calls += 1
+        return TransientClient()
+
+    monkeypatch.setattr(lifecycle_actions, "_reopen_zookeeper_lifecycle_client", fake_reopen)
+    monkeypatch.setattr(lifecycle_actions.time, "sleep", lambda _delay: None)
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=2, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+    options = {**_lifecycle_options(), "query_znode": "/secret"}
+
+    record = lifecycle_actions.collect_zookeeper_data(ctx, {"status": "open_no_auth"}, options)
+
+    assert transient_calls == 3
+    assert reopen_calls == 2
+    assert record["query_znode_value"] == "/secret:<error:CONNECTIONLOSS>"
+    assert record["query_error"] == "CONNECTIONLOSS"
+    assert record["attempts"] == 3
+    assert record["max_attempts"] == 3
+
+    reopen_calls = 0
+
+    class DeniedClient:
+        def get_children2(self, _path: str):
+            return [], _ZK_ERR_NOAUTH, {}
+
+        def close(self) -> None:
+            return
+
+    denied = DeniedClient()
+    state.anonymous_client = cast(Any, denied)
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: (denied, None),
+    )
+
+    denied_record = lifecycle_actions.collect_zookeeper_data(ctx, {"status": "open_no_auth"}, options)
+
+    assert reopen_calls == 0
+    assert denied_record["query_znode_value"] == "/secret:<Access Denied>"
+    assert denied_record["query_error"] == "NOAUTH"
+    assert denied_record["attempts"] == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "credential", "authenticated"),
+    [
+        (
+            "weak_default_creds",
+            SimpleNamespace(username="zk", password="zookeeper", source="default"),
+            True,
+        ),
+        (
+            "open_no_auth",
+            SimpleNamespace(username=None, password=None, source="anonymous"),
+            False,
+        ),
+    ],
+)
+def test_exhaustive_defcreds_refreshes_selected_session_before_direct_read(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    credential: SimpleNamespace,
+    authenticated: bool,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class StaleClient:
+        def get_children2(self, _path: str):
+            pytest.fail("an idle detect/auth session must not reach the data phase")
+
+        def close(self) -> None:
+            return
+
+    class FreshClient:
+        def get_children2(self, path: str):
+            calls.append(("children", path))
+            return [], _ZK_ERR_OK, {"data_length": 5}
+
+        def get_data(self, path: str):
+            calls.append(("data", path))
+            return b"fresh", _ZK_ERR_OK, {"data_length": 5}
+
+        def close(self) -> None:
+            return
+
+    stale = StaleClient()
+    state = lifecycle_actions.ZooKeeperLifecycleState()
+    if authenticated:
+        key = (credential.username, credential.password, credential.source)
+        state.credential_clients[key] = cast(Any, stale)
+    else:
+        state.anonymous_client = cast(Any, stale)
+
+    fresh = FreshClient()
+
+    def fake_reopen(_ctx, _state, *, authenticated: bool):
+        calls.append(("reopen", authenticated))
+        return fresh
+
+    monkeypatch.setattr(lifecycle_actions, "_reopen_zookeeper_lifecycle_client", fake_reopen)
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1, defcreds=True),
+        host="127.0.0.1",
+        port=2181,
+        credential=credential,
+        debug_emit=None,
+    )
+    options = {
+        **_lifecycle_options(),
+        "query_znode": "/protected",
+        "dump": True,
+    }
+
+    record = lifecycle_actions.collect_zookeeper_data(ctx, {"status": status}, options)
+
+    assert calls == [
+        ("reopen", authenticated),
+        ("children", "/protected"),
+        ("data", "/protected"),
+    ]
+    assert record["query_znode_dump"] == "fresh"
+
+
+def test_tree_dump_refreshes_session_again_after_enumeration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    class Client:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def get_data(self, path: str):
+            calls.append((f"data:{self.name}", path))
+            return b"value", _ZK_ERR_OK, {}
+
+        def close(self) -> None:
+            return
+
+    stale = Client("stale")
+    enumerate_client = Client("enumerate")
+    dump_client = Client("dump")
+    refreshed = iter([enumerate_client, dump_client])
+
+    def fake_refresh(*_args, **_kwargs):
+        client = next(refreshed)
+        calls.append(("refresh", client.name))
+        return client, None
+
+    def fake_enumerate(_ctx, _options, _state, client, **_kwargs):
+        calls.append(("enumerate", client.name))
+        return ["/secret"], 1, False, {"/secret": {}}, None
+
+    monkeypatch.setattr(lifecycle_actions, "_refresh_zookeeper_lifecycle_client", fake_refresh)
+    monkeypatch.setattr(lifecycle_actions, "_enumerate_zookeeper_lifecycle", fake_enumerate)
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=stale)
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1, defcreds=False),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+    options = {**_lifecycle_options(), "dump": True}
+
+    record = lifecycle_actions.collect_zookeeper_data(ctx, {"status": "open_no_auth"}, options)
+
+    assert calls == [
+        ("refresh", "enumerate"),
+        ("enumerate", "enumerate"),
+        ("refresh", "dump"),
+        ("data:dump", "/secret"),
+    ]
+    assert record["znode_values"] == ["/secret:value"]
+
+
+def test_lifecycle_refresh_failure_marks_tree_scan_unknown_and_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StaleClient:
+        def close(self) -> None:
+            return
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=StaleClient())
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: (None, "connection reset by peer"),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_enumerate_zookeeper_lifecycle",
+        lambda *_args, **_kwargs: pytest.fail("enumeration must not use a stale session"),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+    options = {**_lifecycle_options(), "show_znodes": True}
+
+    record = lifecycle_actions.collect_zookeeper_data(
+        ctx,
+        {"status": "open_no_auth", "is_zookeeper": True},
+        options,
+    )
+
+    assert record["znode_count"] is None
+    assert record["znodes_truncated"] is True
+    assert record["znode_count_partial"] is True
+    assert record["znode_count_unknown"] is True
+    assert record["znode_truncated_reason"] == "session_refresh"
+    assert record["enum_error"] == "session refresh failed: connection reset by peer"
+    assert record["stage2_error"] == record["enum_error"]
+    assert "enum_error" in lifecycle_actions._format_record(record, "json")
+    assert any(
+        "znode count unknown (partial) reason=session refresh failed: connection reset by peer" in line
+        for line in lifecycle_actions._format_znodes_detail_records(record, "txt")
+    )
+
+    merged = lifecycle_actions._merge_stage2_record(
+        {"status": "open_no_auth", "is_zookeeper": True},
+        record,
+        timeout=0.1,
+        retries=0,
+    )
+    assert merged["znode_count"] is None
+    assert merged["znode_count_partial"] is True
+    assert merged["znode_count_unknown"] is True
+    assert merged["znode_truncated_reason"] == "session_refresh"
+
+
+def test_tree_dump_refresh_failure_is_reported_without_losing_enumeration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Client:
+        def close(self) -> None:
+            return
+
+    enumerate_client = Client()
+    refreshed = iter(((enumerate_client, None), (None, "connection reset by peer")))
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: next(refreshed),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_enumerate_zookeeper_lifecycle",
+        lambda *_args, **_kwargs: (
+            ["/secret"],
+            1,
+            False,
+            {"/secret": {"path": "/secret", "children": 0, "bytes": 6, "error": None}},
+            None,
+        ),
+    )
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=Client())
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+
+    record = lifecycle_actions.collect_zookeeper_data(
+        ctx,
+        {"status": "open_no_auth", "is_zookeeper": True},
+        {**_lifecycle_options(), "dump": True},
+    )
+
+    assert record["znode_count"] == 1
+    assert record["znode_count_unknown"] is False
+    assert record["znode_values"] is None
+    assert record["dump_error"] == "session refresh failed: connection reset by peer"
+    txt_lines = lifecycle_actions._format_znodes_detail_records(record, "txt")
+    assert any("[*] Dump Znodes" in line for line in txt_lines)
+    assert any("[-] session refresh failed: connection reset by peer" in line for line in txt_lines)
+    json_lines = lifecycle_actions._format_znodes_detail_records(record, "json")
+    assert any('"error": "session refresh failed: connection reset by peer"' in line for line in json_lines)
+
+
+def test_lifecycle_tree_walk_delegates_hard_bound_workers_auth_and_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, int, object, dict[str, object]]] = []
+    expected = (["/a", "/b"], 2, True, {"/a": {}, "/b": {}}, None)
+
+    def fake_enumerate(client, max_znodes, progress_hook, **kwargs):
+        calls.append((client, max_znodes, progress_hook, dict(kwargs)))
+        return expected
+
+    monkeypatch.setattr(lifecycle_actions, "_enumerate_znodes", fake_enumerate)
+    client = object()
+    progress_hook = object()
+    transport_config = ZkTransportConfig(mode="tls", insecure=True)
+    state = lifecycle_actions.ZooKeeperLifecycleState(selected_transport_config=transport_config)
+    ctx = SimpleNamespace(credential=SimpleNamespace(username="zk", password="secret"))
+    options = {**_lifecycle_options(), "max_znodes": 2, "enum_workers": 7}
+
+    result = lifecycle_actions._enumerate_zookeeper_lifecycle(
+        ctx,
+        options,
+        state,
+        client,
+        authenticated=True,
+        collect_paths=True,
+        progress_hook=progress_hook,
+    )
+
+    assert result == expected
+    assert calls == [
+        (
+            client,
+            2,
+            progress_hook,
+            {
+                "collect_paths": True,
+                "enum_workers": 7,
+                "auth_username": "zk",
+                "auth_password": "secret",
+                "transport_config": transport_config,
+            },
+        )
+    ]
+
+
+def test_lifecycle_show_znodes_reports_hard_limit_as_partial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, dict[str, object]]] = []
+
+    class FakeClient:
+        def close(self) -> None:
+            return
+
+    def fake_enumerate(_client, max_znodes, _progress_hook, **kwargs):
+        calls.append((max_znodes, dict(kwargs)))
+        return (
+            ["/a", "/b"],
+            2,
+            True,
+            {
+                "/a": {"path": "/a", "children": None, "bytes": None, "error": None},
+                "/b": {"path": "/b", "children": None, "bytes": None, "error": None},
+            },
+            None,
+        )
+
+    monkeypatch.setattr(lifecycle_actions, "_enumerate_znodes", fake_enumerate)
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=FakeClient())
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: (state.anonymous_client, None),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+    options = {**_lifecycle_options(), "show_znodes": True, "max_znodes": 2}
+
+    record = lifecycle_actions.collect_zookeeper_data(ctx, {"status": "open_no_auth"}, options)
+
+    assert calls == [
+        (
+            2,
+            {
+                "collect_paths": True,
+                "enum_workers": 3,
+                "auth_username": None,
+                "auth_password": None,
+            },
+        )
+    ]
+    assert record["znode_count"] == 2
+    assert record["znodes"] == ["/a", "/b"]
+    assert record["znodes_truncated"] is True
+    assert record["znode_count_partial"] is True
+    assert record["znode_count_unknown"] is True
+    assert record["znode_truncated_reason"] == "max_znodes"
+    detail_lines = lifecycle_actions._format_znodes_detail_records(record, "txt")
+    assert any("scanned first 2 znodes; more may exist" in line for line in detail_lines)
+
+
+def test_lifecycle_noauth_subtree_reports_partial_coverage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_enumerate_znodes",
+        lambda *_args, **_kwargs: (
+            ["/public", "/protected"],
+            2,
+            False,
+            {
+                "/public": {"path": "/public", "children": 0, "bytes": 1, "error": None},
+                "/protected": {
+                    "path": "/protected",
+                    "children": None,
+                    "bytes": None,
+                    "error": "Access Denied",
+                },
+            },
+            None,
+        ),
+    )
+    state = lifecycle_actions.ZooKeeperLifecycleState(anonymous_client=FakeClient())
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_refresh_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: (state.anonymous_client, None),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1, defcreds=False),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+        debug_emit=None,
+    )
+    options = {**_lifecycle_options(), "show_znodes": True}
+
+    record = lifecycle_actions.collect_zookeeper_data(ctx, {"status": "open_no_auth"}, options)
+
+    assert record["znodes_truncated"] is True
+    assert record["znode_count_partial"] is True
+    assert record["znode_count_unknown"] is True
+    assert record["znode_truncated_reason"] == "noauth"
+    detail_lines = lifecycle_actions._format_znodes_detail_records(record, "txt")
+    assert any("scan partial: one or more znode subtrees are access denied" in line for line in detail_lines)
+    assert not any("max_znodes=" in line for line in detail_lines)
+
+
+def test_lifecycle_digest_is_verified_by_non_root_access_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        def connect(self) -> None:
+            return
+
+        def auth_digest(self, _username: str, _password: str):
+            return True, None
+
+        def get_children2(self, path: str):
+            assert path in {"/", "/secure"}
+            return [], _ZK_ERR_OK, {}
+
+        def close(self) -> None:
+            return
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(
+        root_err=_ZK_ERR_OK,
+        auth_required=False,
+        anonymous_auth_probe_results={"/": _ZK_ERR_OK, "/secure": _ZK_ERR_NOAUTH},
+    )
+    monkeypatch.setattr(lifecycle_actions, "_zookeeper_lifecycle_client", lambda *_args, **_kwargs: FakeClient())
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username="user", password="pass", source="provided"),
+    )
+
+    record = lifecycle_actions.authenticate_zookeeper(
+        ctx,
+        {"status": "open_no_auth"},
+        _lifecycle_options(),
+    )
+
+    assert record["status"] == "valid_credentials"
+    assert record["provided_credentials_ok"] is True
+    assert record["credential_verdict"] == "valid"
+    assert record["credential_auth_probe_results"] == {"/": "ok", "/secure": "ok"}
+
+
+def test_lifecycle_digest_transport_failure_is_unverified_not_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ResetClient:
+        def connect(self) -> None:
+            return
+
+        def auth_digest(self, _username: str, _password: str):
+            raise ConnectionResetError("connection reset by peer")
+
+        def close(self) -> None:
+            return
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(
+        root_err=_ZK_ERR_NOAUTH,
+        auth_required=True,
+        anonymous_auth_probe_results={"/": _ZK_ERR_NOAUTH},
+    )
+    monkeypatch.setattr(lifecycle_actions, "_zookeeper_lifecycle_client", lambda *_args, **_kwargs: ResetClient())
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username="user", password="pass", source="provided"),
+    )
+
+    record = lifecycle_actions.authenticate_zookeeper(
+        ctx,
+        {"status": "auth_required"},
+        _lifecycle_options(),
+    )
+
+    assert record["status"] == "fail"
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unverified"
+    assert "connection reset" in str(record["error"])
+
+
+def test_lifecycle_sasl_required_marks_digest_unsupported_without_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = lifecycle_actions.ZooKeeperLifecycleState(
+        root_err=_ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH,
+        auth_required=True,
+        anonymous_auth_probe_results={"/": _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH},
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: pytest.fail("digest network attempt must be skipped for SASL-only policy"),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username="user", password="pass", source="default"),
+    )
+
+    record = lifecycle_actions.authenticate_zookeeper(
+        ctx,
+        {"status": "auth_required"},
+        _lifecycle_options(),
+    )
+
+    assert record["status"] == "auth_required"
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unsupported_sasl"
+    assert record["auth_mechanism"] == "sasl"
+    assert record["verification_capability"] == "unsupported"
+
+
+def test_lifecycle_digest_auth_response_sasl_required_is_not_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_clients = 0
+
+    class FakeClient:
+        def connect(self) -> None:
+            return
+
+        def auth_digest(self, _username: str, _password: str):
+            return False, "authentication failed: SESSIONCLOSEDREQUIRESASLAUTH"
+
+        def get_children2(self, _path: str):
+            pytest.fail("closed SASL-required session must not be probed")
+
+        def close(self) -> None:
+            return
+
+    def fake_client(*_args, **_kwargs):
+        nonlocal created_clients
+        created_clients += 1
+        return FakeClient()
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(
+        root_err=_ZK_ERR_NOAUTH,
+        auth_required=True,
+        anonymous_auth_probe_results={"/": _ZK_ERR_NOAUTH},
+    )
+    monkeypatch.setattr(lifecycle_actions, "_zookeeper_lifecycle_client", fake_client)
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username="user", password="pass", source="default"),
+    )
+
+    first = lifecycle_actions.authenticate_zookeeper(ctx, {"status": "auth_required"}, _lifecycle_options())
+    ctx.credential = SimpleNamespace(username="zk", password="zookeeper", source="default")
+    second = lifecycle_actions.authenticate_zookeeper(ctx, {"status": "auth_required"}, _lifecycle_options())
+
+    assert created_clients == 1
+    for record in (first, second):
+        assert record["status"] == "auth_required"
+        assert record["provided_credentials_ok"] is None
+        assert record["credential_verdict"] == "unsupported_sasl"
+        assert record["auth_mechanism"] == "sasl"
+        assert record["verification_capability"] == "unsupported"
+
+
+def test_lifecycle_exhaustive_success_keeps_only_first_verified_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clients: list[FakeClient] = []
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def connect(self) -> None:
+            return
+
+        def auth_digest(self, _username: str, _password: str):
+            return True, None
+
+        def get_children2(self, _path: str):
+            return [], _ZK_ERR_OK, {}
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_client(*_args, **_kwargs):
+        client = FakeClient()
+        clients.append(client)
+        return client
+
+    state = lifecycle_actions.ZooKeeperLifecycleState(
+        root_err=_ZK_ERR_NOAUTH,
+        auth_required=True,
+        anonymous_auth_probe_results={"/": _ZK_ERR_NOAUTH},
+    )
+    monkeypatch.setattr(lifecycle_actions, "_zookeeper_lifecycle_client", fake_client)
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(retries=0, timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username="first", password="secret", source="default"),
+    )
+
+    first = lifecycle_actions.authenticate_zookeeper(ctx, {"status": "auth_required"}, _lifecycle_options())
+    ctx.credential = SimpleNamespace(username="second", password="secret", source="default")
+    second = lifecycle_actions.authenticate_zookeeper(ctx, {"status": "auth_required"}, _lifecycle_options())
+
+    assert first["provided_credentials_ok"] is True
+    assert second["provided_credentials_ok"] is True
+    assert len(state.credential_clients) == 1
+    assert clients[0].closed is False
+    assert clients[1].closed is True
+
+
 def test_zookeeper_defcreds_plan_has_exact_stable_catalog_order() -> None:
     expected = (
-        ("zookeeper", "zookeeper"),
-        ("zookeeper", "admin"),
-        ("zookeeper", "password"),
         ("admin", "admin"),
-        ("admin", "password"),
-        ("admin", "zookeeper"),
-        ("zk", "zk"),
-        ("zk", "zookeeper"),
-        ("zk", "password"),
-        ("root", "root"),
-        ("root", "password"),
-        ("root", "zookeeper"),
-        ("user", "user"),
-        ("user", "password"),
-        ("guest", "guest"),
-        ("test", "test"),
-        ("dev", "dev"),
-        ("service", "service"),
-        ("kafka", "kafka"),
-        ("kafka", "zookeeper"),
-        ("solr", "solr"),
-        ("hadoop", "hadoop"),
-        ("super", "super"),
-        ("user1", "12345"),
         ("admin", "changeme"),
         ("admin", "kafka"),
-        ("kafka", "password"),
-        ("kafka", "changeme"),
+        ("admin", "password"),
+        ("admin", "zookeeper"),
         ("broker", "broker"),
         ("broker", "brokerpass"),
         ("client", "client"),
-        ("service", "password"),
+        ("dev", "dev"),
+        ("guest", "guest"),
+        ("hadoop", "hadoop"),
+        ("kafka", "changeme"),
+        ("kafka", "kafka"),
+        ("kafka", "password"),
+        ("kafka", "zookeeper"),
         ("root", "admin"),
+        ("root", "password"),
+        ("root", "root"),
         ("root", "rootpass"),
+        ("root", "zookeeper"),
+        ("service", "password"),
+        ("service", "service"),
+        ("solr", "solr"),
+        ("super", "super"),
+        ("test", "test"),
+        ("user", "password"),
+        ("user", "user"),
+        ("user1", "12345"),
+        ("zk", "password"),
+        ("zk", "zk"),
+        ("zk", "zookeeper"),
+        ("zookeeper", "admin"),
+        ("zookeeper", "password"),
+        ("zookeeper", "zookeeper"),
     )
     args = parse_args(
         [
@@ -4083,6 +5279,91 @@ def test_zookeeper_defcreds_plan_has_exact_stable_catalog_order() -> None:
     assert tuple((run.username, run.password) for run in plan.credential_runs) == expected
     assert len(plan.credential_runs) == 34
     assert {run.source for run in plan.credential_runs} == {"default"}
+
+
+def test_zookeeper_canonical_plan_scans_zookeeper_and_keeper_default_ports() -> None:
+    args = parse_args(["zookeeper", "-t", "127.0.0.1"])
+
+    assert lifecycle_stage.build_zookeeper_plan(args).ports == (2181, 9181, 12181)
+
+
+def test_zookeeper_canonical_tls_policy_rejects_conflicting_or_incomplete_trust_options() -> None:
+    class Console:
+        def __init__(self) -> None:
+            self.errors: list[str] = []
+
+        def error(self, message: str) -> None:
+            self.errors.append(message)
+
+    conflicting = parse_args(["zookeeper", "-t", "127.0.0.1", "--ca-file", "ca.pem", "--insecure"])
+    console = Console()
+    assert lifecycle_stage.policy.validate_args(conflicting, console) == 2
+    assert console.errors == ["--ca-file cannot be combined with --insecure"]
+
+    incomplete = parse_args(["zookeeper", "-t", "127.0.0.1", "--tls-cert", "client.pem"])
+    console = Console()
+    assert lifecycle_stage.policy.validate_args(incomplete, console) == 2
+    assert console.errors == ["--tls-cert and --tls-key must be used together"]
+
+
+def test_zookeeper_canonical_spec_auto_classifies_apache_without_rejecting_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = parse_args(["zookeeper", "-t", "127.0.0.1", "--insecure"])
+    args.zookeeper_fingerprint_cache = ZooKeeperFingerprintCache()
+    spec = lifecycle_stage.build_zookeeper_spec(args)
+    assert spec.lifecycle_state_factory is not None
+    assert spec.detect is not None
+    state = spec.lifecycle_state_factory(None)
+    assert isinstance(state, implementation_engine.ZooKeeperImplementationLifecycleState)
+    assert state.requested_config.mode == "auto"
+    assert state.requested_config.insecure is True
+
+    def fake_detect(ctx, _options):
+        ctx.lifecycle_state.selected_transport_config = ZkTransportConfig(mode="plaintext")
+        return {
+            "host": ctx.host,
+            "port": ctx.port,
+            "service": "zookeeper",
+            "status": "open_no_auth",
+            "auth_required": False,
+            "is_zookeeper": True,
+            "error": None,
+            "stages": [],
+        }
+
+    monkeypatch.setattr(implementation_engine.zookeeper_actions, "detect_zookeeper", fake_detect)
+    monkeypatch.setattr(
+        implementation_engine,
+        "fingerprint_zookeeper_implementation",
+        lambda *_args, **_kwargs: ZkImplementationFingerprint(
+            "apache-zookeeper",
+            False,
+            "rejected",
+            version="3.9.5",
+        ),
+    )
+    ctx = AuditHookContext(
+        args=args,
+        logger=None,
+        host="127.0.0.1",
+        port=2181,
+        credential=AuditCredentialRun(source="anonymous"),
+        lifecycle_state=state,
+    )
+
+    record = spec.detect(ctx)
+    payload = record.to_dict()
+
+    assert payload["module"] == "zookeeper"
+    assert payload["service"] == "zookeeper"
+    assert payload["implementation"] == "apache-zookeeper"
+    assert payload["implementation_confidence"] == "confirmed"
+    assert payload["vendor"] == "apache"
+    assert payload["is_keeper"] is False
+    assert payload["status"] == "open_no_auth"
+    assert payload["error"] is None
+    assert payload["transport"] == "plaintext"
 
 
 def test_zookeeper_credential_file_precedes_defaults_and_is_stably_deduplicated(tmp_path) -> None:
@@ -4109,6 +5390,67 @@ def test_zookeeper_credential_file_precedes_defaults_and_is_stably_deduplicated(
     assert pairs[2:] == tuple(pair for pair in lifecycle_stage._DEFAULT_CREDENTIALS if pair != ("admin", "admin"))
     assert pairs.count(("custom", "secret")) == 1
     assert pairs.count(("admin", "admin")) == 1
+
+
+def test_zookeeper_credential_file_preserves_password_bytes_into_digest_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    exact_password = "  secret:with:colons  "
+    credentials = tmp_path / "zookeeper-exact.creds"
+    credentials.write_text(f" zk-user :{exact_password}\n", encoding="utf-8")
+    args = parse_args(
+        [
+            "zookeeper",
+            "-t",
+            "127.0.0.1",
+            "--port",
+            "2181",
+            "-u",
+            str(credentials),
+            "--format",
+            "json",
+        ]
+    )
+    observed: list[tuple[str, str]] = []
+
+    class _ExactCredentialClient:
+        selected_transport = "plaintext"
+
+        def connect(self) -> None:
+            return None
+
+        def auth_digest(self, username: str, password: str):
+            observed.append((username, password))
+            return True, None
+
+        def get_children2(self, _path: str):
+            return [], _ZK_ERR_OK, {}
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: _ExactCredentialClient(),
+    )
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_infer_auth_required_from_anonymous_probes",
+        lambda *_args, **_kwargs: (True, "root_noauth", ["/:noauth"]),
+    )
+    monkeypatch.setattr(lifecycle_actions, "collect_zookeeper_data", lambda _ctx, record, _options: record.to_dict())
+
+    runner = AuditCommandRunner(
+        args=args,
+        spec=lifecycle_stage.build_zookeeper_spec(args),
+        emit_line=lambda _line: None,
+    )
+    result = runner.run_plan(lifecycle_stage.build_zookeeper_plan(args))
+
+    assert result.detected_count == 1
+    assert observed == [("zk-user", exact_password)]
 
 
 def test_zookeeper_explicit_default_pair_stays_provided_and_precedes_defaults() -> None:
@@ -4255,6 +5597,43 @@ def test_zookeeper_defcreds_checks_full_catalog_after_late_digest_success(
     assert len(rendered) == len(lifecycle_stage._DEFAULT_CREDENTIALS)
     assert any("[+] zk:zookeeper" in line for line in rendered)
     assert any("[-] root:rootpass" in line for line in rendered)
+
+
+def test_zookeeper_credential_attempt_renderer_distinguishes_rejected_and_unverified() -> None:
+    record = {
+        "module": "zookeeper",
+        "host": "127.0.0.1",
+        "port": 2181,
+        "attempted_credentials": [
+            {
+                "username": "bad",
+                "password": "secret",
+                "status": "auth_required",
+                "provided_credentials_ok": False,
+                "credential_verdict": "rejected",
+            },
+            {
+                "username": "sasl",
+                "password": "secret",
+                "status": "auth_required",
+                "provided_credentials_ok": None,
+                "credential_verdict": "unsupported_sasl",
+            },
+            {
+                "username": "network",
+                "password": "secret",
+                "status": "fail",
+                "provided_credentials_ok": None,
+                "credential_verdict": "unverified",
+            },
+        ],
+    }
+
+    rendered = lifecycle_actions._format_credential_attempts_records(record, "txt")
+
+    assert any("[-] bad:secret" in line for line in rendered)
+    assert any("[!] sasl:secret (unsupported:SASL)" in line for line in rendered)
+    assert any("[!] network:secret (unverified)" in line for line in rendered)
 
 
 def test_zookeeper_explicit_pair_matching_default_is_not_classified_as_weak(

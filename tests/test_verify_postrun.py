@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,7 @@ from scripts.verify_postrun import (
     _EXPECTED_MODULES,
     _EXTENDED_EXPECTED_LABELS,
     _FUZZ_LABELS,
+    _OPENSEARCH_DEFAULT_CREDENTIALS,
     _PROGRESS_EXPECTED_TARGETS,
     _combined_run_output,
     _expected_labels_for_profile,
@@ -23,6 +25,7 @@ from scripts.verify_postrun import (
     _validate_action_contracts,
     _validate_capability_sanity,
     _validate_cross_case_invariants,
+    _validate_discover_lab_contracts,
     _validate_dump_not_empty,
     _validate_elapsed_sanity,
     _validate_expected_exits,
@@ -31,6 +34,7 @@ from scripts.verify_postrun import (
     _validate_meaningful_outcomes,
     _validate_multi_record_consistency,
     _validate_openapi_artifacts,
+    _validate_opensearch_defcreds_contract,
     _validate_output_sanity,
     _validate_progress_target_mappings,
     _validate_rich_lab_outputs,
@@ -422,10 +426,10 @@ def test_golden_text_normalizes_elastic_node_identity_but_keeps_roles(tmp_path: 
     assert _golden_text_for_row(row) != normalized
 
 
-def test_golden_text_normalizes_keeper_election_and_timing_but_keeps_dump(tmp_path: Path) -> None:
+def test_golden_text_normalizes_canonical_keeper_election_and_timing_but_keeps_dump(tmp_path: Path) -> None:
     artifact = tmp_path / "keeper.json"
     row = {
-        "module": "keeper",
+        "module": "zookeeper",
         "label": "keeper_cluster",
         "expected_exit": "0",
         "exit_code": "0",
@@ -433,7 +437,7 @@ def test_golden_text_normalizes_keeper_election_and_timing_but_keeps_dump(tmp_pa
         "log_path": "-",
     }
     first = {
-        "module": "keeper",
+        "module": "zookeeper",
         "status": "open_no_auth",
         "connections": 1,
         "latency_ms": {"min": 0, "avg": 0, "max": 0},
@@ -462,12 +466,6 @@ def test_golden_text_normalizes_keeper_election_and_timing_but_keeps_dump(tmp_pa
     stable_role_normalized = _golden_text_for_row(stable_role_row)
     artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
     assert _golden_text_for_row(stable_role_row) != stable_role_normalized
-
-    forced_cluster_member_row = dict(row, label="keeper_force_plaintext")
-    artifact.write_text(json.dumps(first) + "\n", encoding="utf-8")
-    forced_member_normalized = _golden_text_for_row(forced_cluster_member_row)
-    artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
-    assert _golden_text_for_row(forced_cluster_member_row) == forced_member_normalized
 
     second["znode_values"] = ["/redposture/app/api_key:wrong"]
     artifact.write_text(json.dumps(second) + "\n", encoding="utf-8")
@@ -681,6 +679,7 @@ def test_grpc_multi_ports_expected_targets_is_five() -> None:
 
 def test_keeper_cluster_expected_targets_matches_matrix_command() -> None:
     assert _PROGRESS_EXPECTED_TARGETS["keeper_cluster"] == 2
+    assert "keeper" not in _EXPECTED_MODULES
     _validate_progress_target_mappings()
 
 
@@ -844,16 +843,32 @@ def test_validate_rich_lab_outputs_requires_zookeeper_dump_for_all_ports(tmp_pat
 def test_validate_rich_lab_outputs_requires_keeper_dump_for_each_cluster_target(tmp_path: Path) -> None:
     artifact = tmp_path / "keeper.jsonl"
     log = tmp_path / "keeper.log"
-    artifact.write_text(
-        '{"host":"127.0.0.1","port":19181,"status":"open_no_auth",'
-        '"znode_values":["/redposture/app/api_key:rp-keeper-key-2026","/clickhouse:clickhouse-keeper"]}\n'
-        '{"host":"127.0.0.1","port":29181,"status":"open_no_auth","znode_values":[]}\n',
-        encoding="utf-8",
-    )
+    records = [
+        {
+            "host": "127.0.0.1",
+            "port": 19181,
+            "status": "open_no_auth",
+            "service": "zookeeper",
+            "implementation": "clickhouse-keeper",
+            "znode_values": [
+                "/redposture/app/api_key:rp-keeper-key-2026",
+                "/clickhouse:clickhouse-keeper",
+            ],
+        },
+        {
+            "host": "127.0.0.1",
+            "port": 29181,
+            "status": "open_no_auth",
+            "service": "zookeeper",
+            "implementation": "clickhouse-keeper",
+            "znode_values": [],
+        },
+    ]
+    artifact.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
     log.write_text("", encoding="utf-8")
     rows = [
         {
-            "module": "keeper",
+            "module": "zookeeper",
             "label": "keeper_cluster",
             "expected_exit": "0",
             "exit_code": "0",
@@ -1365,16 +1380,16 @@ def test_validate_meaningful_outcomes_rejects_summary_only(tmp_path: Path) -> No
         _validate_meaningful_outcomes(rows)
 
 
-def test_validate_meaningful_outcomes_allows_keeper_negative_control(tmp_path: Path) -> None:
+def test_validate_meaningful_outcomes_accepts_canonical_apache_classification(tmp_path: Path) -> None:
     json_path, log_path = _audit_json(
         tmp_path,
         "keeper_apache_control",
-        '{"host":"h","port":12181,"status":"not_keeper","module":"keeper",'
-        '"service":"apache-zookeeper","is_keeper":false}',
+        '{"host":"h","port":12181,"status":"open_no_auth","module":"zookeeper",'
+        '"service":"zookeeper","implementation":"apache-zookeeper","is_keeper":false}',
     )
     rows = [
         _mk_row(
-            module="keeper",
+            module="zookeeper",
             label="keeper_apache_control",
             exit_code="0",
             json_path=str(json_path),
@@ -1441,6 +1456,49 @@ def _audit_json(tmp_path: Path, label: str, body: str) -> tuple[Path, Path]:
     return json_path, log_path
 
 
+def test_validate_limit_conformance_enforces_zookeeper_show_znodes_hard_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import matrix_flag_coverage
+
+    label = "zookeeper_hard_limit"
+    monkeypatch.setattr(
+        matrix_flag_coverage,
+        "parse_matrix_cases",
+        lambda _text: [
+            SimpleNamespace(
+                label=label,
+                tokens=("redposture", "zookeeper", "-t", "127.0.0.1", "--show-znodes", "2"),
+            )
+        ],
+    )
+    record = {
+        "module": "zookeeper",
+        "host": "127.0.0.1",
+        "port": 2181,
+        "status": "open_no_auth",
+        "znodes": ["/", "/one"],
+    }
+    json_path, log_path = _audit_json(tmp_path, label, json.dumps(record))
+    rows = [
+        _mk_row(
+            module="zookeeper",
+            label=label,
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    verify_postrun._validate_limit_conformance(rows)
+
+    record["znodes"].append("/three")
+    json_path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match=r"--show-znodes 2.*znodes contains 3"):
+        verify_postrun._validate_limit_conformance(rows)
+
+
 # --- P3-A schema -----------------------------------------------------------------
 
 
@@ -1467,6 +1525,53 @@ def test_validate_schema_mandatory_fields_passes_complete_record(tmp_path: Path)
         _mk_row(module="redis", label="redis_default", exit_code="0", json_path=str(json_path), log_path=str(log_path))
     ]
     _validate_schema_mandatory_fields(rows)
+
+
+def test_canonical_zookeeper_module_schema_requires_identity_and_keeper_telemetry(tmp_path: Path) -> None:
+    required = verify_postrun._MODULE_SCHEMA_REQUIRED["zookeeper"]
+    assert {
+        "implementation",
+        "implementation_confidence",
+        "vendor",
+        "protocol",
+        "transport",
+        "is_keeper",
+        "version",
+        "server_state",
+        "read_only",
+        "connections",
+        "latency_ms",
+        "raft",
+        "quorum_status",
+    } <= set(required)
+
+    payload: dict[str, object] = {field: None for field in required}
+    payload.update(
+        {
+            "host": "127.0.0.1",
+            "port": 9181,
+            "status": "open_no_auth",
+            "module": "zookeeper",
+            "service": "zookeeper",
+        }
+    )
+    json_path, log_path = _audit_json(tmp_path, "keeper_cluster", json.dumps(payload))
+    rows = [
+        _mk_row(
+            module="zookeeper",
+            label="keeper_cluster",
+            exit_code="0",
+            json_path=str(json_path),
+            log_path=str(log_path),
+        )
+    ]
+
+    verify_postrun._validate_module_schema(rows)
+
+    del payload["implementation"]
+    json_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="implementation"):
+        verify_postrun._validate_module_schema(rows)
 
 
 def test_validate_schema_mandatory_fields_skips_exporter_records(tmp_path: Path) -> None:
@@ -2184,3 +2289,316 @@ def test_expected_failure_output_expectations_cover_matrix_failures() -> None:
     assert failure_labels <= set(_EXPECTED_FAILURE_OUTPUT_SUBSTRINGS)
     assert _FUZZ_LABELS == frozenset(label for label in _EXTENDED_EXPECTED_LABELS if label.startswith("fuzz_"))
     assert _FUZZ_LABELS <= set(_EXPECTED_FAILURE_OUTPUT_SUBSTRINGS)
+
+
+def _discover_manifest_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "expected_secret_types": ["password", "api_token"],
+        "findings": [
+            {
+                "secret_type": "password",
+                "value": "matrix-db-pass",
+                "occurrence_count_min": 2,
+                "locations": [
+                    {
+                        "source_kind": "document",
+                        "object": "redposture-discover-corpus-v2/doc-password",
+                        "index": "redposture-discover-corpus-v2",
+                        "id": "doc-password",
+                        "path": "/database/password",
+                    }
+                ],
+            },
+            {
+                "secret_type": "api_token",
+                "value": "matrix-api-token",
+                "locations": [
+                    {
+                        "source_kind": "document",
+                        "object": "redposture-discover-corpus-v2/doc-token",
+                        "index": "redposture-discover-corpus-v2",
+                        "id": "doc-token",
+                        "path": "/client/api_token",
+                    }
+                ],
+            },
+        ],
+        "forbidden_values": ["ordinary-finance-reference"],
+        "expected_surfaces": {
+            "mappings": {"allowed_statuses": ["complete"], "objects_scanned_min": 1},
+            "ingest_pipelines": {"allowed_statuses": ["complete", "denied"], "objects_scanned_min": 0},
+        },
+    }
+
+
+def _discover_record(*, vendor: str, scheme: str, auth_required: bool, username: str | None = None) -> dict:
+    findings = []
+    raw_findings = _discover_manifest_payload()["findings"]
+    assert isinstance(raw_findings, list)
+    for index, item in enumerate(raw_findings):
+        assert isinstance(item, dict)
+        findings.append(
+            {
+                "fingerprint": f"sha256:{index:064x}",
+                "secret_type": item["secret_type"],
+                "value": item["value"],
+                "confidence": "high",
+                "score": 85,
+                "detectors": ["sensitive_field"],
+                "occurrence_count": int(item.get("occurrence_count_min", 1)),
+                "locations": item["locations"],
+            }
+        )
+    return {
+        "module": "elastic",
+        "service": "elastic",
+        "host": "127.0.0.1",
+        "port": 29201 if scheme == "https" else 29200,
+        "status": "valid_credentials" if auth_required else "open_no_auth",
+        "vendor": vendor,
+        "server_version": "2.19.1" if vendor == "opensearch" else "8.13.4",
+        "scheme": scheme,
+        "auth_required": auth_required,
+        "auth_valid": True if auth_required else None,
+        "effective_username": username,
+        "is_elastic": True,
+        "discover": True,
+        "discover_schema_version": 2,
+        "discover_findings": findings,
+        "discover_results": [{"index": "redposture-discover-corpus-v2", "total_hits": 2}],
+        "discover_error": None,
+        "discover_error_detail": None,
+        "discover_coverage": {
+            "status": "complete",
+            "complete": True,
+            "indices_scanned": 1,
+            "indices_failed": 0,
+            "documents_scanned": 2,
+            "timed_out": False,
+            "truncated": False,
+            "shard_failures": [],
+            "surfaces": {
+                "index_inventory": {"status": "complete", "objects_scanned": 1},
+                "mappings": {"status": "complete", "objects_scanned": 1},
+                "ingest_pipelines": {"status": "complete", "objects_scanned": 1},
+            },
+        },
+    }
+
+
+def _write_discover_contract_case(
+    tmp_path: Path,
+    *,
+    label: str,
+    record: dict,
+) -> tuple[list[dict[str, str]], Path]:
+    artifact = tmp_path / f"{label}.json"
+    log_path = tmp_path / f"{label}.log"
+    manifest_path = tmp_path / "discover_corpus_expected.json"
+    artifact.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    log_path.write_text("", encoding="utf-8")
+    manifest_path.write_text(json.dumps(_discover_manifest_payload()), encoding="utf-8")
+    return (
+        [
+            _mk_row(
+                module="elastic",
+                label=label,
+                expected_exit="0",
+                exit_code="0",
+                json_path=str(artifact),
+                log_path=str(log_path),
+            )
+        ],
+        manifest_path,
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "vendor", "scheme", "auth_required", "username"),
+    [
+        ("elastic_open", "elasticsearch", "http", False, None),
+        ("elastic_auth", "elasticsearch", "http", True, "elastic"),
+        ("opensearch_open", "opensearch", "http", False, None),
+        ("opensearch_auth", "opensearch", "https", True, "admin"),
+        ("opensearch_observer", "opensearch", "https", True, "observer"),
+    ],
+)
+def test_validate_discover_lab_contracts_accepts_both_vendors(
+    tmp_path: Path,
+    label: str,
+    vendor: str,
+    scheme: str,
+    auth_required: bool,
+    username: str | None,
+) -> None:
+    record = _discover_record(
+        vendor=vendor,
+        scheme=scheme,
+        auth_required=auth_required,
+        username=username,
+    )
+    if label == "opensearch_observer":
+        record["discover_coverage"]["status"] = "partial"
+        record["discover_coverage"]["complete"] = False
+        record["discover_coverage"]["indices_denied"] = 1
+        record["discover_coverage"]["surfaces"]["ingest_pipelines"] = {
+            "status": "denied",
+            "objects_scanned": 0,
+        }
+    rows, manifest_path = _write_discover_contract_case(
+        tmp_path,
+        label=label,
+        record=record,
+    )
+
+    _validate_discover_lab_contracts(rows, manifest_path=manifest_path)
+
+
+def test_validate_discover_lab_contracts_rejects_corpus_false_positive(tmp_path: Path) -> None:
+    record = _discover_record(vendor="opensearch", scheme="http", auth_required=False)
+    record["discover_findings"].append(
+        {
+            "fingerprint": "sha256:" + "f" * 64,
+            "secret_type": "secret",
+            "value": "ordinary-finance-reference",
+            "confidence": "medium",
+            "score": 60,
+            "locations": [
+                {
+                    "source_kind": "document",
+                    "object": "redposture-discover-corpus-v2/negative-finance",
+                    "index": "redposture-discover-corpus-v2",
+                    "id": "negative-finance",
+                    "path": "/payment/reference",
+                }
+            ],
+        }
+    )
+    rows, manifest_path = _write_discover_contract_case(
+        tmp_path,
+        label="opensearch_open",
+        record=record,
+    )
+
+    with pytest.raises(SystemExit, match="corpus mismatch"):
+        _validate_discover_lab_contracts(rows, manifest_path=manifest_path)
+
+
+def test_validate_discover_lab_contracts_rejects_missing_location(tmp_path: Path) -> None:
+    record = _discover_record(vendor="elasticsearch", scheme="http", auth_required=False)
+    record["discover_findings"][0]["locations"][0]["path"] = "/wrong/path"
+    rows, manifest_path = _write_discover_contract_case(
+        tmp_path,
+        label="elastic_open",
+        record=record,
+    )
+
+    with pytest.raises(SystemExit, match="missing location"):
+        _validate_discover_lab_contracts(rows, manifest_path=manifest_path)
+
+
+def test_validate_discover_lab_contracts_rejects_wrong_server_version(tmp_path: Path) -> None:
+    record = _discover_record(vendor="opensearch", scheme="https", auth_required=True, username="admin")
+    record["server_version"] = "2.18.0"
+    rows, manifest_path = _write_discover_contract_case(
+        tmp_path,
+        label="opensearch_auth",
+        record=record,
+    )
+
+    with pytest.raises(SystemExit, match="server_version='2.18.0'"):
+        _validate_discover_lab_contracts(rows, manifest_path=manifest_path)
+
+
+def test_validate_discover_lab_contracts_rejects_lost_duplicate_occurrence(tmp_path: Path) -> None:
+    record = _discover_record(vendor="elasticsearch", scheme="http", auth_required=False)
+    record["discover_findings"][0]["occurrence_count"] = 1
+    rows, manifest_path = _write_discover_contract_case(
+        tmp_path,
+        label="elastic_open",
+        record=record,
+    )
+
+    with pytest.raises(SystemExit, match="occurrence_count=1"):
+        _validate_discover_lab_contracts(rows, manifest_path=manifest_path)
+
+
+def test_validate_discover_lab_contracts_rejects_truncation_and_surface_regression(tmp_path: Path) -> None:
+    record = _discover_record(vendor="opensearch", scheme="https", auth_required=True, username="observer")
+    record["discover_coverage"]["truncated"] = True
+    record["discover_coverage"]["surfaces"]["mappings"]["status"] = "error"
+    rows, manifest_path = _write_discover_contract_case(
+        tmp_path,
+        label="opensearch_observer",
+        record=record,
+    )
+
+    with pytest.raises(SystemExit, match="timed out or truncated"):
+        _validate_discover_lab_contracts(rows, manifest_path=manifest_path)
+
+
+def _opensearch_defcreds_record() -> dict[str, object]:
+    attempts: list[dict[str, object]] = []
+    for index, (username, password) in enumerate(_OPENSEARCH_DEFAULT_CREDENTIALS):
+        is_winner = index == 8
+        attempts.append(
+            {
+                "username": username,
+                "password": password,
+                "source": "default",
+                "status": "weak_default_creds" if is_winner else "auth_required",
+                "error": None if is_winner else "authentication failed",
+                "auth_probe_status": "verified" if is_winner else "rejected",
+                "auth_probe_http_status": 200 if is_winner else 401,
+                "auth_probe_endpoint": "/_plugins/_security/authinfo",
+                "auth_error_detail": None if is_winner else {"status": 401, "reason": "Unauthorized"},
+                "network_attempted": True,
+                "verification_capability": "identity_endpoint_supported",
+            }
+        )
+    return {
+        "host": "127.0.0.1",
+        "port": 29201,
+        "module": "elastic",
+        "service": "elastic",
+        "status": "weak_default_creds",
+        "vendor": "opensearch",
+        "scheme": "https",
+        "auth_required": True,
+        "auth_valid": True,
+        "effective_username": "logstash",
+        "error": None,
+        "attempted_credentials": attempts,
+    }
+
+
+def _write_opensearch_defcreds_row(tmp_path: Path, record: dict[str, object]) -> list[dict[str, str]]:
+    artifact = tmp_path / "opensearch_defcreds.json"
+    log_path = tmp_path / "opensearch_defcreds.log"
+    artifact.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    log_path.write_text("", encoding="utf-8")
+    return [
+        _mk_row(
+            module="elastic",
+            label="opensearch_defcreds",
+            expected_exit="0",
+            exit_code="0",
+            json_path=str(artifact),
+            log_path=str(log_path),
+        )
+    ]
+
+
+def test_validate_opensearch_defcreds_contract_accepts_exhaustive_ordered_attempts(tmp_path: Path) -> None:
+    _validate_opensearch_defcreds_contract(_write_opensearch_defcreds_row(tmp_path, _opensearch_defcreds_record()))
+
+
+def test_validate_opensearch_defcreds_contract_rejects_reordered_attempts(tmp_path: Path) -> None:
+    record = _opensearch_defcreds_record()
+    attempts = record["attempted_credentials"]
+    assert isinstance(attempts, list)
+    attempts[0], attempts[1] = attempts[1], attempts[0]
+
+    with pytest.raises(SystemExit, match="order mismatch"):
+        _validate_opensearch_defcreds_contract(_write_opensearch_defcreds_row(tmp_path, record))

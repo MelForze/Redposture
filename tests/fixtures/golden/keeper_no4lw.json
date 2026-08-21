@@ -1,29 +1,41 @@
 [
   {
+    "anonymous_auth_probe_results": {
+      "/": "ok",
+      "/keeper/api_version": "ok"
+    },
     "auth_error": null,
     "auth_inference_source": "root_ok",
+    "auth_mechanism": "digest",
     "auth_probe_trace": [
-      "/:ok"
+      "/:ok",
+      "/keeper/api_version:ok"
     ],
     "auth_required": false,
-    "can_create_znode": true,
-    "can_delete_znode": true,
+    "can_create_znode": null,
+    "can_delete_znode": null,
     "connect_error": null,
+    "credential_auth_probe_results": {
+      "/": "ok",
+      "/keeper/api_version": "ok"
+    },
     "credential_verdict": "unverified_anonymous",
     "defcreds_enabled": false,
     "dump": true,
     "dump_error": null,
-    "dump_limit": 10,
+    "dump_limit": null,
     "enum_error": null,
     "error": null,
     "fingerprint_confidence": "unconfirmed",
     "fingerprint_errors": {},
     "host": "127.0.0.1",
+    "implementation": "zookeeper-compatible",
+    "implementation_confidence": "unconfirmed",
     "is_keeper": null,
     "is_zookeeper": true,
     "is_zookeeper_compatible": true,
     "max_znodes": 2000,
-    "module": "keeper",
+    "module": "zookeeper",
     "port": 39181,
     "protocol": "zookeeper",
     "provided_credentials": true,
@@ -55,8 +67,8 @@
     },
     "read_only": null,
     "server_state": null,
-    "service": "zookeeper-compatible",
-    "show_znodes": true,
+    "service": "zookeeper",
+    "show_znodes": false,
     "stage2_error": null,
     "stages": [
       {
@@ -86,38 +98,18 @@
     ],
     "status": "open_no_auth",
     "transport": "plaintext",
+    "vendor": null,
+    "verification_capability": "available",
     "version": null,
     "znode_capability_error": null,
-    "znode_count": 3,
+    "znode_count": null,
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
-    "znode_details": [
-      {
-        "bytes": 0,
-        "children": 2,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 1,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      },
-      {
-        "bytes": 1,
-        "children": 0,
-        "error": null,
-        "state": "readable"
-      }
-    ],
+    "znode_details": null,
+    "znode_truncated_reason": null,
     "znode_values": null,
-    "znodes": [
-      "/keeper",
-      "/keeper/api_version",
-      "/keeper/feature_flags"
-    ],
+    "znodes": [],
     "znodes_truncated": false
   }
 ]

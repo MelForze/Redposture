@@ -116,10 +116,10 @@ def test_http_pool_get_propagates_keyboard_interrupt() -> None:
     conn = _InterruptConn()
     releases: list[bool] = []
 
-    def fake_acquire(_host: str, _port: int, _timeout: float) -> _InterruptConn:
+    def fake_acquire(_scheme: str, _host: str, _port: int, _timeout: float) -> _InterruptConn:
         return conn
 
-    def fake_release(_host: str, _port: int, _conn: _InterruptConn, reusable: bool) -> None:
+    def fake_release(_scheme: str, _host: str, _port: int, _conn: _InterruptConn, reusable: bool) -> None:
         releases.append(reusable)
 
     pool._acquire = fake_acquire  # type: ignore[method-assign, assignment]

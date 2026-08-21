@@ -80,6 +80,43 @@ def test_detect_trigger_exporter_task_logs_errors_markers_and_events() -> None:
     assert events[-1]["phase"] == "detect_hit"
     assert events[-1]["detect_url"] == "http://host-a:9121/metrics"
 
+    result = detect_trigger_exporter_task(
+        logger,
+        "host-a",
+        exporter,
+        1.0,
+        0,
+        lambda *_args: (404, "redis_up 1\n"),
+    )
+    assert result["detected"] is False
+
+
+def test_trigger_2xx_without_probe_metric_is_accepted_but_unconfirmed() -> None:
+    events: list[dict[str, Any]] = []
+    result = trigger_detected_exporter_task(
+        None,
+        "2001:db8::10",
+        _exporter(),
+        ["2001:db8::20"],
+        1.0,
+        0,
+        lambda *_args: (202, "accepted\n"),
+        emit_trigger_event=events.append,
+    )
+
+    assert result["attempted"] == 1
+    assert result["accepted"] == 1
+    assert result["unconfirmed"] == 1
+    assert result["success"] == 0
+    assert result["by_callback"]["2001:db8::20"]["accepted"] == 1
+    assert result["by_callback"]["2001:db8::20"]["unconfirmed"] == 1
+    callback_result = next(item for item in events if item["phase"] == "callback_result")
+    assert callback_result["accepted"] is True
+    assert callback_result["confirmed"] is False
+    assert callback_result["success"] is False
+    assert callback_result["trigger_url"].startswith("http://[2001:db8::10]:9121/")
+    assert "redis://[2001:db8::20]:6379" in callback_result["target"]
+
 
 def test_trigger_detected_exporter_task_success_failure_and_exception_branches() -> None:
     logger = _Logger()
@@ -108,9 +145,27 @@ def test_trigger_detected_exporter_task_success_failure_and_exception_branches()
 
     assert result["attempted"] == 4
     assert result["success"] == 1
-    assert result["by_callback"]["10.0.0.1"] == {"attempted": 1, "success": 1, "fail": 0}
-    assert result["by_callback"]["10.0.0.2"] == {"attempted": 1, "success": 0, "fail": 1}
-    assert result["by_callback"]["10.0.0.4"] == {"attempted": 1, "success": 0, "fail": 1}
+    assert result["by_callback"]["10.0.0.1"] == {
+        "attempted": 1,
+        "accepted": 1,
+        "unconfirmed": 0,
+        "success": 1,
+        "fail": 0,
+    }
+    assert result["by_callback"]["10.0.0.2"] == {
+        "attempted": 1,
+        "accepted": 1,
+        "unconfirmed": 0,
+        "success": 0,
+        "fail": 1,
+    }
+    assert result["by_callback"]["10.0.0.4"] == {
+        "attempted": 1,
+        "accepted": 0,
+        "unconfirmed": 0,
+        "success": 0,
+        "fail": 1,
+    }
     assert any(row[2].get("phase") == "triggered" for row in logger.rows)
     assert sum(1 for row in logger.rows if row[2].get("phase") == "trigger_error") == 3
     result_events = [event for event in events if event["phase"] == "callback_result"]
@@ -162,9 +217,23 @@ def test_scan_exporters_and_trigger_counts_progress_events_and_not_found() -> No
     assert summary["attempted"] == 4
     assert summary["triggered"] == 2
     assert summary["failed"] == 2
-    assert summary["by_host"]["host-c"] == {"detected": 0, "attempted": 0, "success": 0, "fail": 0}
+    assert summary["by_host"]["host-c"] == {
+        "detected": 0,
+        "attempted": 0,
+        "accepted": 0,
+        "unconfirmed": 0,
+        "success": 0,
+        "fail": 0,
+    }
     assert summary["by_callback"]["10.0.0.1"]["success"] == 2
-    assert summary["by_exporter"]["redis_exporter"] == {"detected": 1, "attempted": 2, "success": 1, "fail": 1}
+    assert summary["by_exporter"]["redis_exporter"] == {
+        "detected": 1,
+        "attempted": 2,
+        "accepted": 2,
+        "unconfirmed": 0,
+        "success": 1,
+        "fail": 1,
+    }
     assert sum(progress_advances) == 10  # six detect jobs plus four callback attempts.
     assert progress_totals == [2, 2]
     assert any(event.get("kind") == "timing_summary" for event in stage_events)

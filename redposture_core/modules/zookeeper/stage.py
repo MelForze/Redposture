@@ -16,47 +16,50 @@ from ...stage_runtime import (
     AuditHookContext,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    command_result_exit_code,
     merge_audit_credential_runs,
+    sort_default_audit_credential_runs,
 )
-from . import actions, policy, render
+from . import actions, engine, policy, render
+from .types import ZooKeeperFingerprintCache
 
 _DEFAULT_PORT = 2181
-_DEFAULT_PORTS: tuple[int, ...] | None = (2181, 12181)
+_DEFAULT_PORTS: tuple[int, ...] | None = (2181, 9181, 12181)
 _DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
-    ("zookeeper", "zookeeper"),
-    ("zookeeper", "admin"),
-    ("zookeeper", "password"),
     ("admin", "admin"),
-    ("admin", "password"),
-    ("admin", "zookeeper"),
-    ("zk", "zk"),
-    ("zk", "zookeeper"),
-    ("zk", "password"),
-    ("root", "root"),
-    ("root", "password"),
-    ("root", "zookeeper"),
-    ("user", "user"),
-    ("user", "password"),
-    ("guest", "guest"),
-    ("test", "test"),
-    ("dev", "dev"),
-    ("service", "service"),
-    ("kafka", "kafka"),
-    ("kafka", "zookeeper"),
-    ("solr", "solr"),
-    ("hadoop", "hadoop"),
-    ("super", "super"),
-    ("user1", "12345"),
     ("admin", "changeme"),
     ("admin", "kafka"),
-    ("kafka", "password"),
-    ("kafka", "changeme"),
+    ("admin", "password"),
+    ("admin", "zookeeper"),
     ("broker", "broker"),
     ("broker", "brokerpass"),
     ("client", "client"),
-    ("service", "password"),
+    ("dev", "dev"),
+    ("guest", "guest"),
+    ("hadoop", "hadoop"),
+    ("kafka", "changeme"),
+    ("kafka", "kafka"),
+    ("kafka", "password"),
+    ("kafka", "zookeeper"),
     ("root", "admin"),
+    ("root", "password"),
+    ("root", "root"),
     ("root", "rootpass"),
+    ("root", "zookeeper"),
+    ("service", "password"),
+    ("service", "service"),
+    ("solr", "solr"),
+    ("super", "super"),
+    ("test", "test"),
+    ("user", "password"),
+    ("user", "user"),
+    ("user1", "12345"),
+    ("zk", "password"),
+    ("zk", "zk"),
+    ("zk", "zookeeper"),
+    ("zookeeper", "admin"),
+    ("zookeeper", "password"),
+    ("zookeeper", "zookeeper"),
 )
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_zookeeper_host
@@ -66,7 +69,7 @@ def build_zookeeper_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
     defaults: tuple[AuditCredentialRun, ...] = ()
     if bool(getattr(args, "defcreds", False)):
-        defaults = tuple(
+        defaults = sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source="default")
             for username, password in _DEFAULT_CREDENTIALS
         )
@@ -86,7 +89,11 @@ def _build_zookeeper_lifecycle_options(args: Any) -> dict[str, Any]:
         "max_znodes": int(show_limit) if isinstance(show_limit, int) else configured_max,
         "enum_workers": int(getattr(args, "enum_workers", 3) or 3),
         "dump_limit": dump_flag_limit(getattr(args, "dump", False)),
-        "transport_config": getattr(args, "transport_config", None),
+        "fingerprint_cache": getattr(args, "zookeeper_fingerprint_cache", None) or ZooKeeperFingerprintCache(),
+        "insecure": bool(getattr(args, "insecure", False)),
+        "ca_file": getattr(args, "ca_file", None),
+        "tls_cert": getattr(args, "tls_cert", None),
+        "tls_key": getattr(args, "tls_key", None),
     }
 
 
@@ -100,26 +107,33 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
         and actions._audit_zookeeper_host is _PRODUCTION_AUDIT_HOST
     )
 
-    def _state_factory(_ctx: AuditHookContext) -> actions.ZooKeeperLifecycleState:
-        return actions.ZooKeeperLifecycleState()
+    def _state_factory(_ctx: AuditHookContext) -> engine.ZooKeeperImplementationLifecycleState:
+        return engine.ZooKeeperImplementationLifecycleState(
+            requested_config=engine._transport_config(
+                insecure=bool(options["insecure"]),
+                ca_file=options["ca_file"],
+                tls_cert=options["tls_cert"],
+                tls_key=options["tls_key"],
+            )
+        )
 
     def _detect(ctx: AuditHookContext) -> AuditRecord:
         return AuditRecord.from_mapping(
-            actions.detect_zookeeper(ctx, options),
+            engine.detect_zookeeper_implementation(ctx, options),
             module="zookeeper",
             service="zookeeper",
         )
 
     def _auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         return AuditRecord.from_mapping(
-            actions.authenticate_zookeeper(ctx, record, options),
+            engine.authenticate_zookeeper_implementation(ctx, record, options),
             module="zookeeper",
             service="zookeeper",
         )
 
     def _data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         return AuditRecord.from_mapping(
-            actions.collect_zookeeper_data(ctx, record, options),
+            engine.collect_zookeeper_implementation_data(ctx, record, options),
             module="zookeeper",
             service="zookeeper",
         )
@@ -166,9 +180,12 @@ def run_zookeeper_stage(args: Any, logger: Any) -> int:
         if args.username == "":
             args.username = None
     if getattr(args, "password", None) is not None:
-        args.password = str(args.password).strip()
-        if args.username is None and args.password == "":
-            args.password = None
+        # Passwords are opaque protocol data. Leading/trailing whitespace and
+        # an explicitly supplied empty password are valid digest inputs when a
+        # username is present. An entirely empty credential pair remains the
+        # anonymous CLI default.
+        raw_password = str(args.password)
+        args.password = raw_password if raw_password or args.username is not None else None
     validation_rc = policy.validate_args(args, console)
     if validation_rc is not None:
         return int(validation_rc)
@@ -177,6 +194,7 @@ def run_zookeeper_stage(args: Any, logger: Any) -> int:
     except ValueError as exc:
         console.error(str(exc))
         return 2
+    args.zookeeper_fingerprint_cache = ZooKeeperFingerprintCache()
     if cfg.debug and not getattr(args, "debug_emit", None):
         args.debug_emit = console.info
     if cfg.debug:
@@ -192,7 +210,7 @@ def run_zookeeper_stage(args: Any, logger: Any) -> int:
         return 2
     if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all zookeeper targets are unreachable")
-    return 0
+    return command_result_exit_code(result)
 
 
 __all__ = ["build_zookeeper_plan", "build_zookeeper_spec", "run_zookeeper_stage"]

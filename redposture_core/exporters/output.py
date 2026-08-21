@@ -98,7 +98,8 @@ def format_scan_record(record: dict[str, Any], output_format: str) -> str:
         output_suffix = f" output={output_path}" if output_path else ""
         return (
             f"{'SCAN':<8}\tsummary\t-\t[*] "
-            f"hosts={record.get('hosts')} checks={record.get('checks')} found={record.get('found')}{output_suffix}"
+            f"hosts={record.get('hosts')} checks={record.get('checks')} found={record.get('found')} "
+            f"errors={record.get('errors', 0)}{output_suffix}"
         )
 
     prefix = scan_nxc_prefix(record)
@@ -119,7 +120,11 @@ def format_scan_record(record: dict[str, Any], output_format: str) -> str:
 
 def format_collect_record(record: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
-        return json.dumps(record, ensure_ascii=False)
+        # Raw response bytes are persisted separately when requested and are
+        # intentionally excluded from JSONL.  The decoded `body` field remains
+        # available for human inspection and validation.
+        serializable = {key: value for key, value in record.items() if key != "raw_body"}
+        return json.dumps(serializable, ensure_ascii=False)
 
     if record.get("type") == "summary":
         output_path = record.get("output_path")
@@ -127,7 +132,7 @@ def format_collect_record(record: dict[str, Any], output_format: str) -> str:
         return (
             f"{'COLLECT':<8}\tsummary\t-\t[*] "
             f"hosts={record.get('hosts')} requests={record.get('requests')} "
-            f"success={record.get('success')}{output_suffix}"
+            f"success={record.get('success')} errors={record.get('errors', 0)}{output_suffix}"
         )
 
     host = clip(record.get("host") or "-", 64)

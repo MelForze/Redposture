@@ -251,7 +251,7 @@ def test_zookeeper_lifecycle_reuses_anonymous_detect_and_runs_selected_data_once
     monkeypatch.setattr(
         zookeeper_actions,
         "_probe_znode_create_delete",
-        lambda *_args, **_kwargs: (events.append("data:capabilities") or True, False, None),
+        lambda *_args, **_kwargs: pytest.fail("read-only lifecycle must not probe create/delete"),
     )
     monkeypatch.setattr(
         zookeeper_actions,
@@ -282,11 +282,16 @@ def test_zookeeper_lifecycle_reuses_anonymous_detect_and_runs_selected_data_once
         "auth:bad",
         "connect",
         "auth:good",
-        "data:capabilities",
+        "connect",
+        "auth:good",
         "data:enumerate",
+        "connect",
+        "auth:good",
     ]
     assert result.records[0]["status"] == "valid_credentials"
     assert result.records[0]["znode_count"] == 1
+    assert result.records[0]["can_create_znode"] is None
+    assert result.records[0]["can_delete_znode"] is None
 
 
 def test_zookeeper_lifecycle_retries_transient_auth_without_repeating_detect(

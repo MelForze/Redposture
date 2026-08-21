@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ssl
 from collections.abc import Iterator
 from typing import Any
 
@@ -12,12 +13,20 @@ SCAN_MAX_INFLIGHT_FACTOR = 12
 SCAN_MAX_INFLIGHT_HARD_CAP = 2048
 
 
-def build_exporter_http_pool(max_workers: int, pool_cls: type[HTTPConnectionPool] = HTTPConnectionPool) -> Any:
+def build_exporter_http_pool(
+    max_workers: int,
+    pool_cls: type[HTTPConnectionPool] = HTTPConnectionPool,
+    *,
+    tls_context: ssl.SSLContext | None = None,
+) -> Any:
     workers = max(1, int(max_workers))
-    return pool_cls(
-        max_idle_total=max(workers * 16, HTTP_POOL_MAX_IDLE_TOTAL),
-        max_idle_per_host=max(HTTP_POOL_MAX_IDLE_PER_HOST, min(workers, 8)),
-    )
+    kwargs: dict[str, Any] = {
+        "max_idle_total": max(workers * 16, HTTP_POOL_MAX_IDLE_TOTAL),
+        "max_idle_per_host": max(HTTP_POOL_MAX_IDLE_PER_HOST, min(workers, 8)),
+    }
+    if tls_context is not None:
+        kwargs["tls_context"] = tls_context
+    return pool_cls(**kwargs)
 
 
 def scan_max_inflight(

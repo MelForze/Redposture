@@ -32,9 +32,9 @@ def configure_consul_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=8500,
+        default=None,
         metavar="port",
-        help="Consul port(s): single, list/range, or file (e.g. 8500, 8500,8501, ./ports.txt).",
+        help=("Consul port(s): single, list/range, or file. If omitted, scans HTTP 8500 and HTTPS 8501."),
     )
     add_multi_ports_flag(common)
     auth.add_argument(
@@ -60,6 +60,22 @@ def configure_consul_parser(
         metavar="value",
         help="Basic auth password (for proxied/fronted Consul).",
     )
+    transport = parser.add_argument_group("TLS")
+    transport_mode = transport.add_mutually_exclusive_group()
+    transport_mode.add_argument("--tls", action="store_true", help="Require HTTPS; do not downgrade to HTTP.")
+    transport_mode.add_argument(
+        "--plaintext",
+        action="store_true",
+        help="Require HTTP; do not retry HTTPS.",
+    )
+    transport.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable Consul TLS certificate and hostname verification.",
+    )
+    transport.add_argument("--tls-ca", default=None, metavar="path", help="CA bundle for Consul TLS verification.")
+    transport.add_argument("--tls-cert", default=None, metavar="path", help="Client certificate for Consul mTLS.")
+    transport.add_argument("--tls-key", default=None, metavar="path", help="Client private key for Consul mTLS.")
     ssrf_options.add_argument(
         "--ssrf-target",
         dest="ssrf_target",

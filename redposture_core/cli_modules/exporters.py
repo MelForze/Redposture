@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 from collections.abc import Callable
+from typing import Any
 
 
 def _positive_seconds(value: str) -> float:
@@ -18,6 +19,35 @@ def _positive_seconds(value: str) -> float:
     if number <= 0:
         raise argparse.ArgumentTypeError("--listen-seconds must be > 0")
     return number
+
+
+def _add_exporter_tls_flags(group: Any) -> None:
+    group.add_argument(
+        "--tls-ca",
+        dest="tls_ca",
+        default=None,
+        metavar="file",
+        help="CA bundle used to verify HTTPS exporter targets.",
+    )
+    group.add_argument(
+        "--tls-cert",
+        dest="tls_cert",
+        default=None,
+        metavar="file",
+        help="Client certificate for mTLS exporter targets (requires --tls-key).",
+    )
+    group.add_argument(
+        "--tls-key",
+        dest="tls_key",
+        default=None,
+        metavar="file",
+        help="Client private key for mTLS exporter targets (requires --tls-cert).",
+    )
+    group.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable HTTPS certificate and hostname verification.",
+    )
 
 
 def configure_listen_parser(
@@ -46,6 +76,7 @@ def configure_scan_parser(
     add_log_flag(common)
     add_scan_host_flags(common)
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
+    _add_exporter_tls_flags(common)
     common.add_argument(
         "-f",
         "--format",
@@ -82,6 +113,7 @@ def configure_trigger_parser(
     add_log_flag(common)
     add_scan_host_flags(common)
     add_save_flag(common, "Optional output file path. Use --format json for structured trigger records.")
+    _add_exporter_tls_flags(common)
     common.add_argument(
         "-f",
         "--format",
@@ -181,6 +213,7 @@ def configure_collect_parser(
     add_log_flag(common)
     add_scan_host_flags(common)
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
+    _add_exporter_tls_flags(common)
     common.add_argument(
         "-f",
         "--format",

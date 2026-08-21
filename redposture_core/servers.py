@@ -325,14 +325,25 @@ class RedisListenerHandler(socketserver.StreamRequestHandler):
                     listen_port=listen_port,
                 )
                 self.wfile.write(b"-WRONGPASS invalid username-password pair or user is disabled.\r\n")
-            elif op == "PING":
-                self.wfile.write(b"+PONG\r\n")
-            elif op == "QUIT":
-                self.wfile.write(b"+OK\r\n")
-                self.wfile.flush()
-                break
             else:
-                self.wfile.write(b"-NOAUTH Authentication required.\r\n")
+                # A connection that speaks RESP is already callback evidence,
+                # even when the exporter never sends AUTH.  Previously PING
+                # and INFO were answered but omitted from callback stats,
+                # producing a false negative in --with-listen mode.
+                self.server.attempt_logger.log(  # type: ignore[attr-defined]
+                    "redis",
+                    remote,
+                    command=command[0],
+                    listen_port=listen_port,
+                )
+                if op == "PING":
+                    self.wfile.write(b"+PONG\r\n")
+                elif op == "QUIT":
+                    self.wfile.write(b"+OK\r\n")
+                    self.wfile.flush()
+                    break
+                else:
+                    self.wfile.write(b"-NOAUTH Authentication required.\r\n")
             self.wfile.flush()
 
 

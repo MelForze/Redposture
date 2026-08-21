@@ -7,13 +7,23 @@ from typing import Any
 import pytest
 
 from redposture_core import stage_mongodb as mongodb
+from redposture_core.cli_args import parse_args
 from redposture_core.modules.mongodb import actions as mongodb_actions
+from redposture_core.modules.mongodb import policy as mongodb_policy
 from tests.stage_runtime_helpers import run_module_targets_for_test
 
 
 class _Cursor(list):
     def limit(self, value: int):
         return _Cursor(self[:value])
+
+
+class _ValidationConsole:
+    def __init__(self) -> None:
+        self.errors: list[str] = []
+
+    def error(self, message: str) -> None:
+        self.errors.append(message)
 
 
 class _FakeCollection:
@@ -262,24 +272,24 @@ def test_mongodb_small_helpers_and_collection_validation() -> None:
         {"username": "admin", "password": "admin", "default": True},
     ]
     assert mongodb._MONGODB_DEFAULT_CREDS == (
-        ("root", "root"),
         ("admin", "admin"),
-        ("root", "password"),
-        ("mongo", "mongo"),
-        ("mongodb", "mongodb"),
-        ("admin", "password"),
+        ("admin", "changeme"),
         ("admin", "mongo"),
         ("admin", "mongodb"),
+        ("admin", "password"),
+        ("dev", "dev"),
+        ("mongo", "mongo"),
+        ("mongo", "password"),
+        ("mongodb", "mongodb"),
+        ("mongodb", "password"),
+        ("root", "admin"),
         ("root", "mongo"),
         ("root", "mongodb"),
-        ("mongo", "password"),
-        ("mongodb", "password"),
-        ("admin", "changeme"),
-        ("root", "admin"),
-        ("user", "user"),
-        ("user", "password"),
+        ("root", "password"),
+        ("root", "root"),
         ("test", "test"),
-        ("dev", "dev"),
+        ("user", "password"),
+        ("user", "user"),
     )
     deduplicated = mongodb._credential_runs("admin", "changeme", defcreds=True)
     assert [(item["username"], item["password"], item["default"]) for item in deduplicated] == [
@@ -294,10 +304,8 @@ def test_mongodb_small_helpers_and_collection_validation() -> None:
     assert mongodb._parse_json_object("[1]", field_name="--query")[1] == "--query must be a JSON object"
     assert mongodb._split_csv_values(["a,b", "b", " c "]) == ["a", "b", "c"]
 
-    # A8 fix: `db.users` splits on the dot regardless of whether --database is
-    # set. Before the fix, `--database mydb --collection users.audit` treated
-    # the value as a literal collection named "users.audit" under mydb and
-    # dump/query silently no-op'd against a non-existent collection.
+    # Explicit db.collection targets take precedence over --database; bare
+    # collection names still use the selected database.
     normalized, grouped, error = mongodb._group_collection_targets(["db.users", "events"], "redposture")
     assert error is None
     assert normalized == ["db.users", "events"]
@@ -430,8 +438,8 @@ def test_run_mongodb_stage_nosql_shell_dispatches_to_action(monkeypatch: pytest.
     assert captured["emit_line"] is not None
     assert captured["shell_emit_line"] is not None
     assert captured["credential_candidates"][0] == {
-        "username": "root",
-        "password": "root",
+        "username": "admin",
+        "password": "admin",
         "source": "default",
         "default": True,
     }
@@ -615,6 +623,102 @@ def test_try_credentials_and_collect_data_error_branches(monkeypatch: pytest.Mon
     assert data["nosql_command_error"] == "command failed"
 
 
+def test_collect_mongodb_data_aggregates_partial_capabilities_without_last_write_wins() -> None:
+    class PartialClient:
+        def list_collection_names(self, database: str):
+            if database == "denied":
+                raise RuntimeError("not authorized")
+            return ["items"]
+
+        def count_documents(self, database: str, collection: str):
+            return 2
+
+        def list_indexes(self, database: str, collection: str):
+            if database == "denied":
+                raise RuntimeError("not authorized")
+            return [{"name": "_id_"}]
+
+        def find_documents(self, database: str, collection: str, **_kwargs: object):
+            return [{"_id": 1}]
+
+    data = mongodb._collect_mongodb_data(
+        PartialClient(),
+        database_names=["allowed", "denied"],
+        selected_database=None,
+        collection_targets=[],
+        collection_targets_by_database={},
+        show_databases=True,
+        show_collections=True,
+        show_indexes=True,
+        dump_documents=False,
+        dump_limit=None,
+        query_filter=None,
+        projection=None,
+    )
+    assert data["capabilities"]["can_list_collections"] is True
+    assert data["capability_coverage"]["can_list_collections"] == {
+        "state": "partial",
+        "successes": 1,
+        "failures": 1,
+    }
+    assert data["partial"] is True
+    assert any(item.get("database") == "denied" and item["ok"] is False for item in data["operation_results"])
+
+
+def test_collect_mongodb_data_marks_cross_capability_mixed_coverage_partial() -> None:
+    class MixedCapabilityClient:
+        def list_collection_names(self, _database: str):
+            raise RuntimeError("not authorized")
+
+        def run_command(self, _database: str, _command: dict[str, object]):
+            return {"ok": 1}
+
+    data = mongodb._collect_mongodb_data(
+        MixedCapabilityClient(),
+        database_names=["denied"],
+        selected_database=None,
+        collection_targets=[],
+        collection_targets_by_database={},
+        show_databases=True,
+        show_collections=True,
+        show_indexes=False,
+        dump_documents=False,
+        dump_limit=None,
+        query_filter=None,
+        projection=None,
+        nosql_command={"ping": 1},
+    )
+
+    assert data["capability_coverage"]["can_list_collections"]["state"] == "denied"
+    assert data["capability_coverage"]["can_run_command"]["state"] == "allowed"
+    assert data["partial"] is True
+
+
+def test_mongodb_cli_parses_tls_transport_and_proxy_fails_closed() -> None:
+    args = parse_args(
+        [
+            "mongodb",
+            "-t",
+            "mongo.local",
+            "--tls",
+            "--tls-ca",
+            "ca.pem",
+            "--tls-cert-key",
+            "client.pem",
+            "--tls-insecure",
+        ]
+    )
+    assert args.tls is True
+    assert args.tls_ca == "ca.pem"
+    assert args.tls_cert_key == "client.pem"
+    assert args.tls_insecure is True
+
+    proxied = parse_args(["mongodb", "-t", "mongo.local", "--proxy", "socks5://127.0.0.1:1080"])
+    console = _ValidationConsole()
+    assert mongodb_policy.validate_args(proxied, console) == 2
+    assert console.errors and "does not support --proxy" in console.errors[0]
+
+
 def test_try_credentials_checks_every_candidate_and_keeps_first_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -661,6 +765,15 @@ def test_mongodb_formatters_cover_txt_and_json_branches() -> None:
         "query_documents": [{"database": "redposture", "collection": "users", "document": {"_id": 2}}],
         "query_error": None,
         "query_filter": {"role": "admin"},
+        "operation_results": [
+            {
+                "operation": "list_indexes",
+                "database": "denied",
+                "collection": "users",
+                "ok": False,
+                "error": "not authorized",
+            }
+        ],
     }
     assert "MongoDB Service" in mongodb._format_detect_record(record, "txt")
     assert '"type": "detect"' in mongodb._format_detect_record(record, "json")
@@ -676,6 +789,10 @@ def test_mongodb_formatters_cover_txt_and_json_branches() -> None:
     assert '"type": "documents_dump"' in mongodb._format_documents_detail_records(record, "json")[0]
     assert "Query" in mongodb._format_query_detail_records(record, "txt")[0]
     assert '"type": "query"' in mongodb._format_query_detail_records(record, "json")[0]
+    partial_lines = mongodb._format_partial_operation_records(record, "txt")
+    assert "partial MongoDB data" in partial_lines[0]
+    assert "target=denied.users" in partial_lines[1]
+    assert mongodb._format_partial_operation_records(record, "json") == []
 
     command_record = {
         **record,

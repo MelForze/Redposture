@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import urllib.parse
+from dataclasses import replace
 from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.http_api import http_target_context
 from ...console import Console
 from ...show_limits import dump_flag_enabled, dump_flag_limit
 from ...stage_runtime import (
@@ -13,6 +16,7 @@ from ...stage_runtime import (
     AuditCommandRunner,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    command_result_exit_code,
 )
 from . import actions, policy, render
 
@@ -22,8 +26,37 @@ _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_qdrant_host
 
 
+def _rewrite_ssrf_urls_port(urls: list[str], port: int) -> list[str]:
+    """Point every callback URL at the port the local listener actually bound."""
+    if port <= 0:
+        return list(urls)
+    rewritten_urls: list[str] = []
+    for raw_url in urls:
+        parsed = urllib.parse.urlsplit(str(raw_url))
+        host = str(parsed.hostname or "")
+        if not host:
+            continue
+        authority = f"[{host}]" if ":" in host else host
+        rewritten_urls.append(
+            urllib.parse.urlunsplit(
+                (
+                    parsed.scheme,
+                    f"{authority}:{port}",
+                    parsed.path,
+                    parsed.query,
+                    "",
+                )
+            )
+        )
+    return rewritten_urls
+
+
 def build_qdrant_plan(args: Any) -> AuditCommandPlan:
-    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
+    return plan
 
 
 def build_qdrant_spec(args: Any) -> ModuleAuditSpec:
@@ -42,21 +75,19 @@ def build_qdrant_spec(args: Any) -> ModuleAuditSpec:
     )
 
     def _detect(ctx: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(actions.detect_qdrant(ctx, options), module="qdrant", service="qdrant")
+        with http_target_context(ctx.target, api_prefixes=("/collections", "/service/info")):
+            result = actions.detect_qdrant(ctx, options)
+        return AuditRecord.from_mapping(result, module="qdrant", service="qdrant")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.authenticate_qdrant(ctx, record, options),
-            module="qdrant",
-            service="qdrant",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/collections", "/service/info")):
+            result = actions.authenticate_qdrant(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="qdrant", service="qdrant")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.collect_qdrant_data(ctx, record, options),
-            module="qdrant",
-            service="qdrant",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/collections", "/service/info")):
+            result = actions.collect_qdrant_data(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="qdrant", service="qdrant")
 
     return ModuleAuditSpec(
         module="qdrant",
@@ -104,6 +135,12 @@ def run_qdrant_stage(args: Any, logger: Any) -> int:
             listen_port = 0
         listener = actions._start_qdrant_ssrf_capture_listener(listen_port)
         if listener.get("started"):
+            actual_port = int(listener.get("port") or 0)
+            if actual_port > 0:
+                args.ssrf_urls = _rewrite_ssrf_urls_port(
+                    list(getattr(args, "ssrf_urls", None) or []),
+                    actual_port,
+                )
             console.info(f"local SSRF listener started on 127.0.0.1:{listener.get('port')}")
         else:
             console.warn(f"local SSRF listener failed: {listener.get('error') or 'unknown'}")
@@ -111,7 +148,7 @@ def run_qdrant_stage(args: Any, logger: Any) -> int:
     try:
         runner = AuditCommandRunner(args=args, spec=build_qdrant_spec(args), logger=logger, console=console)
         try:
-            runner.run_plan(plan)
+            result = runner.run_plan(plan)
         except OSError as exc:
             console.error(str(exc))
             return 2
@@ -124,7 +161,7 @@ def run_qdrant_stage(args: Any, logger: Any) -> int:
             hits = actions._qdrant_ssrf_capture_hits(listener)
             actions._stop_qdrant_ssrf_capture_listener(listener)
             console.info(f"qdrant audit complete: ssrf_hits={len(hits)}")
-    return 0
+    return command_result_exit_code(result)
 
 
 __all__ = ["build_qdrant_plan", "build_qdrant_spec", "run_qdrant_stage"]

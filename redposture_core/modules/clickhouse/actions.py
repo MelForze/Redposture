@@ -69,6 +69,49 @@ class _ChSession:
     database: str
 
 
+@dataclass(frozen=True)
+class _ChTlsConfig:
+    enabled: bool = False
+    verify: bool = True
+    ca_file: str | None = None
+    cert_file: str | None = None
+    key_file: str | None = None
+    server_name: str | None = None
+
+
+def _ch_transport_kwargs(
+    tls_config: _ChTlsConfig | None,
+    proxy: Any | None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    if tls_config is not None and (
+        tls_config.enabled
+        or tls_config.ca_file
+        or tls_config.cert_file
+        or tls_config.key_file
+        or tls_config.server_name
+        or not tls_config.verify
+    ):
+        kwargs["tls_config"] = tls_config
+    if proxy is not None and str(getattr(proxy, "raw_url", proxy) or "").strip():
+        kwargs["proxy"] = proxy
+    return kwargs
+
+
+def _ch_transport_from_context(ctx: Any) -> tuple[_ChTlsConfig | None, Any | None]:
+    args = ctx.args
+    tls = _ChTlsConfig(
+        enabled=bool(getattr(args, "tls", False)),
+        verify=not bool(getattr(args, "insecure", False)),
+        ca_file=getattr(args, "tls_ca", None),
+        cert_file=getattr(args, "tls_cert", None),
+        key_file=getattr(args, "tls_key", None),
+        server_name=getattr(args, "tls_server_name", None),
+    )
+    proxy = getattr(args, "_proxy_config", getattr(args, "proxy", None))
+    return tls, proxy
+
+
 @dataclass
 class ClickHouseLifecycleState:
     """Per-target sessions shared across detect/auth/data hooks."""
@@ -251,7 +294,11 @@ def _open_clickhouse_client(
     username: str,
     password: str,
     database: str,
+    *,
+    tls_config: _ChTlsConfig | None = None,
+    proxy: Any | None = None,
 ) -> Any:
+    tls = tls_config or _ChTlsConfig()
     if protocol == "native":
         driver_client = _load_clickhouse_driver_client()
         kwargs: dict[str, Any] = {
@@ -264,6 +311,18 @@ def _open_clickhouse_client(
             "send_receive_timeout": float(timeout),
             "sync_request_timeout": float(timeout),
         }
+        if tls.enabled:
+            kwargs.update(
+                {
+                    "secure": True,
+                    "verify": tls.verify,
+                    "ca_certs": tls.ca_file,
+                    "certfile": tls.cert_file,
+                    "keyfile": tls.key_file,
+                    "server_hostname": tls.server_name or host,
+                }
+            )
+            kwargs = {key: value for key, value in kwargs.items() if value is not None}
         try:
             return driver_client(**kwargs)
         except TypeError as exc:
@@ -280,9 +339,24 @@ def _open_clickhouse_client(
             "username": username,
             "password": password,
             "database": database,
-            "interface": "http",
+            "interface": "https" if tls.enabled else "http",
+            "secure": tls.enabled,
             "connect_timeout": float(timeout),
         }
+        if tls.enabled:
+            kwargs.update(
+                {
+                    "verify": tls.verify,
+                    "ca_cert": tls.ca_file,
+                    "client_cert": tls.cert_file,
+                    "client_cert_key": tls.key_file,
+                    "server_host_name": tls.server_name or host,
+                }
+            )
+        raw_proxy = str(getattr(proxy, "raw_url", proxy) or "").strip()
+        if raw_proxy:
+            kwargs["https_proxy" if tls.enabled else "http_proxy"] = raw_proxy
+        kwargs = {key: value for key, value in kwargs.items() if value is not None}
         try:
             return clickhouse_connect.get_client(**kwargs)
         except TypeError as exc:
@@ -325,10 +399,21 @@ def _connect_and_probe(
     password: str,
     *,
     database: str = "default",
+    tls_config: _ChTlsConfig | None = None,
+    proxy: Any | None = None,
 ) -> tuple[_ChSession | None, str | None]:
     client: Any | None = None
     try:
-        client = _open_clickhouse_client(protocol, host, port, timeout, username, password, database)
+        client = _open_clickhouse_client(
+            protocol,
+            host,
+            port,
+            timeout,
+            username,
+            password,
+            database,
+            **_ch_transport_kwargs(tls_config, proxy),
+        )
         session = _ChSession(
             protocol=protocol,
             client=client,
@@ -379,20 +464,20 @@ def _build_credential_candidates(
 
     if defcreds:
         defaults = (
-            ("default", ""),
-            ("default", "default"),
-            ("default", "password"),
-            ("default", "clickhouse"),
+            ("admin", "admin"),
+            ("admin", "changeme"),
+            ("admin", "password"),
             ("clickhouse", "clickhouse"),
             ("clickhouse", "password"),
-            ("admin", "admin"),
-            ("admin", "password"),
-            ("root", "root"),
-            ("user", "user"),
+            ("default", ""),
             ("default", "changeme"),
-            ("admin", "changeme"),
+            ("default", "clickhouse"),
+            ("default", "default"),
+            ("default", "password"),
             ("root", "password"),
+            ("root", "root"),
             ("user", "password"),
+            ("user", "user"),
         )
         for user, secret in defaults:
             pair = (user, secret)
@@ -687,6 +772,40 @@ def _query_show_grants(session: _ChSession) -> tuple[list[str] | None, str | Non
     return grants, None
 
 
+def _parse_clickhouse_grants(grants: list[str]) -> tuple[bool, bool]:
+    """Return (user_data_read, administrative) from structured GRANT parts.
+
+    Privileges are parsed only from the segment between GRANT and ON.  This is
+    deliberately different from substring matching: ``system.tables`` is an
+    object scope and must not be interpreted as the ``SYSTEM`` privilege.
+    """
+
+    can_read_user_data = False
+    administrative = False
+    for raw in grants:
+        text = " ".join(str(raw or "").strip().upper().split())
+        match = re.match(r"^GRANT\s+(.+?)\s+ON\s+(.+?)(?:\s+TO\s+|$)", text)
+        if not match:
+            continue
+        privilege_text, scope = match.groups()
+        privileges = [item.strip() for item in privilege_text.split(",") if item.strip()]
+        scope_name = re.sub(r"[`\"]", "", scope.strip())
+        scope_name = re.sub(r"\s*\.\s*", ".", scope_name)
+        system_only = scope_name == "SYSTEM" or scope_name.startswith("SYSTEM.")
+        global_scope = scope_name in {"*", "*.*"}
+        for privilege in privileges:
+            normalized = privilege.removesuffix(" WITH GRANT OPTION").strip()
+            if (
+                normalized in {"ACCESS MANAGEMENT", "ROLE ADMIN"}
+                or normalized.startswith("SYSTEM ")
+                or (normalized in {"ALL", "ALL PRIVILEGES"} and global_scope)
+            ):
+                administrative = True
+            if normalized in {"ALL", "ALL PRIVILEGES", "SELECT", "READ"} and not system_only:
+                can_read_user_data = True
+    return can_read_user_data, administrative
+
+
 def _collect_capabilities(
     session: _ChSession,
 ) -> tuple[bool | None, bool | None, bool | None, int | None, list[str] | None, str | None]:
@@ -699,12 +818,7 @@ def _collect_capabilities(
     admin_cap: bool | None = None
 
     if isinstance(grants, list):
-        grant_text = "\n".join(grants).upper()
-        read_cap = any(token in grant_text for token in ("GRANT SELECT", "ALL", "READ", "SELECT ON"))
-        admin_cap = any(
-            token in grant_text
-            for token in ("ACCESS MANAGEMENT", "ROLE ADMIN", "SYSTEM", "GRANT ALL", "ALL PRIVILEGES")
-        )
+        read_cap, admin_cap = _parse_clickhouse_grants(grants)
     else:
         read_cap = None
 
@@ -727,10 +841,10 @@ def _collect_capabilities(
             read_probe_capability = None
             read_probe_error = str(probe_error)
 
-    if read_probe_capability is True:
-        read_cap = True
-    elif read_cap is None:
-        read_cap = read_probe_capability
+    # system.tables is metadata, not proof that user tables are readable.  It
+    # can enrich diagnostics but must not promote read_capability to True.
+    if read_cap is None and read_probe_capability is False:
+        read_probe_error = read_probe_error or "system.tables metadata probe denied"
 
     exec_output, exec_error = _run_execute_command(session, "echo redposture_exec_probe")
     if exec_error is None:
@@ -833,6 +947,9 @@ def _open_operational_session(
     username: str,
     password: str,
     database: str,
+    *,
+    tls_config: _ChTlsConfig | None = None,
+    proxy: Any | None = None,
 ) -> tuple[_ChSession | None, str | None]:
     session, error = _connect_and_probe(
         protocol,
@@ -842,6 +959,7 @@ def _open_operational_session(
         username,
         password,
         database=database,
+        **_ch_transport_kwargs(tls_config, proxy),
     )
     if session is not None:
         return session, None
@@ -859,6 +977,7 @@ def _open_operational_session(
             username,
             password,
             database="default",
+            **_ch_transport_kwargs(tls_config, proxy),
         )
         if fallback is not None:
             return fallback, f"database '{database}' unavailable; connected to default"
@@ -1051,6 +1170,10 @@ def _clickhouse_lifecycle_payload(
         "status": status,
         "auth_required": auth_required,
         "database": str(options["database"]),
+        "requested_database": str(options["database"]),
+        "effective_database": None,
+        "database_fallback": False,
+        "partial": False,
         "provided_credentials": provided,
         "provided_username": credential.username,
         "provided_password": credential.password if provided else None,
@@ -1117,6 +1240,7 @@ def detect_clickhouse(
         raise TypeError("clickhouse lifecycle state is unavailable")
 
     last_error: str | None = None
+    tls_config, proxy = _ch_transport_from_context(ctx)
     protocols = _protocol_attempt_order(str(options["protocol"]))
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
     for attempt in range(attempts):
@@ -1129,6 +1253,7 @@ def detect_clickhouse(
                 "default",
                 "",
                 database="default",
+                **_ch_transport_kwargs(tls_config, proxy),
             )
             if session is not None:
                 state.anonymous_session = session
@@ -1199,6 +1324,7 @@ def authenticate_clickhouse(
     error: str | None = None
     transport_attempts = 0
     definitive_rejection = False
+    tls_config, proxy = _ch_transport_from_context(ctx)
     for attempt in range(attempts):
         transport_attempts += 1
         session, error = _open_operational_session(
@@ -1209,6 +1335,7 @@ def authenticate_clickhouse(
             username,
             password,
             str(options["database"]),
+            **_ch_transport_kwargs(tls_config, proxy),
         )
         if session is not None:
             break
@@ -1274,8 +1401,11 @@ def authenticate_clickhouse(
             "credentials_source": source if ok else None,
             "effective_username": username if ok else None,
             "effective_password": password if ok else None,
+            "effective_database": session.database if session is not None else None,
+            "database_fallback": bool(session is not None and session.database != str(options["database"])),
+            "partial": bool(session is not None and session.database != str(options["database"])),
             "auth_attempts": list(state.auth_attempts),
-            "error": None if ok or status == "invalid_credentials_anonymous" else error,
+            "error": error if ok and error else None if status == "invalid_credentials_anonymous" else error,
         }
     )
     return payload
@@ -1290,6 +1420,7 @@ def collect_clickhouse_data(
     if not isinstance(state, ClickHouseLifecycleState):
         raise TypeError("clickhouse lifecycle state is unavailable")
     payload = _record_payload(record)
+    tls_config, proxy = _ch_transport_from_context(ctx)
     runtime_attempts = payload.get("attempted_credentials")
     merged_attempts = list(state.auth_attempts)
     if isinstance(runtime_attempts, list):
@@ -1337,9 +1468,10 @@ def collect_clickhouse_data(
     if session is None:
         return payload
     desired_database = str(options["database"])
+    database_warning: str | None = None
     if session.database != desired_database:
         _close_client(session.protocol, session.client)
-        session, database_error = _open_operational_session(
+        session, database_warning = _open_operational_session(
             state.selected_protocol or str(options["protocol"]),
             str(ctx.host),
             int(ctx.port),
@@ -1347,16 +1479,17 @@ def collect_clickhouse_data(
             session.username,
             session.password,
             desired_database,
+            **_ch_transport_kwargs(tls_config, proxy),
         )
         if session is None:
-            payload["error"] = database_error or f"failed to open database {desired_database}"
+            payload["error"] = database_warning or f"failed to open database {desired_database}"
             return payload
 
     started = time.monotonic()
     try:
         action_result = _run_clickhouse_actions_on_session(
             session,
-            database=str(options["database"]),
+            database=session.database,
             show_tables=bool(options["show_tables"]),
             show_columns=bool(options["show_columns"]),
             table_targets=list(options["table_targets"]),
@@ -1381,12 +1514,17 @@ def collect_clickhouse_data(
             action_result["capability_error"],
             action_result["execute_error"],
             action_result["sql_error"],
+            database_warning,
         )
         if str(value or "").strip()
     ]
     payload.update(
         {
             "protocol": session.protocol,
+            "requested_database": desired_database,
+            "effective_database": session.database,
+            "database_fallback": session.database != desired_database,
+            "partial": bool(session.database != desired_database),
             "database_names": database_names,
             "database_count": action_result["database_count"],
             "table_names": table_names,
@@ -1431,6 +1569,8 @@ def _audit_clickhouse_host_on_protocol(
     sql_command: str | None,
     dump_row_limit: int | None = None,
     credential_candidates: list[dict[str, Any]] | None = None,
+    tls_config: _ChTlsConfig | None = None,
+    proxy: Any | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     candidates = _normalize_credential_candidates(
@@ -1466,7 +1606,16 @@ def _audit_clickhouse_host_on_protocol(
         default_credentials = False
         selected_credential_session: _ChSession | None = None
 
-        anon_session, anon_error = _connect_and_probe(protocol, host, port, timeout, "default", "", database="default")
+        anon_session, anon_error = _connect_and_probe(
+            protocol,
+            host,
+            port,
+            timeout,
+            "default",
+            "",
+            database="default",
+            **_ch_transport_kwargs(tls_config, proxy),
+        )
         if anon_session is not None:
             anonymous_ok = True
             auth_required = False
@@ -1495,6 +1644,7 @@ def _audit_clickhouse_host_on_protocol(
                 cand_user,
                 cand_pass,
                 database="default",
+                **_ch_transport_kwargs(tls_config, proxy),
             )
             ok = cred_session is not None
             auth_attempts.append(
@@ -1533,6 +1683,7 @@ def _audit_clickhouse_host_on_protocol(
                 effective_username or "default",
                 effective_password or "",
                 database,
+                **_ch_transport_kwargs(tls_config, proxy),
             )
 
         if operation_session is None and anonymous_ok and effective_username is None:
@@ -1550,6 +1701,7 @@ def _audit_clickhouse_host_on_protocol(
                     "default",
                     "",
                     database,
+                    **_ch_transport_kwargs(tls_config, proxy),
                 )
         elif anon_session is not None:
             _close_client(protocol, anon_session.client)
@@ -1578,7 +1730,7 @@ def _audit_clickhouse_host_on_protocol(
         if operation_session is not None:
             action_result = _run_clickhouse_actions_on_session(
                 operation_session,
-                database=database,
+                database=operation_session.database,
                 show_tables=show_tables,
                 show_columns=show_columns,
                 table_targets=list(table_targets),
@@ -1624,6 +1776,10 @@ def _audit_clickhouse_host_on_protocol(
             "status": status,
             "auth_required": auth_required,
             "database": database,
+            "requested_database": database,
+            "effective_database": operation_session.database if operation_session is not None else None,
+            "database_fallback": bool(operation_session is not None and operation_session.database != database),
+            "partial": bool(operation_session is not None and operation_session.database != database),
             "provided_credentials": provided_credentials,
             "provided_username": provided_username,
             "provided_password": provided_password,
@@ -1734,6 +1890,8 @@ def _audit_clickhouse_host(
     sql_command: str | None,
     dump_row_limit: int | None = None,
     credential_candidates: list[dict[str, Any]] | None = None,
+    tls_config: _ChTlsConfig | None = None,
+    proxy: Any | None = None,
 ) -> dict[str, Any]:
     sequence = _protocol_attempt_order(protocol)
     last_record: dict[str, Any] | None = None
@@ -1741,6 +1899,10 @@ def _audit_clickhouse_host(
         optional_kwargs: dict[str, Any] = {"dump_row_limit": dump_row_limit}
         if credential_candidates is not None:
             optional_kwargs["credential_candidates"] = credential_candidates
+        if tls_config is not None:
+            optional_kwargs["tls_config"] = tls_config
+        if proxy is not None:
+            optional_kwargs["proxy"] = proxy
         while True:
             try:
                 record = _audit_clickhouse_host_on_protocol(
@@ -1952,6 +2114,17 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
         else:
             lines.append(f"{prefix} [-] {user}:{password}")
     return lines
+
+
+def _format_database_fallback_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt" or not bool(record.get("database_fallback")):
+        return []
+    requested = str(record.get("requested_database") or record.get("database") or "-")
+    effective = str(record.get("effective_database") or "-")
+    return [
+        f"{_nxc_prefix(record)} [!] requested database={requested} unavailable; "
+        f"actions used database={effective} (partial result)"
+    ]
 
 
 def _format_databases_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -2413,11 +2586,22 @@ def _run_sql_query_once(
     password: str,
     database: str,
     query: str,
+    tls_config: _ChTlsConfig | None = None,
+    proxy: Any | None = None,
 ) -> tuple[list[str], str | None]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
     for attempt in range(attempts):
-        session, error = _open_operational_session(protocol, host, port, timeout, username, password, database)
+        session, error = _open_operational_session(
+            protocol,
+            host,
+            port,
+            timeout,
+            username,
+            password,
+            database,
+            **_ch_transport_kwargs(tls_config, proxy),
+        )
         if session is None:
             last_error = error or last_error
             if attempt >= attempts - 1:
@@ -2440,11 +2624,22 @@ def _run_execute_command_once(
     password: str,
     database: str,
     command: str,
+    tls_config: _ChTlsConfig | None = None,
+    proxy: Any | None = None,
 ) -> tuple[list[str], str | None]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
     for attempt in range(attempts):
-        session, error = _open_operational_session(protocol, host, port, timeout, username, password, database)
+        session, error = _open_operational_session(
+            protocol,
+            host,
+            port,
+            timeout,
+            username,
+            password,
+            database,
+            **_ch_transport_kwargs(tls_config, proxy),
+        )
         if session is None:
             last_error = error or last_error
             if attempt >= attempts - 1:
@@ -2491,6 +2686,8 @@ def _audit_clickhouse_host_with_port_fallback(
     execute_command: str | None,
     sql_command: str | None,
     dump_row_limit: int | None = None,
+    tls_config: _ChTlsConfig | None = None,
+    proxy: Any | None = None,
 ) -> dict[str, Any]:
     last_record: dict[str, Any] | None = None
     for port, protocol in port_protocols:
@@ -2514,9 +2711,14 @@ def _audit_clickhouse_host_with_port_fallback(
                 dump_row_limit=dump_row_limit,
                 execute_command=execute_command,
                 sql_command=sql_command,
+                **_ch_transport_kwargs(tls_config, proxy),
             )
         else:
             dump_kwargs: dict[str, Any] = {"dump_row_limit": dump_row_limit} if dump_row_limit is not None else {}
+            if tls_config is not None:
+                dump_kwargs["tls_config"] = tls_config
+            if proxy is not None:
+                dump_kwargs["proxy"] = proxy
             record = _audit_clickhouse_host_on_protocol(
                 host=host,
                 port=port,

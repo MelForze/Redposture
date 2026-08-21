@@ -114,3 +114,31 @@ def test_validate_parser_vulnerable_extraction_helpers() -> None:
     assert parsers._extract_vulnerable_login_pairs_from_hit(
         {"sample": "username=metrics password=MetricsPass2026"}
     ) == [("metrics", "MetricsPass2026")]
+
+
+def test_vulnerable_login_pairs_never_cross_unrelated_lines() -> None:
+    text = "username=alice\nusername=bob\npassword=SecretForBob2026!\n"
+    assert parsers._extract_vulnerable_login_pairs_from_text(text) == []
+
+    structured = '{"first":{"username":"alice"},"second":{"username":"bob","password":"SecretForBob2026!"}}'
+    assert parsers._extract_vulnerable_login_pairs_from_text(structured) == [("bob", "SecretForBob2026!")]
+
+
+def test_collect_strict_strong_correlation_is_bounded_to_neighboring_lines() -> None:
+    lines = (
+        ["Authorization: Bearer A1b2C3d4E5f6G7h8I9j0K1l2"]
+        + ["metric 1"] * 20
+        + ["example_password=DocumentationOnly2026!"]
+    )
+    hits: list[dict[str, str | int]] = [
+        {"reason": "authorization_bearer", "sample": lines[0], "line_no": 1},
+        {"reason": "example_password=value", "sample": lines[-1], "line_no": len(lines)},
+    ]
+
+    parsers._apply_cross_line_correlation(
+        lines=lines,
+        hits=hits,
+        precision_profile=parsers.VALIDATION_PRECISION_COLLECT_STRICT,
+    )
+
+    assert "correlated_with_strong" not in str(hits[-1]["reason"])
