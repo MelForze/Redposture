@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core.audit_models import AuditRecord
+from redposture_core.modules.proxmox import policy as proxmox_policy
 from redposture_core.modules.proxmox import stage as proxmox_module_stage
 from redposture_core.network_proxy import ProxyConfig
 from redposture_core.stage_proxmox import (
@@ -55,6 +56,32 @@ from redposture_core.stage_proxmox import (
 )
 from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    [
+        ({"grant_role": "PVEAuditor", "add_user": None}, "--grant-role requires --add-user"),
+        (
+            {"grant_role": "PVEAuditor", "add_user": "audit@pve", "grant_path": "nodes"},
+            "--grant-path must start with /",
+        ),
+    ],
+)
+def test_proxmox_policy_rejects_invalid_grant_options(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object], expected_error: str
+) -> None:
+    monkeypatch.setattr(proxmox_policy, "validate_basic_module_args", lambda *_args, **_kwargs: None)
+    errors: list[str] = []
+
+    assert proxmox_policy.validate_args(SimpleNamespace(**overrides), SimpleNamespace(error=errors.append)) == 2
+    assert errors == [expected_error]
+
+
+def test_proxmox_policy_propagates_common_validation_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(proxmox_policy, "validate_basic_module_args", lambda *_args, **_kwargs: 2)
+
+    assert proxmox_policy.validate_args(SimpleNamespace(), SimpleNamespace()) == 2
 
 
 def _proxmox_stage_record(
