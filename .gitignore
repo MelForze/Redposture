@@ -41,6 +41,7 @@ lab_tests/
 result
 collect_results*.txt
 scan_results*.txt
+scan.txt
 trigger_events*.txt
 *_audit.txt
 collect_raw/
