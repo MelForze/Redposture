@@ -88,7 +88,25 @@ def configure_proxmox_parser(
         type=str,
         default=None,
         metavar="username",
-        help="Create user via /access/users and generate random 20-char password.",
+        help="Create an unprivileged user via /access/users and generate a random 20-char password.",
+    )
+    actions.add_argument(
+        "--grant-role",
+        default=None,
+        metavar="role",
+        help="Explicitly grant this Proxmox role to the user created by --add-user.",
+    )
+    actions.add_argument(
+        "--grant-path",
+        default="/",
+        metavar="path",
+        help="ACL path used with --grant-role (default: /).",
+    )
+    actions.add_argument(
+        "--grant-propagate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Propagate the explicit --grant-role ACL to child paths (default: enabled).",
     )
     add_save_flag(common, "Optional output file path. If omitted, results are printed to stdout.")
     common.add_argument(

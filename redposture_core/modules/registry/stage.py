@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.http_api import http_target_context
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -22,7 +24,11 @@ _PRODUCTION_AUDIT_HOST = actions._audit_registry_host
 
 
 def build_registry_plan(args: Any) -> AuditCommandPlan:
-    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
+    return plan
 
 
 def build_registry_spec(args: Any) -> ModuleAuditSpec:
@@ -54,25 +60,19 @@ def build_registry_spec(args: Any) -> ModuleAuditSpec:
         return actions.RegistryLifecycleState()
 
     def _detect(ctx: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.detect_registry(ctx, options),
-            module="registry",
-            service="registry",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth")):
+            result = actions.detect_registry(ctx, options)
+        return AuditRecord.from_mapping(result, module="registry", service="registry")
 
     def _auth(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.authenticate_registry(ctx, record, options),
-            module="registry",
-            service="registry",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth")):
+            result = actions.authenticate_registry(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="registry", service="registry")
 
     def _data(ctx: Any, record: Any) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.collect_registry_data(ctx, record, options),
-            module="registry",
-            service="registry",
-        )
+        with http_target_context(ctx.target, api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth")):
+            result = actions.collect_registry_data(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="registry", service="registry")
 
     return ModuleAuditSpec(
         module="registry",

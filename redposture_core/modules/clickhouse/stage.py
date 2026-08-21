@@ -15,7 +15,9 @@ from ...stage_runtime import (
     AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    command_result_exit_code,
     merge_audit_credential_runs,
+    sort_default_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -23,17 +25,24 @@ _DEFAULT_PORT = 9000
 _DEFAULT_PORTS: tuple[int, ...] | None = (9000, 19000)
 _DEFAULT_HTTP_PORT = 8123
 _DEFAULT_HTTP_PORTS: tuple[int, ...] | None = (8123, 18123)
+_DEFAULT_TLS_PORT = 9440
+_DEFAULT_HTTPS_PORT = 8443
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_clickhouse_host
 
 
 def build_clickhouse_plan(args: Any) -> AuditCommandPlan:
+    tls_enabled = bool(getattr(args, "tls", False))
     if _raw_protocol(args) == "http":
-        plan = build_basic_audit_plan(args, default_port=_DEFAULT_HTTP_PORT, default_ports=_DEFAULT_HTTP_PORTS)
+        default_port = _DEFAULT_HTTPS_PORT if tls_enabled else _DEFAULT_HTTP_PORT
+        default_ports = (_DEFAULT_HTTPS_PORT,) if tls_enabled else _DEFAULT_HTTP_PORTS
+        plan = build_basic_audit_plan(args, default_port=default_port, default_ports=default_ports)
     else:
-        plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+        default_port = _DEFAULT_TLS_PORT if tls_enabled else _DEFAULT_PORT
+        default_ports = (_DEFAULT_TLS_PORT,) if tls_enabled else _DEFAULT_PORTS
+        plan = build_basic_audit_plan(args, default_port=default_port, default_ports=default_ports)
     defaults = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source=source)
             for username, password, source in actions._build_credential_candidates(None, None, True)
         )
@@ -48,7 +57,10 @@ def build_clickhouse_plan(args: Any) -> AuditCommandPlan:
 
 def _force_single_default_port(args: Any) -> None:
     if getattr(args, "port", None) is None and getattr(args, "ports", None) is None:
-        args.port = _DEFAULT_HTTP_PORT if _raw_protocol(args) == "http" else _DEFAULT_PORT
+        if bool(getattr(args, "tls", False)):
+            args.port = _DEFAULT_HTTPS_PORT if _raw_protocol(args) == "http" else _DEFAULT_TLS_PORT
+        else:
+            args.port = _DEFAULT_HTTP_PORT if _raw_protocol(args) == "http" else _DEFAULT_PORT
 
 
 def _build_clickhouse_host_stage_options(args: Any) -> dict[str, Any]:
@@ -158,14 +170,14 @@ def run_clickhouse_stage(args: Any, logger: Any) -> int:
     _emit_debug_start(args, console, plan)
     try:
         runner = AuditCommandRunner(args=args, spec=build_clickhouse_spec(args), logger=logger, console=console)
-        runner.run_plan(plan)
+        result = runner.run_plan(plan)
     except ValueError as exc:
         console.error(str(exc))
         return 2
     except OSError as exc:
         console.error(f"failed to process clickhouse output: {exc}")
         return 2
-    return 0
+    return command_result_exit_code(result)
 
 
 def _emit_debug_start(args: Any, console: Any, plan: AuditCommandPlan) -> None:
@@ -193,6 +205,19 @@ def _raw_protocol(args: Any) -> str:
     if bool(getattr(args, "http", False)):
         return "http"
     return str(getattr(args, "protocol", None) or "native")
+
+
+def _clickhouse_transport_kwargs(args: Any) -> dict[str, Any]:
+    tls = actions._ChTlsConfig(
+        enabled=bool(getattr(args, "tls", False)),
+        verify=not bool(getattr(args, "insecure", False)),
+        ca_file=getattr(args, "tls_ca", None),
+        cert_file=getattr(args, "tls_cert", None),
+        key_file=getattr(args, "tls_key", None),
+        server_name=getattr(args, "tls_server_name", None),
+    )
+    proxy = getattr(args, "_proxy_config", getattr(args, "proxy", None))
+    return actions._ch_transport_kwargs(tls, proxy)
 
 
 def _check_clickhouse_shell_target(
@@ -236,6 +261,7 @@ def _check_clickhouse_shell_target(
         execute_command=None,
         sql_command=None,
         credential_candidates=credential_candidates,
+        **_clickhouse_transport_kwargs(args),
     )
 
 
@@ -299,6 +325,7 @@ def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
             password=shell_password,
             database=str(getattr(args, "database", "default") or "default"),
             query=query,
+            **_clickhouse_transport_kwargs(args),
         )
         shell_record = dict(record)
         shell_record.update(
@@ -384,6 +411,7 @@ def _run_clickhouse_os_shell(args: Any, logger: Any, console: Any) -> int:
             password=shell_password,
             database=str(getattr(args, "database", "default") or "default"),
             command=command,
+            **_clickhouse_transport_kwargs(args),
         )
         shell_record = dict(record)
         shell_record.update(

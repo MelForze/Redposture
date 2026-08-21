@@ -438,7 +438,33 @@ def test_base64_service_account_json_is_scanned_once_for_inner_credentials() -> 
     assert "google-client-secret" in values
     assert private_key in values
     assert encoded not in values
+    assert not any(
+        item.secret_type == "password" and item.value.startswith('"service_account"')
+        for item, _location in result.detections
+    )
+    assert not any(
+        item.secret_type == "private_key" and item.value.lstrip().startswith("{")
+        for item, _location in result.detections
+    )
     assert all(item.secret_type != "encoded_credentials" for item, _location in result.detections)
+
+
+def test_docker_auth_decodes_one_inner_basic_credential_without_json_wrapper_finding() -> None:
+    result = scan_value_tree(
+        {
+            "dockerconfigjson": {
+                "auths": {"registry.corpus.invalid": {"auth": "Y29ycHVzLWRvY2tlcjpDb3JwdXNEb2NrZXJQYXNzd29yZCEyMDI2"}}
+            }
+        },
+        source_kind="document",
+        object_name="logs/docker-config",
+    )
+
+    assert any(
+        item.secret_type == "password" and item.value == "CorpusDockerPassword!2026"
+        for item, _location in result.detections
+    )
+    assert all(not item.value.lstrip().startswith(("{", "[")) for item, _location in result.detections)
 
 
 def test_recursive_scanner_reports_each_traversal_limit() -> None:
@@ -716,6 +742,53 @@ def _response(
     )
 
 
+@pytest.mark.parametrize("vendor", ["elasticsearch", "opensearch"])
+def test_node_settings_request_omits_unsupported_include_defaults(vendor: str) -> None:
+    paths: list[str] = []
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        paths.append(item.path)
+        if item.path == "/_resolve/index/*?expand_wildcards=all":
+            return _response({"indices": []})
+        if item.path == "/_cluster/settings?flat_settings=false&include_defaults=false":
+            return _response({"persistent": {}, "transient": {}})
+        if item.path == "/_nodes/settings?flat_settings=false":
+            return _response({"nodes": {"node-a": {"settings": {}}}})
+        if item.path == "/_index_template":
+            return _response({"index_templates": []})
+        if item.path == "/_component_template":
+            return _response({"component_templates": []})
+        if item.path in {"/_template", "/_ingest/pipeline"}:
+            return _response({})
+        raise AssertionError(f"unexpected request: {item.method} {item.path}")
+
+    report = run_discovery(request, vendor=vendor)
+
+    assert "/_nodes/settings?flat_settings=false" in paths
+    assert all("include_defaults" not in path for path in paths if path.startswith("/_nodes/settings"))
+    assert report.coverage.surfaces["node_settings"].status == "complete"
+    assert report.coverage.surfaces["node_settings"].objects_scanned == 1
+
+
+def _missing_search_context_response() -> tuple[int, bytes, dict[str, str], str | None, bool]:
+    return _response(
+        {
+            "error": {
+                "type": "search_phase_execution_exception",
+                "reason": "all shards failed",
+                "root_cause": [
+                    {
+                        "type": "search_context_missing_exception",
+                        "reason": "No search context found for id [4683]",
+                    }
+                ],
+            },
+            "status": 404,
+        },
+        status=404,
+    )
+
+
 def test_run_discovery_paginates_beyond_200_updates_and_closes_pit() -> None:
     requests: list[DiscoverRequest] = []
     search_bodies: list[dict[str, Any]] = []
@@ -961,7 +1034,7 @@ def test_source_disabled_mapping_requests_bounded_fields_without_executing_runti
             return _response({"logs": {"settings": {}}})
         if item.path in {
             "/_cluster/settings?flat_settings=false&include_defaults=false",
-            "/_nodes/settings?flat_settings=false&include_defaults=false",
+            "/_nodes/settings?flat_settings=false",
             "/_index_template",
             "/_component_template",
             "/_template",
@@ -1078,6 +1151,144 @@ def test_pit_is_closed_when_a_search_request_fails() -> None:
     cleanup = [item for item in requests if item.method == "DELETE" and item.path == "/_pit"]
     assert len(cleanup) == 1
     assert json.loads(cleanup[0].body or b"{}") == {"id": "pit-error"}
+
+
+@pytest.mark.parametrize(
+    ("vendor", "open_path_fragment", "close_path"),
+    [
+        ("elasticsearch", "/logs/_pit?", "/_pit"),
+        ("opensearch", "/logs/_search/point_in_time?", "/_search/point_in_time"),
+    ],
+)
+def test_pit_missing_context_restarts_once_without_duplicate_documents(
+    vendor: str,
+    open_path_fragment: str,
+    close_path: str,
+) -> None:
+    requests: list[DiscoverRequest] = []
+    search_bodies: list[dict[str, Any]] = []
+    closed_ids: list[str] = []
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        requests.append(item)
+        body = json.loads(item.body) if item.body else {}
+        if item.method == "POST" and item.path == "/_search":
+            search_bodies.append(body)
+            page = len(search_bodies)
+            if page == 2:
+                return _missing_search_context_response()
+            if page in {1, 3}:
+                return _response(
+                    {
+                        "pit_id": "pit-before-expiry" if page == 1 else "pit-after-reopen",
+                        "hits": {
+                            "total": {"value": 2, "relation": "eq"},
+                            "hits": [
+                                {
+                                    "_index": "logs",
+                                    "_id": "doc-1",
+                                    "_source": {"password": "first-page-secret"},
+                                    "sort": [1],
+                                }
+                            ],
+                        },
+                    }
+                )
+            if page == 4:
+                return _response(
+                    {
+                        "hits": {
+                            "total": {"value": 2, "relation": "eq"},
+                            "hits": [
+                                {
+                                    "_index": "logs",
+                                    "_id": "doc-2",
+                                    "_source": {"clientSecret": "second-page-secret"},
+                                    "sort": [2],
+                                }
+                            ],
+                        }
+                    }
+                )
+            assert page == 5
+            return _response({"hits": {"total": {"value": 2, "relation": "eq"}, "hits": []}})
+        if item.method == "POST" and open_path_fragment in item.path:
+            return _response({"pit_id": "pit-reopened"}, status=201)
+        if item.method == "DELETE" and item.path == close_path:
+            raw_id = body.get("id")
+            if raw_id is None:
+                pit_ids = body.get("pit_id")
+                raw_id = pit_ids[0] if isinstance(pit_ids, list) and pit_ids else None
+            closed_ids.append(str(raw_id))
+            return _response({"succeeded": True})
+        raise AssertionError(f"unexpected PIT recovery request: {item.method} {item.path}")
+
+    engine = DiscoverEngine(request, vendor=vendor, options=DiscoverOptions(page_size=1))
+    completed = engine._paginate_pit(
+        "logs",
+        {"query": {"match_all": {}}},
+        candidate=False,
+        pit_id="pit-initial",
+        payload_complete=True,
+    )
+
+    legacy = engine._legacy_result("logs")
+    assert completed is True
+    assert engine.coverage.documents_scanned == 2
+    assert engine.coverage.duplicate_documents == 1
+    assert {finding.value for finding in engine.accumulator.findings()} == {
+        "first-page-secret",
+        "second-page-secret",
+    }
+    assert "search_after" not in search_bodies[2]
+    assert search_bodies[2]["pit"]["id"] == "pit-reopened"
+    assert closed_ids == ["pit-before-expiry", "pit-after-reopen"]
+    assert legacy["error"] is None
+    assert legacy["retried"] is True
+    assert legacy["retry_chunks"] == 1
+    assert legacy["partial_error_details"][0]["type"] == "search_phase_execution_exception"
+    assert legacy["partial_error_details"][0]["operation"] == "pit"
+
+
+def test_pit_missing_context_recovery_is_bounded_and_retains_terminal_error() -> None:
+    search_calls = 0
+    open_calls = 0
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        nonlocal search_calls, open_calls
+        if item.method == "POST" and item.path == "/_search":
+            search_calls += 1
+            return _missing_search_context_response()
+        if item.method == "POST" and item.path.startswith("/logs/_pit?"):
+            open_calls += 1
+            return _response({"id": "pit-reopened"}, status=201)
+        if item.method == "DELETE" and item.path == "/_pit":
+            return _response({"succeeded": True})
+        raise AssertionError(f"unexpected bounded PIT request: {item.method} {item.path}")
+
+    engine = DiscoverEngine(request, vendor="elasticsearch")
+    completed = engine._paginate_pit(
+        "logs",
+        {"query": {"match_all": {}}},
+        candidate=False,
+        pit_id="pit-initial",
+        payload_complete=True,
+    )
+
+    legacy = engine._legacy_result("logs")
+    assert completed is False
+    assert search_calls == 2
+    assert open_calls == 1
+    assert legacy["error"] == "PIT search: all shards failed"
+    assert legacy["error_detail"]["status"] == 404
+    assert legacy["error_detail"]["root_cause"] == [
+        {
+            "type": "search_context_missing_exception",
+            "reason": "No search context found for id [4683]",
+        }
+    ]
+    assert legacy["retried"] is True
+    assert legacy["retry_chunks"] == 1
 
 
 def test_opensearch_run_uses_vendor_pit_search_after_and_cleanup_shapes() -> None:
@@ -1209,6 +1420,144 @@ def test_scroll_fallback_is_cleared_and_preserves_full_values() -> None:
     assert json.loads(clear[0].body or b"{}") == {"scroll_id": ["scroll-2"]}
 
 
+def test_scroll_missing_context_restarts_once_and_deduplicates_replayed_page() -> None:
+    start_calls = 0
+    continuation_calls = 0
+    cleared_ids: list[str] = []
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        nonlocal start_calls, continuation_calls
+        body = json.loads(item.body) if item.body else {}
+        if item.path.startswith("/logs/_pit?"):
+            return _response({}, status=404)
+        if item.method == "POST" and item.path.startswith("/logs/_search?scroll="):
+            start_calls += 1
+            scroll_id = "scroll-1" if start_calls == 1 else "scroll-2"
+            return _response(
+                {
+                    "_scroll_id": scroll_id,
+                    "hits": {
+                        "total": {"value": 2, "relation": "eq"},
+                        "hits": [
+                            {
+                                "_index": "logs",
+                                "_id": "doc-1",
+                                "_source": {"password": "replayed-scroll-secret"},
+                            }
+                        ],
+                    },
+                }
+            )
+        if item.method == "POST" and item.path == "/_search/scroll":
+            continuation_calls += 1
+            if continuation_calls == 1:
+                assert body["scroll_id"] == "scroll-1"
+                return _missing_search_context_response()
+            if continuation_calls == 2:
+                assert body["scroll_id"] == "scroll-2"
+                return _response(
+                    {
+                        "_scroll_id": "scroll-3",
+                        "hits": {
+                            "total": {"value": 2, "relation": "eq"},
+                            "hits": [
+                                {
+                                    "_index": "logs",
+                                    "_id": "doc-2",
+                                    "_source": {"apiToken": "post-recovery-scroll-secret"},
+                                }
+                            ],
+                        },
+                    }
+                )
+            assert continuation_calls == 3
+            assert body["scroll_id"] == "scroll-3"
+            return _response(
+                {
+                    "_scroll_id": "scroll-4",
+                    "hits": {"total": {"value": 2, "relation": "eq"}, "hits": []},
+                }
+            )
+        if item.method == "DELETE" and item.path == "/_search/scroll":
+            raw_ids = body.get("scroll_id")
+            assert isinstance(raw_ids, list)
+            cleared_ids.extend(str(value) for value in raw_ids)
+            return _response({"succeeded": True})
+        raise AssertionError(f"unexpected scroll recovery request: {item.method} {item.path}")
+
+    engine = DiscoverEngine(request, vendor="elasticsearch", options=DiscoverOptions(page_size=1))
+    engine._search_query("logs", {"query": {"match_all": {}}}, candidate=False)
+
+    legacy = engine._legacy_result("logs")
+    assert start_calls == 2
+    assert continuation_calls == 3
+    assert cleared_ids == ["scroll-1", "scroll-4"]
+    assert engine.coverage.documents_scanned == 2
+    assert engine.coverage.duplicate_documents == 1
+    assert {finding.value for finding in engine.accumulator.findings()} == {
+        "replayed-scroll-secret",
+        "post-recovery-scroll-secret",
+    }
+    assert legacy["error"] is None
+    assert legacy["retried"] is True
+    assert legacy["retry_chunks"] == 1
+    assert legacy["partial_error_details"][0]["operation"] == "scroll"
+
+
+def test_scroll_missing_context_recovery_is_bounded_and_terminal_error_is_structured() -> None:
+    start_calls = 0
+    continuation_calls = 0
+    cleared_ids: list[str] = []
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        nonlocal start_calls, continuation_calls
+        body = json.loads(item.body) if item.body else {}
+        if item.path.startswith("/logs/_pit?"):
+            return _response({}, status=404)
+        if item.method == "POST" and item.path.startswith("/logs/_search?scroll="):
+            start_calls += 1
+            return _response(
+                {
+                    "_scroll_id": f"scroll-{start_calls}",
+                    "hits": {
+                        "total": {"value": 2, "relation": "eq"},
+                        "hits": [
+                            {
+                                "_index": "logs",
+                                "_id": "doc-1",
+                                "_source": {"password": "bounded-scroll-secret"},
+                            }
+                        ],
+                    },
+                }
+            )
+        if item.method == "POST" and item.path == "/_search/scroll":
+            continuation_calls += 1
+            return _missing_search_context_response()
+        if item.method == "DELETE" and item.path == "/_search/scroll":
+            raw_ids = body.get("scroll_id")
+            assert isinstance(raw_ids, list)
+            cleared_ids.extend(str(value) for value in raw_ids)
+            return _response({"succeeded": True})
+        raise AssertionError(f"unexpected terminal scroll request: {item.method} {item.path}")
+
+    engine = DiscoverEngine(request, vendor="elasticsearch", options=DiscoverOptions(page_size=1))
+    engine._search_query("logs", {"query": {"match_all": {}}}, candidate=False)
+
+    legacy = engine._legacy_result("logs")
+    assert start_calls == 2
+    assert continuation_calls == 2
+    assert cleared_ids == ["scroll-1", "scroll-2"]
+    assert engine.coverage.documents_scanned == 1
+    assert legacy["error"] == "scroll: all shards failed"
+    assert legacy["error_detail"]["status"] == 404
+    assert legacy["error_detail"]["type"] == "search_phase_execution_exception"
+    assert legacy["error_detail"]["root_cause"][0]["type"] == "search_context_missing_exception"
+    assert legacy["retried"] is True
+    assert legacy["retry_chunks"] == 1
+    assert legacy["truncated"] is True
+
+
 def test_scroll_hits_without_scroll_id_mark_coverage_partial() -> None:
     def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
         if item.path.startswith("/logs/_pit?"):
@@ -1272,6 +1621,25 @@ def test_single_page_fallback_marks_coverage_partial() -> None:
     assert engine.coverage.truncated_reasons == ["search:logs:pagination_unavailable"]
 
 
+def test_denied_single_page_fallback_does_not_claim_response_truncation() -> None:
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        if item.path.startswith("/logs/_pit?"):
+            return _response({}, status=403)
+        if "scroll=" in item.path:
+            return _response({}, status=403)
+        if item.path == "/logs/_search?expand_wildcards=open":
+            return _response({"error": {"type": "security_exception", "reason": "denied"}}, status=403)
+        raise AssertionError(f"unexpected denied request: {item.method} {item.path}")
+
+    engine = DiscoverEngine(request, vendor="opensearch")
+    engine._search_query("logs", {"query": {"match_all": {}}}, candidate=False)
+
+    legacy = engine._legacy_result("logs")
+    assert legacy["error_detail"]["status"] == 403
+    assert engine.coverage.truncated is False
+    assert engine.coverage.truncated_reasons == []
+
+
 def test_closed_indices_make_coverage_explicitly_incomplete() -> None:
     payload = DiscoverCoverage(
         indices_enumerated=2,
@@ -1313,6 +1681,272 @@ def test_truncated_resolve_with_complete_cat_fallback_does_not_poison_inventory_
     ]
     assert engine.coverage.truncated is False
     assert engine.coverage.surfaces["index_inventory"].status == "complete"
+
+
+def test_elasticsearch_1x_inventory_retries_cat_without_expand_wildcards() -> None:
+    paths: list[str] = []
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        paths.append(item.path)
+        if item.path == "/_resolve/index/*?expand_wildcards=all":
+            return _response({}, status=404)
+        if item.path == "/_cat/indices?format=json&expand_wildcards=all&h=index,status":
+            return _response(
+                {
+                    "error": "request [/_cat/indices] contains unrecognized parameter: [expand_wildcards]",
+                },
+                status=400,
+            )
+        if item.path == "/_cat/indices?format=json&h=index,status":
+            return _response(
+                [
+                    {"index": "graylog_3976", "status": "open"},
+                    {"index": "archive", "status": "close"},
+                ]
+            )
+        raise AssertionError(f"unexpected legacy inventory request: {item.method} {item.path}")
+
+    engine = DiscoverEngine(request, vendor="elasticsearch")
+    inventory, error, detail = engine._inventory()
+
+    assert error is None
+    assert detail is None
+    assert [(item.name, item.status) for item in inventory] == [
+        ("archive", "closed"),
+        ("graylog_3976", "open"),
+    ]
+    assert paths == [
+        "/_resolve/index/*?expand_wildcards=all",
+        "/_cat/indices?format=json&expand_wildcards=all&h=index,status",
+        "/_cat/indices?format=json&h=index,status",
+    ]
+    assert engine.coverage.surfaces["index_inventory"].status == "complete"
+
+
+def test_legacy_cat_inventory_fallback_does_not_mask_authorization_failure() -> None:
+    paths: list[str] = []
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        paths.append(item.path)
+        if item.path == "/_resolve/index/*?expand_wildcards=all":
+            return _response({}, status=404)
+        if item.path == "/_cat/indices?format=json&expand_wildcards=all&h=index,status":
+            return _response(
+                {"error": {"type": "security_exception", "reason": "action denied"}},
+                status=403,
+            )
+        raise AssertionError(f"unexpected denied inventory request: {item.method} {item.path}")
+
+    engine = DiscoverEngine(request, vendor="elasticsearch")
+    inventory, error, detail = engine._inventory()
+
+    assert inventory == []
+    assert error == "action denied"
+    assert detail is not None
+    assert detail["status"] == 403
+    assert paths == [
+        "/_resolve/index/*?expand_wildcards=all",
+        "/_cat/indices?format=json&expand_wildcards=all&h=index,status",
+    ]
+
+
+def test_elasticsearch_1x_run_falls_back_to_legacy_resources_and_scans_documents() -> None:
+    requests: list[DiscoverRequest] = []
+    scroll_search_bodies: list[dict[str, Any]] = []
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        requests.append(item)
+        body = json.loads(item.body) if item.body else {}
+        if item.path == "/_resolve/index/*?expand_wildcards=all":
+            return _response({}, status=404)
+        if item.path == "/_cat/indices?format=json&expand_wildcards=all&h=index,status":
+            return _response(
+                {"error": "unrecognized parameter [expand_wildcards]"},
+                status=400,
+            )
+        if item.path == "/_cat/indices?format=json&h=index,status":
+            return _response([{"index": "graylog_3976", "status": "open"}])
+        if item.path == "/graylog_3976/_mapping?expand_wildcards=open,hidden":
+            return _response({"error": "unrecognized parameter [expand_wildcards]"}, status=400)
+        if item.path == "/graylog_3976/_mapping":
+            return _response(
+                {
+                    "graylog_3976": {
+                        "mappings": {
+                            "message": {
+                                "properties": {
+                                    "event": {"type": "string"},
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+        if item.path.startswith("/graylog_3976/_settings?"):
+            return _response({"error": "unknown parameter [include_defaults]"}, status=400)
+        if item.path == "/graylog_3976/_settings":
+            return _response({"graylog_3976": {"settings": {"index.number_of_shards": "1"}}})
+        if item.path in {
+            "/_cluster/settings?flat_settings=false&include_defaults=false",
+            "/_nodes/settings?flat_settings=false",
+            "/_template",
+        }:
+            return _response({})
+        if item.path in {"/_index_template", "/_component_template", "/_ingest/pipeline"}:
+            return _response({}, status=404)
+        if item.method == "POST" and item.path.startswith("/graylog_3976/_pit?"):
+            return _response({}, status=404)
+        if item.method == "POST" and item.path.startswith("/graylog_3976/_search?scroll="):
+            scroll_search_bodies.append(body)
+            if "track_total_hits" in body:
+                return _response(
+                    {"error": "SearchParseException: No parser for element [track_total_hits]"},
+                    status=400,
+                )
+            if "expand_wildcards=" in item.path:
+                return _response(
+                    {"error": "request contains unrecognized parameter: [expand_wildcards]"},
+                    status=400,
+                )
+            return _response(
+                {
+                    "_scroll_id": "legacy-scroll-1",
+                    "hits": {
+                        "total": 1,
+                        "hits": [
+                            {
+                                "_index": "graylog_3976",
+                                "_id": "legacy-secret-doc",
+                                "_source": {"service": {"password": "legacy-es-secret"}},
+                            }
+                        ],
+                    },
+                }
+            )
+        if item.method == "POST" and item.path == "/_search/scroll":
+            return _response(
+                {
+                    "_scroll_id": "legacy-scroll-2",
+                    "hits": {"total": 1, "hits": []},
+                }
+            )
+        if item.method == "DELETE" and item.path == "/_search/scroll":
+            return _response({"succeeded": True})
+        raise AssertionError(f"unexpected Elasticsearch 1.x request: {item.method} {item.path}")
+
+    report = run_discovery(request, vendor="elasticsearch", options=DiscoverOptions(page_size=200))
+    serialized = report.to_dict()
+    request_paths = [item.path for item in requests]
+
+    assert [finding["value"] for finding in serialized["discover_findings"]] == ["legacy-es-secret"]
+    assert serialized["discover_coverage"]["indices_enumerated"] == 1
+    assert serialized["discover_coverage"]["indices_scanned"] == 1
+    assert serialized["discover_coverage"]["documents_scanned"] == 1
+    assert "/graylog_3976/_mapping" in request_paths
+    assert "/graylog_3976/_settings" in request_paths
+    assert "/graylog_3976/_search?scroll=2m" in request_paths
+    assert len(scroll_search_bodies) == 3
+    assert "track_total_hits" in scroll_search_bodies[0]
+    assert "track_total_hits" not in scroll_search_bodies[1]
+    assert "track_total_hits" not in scroll_search_bodies[2]
+    assert scroll_search_bodies[2]["_source"] is True
+    legacy = serialized["discover_results"][0]
+    assert legacy["error"] is None
+    assert legacy["retried"] is True
+    assert legacy["retry_chunks"] == 2
+    assert [detail["operation"] for detail in legacy["partial_error_details"]] == [
+        "legacy_scroll_search",
+        "legacy_scroll_search",
+    ]
+
+
+def test_legacy_index_resource_fallback_is_not_attempted_after_denial() -> None:
+    paths: list[str] = []
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        paths.append(item.path)
+        return _response(
+            {"error": {"type": "security_exception", "reason": "mapping denied"}},
+            status=403,
+        )
+
+    engine = DiscoverEngine(request, vendor="elasticsearch")
+    mappings = engine._fetch_index_resource(
+        ["logs"],
+        suffix="_mapping?expand_wildcards=open,hidden",
+        surface_name="mappings",
+        legacy_suffix="_mapping",
+    )
+
+    assert mappings == {}
+    assert paths == ["/logs/_mapping?expand_wildcards=open,hidden"]
+    assert engine.coverage.surfaces["mappings"].status == "denied"
+
+
+def test_legacy_search_fallback_does_not_replay_arbitrary_parse_errors() -> None:
+    calls = 0
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        nonlocal calls
+        calls += 1
+        return _response(
+            {
+                "error": {
+                    "type": "query_parsing_exception",
+                    "reason": "failed to parse application query",
+                }
+            },
+            status=400,
+        )
+
+    engine = DiscoverEngine(request, vendor="elasticsearch")
+    response, _parsed, effective_body, effective_path = engine._request_search_with_legacy_fallback(
+        "logs",
+        {"track_total_hits": True, "query": {"match_all": {}}},
+        "/logs/_search?expand_wildcards=open",
+        "/logs/_search",
+        operation="legacy_single_page_search",
+    )
+
+    assert response.status == 400
+    assert calls == 1
+    assert effective_body["track_total_hits"] is True
+    assert effective_path.endswith("expand_wildcards=open")
+
+
+def test_legacy_search_fallback_removes_only_named_optional_fields_and_keeps_source() -> None:
+    bodies: list[dict[str, Any]] = []
+
+    def request(item: DiscoverRequest) -> tuple[int, bytes, dict[str, str], str | None, bool]:
+        body = json.loads(item.body) if item.body else {}
+        bodies.append(body)
+        if "stored_fields" in body:
+            return _response({"error": "No parser for element [stored_fields]"}, status=400)
+        if "docvalue_fields" in body:
+            return _response({"error": "unknown field [docvalue_fields]"}, status=400)
+        return _response({"hits": {"total": 0, "hits": []}})
+
+    engine = DiscoverEngine(request, vendor="elasticsearch")
+    response, _parsed, effective_body, _effective_path = engine._request_search_with_legacy_fallback(
+        "logs",
+        {
+            "query": {"match_all": {}},
+            "_source": True,
+            "stored_fields": ["password"],
+            "docvalue_fields": ["password"],
+        },
+        "/logs/_search?expand_wildcards=open",
+        "/logs/_search",
+        operation="legacy_single_page_search",
+    )
+
+    assert response.status == 200
+    assert len(bodies) == 3
+    assert "stored_fields" not in bodies[1]
+    assert "docvalue_fields" in bodies[1]
+    assert "stored_fields" not in effective_body
+    assert "docvalue_fields" not in effective_body
+    assert effective_body["_source"] is True
 
 
 def test_normal_text_exports_full_findings_but_hides_raw_candidate_documents() -> None:
@@ -1361,10 +1995,75 @@ def test_normal_text_exports_full_findings_but_hides_raw_candidate_documents() -
     debug = "\n".join(debug_lines)
 
     assert "1 Secret Findings" in normal
-    assert 'value="full-exported-secret"' in normal
+    finding_line = next(line for line in normal_lines if "secret_type=" in line)
+    assert (
+        'secret_type=password value="full-exported-secret" source_kind="document" '
+        'object="logs/doc-1" index="logs" id="doc-1" path="/password"'
+    ) in finding_line
+    assert "confidence=" not in finding_line
+    assert "score=" not in finding_line
+    assert "detectors=" not in finding_line
+    assert "occurrences=" not in finding_line
+    assert "(very_high:1)" not in normal
     assert "Discover coverage status=complete" in normal
     assert "raw-candidate-document" not in normal
     assert "raw-candidate-document" in debug
+
+    debug_finding_line = next(line for line in debug_lines if "secret_type=" in line)
+    assert "confidence=very_high" in debug_finding_line
+    assert "score=90" in debug_finding_line
+    assert 'detectors=["sensitive_field"]' in debug_finding_line
+    assert "occurrences=1" in debug_finding_line
+    assert "1 Secret Findings (very_high:1)" in debug
+
+    json_lines = elastic_actions._format_detail_records(record, "json", debug=False)
+    discover_dump = next(json.loads(line) for line in json_lines if json.loads(line).get("type") == "discover_dump")
+    exported_finding = discover_dump["findings"][0]
+    assert exported_finding["value"] == "full-exported-secret"
+    assert exported_finding["confidence"] == "very_high"
+    assert exported_finding["score"] == 90
+    assert exported_finding["detectors"] == ["sensitive_field"]
+    assert exported_finding["occurrence_count"] == 1
+
+
+def test_finding_renderer_json_escapes_value_without_confusing_origin() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 9200,
+        "status": "open_no_auth",
+        "discover": True,
+        "discover_findings": [
+            {
+                "value": 'line one\nsource_kind="fake" \\ tail',
+                "secret_type": "bearer_token",
+                "confidence": "very_high",
+                "score": 90,
+                "detectors": ["bearer_auth"],
+                "occurrence_count": 3,
+                "locations": [
+                    {
+                        "source_kind": "document",
+                        "object": "robot-logs/doc-1",
+                        "index": "robot-logs",
+                        "id": "doc-1",
+                        "path": "/event/original",
+                    }
+                ],
+            }
+        ],
+        "discover_coverage": {"complete": True, "status": "complete"},
+        "discover_results": [],
+        "discover_error": None,
+    }
+
+    lines = elastic_actions._format_detail_records(record, "txt", debug=False)
+    finding_line = next(line for line in lines if "secret_type=" in line)
+
+    assert 'value="line one\\nsource_kind=\\"fake\\" \\\\ tail"' in finding_line
+    assert finding_line.endswith(
+        'source_kind="document" object="robot-logs/doc-1" index="robot-logs" id="doc-1" path="/event/original"'
+    )
+    assert "\n" not in finding_line
 
 
 def test_incomplete_empty_scan_does_not_claim_that_no_secrets_exist() -> None:
@@ -1395,3 +2094,84 @@ def test_incomplete_empty_scan_does_not_claim_that_no_secrets_exist() -> None:
     assert "0 Secret Findings in scanned scope" in rendered
     assert "status=partial" in rendered
     assert "reasons=max_documents" in rendered
+
+
+@pytest.mark.parametrize(
+    ("surface_status", "rendered_status"),
+    [
+        ("complete", "complete"),
+        ("unsupported", "unsupported"),
+        ("denied", "denied"),
+        ("error", "error"),
+        ("timeout", "error"),
+    ],
+)
+def test_zero_index_coverage_exposes_inventory_status_without_verbose_normal_line(
+    surface_status: str,
+    rendered_status: str,
+) -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 9200,
+        "status": "open_no_auth",
+        "discover": True,
+        "discover_findings": [],
+        "discover_coverage": {
+            "complete": False,
+            "status": "partial",
+            "indices_enumerated": 0,
+            "indices_scanned": 0,
+            "surfaces": {
+                "index_inventory": {
+                    "status": surface_status,
+                    "error": "inventory endpoint rejected the request",
+                    "error_detail": {
+                        "status": 403,
+                        "type": "security_exception",
+                        "reason": "forbidden inventory",
+                    },
+                }
+            },
+        },
+        "discover_results": [],
+        "discover_error": None,
+    }
+
+    normal_lines = elastic_actions._format_detail_records(record, "txt", debug=False)
+    coverage_line = next(line for line in normal_lines if "Discover coverage" in line)
+
+    assert f"status=partial inventory={rendered_status} indices=0/0" in coverage_line
+    assert "inventory endpoint rejected" not in "\n".join(normal_lines)
+    assert not any("surface=index_inventory" in line for line in normal_lines)
+
+    debug_lines = elastic_actions._format_detail_records(record, "txt", debug=True)
+    assert any(
+        f"surface=index_inventory status={surface_status}" in line
+        and "reason=inventory endpoint rejected the request" in line
+        for line in debug_lines
+    )
+
+
+def test_nonempty_inventory_does_not_repeat_inventory_status_in_coverage_line() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 9200,
+        "status": "open_no_auth",
+        "discover": True,
+        "discover_findings": [],
+        "discover_coverage": {
+            "complete": True,
+            "status": "complete",
+            "indices_enumerated": 2,
+            "indices_scanned": 2,
+            "surfaces": {"index_inventory": {"status": "complete"}},
+        },
+        "discover_results": [],
+        "discover_error": None,
+    }
+
+    normal_lines = elastic_actions._format_detail_records(record, "txt", debug=False)
+    coverage_line = next(line for line in normal_lines if "Discover coverage" in line)
+
+    assert "indices=2/2" in coverage_line
+    assert "inventory=" not in coverage_line

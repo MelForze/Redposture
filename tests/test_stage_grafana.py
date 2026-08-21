@@ -123,35 +123,35 @@ def test_grafana_helper_parsers_and_auth_helpers() -> None:
     assert _build_credential_candidates("admin", "secret", True) == [
         ("admin", "secret", "provided"),
         ("admin", "admin", "default"),
-        ("admin", "password", "default"),
-        ("admin", "grafana", "default"),
         ("admin", "changeme", "default"),
+        ("admin", "grafana", "default"),
+        ("admin", "password", "default"),
         ("grafana", "grafana", "default"),
         ("grafana", "password", "default"),
-        ("root", "root", "default"),
-        ("user", "user", "default"),
         ("root", "password", "default"),
+        ("root", "root", "default"),
         ("user", "password", "default"),
+        ("user", "user", "default"),
     ]
     assert _build_credential_candidates(None, None, False) == []
     assert _build_credential_candidates(None, None, True) == [
         ("admin", "admin", "default"),
-        ("admin", "password", "default"),
-        ("admin", "grafana", "default"),
         ("admin", "changeme", "default"),
+        ("admin", "grafana", "default"),
+        ("admin", "password", "default"),
         ("grafana", "grafana", "default"),
         ("grafana", "password", "default"),
-        ("root", "root", "default"),
-        ("user", "user", "default"),
         ("root", "password", "default"),
+        ("root", "root", "default"),
         ("user", "password", "default"),
+        ("user", "user", "default"),
     ]
 
 
 def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_grafana._http_request",
-        lambda *_args, **_kwargs: (200, "{}", {}),
+        lambda *_args, **_kwargs: (200, '{"id":1,"login":"admin"}', {}),
     )
     ok, error = _verify_credentials("127.0.0.1", 3000, 1.0, "admin", "admin")
     assert (ok, error) == (True, None)
@@ -213,6 +213,33 @@ def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.Monke
     cleanup_ok, cleanup_error = _delete_temp_datasource("127.0.0.1", 3000, 1.0, None, None, None)
     assert cleanup_ok is None
     assert cleanup_error == "temporary datasource id/uid is missing"
+
+
+def test_grafana_auth_rejects_login_page_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_grafana._http_request",
+        lambda *_args, **_kwargs: (200, "<html><title>Grafana login</title></html>", {}),
+    )
+
+    basic_ok, basic_error = _verify_credentials("127.0.0.1", 3000, 1.0, "admin", "admin")
+    token_ok, token_error = grafana_stage._verify_apitoken("127.0.0.1", 3000, 1.0, "glsa-token")
+
+    assert basic_ok is False
+    assert "invalid identity payload" in str(basic_error)
+    assert token_ok is False
+    assert "invalid identity payload" in str(token_error)
+
+
+def test_grafana_service_account_403_is_accepted_as_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_grafana._http_request",
+        lambda *_args, **_kwargs: (403, '{"message":"access denied"}', {}),
+    )
+
+    ok, error = grafana_stage._verify_apitoken("127.0.0.1", 3000, 1.0, "glsa-scoped")
+
+    assert ok is True
+    assert "identity endpoint is not permitted" in str(error)
 
 
 def test_run_temp_prometheus_check_success_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -311,15 +338,15 @@ def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypat
     assert isinstance(auth_attempts, list)
     assert [f"{item.get('username')}:{item.get('password')}" for item in auth_attempts] == [
         "admin:admin",
-        "admin:password",
-        "admin:grafana",
         "admin:changeme",
+        "admin:grafana",
+        "admin:password",
         "grafana:grafana",
         "grafana:password",
-        "root:root",
-        "user:user",
         "root:password",
+        "root:root",
         "user:password",
+        "user:user",
     ]
     detail_lines = _format_auth_attempt_detail_records(record, "txt")
     assert any("[-] admin:admin" in line for line in detail_lines)
@@ -411,15 +438,15 @@ def test_audit_grafana_classifies_successful_default_credentials_even_if_anonymo
     assert record["effective_password"] == "password"
     assert verify_calls == [
         ("admin", "admin"),
-        ("admin", "password"),
-        ("admin", "grafana"),
         ("admin", "changeme"),
+        ("admin", "grafana"),
+        ("admin", "password"),
         ("grafana", "grafana"),
         ("grafana", "password"),
-        ("root", "root"),
-        ("user", "user"),
         ("root", "password"),
+        ("root", "root"),
         ("user", "password"),
+        ("user", "user"),
     ]
     assert datasource_headers[-1] == _auth_header("admin", "password")
     auth_attempts = record.get("auth_attempts")
@@ -427,7 +454,7 @@ def test_audit_grafana_classifies_successful_default_credentials_even_if_anonymo
     assert len(auth_attempts) == 10
     assert bool(auth_attempts[0].get("ok")) is False
     assert "candidate transport failure" in str(auth_attempts[0].get("error"))
-    assert bool(auth_attempts[1].get("ok")) is True
+    assert bool(auth_attempts[3].get("ok")) is True
     assert bool(auth_attempts[4].get("ok")) is True
     detail_lines = _format_auth_attempt_detail_records(record, "txt")
     first_success = next(line for line in detail_lines if "[+] admin:password" in line)
@@ -493,15 +520,15 @@ def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> 
     assert verify_calls == [
         ("custom-user", "custom-pass"),
         ("admin", "admin"),
-        ("admin", "password"),
-        ("admin", "grafana"),
         ("admin", "changeme"),
+        ("admin", "grafana"),
+        ("admin", "password"),
         ("grafana", "grafana"),
         ("grafana", "password"),
-        ("root", "root"),
-        ("user", "user"),
         ("root", "password"),
+        ("root", "root"),
         ("user", "password"),
+        ("user", "user"),
     ]
 
 
@@ -1208,7 +1235,7 @@ def test_grafana_defcreds_falls_back_after_api_token_transport_error(
         if path == "/api/user":
             if str(authorization).startswith("Bearer "):
                 raise OSError("token transport failure")
-            return (200, "{}", {}) if authorization == winning_header else (401, "", {})
+            return (200, '{"id":1,"login":"admin"}', {}) if authorization == winning_header else (401, "", {})
         if path == "/api/datasources":
             datasource_headers.append(authorization)
             return 200, "[]", {}

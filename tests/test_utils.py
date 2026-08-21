@@ -23,6 +23,7 @@ from redposture_core.utils import (
     normalize_scan_host,
     parse_proxmox_api_token_auth,
     parse_scan_target_specs,
+    parse_target_exclusions,
     parse_username_password_credential_file,
     stream_scan_target_specs,
 )
@@ -105,6 +106,48 @@ def test_stream_scan_target_specs_deduplicates_overlapping_ipv4_ranges() -> None
 
     assert plan.target_count == 3
     assert list(plan.iter_hosts()) == ["10.0.0.1", "10.0.0.2", "10.0.0.0"]
+
+
+def test_target_exclusions_support_hosts_ips_networks_urls_and_files(tmp_path: Path) -> None:
+    nested = tmp_path / "nested.list"
+    nested.write_text("blocked.example.\n2001:db8::/126\n", encoding="utf-8")
+    exclusions_file = tmp_path / "exclude.txt"
+    exclusions_file.write_text(
+        f"# exclusions\n10.0.0.2\nhttps://url-blocked.example:9443/path\n{nested}\n",
+        encoding="utf-8",
+    )
+
+    exclusions = parse_target_exclusions([str(exclusions_file), "10.0.1.0/30,PORT-BLOCKED.example:443"])
+
+    assert exclusions.matches("10.0.0.2") is True
+    assert exclusions.matches("10.0.1.1") is True
+    assert exclusions.matches("2001:db8::2") is True
+    assert exclusions.matches("blocked.EXAMPLE") is True
+    assert exclusions.matches("url-blocked.example") is True
+    assert exclusions.matches("port-blocked.example") is True
+    assert exclusions.matches("10.0.0.3") is False
+
+
+def test_stream_target_exclusions_subtract_ipv4_ranges_without_materializing() -> None:
+    plan = stream_scan_target_specs(
+        "10.0.0.0/24,allowed.example,blocked.example:9000,https://url.example:9443/path",
+        exclude_targets=["10.0.0.0/26,10.0.0.100", "BLOCKED.EXAMPLE.,url.example"],
+    )
+
+    assert plan.target_count == 191
+    assert plan.hosts_sample(3) == ["10.0.0.64", "10.0.0.65", "10.0.0.66"]
+    assert plan.contains_host("10.0.0.100") is False
+    assert plan.contains_host("allowed.example") is True
+    assert {spec.host for spec in plan.iter_specs() if not spec.host.startswith("10.")} == {"allowed.example"}
+
+
+def test_eager_target_exclusions_ignore_scheme_port_and_path() -> None:
+    specs = parse_scan_target_specs(
+        "api.example:8080,https://api.example:9443/a,other.example",
+        exclude_targets="API.EXAMPLE.",
+    )
+
+    assert [spec.host for spec in specs] == ["other.example"]
 
 
 def test_collect_scan_targets_rejects_invalid_cidr() -> None:
@@ -370,6 +413,17 @@ def test_parse_username_password_credential_file_username_only_mode(tmp_path: Pa
     creds = parse_username_password_credential_file(str(creds_file), "shared")
 
     assert [(item.username, item.password) for item in creds or []] == [("admin", "shared"), ("operator", "shared")]
+
+
+def test_parse_username_password_credential_file_preserves_exact_secret(tmp_path: Path) -> None:
+    creds_file = tmp_path / "creds.txt"
+    creds_file.write_bytes(b"  zk-user  :  secret:with:colons  \r\n")
+
+    creds = parse_username_password_credential_file(str(creds_file), None)
+
+    assert [(item.username, item.password) for item in creds or []] == [
+        ("zk-user", "  secret:with:colons  "),
+    ]
 
 
 @pytest.mark.parametrize(

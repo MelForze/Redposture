@@ -24,6 +24,7 @@ def configure_redis_parser(
     port_type: Callable[[str], int],
 ) -> None:
     common = parser.add_argument_group("Common")
+    transport = parser.add_argument_group("TLS")
     auth = parser.add_argument_group("Auth")
     actions = parser.add_argument_group("Actions")
     add_output_flags(common)
@@ -42,6 +43,33 @@ def configure_redis_parser(
         ),
     )
     add_multi_ports_flag(common)
+    transport.add_argument("--tls", action="store_true", help="Use TLS for Redis connections.")
+    transport.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable Redis TLS certificate and hostname verification.",
+    )
+    transport.add_argument(
+        "--tls-ca",
+        dest="tls_ca",
+        default=None,
+        metavar="file",
+        help="CA certificate bundle for Redis TLS verification.",
+    )
+    transport.add_argument(
+        "--tls-cert",
+        dest="tls_cert",
+        default=None,
+        metavar="file",
+        help="Client certificate for Redis mTLS.",
+    )
+    transport.add_argument(
+        "--tls-key",
+        dest="tls_key",
+        default=None,
+        metavar="file",
+        help="Client private key for Redis mTLS.",
+    )
     auth.add_argument(
         "-u",
         "--username",
@@ -257,6 +285,32 @@ def configure_kafka_parser(
         "--defcreds",
         action="store_true",
         help="Try the curated Kafka SASL/PLAIN credential set after provided or file credentials.",
+    )
+    transport = parser.add_argument_group("TLS")
+    transport_mode = transport.add_mutually_exclusive_group()
+    transport_mode.add_argument(
+        "--tls",
+        action="store_true",
+        help="Require a TLS Kafka listener (works on any port).",
+    )
+    transport_mode.add_argument(
+        "--plaintext",
+        action="store_true",
+        help="Require plaintext Kafka and disable automatic TLS retry.",
+    )
+    transport.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable Kafka TLS certificate and hostname verification.",
+    )
+    transport.add_argument("--tls-ca", default=None, metavar="path", help="CA bundle for Kafka TLS verification.")
+    transport.add_argument("--tls-cert", default=None, metavar="path", help="Client certificate for Kafka mTLS.")
+    transport.add_argument("--tls-key", default=None, metavar="path", help="Client private key for Kafka mTLS.")
+    transport.add_argument(
+        "--tls-server-name",
+        default=None,
+        metavar="name",
+        help="Override the Kafka TLS SNI and certificate hostname (useful when connecting by IP).",
     )
     actions.add_argument(
         "--show-topics",

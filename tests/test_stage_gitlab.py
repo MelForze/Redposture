@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import pathlib
 import subprocess
 import urllib.error
 import urllib.request
@@ -84,6 +85,7 @@ def test_clone_project_sanitizes_path_traversal_destination(monkeypatch: pytest.
     ) -> subprocess.CompletedProcess[str]:
         _ = (capture_output, text, timeout, check)
         captured["cmd"] = list(cmd)
+        pathlib.Path(cmd[-1]).mkdir(parents=True)
         return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(gitlab.subprocess, "run", fake_run)
@@ -597,6 +599,11 @@ def test_clone_project_handles_missing_git_existing_dir_and_fallback(
     dest_path.mkdir(parents=True)
     monkeypatch.setattr(gitlab.shutil, "which", lambda _name: "/usr/bin/git")
     result = gitlab._clone_project(project, "127.0.0.1", 8080, use_https=False, token=None, clone_dir=str(clone_root))
+    assert result["status"] == "failed"
+    assert result["error"] == "destination exists but is not a complete git repository"
+
+    (dest_path / ".git").mkdir()
+    result = gitlab._clone_project(project, "127.0.0.1", 8080, use_https=False, token=None, clone_dir=str(clone_root))
     assert result["status"] == "exists"
     assert result["dest"] == str(dest_path)
 
@@ -618,6 +625,7 @@ def test_clone_project_handles_missing_git_existing_dir_and_fallback(
             return subprocess.CompletedProcess(
                 cmd, 1, "", "fatal: dumb http transport does not support shallow capabilities"
             )
+        pathlib.Path(cmd[-1]).mkdir(parents=True)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(gitlab.subprocess, "run", fake_run)
@@ -651,6 +659,54 @@ def test_clone_project_handles_missing_git_existing_dir_and_fallback(
     )
     assert result["status"] == "failed"
     assert result["error"] == "git clone timeout"
+
+
+def test_gitlab_identity_schema_and_repository_only_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert gitlab._looks_like_gitlab_user({"id": 7, "username": "alice"}) is True
+    assert gitlab._looks_like_gitlab_user({}) is False
+    assert gitlab._looks_like_gitlab_user("<html>sign in</html>") is False
+
+    state = gitlab.GitLabLifecycleState()
+    ctx = SimpleNamespace(
+        host="gitlab.local",
+        port=443,
+        args=SimpleNamespace(timeout=1.0),
+        credential=SimpleNamespace(token="repo-token"),
+        lifecycle_state=state,
+    )
+    monkeypatch.setattr(gitlab, "_api_get_json", lambda *_args, **_kwargs: (401, {}, {}, None))
+    monkeypatch.setattr(gitlab, "_probe_repository_token", lambda *_args, **_kwargs: (True, None))
+
+    record = gitlab.authenticate_gitlab(
+        ctx,
+        {"host": "gitlab.local", "port": 443, "https": True, "status": "auth_required"},
+        {"project_filters": ["group/app"]},
+    )
+
+    assert record["token_valid"] is True
+    assert record["token_capability"] == "repository"
+
+
+def test_gitlab_pagination_keeps_completed_pages_on_later_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    responses = iter(
+        [
+            (200, [{"id": 1, "path_with_namespace": "group/app"}], {"x-next-page": "2"}, None),
+            (500, None, {}, None),
+        ]
+    )
+    monkeypatch.setattr(gitlab, "_api_get_json", lambda *_args, **_kwargs: next(responses))
+
+    projects, error = gitlab._paginate_projects(
+        "gitlab.local",
+        443,
+        1.0,
+        use_https=True,
+        token="token",
+        public_only=False,
+    )
+
+    assert projects == [{"id": 1, "path_with_namespace": "group/app"}]
+    assert str(error).startswith("partial:")
 
 
 def test_audit_gitlab_targets_and_run_stage_paths(

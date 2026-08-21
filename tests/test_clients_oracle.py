@@ -233,6 +233,11 @@ def test_listener_dump_password_protected_and_nne_policy() -> None:
     )
     assert weak["weak"] is True
     assert "RC4" in weak["weak_reasons"]
+    assert weak["status"] == "encrypted"
+    assert weak["transport_observation"] == "tcp_only"
+    tcp_without_session_evidence = classify_nne_policy(tcp_available=True, tcps_available=False, banners=[])
+    assert tcp_without_session_evidence["status"] == "unknown"
+    assert tcp_without_session_evidence["weak"] is False
     strong = classify_nne_policy(tcp_available=False, tcps_available=True, banners=[])
     assert strong["status"] == "tcps_only"
     assert (
@@ -241,6 +246,8 @@ def test_listener_dump_password_protected_and_nne_policy() -> None:
     )
     assert classify_oracle_error("ORA-12541") == "not_oracle"
     assert classify_oracle_error("DPY-6003 timeout") == "fail"
+    assert classify_oracle_error("DPY-4011: database or network closed the connection") == "fail"
+    assert normalize_oracle_error(RuntimeError("DPY-4011")) == "database or network closed the connection"
     encrypted = classify_nne_policy(
         tcp_available=True,
         tcps_available=True,

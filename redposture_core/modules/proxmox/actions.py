@@ -16,7 +16,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ...clients import transport
-from ...clients.http_api import HttpApiClient, HttpClientConfig
+from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url
 from ...console import Console
 from ...rendering import BooleanColorRule, render_colored_marker_line
 from ...stage_runtime import (
@@ -112,16 +112,16 @@ _BASE64_TEXT_RE = re.compile(r"\b[A-Za-z0-9+/]{20,}={0,2}\b")
 _PEM_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 _PERMISSION_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*\.[A-Za-z][A-Za-z0-9_.-]*$")
 _PROXMOX_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
-    ("root@pam", "root"),
+    ("admin@pam", "admin"),
+    ("admin@pve", "admin"),
+    ("admin@pve", "password"),
     ("root@pam", "admin"),
+    ("root@pam", "changeme"),
     ("root@pam", "password"),
     ("root@pam", "proxmox"),
     ("root@pam", "Proxmox123"),
-    ("root@pam", "changeme"),
+    ("root@pam", "root"),
     ("root@pam", "toor"),
-    ("admin@pve", "admin"),
-    ("admin@pve", "password"),
-    ("admin@pam", "admin"),
 )
 
 
@@ -210,7 +210,7 @@ def _proxmox_request_once(
     request_method = str(method or "GET").upper()
     request_body = urllib.parse.urlencode(form or {}, doseq=True).encode("utf-8") if form else None
     scheme = "https" if use_https else "http"
-    url = f"{scheme}://{host}:{port}{_PROXMOX_API_PREFIX}{path}"
+    url = build_http_target_url(host, port, f"{_PROXMOX_API_PREFIX}{path}", default_scheme=scheme)
     request_headers = {
         "User-Agent": "RedPosture/1.0",
         "Accept": "application/json,text/plain,*/*",
@@ -234,7 +234,10 @@ def _proxmox_request_once(
     )
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
-    return int(response.status), response.body, {str(k).lower(): str(v) for k, v in response.headers.items()}, None
+    response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+    if bool(getattr(response, "truncated", False)):
+        response_headers["x-redposture-truncated"] = "true"
+    return int(response.status), response.body, response_headers, None
 
 
 def _proxmox_request(
@@ -308,6 +311,39 @@ def _extract_error_message(payload: bytes) -> str | None:
             return data.strip()
     text = _decode_body_text(payload).strip()
     return text or None
+
+
+def _looks_like_proxmox_response(
+    status: int,
+    payload: bytes,
+    headers: dict[str, str] | None = None,
+) -> bool:
+    """Require a Proxmox-specific response shape instead of a bare HTTP status."""
+
+    normalized_headers = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
+    server = normalized_headers.get("server", "").lower()
+    if "pve-api-daemon" in server or any(key.startswith("x-pve-") for key in normalized_headers):
+        return True
+    parsed = _parse_json_payload(payload)
+    if not isinstance(parsed, dict) or "data" not in parsed:
+        return False
+    if status == 200 and isinstance(parsed.get("data"), (dict, list)):
+        return True
+    if status not in {401, 403}:
+        return False
+    message = (_extract_error_message(payload) or "").lower()
+    return any(
+        marker in message
+        for marker in (
+            "pve",
+            "proxmox",
+            "authentication failure",
+            "authentication required",
+            "permission check failed",
+            "permission denied",
+            "ticket",
+        )
+    )
 
 
 def _is_invalid_token_message(value: str | None) -> bool:
@@ -978,6 +1014,9 @@ def _audit_proxmox_host(
     show_nodes: bool = False,
     show_users: bool = False,
     add_user: str | None = None,
+    grant_role: str | None = None,
+    grant_path: str = "/",
+    grant_propagate: bool = True,
     on_status_ready: Callable[[dict[str, Any]], None] | None = None,
     on_discovered_url: Callable[[str], None] | None = None,
     on_credential_finding: Callable[[dict[str, str]], None] | None = None,
@@ -990,6 +1029,8 @@ def _audit_proxmox_host(
     streamed_url_count = 0
     streamed_finding_count = 0
     requested_add_user = str(add_user or "").strip()
+    requested_grant_role = str(grant_role or "").strip()
+    requested_grant_path = str(grant_path or "/").strip() or "/"
     if _resolved_auth is None:
         auth_headers, auth_method, auth_username, auth_password, auth_attempts = _resolve_proxmox_auth_headers(
             host,
@@ -1046,7 +1087,7 @@ def _audit_proxmox_host(
             request_kwargs["method"] = request_method
             request_kwargs["form"] = form
         try:
-            status, payload, _headers, error = _proxmox_request(
+            status, payload, response_headers, error = _proxmox_request(
                 host,
                 port,
                 path,
@@ -1058,7 +1099,7 @@ def _audit_proxmox_host(
             if not is_signature_compat_typeerror(exc, expected_keywords={"auth_headers"}):
                 raise
             request_kwargs.pop("auth_headers", None)
-            status, payload, _headers, error = _proxmox_request(
+            status, payload, response_headers, error = _proxmox_request(
                 host,
                 port,
                 path,
@@ -1072,6 +1113,7 @@ def _audit_proxmox_host(
                 "status": status,
                 "error": error,
                 "method": request_method,
+                "truncated": response_headers.get("x-redposture-truncated") == "true",
             }
         )
         if (
@@ -1084,6 +1126,16 @@ def _audit_proxmox_host(
             _scan_endpoint_payload(path, payload, findings, findings_seen)
         flush_stream_buffers()
         return status, payload, error
+
+    def attach_completeness(result: dict[str, Any]) -> dict[str, Any]:
+        truncated_count = sum(bool(item.get("truncated")) for item in endpoint_results)
+        result["responses_truncated"] = truncated_count
+        result["partial"] = truncated_count > 0
+        if truncated_count:
+            result["partial_error"] = f"{truncated_count} endpoint response(s) exceeded the body limit"
+        else:
+            result["partial_error"] = None
+        return result
 
     started = time.monotonic()
     access_status, access_payload, access_error = fetch("/access")
@@ -1125,6 +1177,7 @@ def _audit_proxmox_host(
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": access_error,
         }
+        result = attach_completeness(result)
         if on_status_ready is not None:
             on_status_ready(result)
         return result
@@ -1203,6 +1256,7 @@ def _audit_proxmox_host(
             "error": access_error_text
             or ("authentication failed" if auth_status == "auth_failed" else "insufficient privileges"),
         }
+        result = attach_completeness(result)
         if on_status_ready is not None:
             on_status_ready(result)
         return result
@@ -1245,6 +1299,7 @@ def _audit_proxmox_host(
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": f"unexpected HTTP {access_status} from /access",
         }
+        result = attach_completeness(result)
         if on_status_ready is not None:
             on_status_ready(result)
         return result
@@ -1299,27 +1354,28 @@ def _audit_proxmox_host(
             else:
                 added_user = add_user_id
                 added_password = candidate_password
-                acl_status, acl_payload, acl_fetch_error = fetch(
-                    "/access/acl",
-                    method="PUT",
-                    form={
-                        "path": _ADD_USER_PRIV_PATH,
-                        "users": add_user_id,
-                        "roles": _ADD_USER_PRIV_ROLE,
-                        "propagate": "1",
-                    },
-                )
-                if acl_fetch_error:
-                    add_user_privileges_granted = False
-                    add_user_privileges_error = acl_fetch_error
-                elif acl_status not in {200, 201}:
-                    add_user_privileges_granted = False
-                    add_user_privileges_error = (
-                        _extract_error_message(acl_payload) or f"unexpected HTTP {acl_status} from /access/acl"
+                if requested_grant_role:
+                    acl_status, acl_payload, acl_fetch_error = fetch(
+                        "/access/acl",
+                        method="PUT",
+                        form={
+                            "path": requested_grant_path,
+                            "users": add_user_id,
+                            "roles": requested_grant_role,
+                            "propagate": "1" if grant_propagate else "0",
+                        },
                     )
-                else:
-                    add_user_privileges_granted = True
-                    add_user_privileges_role = _ADD_USER_PRIV_ROLE
+                    if acl_fetch_error:
+                        add_user_privileges_granted = False
+                        add_user_privileges_error = acl_fetch_error
+                    elif acl_status not in {200, 201}:
+                        add_user_privileges_granted = False
+                        add_user_privileges_error = (
+                            _extract_error_message(acl_payload) or f"unexpected HTTP {acl_status} from /access/acl"
+                        )
+                    else:
+                        add_user_privileges_granted = True
+                        add_user_privileges_role = requested_grant_role
 
     users = None
     users_error = None
@@ -1351,6 +1407,9 @@ def _audit_proxmox_host(
         "cap_modify": cap_modify,
         "cap_backup": cap_backup,
         "add_user": requested_add_user or None,
+        "grant_role": requested_grant_role or None,
+        "grant_path": requested_grant_path if requested_grant_role else None,
+        "grant_propagate": bool(grant_propagate) if requested_grant_role else None,
         "added_user": added_user,
         "added_password": added_password,
         "add_user_error": add_user_error,
@@ -1468,6 +1527,9 @@ def _audit_proxmox_host(
         "users": users,
         "users_error": users_error,
         "add_user": requested_add_user or None,
+        "grant_role": requested_grant_role or None,
+        "grant_path": requested_grant_path if requested_grant_role else None,
+        "grant_propagate": bool(grant_propagate) if requested_grant_role else None,
         "added_user": added_user,
         "added_password": added_password,
         "add_user_error": add_user_error,
@@ -1486,7 +1548,7 @@ def _audit_proxmox_host(
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "error": None,
     }
-    return result
+    return attach_completeness(result)
 
 
 def _nxc_prefix(record: dict[str, Any]) -> str:
@@ -1588,6 +1650,15 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         suffix = " (insufficient privileges)" if status == "insufficient_privileges" else ""
         lines.append(f"{prefix} {'[+]' if ok else '[-]'} {label}{suffix}")
     return lines
+
+
+def _format_partial_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    """Make response truncation explicit in the human-readable result stream."""
+    if output_format != "txt" or not bool(record.get("partial")):
+        return []
+    count = int(record.get("responses_truncated") or 0)
+    error = _clip(str(record.get("partial_error") or "response body limit exceeded"), 120)
+    return [f"{_nxc_prefix(record)} [!] partial results responses_truncated={count} err={error}"]
 
 
 def _format_findings_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
@@ -1800,7 +1871,8 @@ def _format_add_user_detail_records(record: dict[str, Any], output_format: str) 
     added_password = str(record.get("added_password") or "").strip()
     add_user_error = str(record.get("add_user_error") or "").strip()
     add_user_privileges_granted = record.get("add_user_privileges_granted")
-    add_user_privileges_role = str(record.get("add_user_privileges_role") or _ADD_USER_PRIV_ROLE).strip()
+    requested_grant_role = str(record.get("grant_role") or "").strip()
+    add_user_privileges_role = str(record.get("add_user_privileges_role") or requested_grant_role).strip()
     add_user_privileges_error = str(record.get("add_user_privileges_error") or "").strip()
 
     if output_format == "json":
@@ -1832,6 +1904,14 @@ def _format_add_user_detail_records(record: dict[str, Any], output_format: str) 
             f"{prefix} [+] User {added_user} added with password {added_password} "
             f"and granted privileges {add_user_privileges_role or _ADD_USER_PRIV_ROLE}"
         ]
+    if (
+        added_user
+        and added_password
+        and not requested_grant_role
+        and add_user_privileges_granted is None
+        and not add_user_privileges_error
+    ):
+        return [f"{prefix} [+] User {added_user} added with password {added_password} (no ACL grant requested)"]
     if added_user and added_password:
         error_text = _clip(add_user_privileges_error or "failed to grant administrator privileges", 120)
         return [
@@ -1938,6 +2018,9 @@ def _call_audit_proxmox_host_with_stage_debug(
     on_status_ready: Callable[[dict[str, Any]], None] | None = None,
     on_discovered_url: Callable[[str], None] | None = None,
     on_credential_finding: Callable[[dict[str, str]], None] | None = None,
+    grant_role: str | None = None,
+    grant_path: str = "/",
+    grant_propagate: bool = True,
 ) -> dict[str, Any]:
     started = time.monotonic()
     audit_kwargs: dict[str, Any] = {
@@ -1952,6 +2035,14 @@ def _call_audit_proxmox_host_with_stage_debug(
         "on_discovered_url": on_discovered_url if run_deep_checks else None,
         "on_credential_finding": on_credential_finding if run_deep_checks else None,
     }
+    if run_deep_checks and grant_role:
+        audit_kwargs.update(
+            {
+                "grant_role": grant_role,
+                "grant_path": grant_path,
+                "grant_propagate": grant_propagate,
+            }
+        )
     try:
         record = _audit_proxmox_host(
             host,

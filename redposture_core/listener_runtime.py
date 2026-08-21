@@ -6,6 +6,8 @@ import argparse
 import os
 import shutil
 import time
+from collections.abc import Callable
+from typing import Any
 
 from .console import Console
 from .constants import SUPPORTED_SERVICES
@@ -98,54 +100,85 @@ def _start_servers(
             generate_local_selfcert=False,
         )
 
-    postgres_ssl_context = (
-        build_ssl_context(cert_path, key_path)
-        if (cert_path and key_path and "postgres" in services and args.postgres_tls)
-        else None
-    )
-    proxmox_ssl_context = (
-        build_ssl_context(cert_path, key_path)
-        if (cert_path and key_path and "proxmox" in services and args.proxmox_tls)
-        else None
-    )
-
-    if "postgres" in services:
+    def _start_listener(name: str, port: int, server_factory: Callable[[], Any], *, tls: bool) -> None:
+        server: Any | None = None
         try:
-            pg_server = make_postgres_server(
-                args.bind,
+            server = server_factory()
+            running.append(start_server(name, args.bind, port, server, tls=tls))
+        except BaseException as exc:
+            # The factory may already have bound a socket even though
+            # ``start_server`` failed before returning a RunningServer.
+            if server is not None:
+                try:
+                    server.server_close()
+                except Exception:
+                    pass
+            if isinstance(exc, OSError):
+                raise OSError(_build_bind_error(name, args.bind, port, exc)) from exc
+            raise
+
+    try:
+        postgres_ssl_context = (
+            build_ssl_context(cert_path, key_path)
+            if (cert_path and key_path and "postgres" in services and args.postgres_tls)
+            else None
+        )
+        proxmox_ssl_context = (
+            build_ssl_context(cert_path, key_path)
+            if (cert_path and key_path and "proxmox" in services and args.proxmox_tls)
+            else None
+        )
+
+        if "postgres" in services:
+            _start_listener(
+                "postgres",
                 args.postgres_port,
-                logger,
-                postgres_tls=args.postgres_tls,
-                ssl_context=postgres_ssl_context,
+                lambda: make_postgres_server(
+                    args.bind,
+                    args.postgres_port,
+                    logger,
+                    postgres_tls=args.postgres_tls,
+                    ssl_context=postgres_ssl_context,
+                ),
+                tls=args.postgres_tls,
             )
-            running.append(start_server("postgres", args.bind, args.postgres_port, pg_server, tls=args.postgres_tls))
-        except OSError as exc:
-            raise OSError(_build_bind_error("postgres", args.bind, args.postgres_port, exc)) from exc
 
-    if "redis" in services:
-        try:
-            redis_server = make_redis_server(args.bind, args.redis_port, logger)
-            running.append(start_server("redis", args.bind, args.redis_port, redis_server, tls=False))
-        except OSError as exc:
-            raise OSError(_build_bind_error("redis", args.bind, args.redis_port, exc)) from exc
+        if "redis" in services:
+            _start_listener(
+                "redis",
+                args.redis_port,
+                lambda: make_redis_server(args.bind, args.redis_port, logger),
+                tls=False,
+            )
 
-    if "proxmox" in services:
-        try:
+        if "proxmox" in services:
             proxmox_handler = make_proxmox_handler(logger)
-            proxmox_server = make_http_server(
-                args.bind, args.proxmox_port, proxmox_handler, ssl_context=proxmox_ssl_context
+            _start_listener(
+                "proxmox",
+                args.proxmox_port,
+                lambda: make_http_server(
+                    args.bind,
+                    args.proxmox_port,
+                    proxmox_handler,
+                    ssl_context=proxmox_ssl_context,
+                ),
+                tls=args.proxmox_tls,
             )
-            running.append(start_server("proxmox", args.bind, args.proxmox_port, proxmox_server, tls=args.proxmox_tls))
-        except OSError as exc:
-            raise OSError(_build_bind_error("proxmox", args.bind, args.proxmox_port, exc)) from exc
 
-    if "blackbox" in services:
-        try:
+        if "blackbox" in services:
             blackbox_handler = make_blackbox_handler(logger)
-            blackbox_server = make_http_server(args.bind, args.blackbox_port, blackbox_handler, ssl_context=None)
-            running.append(start_server("blackbox", args.bind, args.blackbox_port, blackbox_server, tls=False))
-        except OSError as exc:
-            raise OSError(_build_bind_error("blackbox", args.bind, args.blackbox_port, exc)) from exc
+            _start_listener(
+                "blackbox",
+                args.blackbox_port,
+                lambda: make_http_server(args.bind, args.blackbox_port, blackbox_handler, ssl_context=None),
+                tls=False,
+            )
+    except BaseException:
+        # Roll back the complete partially-started listener set for every
+        # failure class, including SSL configuration errors and unexpected
+        # start-thread failures, then preserve the original exception.
+        stop_started_listeners(running, temp_cert_dir)
+        raise
 
     console.success("listeners started")
     for item in running:

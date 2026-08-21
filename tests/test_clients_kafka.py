@@ -298,13 +298,12 @@ def test_fetch_response_top_level_session_error_is_surfaced() -> None:
 
 def test_fetch_response_hint_for_compressed_batch() -> None:
     """When broker returns non-empty records bytes but our parser produces
-    zero decodable messages, that's almost always a compressed record batch
-    (zstd/snappy/lz4/gzip) that our client doesn't decompress. Surface a
-    hint so the operator understands why (max:N) shows zero.
+    zero decodable messages, surface a hint that identifies compressed,
+    empty/control, and malformed batches instead of silently showing zero.
     """
     # Craft a "record batch" whose magic byte is 2 (v2 format) with a
-    # non-zero compression code — our _parse_record_batch_entries will
-    # skip it and return []. Combined with non-empty records bytes,
+    # non-zero compression code with an empty compressed payload. The parser
+    # returns no application records; combined with non-empty record bytes,
     # the wrapper should synthesise a helpful error.
     #
     # v2 record batch layout (first 61 bytes are the batch header):
@@ -404,22 +403,22 @@ def test_kafka_small_helpers_and_metadata_success_branches() -> None:
     assert kafka._build_credential_runs("u", "", True) == [
         ("u", ""),
         ("admin", "admin"),
-        ("kafka", "kafka"),
-        ("kafka", "password"),
-        ("admin", "password"),
-        ("admin", "kafka"),
         ("admin", "admin-secret"),
-        ("kafka", "admin"),
-        ("kafka", "changeme"),
+        ("admin", "changeme"),
+        ("admin", "kafka"),
+        ("admin", "password"),
         ("broker", "broker"),
         ("broker", "brokerpass"),
-        ("user", "user"),
-        ("user", "password"),
         ("client", "client"),
-        ("service", "service"),
-        ("admin", "changeme"),
-        ("service", "password"),
+        ("kafka", "admin"),
+        ("kafka", "changeme"),
+        ("kafka", "kafka"),
+        ("kafka", "password"),
         ("kafka", "zookeeper"),
+        ("service", "password"),
+        ("service", "service"),
+        ("user", "password"),
+        ("user", "user"),
     ]
     assert kafka._build_credential_runs(None, None, False) == [(None, None)]
 
@@ -1035,3 +1034,132 @@ def test_open_kafka_socket_extended_tls_first_ports(monkeypatch: pytest.MonkeyPa
     _, transport = kafka.open_kafka_socket("kafka.internal", 29092, 1.0)
     assert transport == "plaintext"
     assert wrap_calls == []
+
+
+def test_kafka_tls_config_loads_ca_and_client_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    class _FakeSocket:
+        def settimeout(self, timeout: float) -> None:
+            calls["timeout"] = timeout
+
+        def close(self) -> None:
+            calls["closed"] = True
+
+    class _FakeContext:
+        check_hostname = True
+        verify_mode = kafka.ssl.CERT_REQUIRED
+
+        def load_cert_chain(self, certfile: str, keyfile: str) -> None:
+            calls["cert_chain"] = (certfile, keyfile)
+
+        def wrap_socket(self, sock: _FakeSocket, server_hostname: str) -> _FakeSocket:
+            calls["server_hostname"] = server_hostname
+            return sock
+
+    def _fake_default_context(*, cafile: str | None = None):
+        calls["cafile"] = cafile
+        return _FakeContext()
+
+    monkeypatch.setattr(kafka.socket, "create_connection", lambda *_a, **_k: _FakeSocket())
+    monkeypatch.setattr(kafka.ssl, "create_default_context", _fake_default_context)
+    sock, transport = kafka.open_kafka_socket(
+        "broker.internal",
+        12345,
+        2.0,
+        use_tls=True,
+        tls_config=kafka.KafkaTlsConfig(
+            ca_file="ca.pem",
+            cert_file="client.pem",
+            key_file="client.key",
+            server_name="broker.service.internal",
+        ),
+    )
+    assert transport == "tls"
+    assert sock is not None
+    assert calls["cafile"] == "ca.pem"
+    assert calls["cert_chain"] == ("client.pem", "client.key")
+    assert calls["server_hostname"] == "broker.service.internal"
+
+
+def test_kafka_fetch_version_negotiation_and_gzip_batch() -> None:
+    response = struct.pack(">ih", 9, 0) + struct.pack(">i", 1) + struct.pack(">hhh", kafka.KAFKA_FETCH, 5, 8)
+    parsed = kafka._parse_apiversions_response(response, 9)
+    assert parsed.versions[kafka.KAFKA_FETCH] == (5, 8)
+    assert kafka._select_fetch_api_version(parsed.versions) == 7
+
+    value = b"compressed-value"
+    record_body = (
+        struct.pack(">b", 0) + _varint(0) + _varint(3) + _varint(-1) + _varint(len(value)) + value + _varint(0)
+    )
+    compressed_records = kafka.gzip.compress(_varint(len(record_body)) + record_body)
+    batch = (
+        struct.pack(">i", 0)
+        + struct.pack(">b", 2)
+        + struct.pack(">i", 0)
+        + struct.pack(">h", 1)
+        + struct.pack(">i", 3)
+        + struct.pack(">q", 0)
+        + struct.pack(">q", 0)
+        + struct.pack(">q", -1)
+        + struct.pack(">h", -1)
+        + struct.pack(">i", -1)
+        + struct.pack(">i", 1)
+        + compressed_records
+    )
+    assert kafka._parse_record_batch_entries(20, batch, 10) == [(23, "compressed-value")]
+
+
+def test_kafka_optional_compression_codec_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Snappy:
+        @staticmethod
+        def decompress(payload: bytes) -> bytes:
+            return b"snappy:" + payload
+
+    class _Lz4:
+        @staticmethod
+        def decompress(payload: bytes) -> bytes:
+            return b"lz4:" + payload
+
+    class _ZstdDecoder:
+        def decompress(self, payload: bytes) -> bytes:
+            return b"zstd:" + payload
+
+    class _Zstd:
+        ZstdDecompressor = _ZstdDecoder
+
+    modules = {"snappy": _Snappy, "lz4.frame": _Lz4, "zstandard": _Zstd}
+    monkeypatch.setattr(kafka.importlib, "import_module", modules.__getitem__)
+    assert kafka._decompress_kafka_records(2, b"x") == b"snappy:x"
+    assert kafka._decompress_kafka_records(3, b"x") == b"lz4:x"
+    assert kafka._decompress_kafka_records(4, b"x") == b"zstd:x"
+
+
+def test_kafka_sasl_first_negotiates_versions_after_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda _sock, correlation: (True, correlation + 1, None))
+    monkeypatch.setattr(
+        kafka,
+        "_sasl_authenticate_plain",
+        lambda _sock, correlation, _username, _password: (True, correlation + 1, None),
+    )
+    monkeypatch.setattr(
+        kafka,
+        "_probe_apiversions",
+        lambda _sock, _correlation: kafka.KafkaApiVersionsResult(
+            True,
+            0,
+            None,
+            {kafka.KAFKA_FETCH: (4, 7)},
+        ),
+    )
+    versions: dict[int, tuple[int, int]] = {}
+    ok, correlation, error = kafka._authenticate_or_probe(
+        object(),
+        10,
+        "user",
+        "secret",
+        sasl_first=True,
+        api_versions_out=versions,
+    )
+    assert (ok, correlation, error) == (True, 13, None)
+    assert versions[kafka.KAFKA_FETCH] == (4, 7)

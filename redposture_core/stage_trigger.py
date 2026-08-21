@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
+import socket
+import ssl
 import sys
 import threading
 import time
@@ -14,6 +17,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse
 
 from .console import Console
+from .exporters.http_client import build_exporter_tls_context
 from .exporters.trigger import scan_exporters_and_trigger
 from .listener_runtime import parse_services, start_listeners_for_trigger, stop_started_listeners
 from .logger import AttemptLogger
@@ -74,7 +78,16 @@ def _as_text(value: object) -> str | None:
 def _json_record_from_trigger_event(event: dict[str, Any]) -> dict[str, Any] | None:
     if str(event.get("phase") or "").strip().lower() != "callback_result":
         return None
-    success = bool(event.get("success"))
+    confirmed = bool(event.get("confirmed", event.get("success")))
+    http_status = _safe_int(event.get("status"))
+    accepted = bool(event.get("accepted", http_status is not None and 200 <= http_status < 300))
+    rejected = event.get("probe_success") is False or bool(event.get("error"))
+    if confirmed:
+        result_status = "trigger_success"
+    elif accepted and not rejected:
+        result_status = "trigger_accepted_unconfirmed"
+    else:
+        result_status = "trigger_error"
     record: dict[str, Any] = {
         "timestamp": utc_now_iso(),
         "source_type": "trigger",
@@ -85,10 +98,12 @@ def _json_record_from_trigger_event(event: dict[str, Any]) -> dict[str, Any] | N
         "callback_target": _as_text(event.get("callback_target")),
         "trigger_url": _as_text(event.get("trigger_url")),
         "target": _as_text(event.get("target")),
-        "success": success,
+        "success": confirmed,
+        "accepted": accepted,
+        "confirmed": confirmed,
         "probe_success": event.get("probe_success"),
-        "status": "trigger_success" if success else "trigger_error",
-        "http_status": _safe_int(event.get("status")),
+        "status": result_status,
+        "http_status": http_status,
         "error": _as_text(event.get("error")),
     }
     return {key: value for key, value in record.items() if value is not None}
@@ -414,7 +429,109 @@ def _callback_event_has_complete_creds(event: dict[str, Any]) -> bool:
 
 def _callback_event_remote_host(event: dict[str, Any]) -> str:
     remote = str(event.get("remote_addr") or "-")
-    return remote.rsplit(":", 1)[0] if ":" in remote else remote
+    host = remote.rsplit(":", 1)[0] if ":" in remote else remote
+    return host[1:-1] if host.startswith("[") and host.endswith("]") else host
+
+
+def _normalized_correlation_host(value: object) -> str:
+    host = str(value or "").strip().strip("[]").rstrip(".").lower()
+    try:
+        return ipaddress.ip_address(host).compressed
+    except ValueError:
+        return host
+
+
+def _target_host_aliases(host: object) -> set[str]:
+    normalized = _normalized_correlation_host(host)
+    aliases = {normalized} if normalized else set()
+    try:
+        for result in socket.getaddrinfo(normalized, None, type=socket.SOCK_STREAM):
+            aliases.add(_normalized_correlation_host(result[4][0]))
+    except (OSError, UnicodeError):
+        pass
+    return aliases
+
+
+def _correlated_callback_stats(
+    trigger_summaries: list[dict[str, Any]],
+    callback_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Count callbacks only from hosts that had a matching exporter attempt."""
+
+    allowed_hosts_by_service: dict[str, set[str]] = {}
+    attempts_by_service: dict[str, int] = {}
+    unscoped_attempts = 0
+    unscoped_allowed_hosts: set[str] = set()
+    for summary in trigger_summaries:
+        exporter_hosts = summary.get("attempts_by_exporter_host")
+        if isinstance(exporter_hosts, dict) and exporter_hosts:
+            for exporter_name, host_attempts in exporter_hosts.items():
+                service = _EXPORTER_TO_LISTENER_SERVICE.get(str(exporter_name))
+                if service is None or not isinstance(host_attempts, dict):
+                    continue
+                for host, count_raw in host_attempts.items():
+                    count = int(count_raw or 0)
+                    if count <= 0:
+                        continue
+                    attempts_by_service[service] = attempts_by_service.get(service, 0) + count
+                    allowed_hosts_by_service.setdefault(service, set()).update(_target_host_aliases(host))
+            continue
+
+        # Compatibility with older/custom trigger implementations that do not
+        # expose the exporter-to-host relation: restrict callbacks to scanned
+        # hosts while retaining per-exporter attempt limits.
+        all_host_aliases: set[str] = set()
+        by_host = summary.get("by_host")
+        if isinstance(by_host, dict):
+            for host, stats in by_host.items():
+                if isinstance(stats, dict) and int(stats.get("attempted", 0)) > 0:
+                    all_host_aliases.update(_target_host_aliases(host))
+        by_exporter = summary.get("by_exporter")
+        if isinstance(by_exporter, dict) and by_exporter:
+            for exporter_name, stats in by_exporter.items():
+                service = _EXPORTER_TO_LISTENER_SERVICE.get(str(exporter_name))
+                if service is None or not isinstance(stats, dict):
+                    continue
+                count = int(stats.get("attempted", 0))
+                if count <= 0:
+                    continue
+                attempts_by_service[service] = attempts_by_service.get(service, 0) + count
+                allowed_hosts_by_service.setdefault(service, set()).update(all_host_aliases)
+        else:
+            unscoped_attempts += int(summary.get("attempted", 0))
+            unscoped_allowed_hosts.update(all_host_aliases)
+
+    callbacks_by_service: dict[str, int] = {}
+    seen_connections: set[tuple[str, str, str]] = set()
+    for event in callback_events:
+        service = str(event.get("service") or "").strip().lower()
+        if service not in attempts_by_service and unscoped_attempts <= 0:
+            continue
+        remote_host = _normalized_correlation_host(_callback_event_remote_host(event))
+        allowed_hosts = allowed_hosts_by_service.get(service, set())
+        if service not in attempts_by_service:
+            allowed_hosts = unscoped_allowed_hosts
+        if remote_host not in allowed_hosts:
+            continue
+        signature = (
+            service,
+            str(event.get("remote_addr") or "-"),
+            str(event.get("listen_port") or "-"),
+        )
+        if signature in seen_connections:
+            continue
+        seen_connections.add(signature)
+        callbacks_by_service[service] = callbacks_by_service.get(service, 0) + 1
+
+    limited_by_service = {
+        service: min(count, callbacks_by_service.get(service, 0)) for service, count in attempts_by_service.items()
+    }
+    scoped_total = sum(limited_by_service.values())
+    unscoped_total = min(
+        unscoped_attempts,
+        sum(count for service, count in callbacks_by_service.items() if service not in attempts_by_service),
+    )
+    return {"total": scoped_total + unscoped_total, "by_service": limited_by_service}
 
 
 def _run_trigger_credential_checks(args: argparse.Namespace, logger: AttemptLogger, console: Console) -> None:
@@ -549,6 +666,8 @@ def _run_trigger_requests(
     record_sink: LineOutputSink | None = None,
     progress_advance: Callable[[int], None] | None = None,
     progress_add_total: Callable[[int], None] | None = None,
+    scheme: str = "http",
+    tls_context: ssl.SSLContext | None = None,
 ) -> dict[str, Any]:
     callbacks = ",".join(callback_targets)
     if show_trigger_info:
@@ -667,12 +786,16 @@ def _run_trigger_requests(
         emit_stage_event=_emit_stage_event if args.debug else None,
         progress_advance=progress_advance,
         progress_add_total=progress_add_total,
+        scheme=scheme,
+        tls_context=tls_context,
     )
     attempted = int(summary.get("attempted", 0))
+    accepted = int(summary.get("accepted", 0))
     display_success = int(summary.get("triggered", 0))
     display_fail = int(summary.get("failed", max(0, attempted - display_success)))
+    display_unconfirmed = int(summary.get("unconfirmed", max(0, accepted - display_success)))
 
-    if args.with_listen:
+    if args.with_listen and show_trigger_info:
         callback_stats = logger.get_trigger_callback_stats()
         by_service = callback_stats.get("by_service", {})
         callback_based_success = 0
@@ -691,7 +814,7 @@ def _run_trigger_requests(
             callback_based_success = int(callback_stats.get("total", 0))
 
         display_success = min(attempted, callback_based_success)
-        display_fail = max(0, attempted - display_success)
+        display_unconfirmed = max(0, attempted - display_success - display_fail)
         if args.debug:
             console.debug(
                 "with-listen summary mode: "
@@ -703,7 +826,8 @@ def _run_trigger_requests(
         console.info(
             "trigger complete: "
             f"hosts={len(hosts)} detected={summary['detected_exporters']} "
-            f"attempts={attempted} success={display_success} fail={display_fail}"
+            f"attempts={attempted} accepted={accepted} confirmed={display_success} "
+            f"unconfirmed={display_unconfirmed} fail={display_fail}"
         )
         if args.debug:
             for host, stats in sorted(summary["by_host"].items()):
@@ -714,7 +838,8 @@ def _run_trigger_requests(
                     marker,
                     (
                         f"detected={stats['detected']} attempts={stats['attempted']} "
-                        f"success={stats['success']} fail={stats['fail']}"
+                        f"accepted={stats.get('accepted', 0)} confirmed={stats['success']} "
+                        f"unconfirmed={stats.get('unconfirmed', 0)} fail={stats['fail']}"
                     ),
                     logger=logger,
                 )
@@ -728,7 +853,9 @@ def _run_trigger_requests(
                     console,
                     f"callback={target}",
                     marker,
-                    f"attempts={callback_attempted} success={callback_success} fail={callback_fail}",
+                    f"attempts={callback_attempted} accepted={stats.get('accepted', 0)} "
+                    f"confirmed={callback_success} unconfirmed={stats.get('unconfirmed', 0)} "
+                    f"fail={callback_fail}",
                     logger=logger,
                 )
     for host, stats in sorted(summary["by_host"].items()):
@@ -777,7 +904,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         targets = f"{targets},{hosts_file}" if targets else hosts_file
 
     try:
-        target_specs = collect_scan_target_specs(targets)
+        target_specs = collect_scan_target_specs(targets, exclude_targets=getattr(args, "out_targets", None))
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
@@ -796,10 +923,20 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     postgres_auth_modules = _parse_postgres_auth_modules(getattr(args, "postgres_auth_modules", None))
 
     if not target_specs:
+        if targets and getattr(args, "out_targets", None):
+            console.error("all targets were excluded by --out-target")
+            return 2
         console.error("trigger requires -t/--targets")
         return 2
-    if any(spec.scheme == "https" for spec in target_specs):
-        console.error("exporters trigger accepts only http:// URL targets for -t/--targets")
+    try:
+        tls_context = build_exporter_tls_context(
+            insecure=bool(getattr(args, "insecure", False)),
+            ca_file=getattr(args, "tls_ca", None),
+            cert_file=getattr(args, "tls_cert", None),
+            key_file=getattr(args, "tls_key", None),
+        )
+    except (OSError, ValueError, ssl.SSLError) as exc:
+        console.error(f"invalid exporter TLS configuration: {exc}")
         return 2
 
     callback_targets: list[str] = []
@@ -847,32 +984,38 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             "trigger exporters filter=" + ",".join(sorted(str(item.get("name") or "") for item in trigger_exporters))
         )
 
-    plain_hosts: list[str] = []
-    additional_port_hosts: list[str] = []
-    explicit_port_groups: dict[int, list[tuple[str, bool]]] = {}
+    plain_hosts: dict[str, list[str]] = {}
+    additional_port_hosts: dict[str, list[str]] = {}
+    explicit_port_groups: dict[tuple[int, str], list[tuple[str, bool]]] = {}
     for spec in target_specs:
         is_bare_target = spec.scheme is None
-        if (spec.explicit_port is None or is_bare_target) and spec.host not in additional_port_hosts:
-            additional_port_hosts.append(spec.host)
+        scheme = spec.scheme or "http"
+        if spec.explicit_port is None or is_bare_target:
+            scheme_hosts = additional_port_hosts.setdefault(scheme, [])
+            if spec.host not in scheme_hosts:
+                scheme_hosts.append(spec.host)
         if spec.explicit_port is None:
-            if spec.host not in plain_hosts:
-                plain_hosts.append(spec.host)
+            scheme_hosts = plain_hosts.setdefault(scheme, [])
+            if spec.host not in scheme_hosts:
+                scheme_hosts.append(spec.host)
             continue
         port_key = int(spec.explicit_port)
-        explicit_targets = explicit_port_groups.setdefault(port_key, [])
+        explicit_targets = explicit_port_groups.setdefault((port_key, scheme), [])
         target_key = (spec.host, is_bare_target)
         if target_key not in explicit_targets:
             explicit_targets.append(target_key)
 
-    run_batches: list[tuple[list[str], list[dict[str, Any]]]] = []
+    run_batches: list[tuple[list[str], list[dict[str, Any]], str]] = []
     if custom_ports and additional_port_hosts:
         custom_trigger_exporters = _override_trigger_exporter_ports(trigger_exporters, custom_ports)
-        run_batches.append((additional_port_hosts, custom_trigger_exporters))
+        for scheme, scheme_hosts in additional_port_hosts.items():
+            run_batches.append((scheme_hosts, custom_trigger_exporters, scheme))
         console.debug("trigger custom ports=" + ",".join(str(int(port)) for port in dict.fromkeys(custom_ports)))
     elif plain_hosts:
-        run_batches.append((plain_hosts, trigger_exporters))
+        for scheme, scheme_hosts in plain_hosts.items():
+            run_batches.append((scheme_hosts, trigger_exporters, scheme))
     custom_port_set = {int(port) for port in custom_ports}
-    for explicit_port, explicit_targets in explicit_port_groups.items():
+    for (explicit_port, scheme), explicit_targets in explicit_port_groups.items():
         explicit_hosts = [
             host
             for host, is_bare_target in explicit_targets
@@ -882,16 +1025,18 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if not explicit_hosts:
             continue
         batch_exporters = _override_trigger_exporter_ports(trigger_exporters, [explicit_port])
-        run_batches.append((explicit_hosts, batch_exporters))
+        run_batches.append((explicit_hosts, batch_exporters, scheme))
         console.debug("trigger target explicit port=" + str(explicit_port) + " hosts=" + str(len(explicit_hosts)))
     if not run_batches:
         console.error("trigger requires at least one valid target")
         return 2
 
     if args.with_listen:
-        patched_batches: list[tuple[list[str], list[dict[str, Any]]]] = []
-        for batch_hosts, batch_exporters in run_batches:
-            patched_batches.append((batch_hosts, _patch_trigger_exporters_for_with_listen(batch_exporters, args)))
+        patched_batches: list[tuple[list[str], list[dict[str, Any]], str]] = []
+        for batch_hosts, batch_exporters, scheme in run_batches:
+            patched_batches.append(
+                (batch_hosts, _patch_trigger_exporters_for_with_listen(batch_exporters, args), scheme)
+            )
         run_batches = patched_batches
         check_exporters = run_batches[0][1]
         proxmox_tls_enabled = bool(getattr(args, "proxmox_tls", False))
@@ -930,7 +1075,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     show_trigger_info = output_format == "txt" or not stream_to_stdout
     trigger_progress = None
     trigger_progress_total = sum(
-        len(batch_hosts) * len(batch_exporters) for batch_hosts, batch_exporters in run_batches
+        len(batch_hosts) * len(batch_exporters) for batch_hosts, batch_exporters, _scheme in run_batches
     )
 
     def _start_trigger_progress() -> None:
@@ -962,12 +1107,13 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
 
     if not args.with_listen:
         result_code = 0
+        non_listener_summaries: list[dict[str, Any]] = []
         try:
             logger_scope = logger.scoped_console_stream(sys.stderr) if output_format == "json" else nullcontext()
             with logger_scope:
                 _start_trigger_progress()
-                for batch_hosts, batch_exporters in run_batches:
-                    _run_trigger_requests(
+                for batch_hosts, batch_exporters, scheme in run_batches:
+                    summary = _run_trigger_requests(
                         args,
                         logger,
                         console,
@@ -979,7 +1125,11 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                         record_sink=json_sink,
                         progress_advance=_advance_trigger_progress,
                         progress_add_total=_add_trigger_progress_total,
+                        scheme=scheme,
+                        tls_context=tls_context,
                     )
+                    if isinstance(summary, dict):
+                        non_listener_summaries.append(summary)
         except _TriggerOutputError as exc:
             console.error(f"failed to write trigger output: {exc}")
             result_code = 1
@@ -991,11 +1141,82 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 except OSError as exc:
                     console.error(f"failed to close trigger output: {exc}")
                     result_code = 1
+        attempted = sum(int(item.get("attempted", 0)) for item in non_listener_summaries)
+        confirmed = sum(int(item.get("triggered", 0)) for item in non_listener_summaries)
+        if result_code == 0 and attempted > 0 and confirmed == 0:
+            console.error("trigger inconclusive: no callback attempt was confirmed")
+            result_code = 1
         return result_code
 
     running: list[RunningServer] = []
     temp_cert_dir: str | None = None
     result_code = 0
+    trigger_summaries: list[dict[str, Any]] = []
+    reconciled = False
+
+    def _reconcile_listener_results() -> None:
+        nonlocal reconciled, result_code
+        if reconciled or not trigger_summaries:
+            return
+        reconciled = True
+        attempted = sum(int(item.get("attempted", 0)) for item in trigger_summaries)
+        accepted = sum(int(item.get("accepted", 0)) for item in trigger_summaries)
+        probe_confirmed = sum(int(item.get("triggered", 0)) for item in trigger_summaries)
+        hard_failed = sum(int(item.get("failed", 0)) for item in trigger_summaries)
+        callback_stats = _correlated_callback_stats(
+            trigger_summaries,
+            logger.get_trigger_callback_events(),
+        )
+        by_service = callback_stats.get("by_service", {})
+        attempts_by_service: dict[str, int] = {}
+        for summary in trigger_summaries:
+            by_exporter = summary.get("by_exporter")
+            if not isinstance(by_exporter, dict):
+                continue
+            for exporter_name, exporter_stats in by_exporter.items():
+                if not isinstance(exporter_stats, dict):
+                    continue
+                service_name = _EXPORTER_TO_LISTENER_SERVICE.get(str(exporter_name))
+                if service_name is None:
+                    continue
+                attempted_for_exporter = int(exporter_stats.get("attempted", 0))
+                attempts_by_service[service_name] = attempts_by_service.get(service_name, 0) + attempted_for_exporter
+        callback_confirmed = sum(
+            min(service_attempts, int(by_service.get(service_name, 0)))
+            for service_name, service_attempts in attempts_by_service.items()
+        )
+        if not attempts_by_service:
+            callback_confirmed = min(attempted, int(callback_stats.get("total", 0)))
+        callback_confirmed = min(attempted, callback_confirmed)
+        remaining = max(0, attempted - callback_confirmed)
+        failed = min(hard_failed, remaining)
+        unconfirmed = max(0, remaining - failed)
+        console.info(
+            "trigger complete: "
+            f"attempts={attempted} accepted={accepted} probe_confirmed={probe_confirmed} "
+            f"callback_confirmed={callback_confirmed} unconfirmed={unconfirmed} fail={failed}"
+        )
+        if json_sink is not None:
+            payload = {
+                "timestamp": utc_now_iso(),
+                "type": "summary",
+                "source_type": "trigger",
+                "attempted": attempted,
+                "accepted": accepted,
+                "probe_confirmed": probe_confirmed,
+                "callback_confirmed": callback_confirmed,
+                "unconfirmed": unconfirmed,
+                "failed": failed,
+            }
+            try:
+                json_sink.emit_many([json.dumps(payload, ensure_ascii=False)])
+            except (OSError, TypeError, ValueError) as exc:
+                console.error(f"failed to write trigger output: {exc}")
+                result_code = 1
+        if result_code == 0 and attempted > 0 and max(probe_confirmed, callback_confirmed) == 0:
+            console.error("trigger inconclusive: no callback attempt was confirmed")
+            result_code = 1
+
     logger_scope = logger.scoped_console_stream(sys.stderr) if output_format == "json" else nullcontext()
     with logger_scope:
         try:
@@ -1006,23 +1227,27 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             )
             running, temp_cert_dir = start_listeners_for_trigger(args, logger, console)
             _start_trigger_progress()
-            for batch_hosts, batch_exporters in run_batches:
-                _run_trigger_requests(
+            for batch_hosts, batch_exporters, scheme in run_batches:
+                summary = _run_trigger_requests(
                     args,
                     logger,
                     console,
                     batch_hosts,
                     callback_targets,
                     batch_exporters,
-                    show_trigger_info=show_trigger_info,
+                    # A listener-backed result cannot be finalised until the
+                    # observation window has ended.
+                    show_trigger_info=False,
                     log_trigger_attempts=False,
                     record_sink=json_sink,
                     progress_advance=_advance_trigger_progress,
                     progress_add_total=_add_trigger_progress_total,
+                    scheme=scheme,
+                    tls_context=tls_context,
                 )
+                if isinstance(summary, dict):
+                    trigger_summaries.append(summary)
             _close_trigger_progress()
-            if getattr(args, "check_credentials", False):
-                _run_trigger_credential_checks(args, logger, console)
             if listen_seconds is not None:
                 console.info(f"listeners are up; waiting for incoming events ({listen_seconds:.1f}s)")
                 deadline = time.monotonic() + float(listen_seconds)
@@ -1032,12 +1257,18 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                         break
                     time.sleep(min(1.0, remaining))
                 console.info("listen window elapsed; stopping listeners...")
+                _reconcile_listener_results()
+                if getattr(args, "check_credentials", False):
+                    _run_trigger_credential_checks(args, logger, console)
             else:
                 console.info("listeners are up; waiting for incoming events (Ctrl+C to stop)")
                 while True:
                     time.sleep(1)
         except KeyboardInterrupt:
             console.info("stopping listeners...")
+            _reconcile_listener_results()
+            if getattr(args, "check_credentials", False):
+                _run_trigger_credential_checks(args, logger, console)
         except _TriggerOutputError as exc:
             console.error(f"failed to write trigger output: {exc}")
             result_code = 1
@@ -1049,6 +1280,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             result_code = 2
         finally:
             _close_trigger_progress()
+            _reconcile_listener_results()
             logger.set_trigger_callback_mode(False)
             stop_started_listeners(running, temp_cert_dir)
             if json_sink is not None:

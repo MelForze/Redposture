@@ -1,14 +1,19 @@
 [
   {
+    "anonymous_auth_probe_results": {
+      "/": "ok"
+    },
     "auth_error": null,
     "auth_inference_source": "root_ok",
+    "auth_mechanism": "digest",
     "auth_probe_trace": [
       "/:ok"
     ],
     "auth_required": false,
-    "can_create_znode": true,
-    "can_delete_znode": true,
+    "can_create_znode": null,
+    "can_delete_znode": null,
     "connect_error": null,
+    "credential_auth_probe_results": {},
     "credential_verdict": null,
     "defcreds_enabled": false,
     "dump": true,
@@ -16,11 +21,18 @@
     "dump_limit": null,
     "enum_error": null,
     "error": null,
+    "fingerprint_confidence": "rejected",
+    "fingerprint_errors": {},
     "host": "127.0.0.1",
+    "implementation": "apache-zookeeper",
+    "implementation_confidence": "confirmed",
+    "is_keeper": false,
     "is_zookeeper": true,
+    "is_zookeeper_compatible": true,
     "max_znodes": 2000,
     "module": "zookeeper",
     "port": 2181,
+    "protocol": "zookeeper",
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
@@ -30,6 +42,26 @@
     "query_znode_dump": null,
     "query_znode_dump_error": null,
     "query_znode_value": null,
+    "quorum_status": "unknown",
+    "raft": {
+      "commit_lag": null,
+      "first_log_idx": null,
+      "first_log_term": null,
+      "followers": null,
+      "last_committed_idx": null,
+      "last_log_idx": null,
+      "last_log_term": null,
+      "last_snapshot_idx": null,
+      "leader_committed_log_idx": null,
+      "log_dir_size": null,
+      "peer_state": null,
+      "pending_syncs": null,
+      "snapshot_dir_size": null,
+      "synced_followers": null,
+      "target_committed_log_idx": null
+    },
+    "read_only": null,
+    "server_state": "standalone",
     "service": "zookeeper",
     "show_znodes": true,
     "stage2_error": null,
@@ -60,8 +92,12 @@
       }
     ],
     "status": "open_no_auth",
+    "transport": "plaintext",
+    "vendor": "apache",
+    "verification_capability": "available",
+    "version": "3.9.5-293c895a8d966a3ecb92872be4a1daf87d725da2, built on 2026-02-11 20:18 UTC",
     "znode_capability_error": null,
-    "znode_count": 22,
+    "znode_count": 25,
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
@@ -197,8 +233,27 @@
         "children": 0,
         "error": null,
         "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 2,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
       }
     ],
+    "znode_truncated_reason": null,
     "znode_values": [
       "/brokers:cluster=kafka-open",
       "/brokers/ids:source=seed",
@@ -221,7 +276,10 @@
       "/redposture/cache/redis_uri:redis://default:redis@redis:6379/0",
       "/redposture/db:engine=postgres,host=postgres,port=5432",
       "/redposture/db/password:postgres",
-      "/redposture/env:lab"
+      "/redposture/env:lab",
+      "/zookeeper:<empty>",
+      "/zookeeper/config:<empty>",
+      "/zookeeper/quota:<empty>"
     ],
     "znodes": [
       "/brokers",
@@ -245,20 +303,28 @@
       "/redposture/cache/redis_uri",
       "/redposture/db",
       "/redposture/db/password",
-      "/redposture/env"
+      "/redposture/env",
+      "/zookeeper",
+      "/zookeeper/config",
+      "/zookeeper/quota"
     ],
     "znodes_truncated": false
   },
   {
+    "anonymous_auth_probe_results": {
+      "/": "ok"
+    },
     "auth_error": null,
     "auth_inference_source": "root_ok",
+    "auth_mechanism": "digest",
     "auth_probe_trace": [
       "/:ok"
     ],
     "auth_required": false,
-    "can_create_znode": true,
-    "can_delete_znode": true,
+    "can_create_znode": null,
+    "can_delete_znode": null,
     "connect_error": null,
+    "credential_auth_probe_results": {},
     "credential_verdict": null,
     "defcreds_enabled": false,
     "dump": true,
@@ -266,11 +332,18 @@
     "dump_limit": null,
     "enum_error": null,
     "error": null,
+    "fingerprint_confidence": "rejected",
+    "fingerprint_errors": {},
     "host": "127.0.0.1",
+    "implementation": "apache-zookeeper",
+    "implementation_confidence": "confirmed",
+    "is_keeper": false,
     "is_zookeeper": true,
+    "is_zookeeper_compatible": true,
     "max_znodes": 2000,
     "module": "zookeeper",
     "port": 22181,
+    "protocol": "zookeeper",
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
@@ -280,6 +353,26 @@
     "query_znode_dump": null,
     "query_znode_dump_error": null,
     "query_znode_value": null,
+    "quorum_status": "unknown",
+    "raft": {
+      "commit_lag": null,
+      "first_log_idx": null,
+      "first_log_term": null,
+      "followers": null,
+      "last_committed_idx": null,
+      "last_log_idx": null,
+      "last_log_term": null,
+      "last_snapshot_idx": null,
+      "leader_committed_log_idx": null,
+      "log_dir_size": null,
+      "peer_state": null,
+      "pending_syncs": null,
+      "snapshot_dir_size": null,
+      "synced_followers": null,
+      "target_committed_log_idx": null
+    },
+    "read_only": null,
+    "server_state": "standalone",
     "service": "zookeeper",
     "show_znodes": true,
     "stage2_error": null,
@@ -310,8 +403,12 @@
       }
     ],
     "status": "open_no_auth",
+    "transport": "plaintext",
+    "vendor": "apache",
+    "verification_capability": "available",
+    "version": "3.9.5-293c895a8d966a3ecb92872be4a1daf87d725da2, built on 2026-02-11 20:18 UTC",
     "znode_capability_error": null,
-    "znode_count": 22,
+    "znode_count": 25,
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
@@ -447,8 +544,27 @@
         "children": 0,
         "error": null,
         "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 2,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
       }
     ],
+    "znode_truncated_reason": null,
     "znode_values": [
       "/brokers:cluster=kafka-open",
       "/brokers/ids:source=seed",
@@ -471,7 +587,10 @@
       "/redposture/cache/redis_uri:redis://default:redis@redis:6379/0",
       "/redposture/db:engine=postgres,host=postgres,port=5432",
       "/redposture/db/password:postgres",
-      "/redposture/env:lab"
+      "/redposture/env:lab",
+      "/zookeeper:<empty>",
+      "/zookeeper/config:<empty>",
+      "/zookeeper/quota:<empty>"
     ],
     "znodes": [
       "/brokers",
@@ -495,20 +614,28 @@
       "/redposture/cache/redis_uri",
       "/redposture/db",
       "/redposture/db/password",
-      "/redposture/env"
+      "/redposture/env",
+      "/zookeeper",
+      "/zookeeper/config",
+      "/zookeeper/quota"
     ],
     "znodes_truncated": false
   },
   {
+    "anonymous_auth_probe_results": {
+      "/": "ok"
+    },
     "auth_error": null,
     "auth_inference_source": "root_ok",
+    "auth_mechanism": "digest",
     "auth_probe_trace": [
       "/:ok"
     ],
     "auth_required": false,
-    "can_create_znode": true,
-    "can_delete_znode": true,
+    "can_create_znode": null,
+    "can_delete_znode": null,
     "connect_error": null,
+    "credential_auth_probe_results": {},
     "credential_verdict": null,
     "defcreds_enabled": false,
     "dump": true,
@@ -516,11 +643,18 @@
     "dump_limit": null,
     "enum_error": null,
     "error": null,
+    "fingerprint_confidence": "rejected",
+    "fingerprint_errors": {},
     "host": "127.0.0.1",
+    "implementation": "apache-zookeeper",
+    "implementation_confidence": "confirmed",
+    "is_keeper": false,
     "is_zookeeper": true,
+    "is_zookeeper_compatible": true,
     "max_znodes": 2000,
     "module": "zookeeper",
     "port": 22182,
+    "protocol": "zookeeper",
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
@@ -530,6 +664,26 @@
     "query_znode_dump": null,
     "query_znode_dump_error": null,
     "query_znode_value": null,
+    "quorum_status": "unknown",
+    "raft": {
+      "commit_lag": null,
+      "first_log_idx": null,
+      "first_log_term": null,
+      "followers": null,
+      "last_committed_idx": null,
+      "last_log_idx": null,
+      "last_log_term": null,
+      "last_snapshot_idx": null,
+      "leader_committed_log_idx": null,
+      "log_dir_size": null,
+      "peer_state": null,
+      "pending_syncs": null,
+      "snapshot_dir_size": null,
+      "synced_followers": null,
+      "target_committed_log_idx": null
+    },
+    "read_only": null,
+    "server_state": "standalone",
     "service": "zookeeper",
     "show_znodes": true,
     "stage2_error": null,
@@ -560,8 +714,12 @@
       }
     ],
     "status": "open_no_auth",
+    "transport": "plaintext",
+    "vendor": "apache",
+    "verification_capability": "available",
+    "version": "3.9.5-293c895a8d966a3ecb92872be4a1daf87d725da2, built on 2026-02-11 20:18 UTC",
     "znode_capability_error": null,
-    "znode_count": 22,
+    "znode_count": 25,
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
@@ -697,8 +855,27 @@
         "children": 0,
         "error": null,
         "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 2,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
       }
     ],
+    "znode_truncated_reason": null,
     "znode_values": [
       "/brokers:cluster=kafka-open",
       "/brokers/ids:source=seed",
@@ -721,7 +898,10 @@
       "/redposture/cache/redis_uri:redis://default:redis@redis:6379/0",
       "/redposture/db:engine=postgres,host=postgres,port=5432",
       "/redposture/db/password:postgres",
-      "/redposture/env:lab"
+      "/redposture/env:lab",
+      "/zookeeper:<empty>",
+      "/zookeeper/config:<empty>",
+      "/zookeeper/quota:<empty>"
     ],
     "znodes": [
       "/brokers",
@@ -745,20 +925,28 @@
       "/redposture/cache/redis_uri",
       "/redposture/db",
       "/redposture/db/password",
-      "/redposture/env"
+      "/redposture/env",
+      "/zookeeper",
+      "/zookeeper/config",
+      "/zookeeper/quota"
     ],
     "znodes_truncated": false
   },
   {
+    "anonymous_auth_probe_results": {
+      "/": "ok"
+    },
     "auth_error": null,
     "auth_inference_source": "root_ok",
+    "auth_mechanism": "digest",
     "auth_probe_trace": [
       "/:ok"
     ],
     "auth_required": false,
-    "can_create_znode": true,
-    "can_delete_znode": true,
+    "can_create_znode": null,
+    "can_delete_znode": null,
     "connect_error": null,
+    "credential_auth_probe_results": {},
     "credential_verdict": null,
     "defcreds_enabled": false,
     "dump": true,
@@ -766,11 +954,18 @@
     "dump_limit": null,
     "enum_error": null,
     "error": null,
+    "fingerprint_confidence": "rejected",
+    "fingerprint_errors": {},
     "host": "127.0.0.1",
+    "implementation": "apache-zookeeper",
+    "implementation_confidence": "confirmed",
+    "is_keeper": false,
     "is_zookeeper": true,
+    "is_zookeeper_compatible": true,
     "max_znodes": 2000,
     "module": "zookeeper",
     "port": 22183,
+    "protocol": "zookeeper",
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
@@ -780,6 +975,26 @@
     "query_znode_dump": null,
     "query_znode_dump_error": null,
     "query_znode_value": null,
+    "quorum_status": "unknown",
+    "raft": {
+      "commit_lag": null,
+      "first_log_idx": null,
+      "first_log_term": null,
+      "followers": null,
+      "last_committed_idx": null,
+      "last_log_idx": null,
+      "last_log_term": null,
+      "last_snapshot_idx": null,
+      "leader_committed_log_idx": null,
+      "log_dir_size": null,
+      "peer_state": null,
+      "pending_syncs": null,
+      "snapshot_dir_size": null,
+      "synced_followers": null,
+      "target_committed_log_idx": null
+    },
+    "read_only": null,
+    "server_state": "standalone",
     "service": "zookeeper",
     "show_znodes": true,
     "stage2_error": null,
@@ -810,8 +1025,12 @@
       }
     ],
     "status": "open_no_auth",
+    "transport": "plaintext",
+    "vendor": "apache",
+    "verification_capability": "available",
+    "version": "3.9.5-293c895a8d966a3ecb92872be4a1daf87d725da2, built on 2026-02-11 20:18 UTC",
     "znode_capability_error": null,
-    "znode_count": 22,
+    "znode_count": 25,
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
@@ -947,8 +1166,27 @@
         "children": 0,
         "error": null,
         "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 2,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
       }
     ],
+    "znode_truncated_reason": null,
     "znode_values": [
       "/brokers:cluster=kafka-open",
       "/brokers/ids:source=seed",
@@ -971,7 +1209,10 @@
       "/redposture/cache/redis_uri:redis://default:redis@redis:6379/0",
       "/redposture/db:engine=postgres,host=postgres,port=5432",
       "/redposture/db/password:postgres",
-      "/redposture/env:lab"
+      "/redposture/env:lab",
+      "/zookeeper:<empty>",
+      "/zookeeper/config:<empty>",
+      "/zookeeper/quota:<empty>"
     ],
     "znodes": [
       "/brokers",
@@ -995,20 +1236,28 @@
       "/redposture/cache/redis_uri",
       "/redposture/db",
       "/redposture/db/password",
-      "/redposture/env"
+      "/redposture/env",
+      "/zookeeper",
+      "/zookeeper/config",
+      "/zookeeper/quota"
     ],
     "znodes_truncated": false
   },
   {
+    "anonymous_auth_probe_results": {
+      "/": "ok"
+    },
     "auth_error": null,
     "auth_inference_source": "root_ok",
+    "auth_mechanism": "digest",
     "auth_probe_trace": [
       "/:ok"
     ],
     "auth_required": false,
-    "can_create_znode": true,
-    "can_delete_znode": true,
+    "can_create_znode": null,
+    "can_delete_znode": null,
     "connect_error": null,
+    "credential_auth_probe_results": {},
     "credential_verdict": null,
     "defcreds_enabled": false,
     "dump": true,
@@ -1016,11 +1265,18 @@
     "dump_limit": null,
     "enum_error": null,
     "error": null,
+    "fingerprint_confidence": "rejected",
+    "fingerprint_errors": {},
     "host": "127.0.0.1",
+    "implementation": "apache-zookeeper",
+    "implementation_confidence": "confirmed",
+    "is_keeper": false,
     "is_zookeeper": true,
+    "is_zookeeper_compatible": true,
     "max_znodes": 2000,
     "module": "zookeeper",
     "port": 22184,
+    "protocol": "zookeeper",
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
@@ -1030,6 +1286,26 @@
     "query_znode_dump": null,
     "query_znode_dump_error": null,
     "query_znode_value": null,
+    "quorum_status": "unknown",
+    "raft": {
+      "commit_lag": null,
+      "first_log_idx": null,
+      "first_log_term": null,
+      "followers": null,
+      "last_committed_idx": null,
+      "last_log_idx": null,
+      "last_log_term": null,
+      "last_snapshot_idx": null,
+      "leader_committed_log_idx": null,
+      "log_dir_size": null,
+      "peer_state": null,
+      "pending_syncs": null,
+      "snapshot_dir_size": null,
+      "synced_followers": null,
+      "target_committed_log_idx": null
+    },
+    "read_only": null,
+    "server_state": "standalone",
     "service": "zookeeper",
     "show_znodes": true,
     "stage2_error": null,
@@ -1060,8 +1336,12 @@
       }
     ],
     "status": "open_no_auth",
+    "transport": "plaintext",
+    "vendor": "apache",
+    "verification_capability": "available",
+    "version": "3.9.5-293c895a8d966a3ecb92872be4a1daf87d725da2, built on 2026-02-11 20:18 UTC",
     "znode_capability_error": null,
-    "znode_count": 22,
+    "znode_count": 25,
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
@@ -1197,8 +1477,27 @@
         "children": 0,
         "error": null,
         "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 2,
+        "error": null,
+        "state": "readable"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
+      },
+      {
+        "bytes": 0,
+        "children": 0,
+        "error": null,
+        "state": "empty"
       }
     ],
+    "znode_truncated_reason": null,
     "znode_values": [
       "/brokers:cluster=kafka-open",
       "/brokers/ids:source=seed",
@@ -1221,7 +1520,10 @@
       "/redposture/cache/redis_uri:redis://default:redis@redis:6379/0",
       "/redposture/db:engine=postgres,host=postgres,port=5432",
       "/redposture/db/password:postgres",
-      "/redposture/env:lab"
+      "/redposture/env:lab",
+      "/zookeeper:<empty>",
+      "/zookeeper/config:<empty>",
+      "/zookeeper/quota:<empty>"
     ],
     "znodes": [
       "/brokers",
@@ -1245,7 +1547,10 @@
       "/redposture/cache/redis_uri",
       "/redposture/db",
       "/redposture/db/password",
-      "/redposture/env"
+      "/redposture/env",
+      "/zookeeper",
+      "/zookeeper/config",
+      "/zookeeper/quota"
     ],
     "znodes_truncated": false
   }

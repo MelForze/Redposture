@@ -13,12 +13,14 @@ from ...stage_runtime import (
     ModuleAuditSpec,
     build_basic_audit_plan,
     build_basic_credential_runs,
+    command_result_exit_code,
     merge_audit_credential_runs,
+    sort_default_audit_credential_runs,
 )
 from . import actions, policy, render
 
 _DEFAULT_PORT = 1521
-_DEFAULT_PORTS: tuple[int, ...] | None = (1521, 11521)
+_DEFAULT_PORTS: tuple[int, ...] | None = (1521, 2484, 11521)
 
 
 def build_oracle_plan(args: Any) -> AuditCommandPlan:
@@ -68,7 +70,7 @@ def run_oracle_stage(args: Any, logger: Any) -> int:
         console.error(str(exc))
         return 2
     default_runs = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source="default")
             for username, password in actions._ORACLE_DEFAULT_CREDS
         )
@@ -94,9 +96,9 @@ def run_oracle_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process oracle output: {exc}")
         return 2
-    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
+    if cfg.debug and command_result_exit_code(result) != 0 and hasattr(console, "warn"):
         console.warn("all oracle targets are unreachable")
-    return 0
+    return command_result_exit_code(result)
 
 
 __all__ = ["build_oracle_plan", "build_oracle_spec", "run_oracle_stage"]

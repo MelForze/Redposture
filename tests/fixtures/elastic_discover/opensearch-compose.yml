@@ -1,0 +1,112 @@
+# Real OpenSearch 2.19.1 lab for the Elastic/OpenSearch audit module.
+# Run from the repository root:
+#   docker compose -f lab/services/opensearch/docker-compose.yml up -d --wait
+
+services:
+  opensearch-open:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: redposture-lab-opensearch-open
+    environment:
+      discovery.type: single-node
+      cluster.name: redposture-opensearch-open
+      node.name: opensearch-open-1
+      plugins.security.disabled: "true"
+      bootstrap.memory_lock: "true"
+      # The image's pre-start demo installer requires a strong password even
+      # when the Security plugin is disabled for this anonymous node.
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: "R3dPosture-Lab!2026"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "127.0.0.1:29200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9200/_cluster/health >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 90
+      start_period: 35s
+    restart: unless-stopped
+
+  opensearch-open-seed:
+    image: curlimages/curl:8.12.1
+    container_name: redposture-lab-opensearch-open-seed
+    depends_on:
+      opensearch-open:
+        condition: service_healthy
+    environment:
+      ELASTIC_URL: "http://opensearch-open:9200"
+      SEARCH_VENDOR: "opensearch"
+    command: ["sh", "/seed/seed_elastic.sh"]
+    volumes:
+      - ../elastic/seed_elastic.sh:/seed/seed_elastic.sh:ro
+      - ../elastic/discover_corpus_mapping.json:/seed/discover_corpus_mapping.json:ro
+      - ../elastic/discover_corpus.ndjson:/seed/discover_corpus.ndjson:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/redposture-search-seed-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 180
+      start_period: 1s
+    restart: unless-stopped
+
+  opensearch-auth:
+    image: opensearchproject/opensearch:2.19.1
+    container_name: redposture-lab-opensearch-auth
+    environment:
+      discovery.type: single-node
+      cluster.name: redposture-opensearch-auth
+      node.name: opensearch-auth-1
+      bootstrap.memory_lock: "true"
+      OPENSEARCH_INITIAL_ADMIN_PASSWORD: "R3dPosture-Lab!2026"
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "127.0.0.1:29201:9200"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fkSs -u admin:$${OPENSEARCH_INITIAL_ADMIN_PASSWORD} https://127.0.0.1:9200/_cluster/health >/dev/null",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 90
+      start_period: 35s
+    restart: unless-stopped
+
+  opensearch-auth-seed:
+    image: curlimages/curl:8.12.1
+    container_name: redposture-lab-opensearch-auth-seed
+    depends_on:
+      opensearch-auth:
+        condition: service_healthy
+    environment:
+      ELASTIC_URL: "https://opensearch-auth:9200"
+      ELASTIC_USER: "admin"
+      ELASTIC_PASSWORD: "R3dPosture-Lab!2026"
+      ELASTIC_INSECURE: "1"
+      SEARCH_VENDOR: "opensearch"
+    command: ["sh", "/seed/seed_elastic.sh"]
+    volumes:
+      - ../elastic/seed_elastic.sh:/seed/seed_elastic.sh:ro
+      - ../elastic/discover_corpus_mapping.json:/seed/discover_corpus_mapping.json:ro
+      - ../elastic/discover_corpus.ndjson:/seed/discover_corpus.ndjson:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/redposture-search-seed-ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 180
+      start_period: 1s
+    restart: unless-stopped

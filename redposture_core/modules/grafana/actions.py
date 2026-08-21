@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
+from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, resolve_http_scheme
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
@@ -95,7 +95,7 @@ def _http_request(
     data: bytes | None = None,
 ) -> tuple[int, str, dict[str, str]]:
     scheme = resolve_http_scheme(host, port, timeout, probe_path="/api/health")
-    url = f"{scheme}://{host}:{port}{path}"
+    url = build_http_target_url(host, port, path, default_scheme=scheme)
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
@@ -163,6 +163,22 @@ def _looks_like_grafana_health(status: int, body: str) -> tuple[bool, str | None
     return False, None
 
 
+def _is_grafana_health_api_response(status: int, body: str) -> bool:
+    if status != 200:
+        return False
+    payload = _load_json_dict(body)
+    return isinstance(payload, dict) and any(key in payload for key in ("version", "database", "commit"))
+
+
+def _looks_like_grafana_user(body: str) -> bool:
+    payload = _load_json_dict(body)
+    if payload is None:
+        return False
+    user_id = payload.get("id")
+    login = payload.get("login")
+    return isinstance(user_id, int) and not isinstance(user_id, bool) and isinstance(login, str) and bool(login.strip())
+
+
 def _auth_header(username: str, password: str) -> str:
     raw = f"{username}:{password}".encode()
     token = base64.b64encode(raw).decode("ascii")
@@ -170,37 +186,69 @@ def _auth_header(username: str, password: str) -> str:
 
 
 def _verify_credentials(host: str, port: int, timeout: float, username: str, password: str) -> tuple[bool, str | None]:
-    status, _body, _headers = _http_request(
+    status, body, _headers = _http_request(
         host,
         port,
         "/api/user",
         timeout,
         headers={"Authorization": _auth_header(username, password)},
     )
-    if status == 200:
+    if status == 200 and _looks_like_grafana_user(body):
         return True, None
+    if status == 200:
+        return False, "/api/user returned an invalid identity payload"
     if status in {401, 403}:
         return False, "invalid credentials"
     return False, f"/api/user returned status {status}"
 
 
 def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tuple[bool, str | None]:
-    """E2E-batch fix: previously the grafana module had no way to accept an
-    API key / service-account token; users could only try Basic auth. This
-    helper mirrors `_verify_credentials` for `Authorization: Bearer <token>`
-    so `--apitoken glsa-...` reaches the same success/failure classification
-    as user/pass, and downstream fields (provided_credentials_ok, effective_*)
-    are populated uniformly."""
-    status, _body, _headers = _http_request(
+    """Validate user tokens and capability-scoped service-account tokens.
+
+    Grafana service-account tokens are not guaranteed to expose ``/api/user``.
+    A 403 is therefore an accepted-but-restricted credential, while a 401 is
+    cross-checked against a normal service-account capability endpoint before
+    being rejected.
+    """
+    headers = {"Authorization": f"Bearer {apitoken}"}
+    status, body, _headers = _http_request(
         host,
         port,
         "/api/user",
         timeout,
-        headers={"Authorization": f"Bearer {apitoken}"},
+        headers=headers,
     )
-    if status == 200:
+    if status == 200 and _looks_like_grafana_user(body):
         return True, None
-    if status in {401, 403}:
+    if status == 200:
+        capability_status, capability_body, _capability_headers = _http_request(
+            host,
+            port,
+            "/api/datasources",
+            timeout,
+            headers=headers,
+        )
+        if capability_status == 200 and _load_json_list(capability_body) is not None:
+            return True, None
+        if capability_status == 403:
+            return True, "token accepted; datasource capability is not permitted"
+        return False, "/api/user returned an invalid identity payload"
+    if status == 403:
+        return True, "token accepted; identity endpoint is not permitted"
+    if status == 401:
+        capability_status, capability_body, _capability_headers = _http_request(
+            host,
+            port,
+            "/api/datasources",
+            timeout,
+            headers=headers,
+        )
+        if capability_status == 200 and _load_json_list(capability_body) is not None:
+            return True, None
+        if capability_status == 200:
+            return False, "/api/datasources returned an invalid capability payload"
+        if capability_status == 403:
+            return True, "token accepted; datasource capability is not permitted"
         return False, "invalid api token"
     return False, f"/api/user returned status {status}"
 
@@ -582,15 +630,15 @@ def _build_credential_candidates(
     if defcreds:
         defaults = (
             ("admin", "admin"),
-            ("admin", "password"),
-            ("admin", "grafana"),
             ("admin", "changeme"),
+            ("admin", "grafana"),
+            ("admin", "password"),
             ("grafana", "grafana"),
             ("grafana", "password"),
-            ("root", "root"),
-            ("user", "user"),
             ("root", "password"),
+            ("root", "root"),
             ("user", "password"),
+            ("user", "user"),
         )
         for user, secret in defaults:
             pair = (user, secret)
@@ -619,11 +667,12 @@ def _audit_grafana_host(
         started = time.monotonic()
         try:
             health_status, health_body, health_headers = _http_request(host, port, "/api/health", timeout)
+            health_api_ok = _is_grafana_health_api_response(health_status, health_body)
             is_grafana, version = _looks_like_grafana_health(health_status, health_body)
             login_status = 0
             login_body = ""
             login_headers: dict[str, str] = {}
-            if not is_grafana or health_status in {401, 403}:
+            if not health_api_ok or health_status in {401, 403}:
                 login_status, login_body, login_headers = _http_request(host, port, "/login", timeout)
                 if _looks_like_grafana_login(login_status, login_body, login_headers):
                     is_grafana = True
@@ -657,7 +706,7 @@ def _audit_grafana_host(
                 }
 
             auth_required: bool | None
-            if health_status == 200:
+            if health_api_ok:
                 auth_required = False
             elif health_status in {401, 403}:
                 auth_required = True
@@ -1268,8 +1317,9 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             health_status, health_body, _health_headers = _http_request(
                 str(ctx.host), int(ctx.port), "/api/health", float(getattr(ctx.args, "timeout", 5.0))
             )
+            health_api_ok = _is_grafana_health_api_response(health_status, health_body)
             is_grafana, version = _looks_like_grafana_health(health_status, health_body)
-            if not is_grafana or health_status in {401, 403}:
+            if not health_api_ok or health_status in {401, 403}:
                 login_status, login_body, login_headers = _http_request(
                     str(ctx.host), int(ctx.port), "/login", float(getattr(ctx.args, "timeout", 5.0))
                 )
@@ -1298,8 +1348,12 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                 "host": str(ctx.host),
                 "port": int(ctx.port),
                 "is_grafana": True,
-                "status": "open_no_auth" if health_status == 200 else "auth_required",
-                "auth_required": False if health_status == 200 else True if health_status in {401, 403} else None,
+                "status": "open_no_auth"
+                if health_api_ok
+                else "auth_required"
+                if health_status in {401, 403}
+                else "unknown_auth",
+                "auth_required": False if health_api_ok else True if health_status in {401, 403} else None,
                 "server_version": version,
                 "provided_credentials": False,
                 "provided_username": None,

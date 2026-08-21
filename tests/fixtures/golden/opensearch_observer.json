@@ -1,0 +1,1277 @@
+[
+  {
+    "access_level": "unknown",
+    "anonymous_root_status": 401,
+    "api_key_probe_error": null,
+    "api_key_probe_status": "not_run",
+    "attempted_credentials": [
+      {
+        "auth_error_detail": null,
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 200,
+        "auth_probe_status": "verified",
+        "error": null,
+        "network_attempted": true,
+        "password": "V13w-Only!2026",
+        "source": "provided",
+        "status": "valid_credentials",
+        "username": "observer",
+        "verification_capability": "identity_endpoint_supported"
+      }
+    ],
+    "auth_error_detail": null,
+    "auth_probe_endpoint": "/_plugins/_security/authinfo",
+    "auth_probe_http_status": 200,
+    "auth_probe_status": "verified",
+    "auth_required": true,
+    "auth_valid": true,
+    "can_manage": null,
+    "can_manage_security": null,
+    "can_read": null,
+    "can_write": null,
+    "cat_endpoints": [
+      "/_cat/allocation",
+      "/_cat/cluster_manager",
+      "/_cat/fielddata",
+      "/_cat/fielddata/",
+      "/_cat/health",
+      "/_cat/indices",
+      "/_cat/indices/",
+      "/_cat/nodeattrs",
+      "/_cat/nodes",
+      "/_cat/pending_tasks",
+      "/_cat/plugins",
+      "/_cat/recovery",
+      "/_cat/recovery/",
+      "/_cat/segment_replication",
+      "/_cat/segment_replication/",
+      "/_cat/segments",
+      "/_cat/segments/",
+      "/_cat/shards",
+      "/_cat/shards/",
+      "/_cat/tasks",
+      "/_cat/templates",
+      "/_cat/thread_pool",
+      "/_cat/thread_pool/",
+      "/_remote/info"
+    ],
+    "cat_plugins": null,
+    "cluster_error": null,
+    "cluster_health": {
+      "active_primary_shards": 9,
+      "active_shards": 9,
+      "active_shards_percent_as_number": 90.0,
+      "cluster_name": "redposture-opensearch-auth",
+      "delayed_unassigned_shards": 0,
+      "discovered_cluster_manager": true,
+      "discovered_master": true,
+      "initializing_shards": 0,
+      "number_of_data_nodes": 1,
+      "number_of_in_flight_fetch": 0,
+      "number_of_nodes": 1,
+      "number_of_pending_tasks": 0,
+      "relocating_shards": 0,
+      "status": "yellow",
+      "task_max_waiting_in_queue_millis": 0,
+      "timed_out": false,
+      "unassigned_shards": 1
+    },
+    "cluster_nodes": [
+      {
+        "roles": [
+          "cluster_manager",
+          "data",
+          "ingest",
+          "remote_cluster_client"
+        ],
+        "version": "2.19.1"
+      }
+    ],
+    "credential_verification": {
+      "capability": "identity_endpoint_supported",
+      "status": "verified",
+      "supported_endpoint": "/_plugins/_security/authinfo",
+      "unsupported_endpoints": []
+    },
+    "credentials_source": "provided",
+    "defcreds_enabled": false,
+    "detect_confidence": "high",
+    "detect_probe_trace": [
+      {
+        "error": null,
+        "scheme": "https",
+        "signal_kind": "hard_positive",
+        "signals": [
+          "opensearch_security_realm"
+        ],
+        "status": 401,
+        "transport_error": null,
+        "vendor": "opensearch"
+      }
+    ],
+    "detect_signals": [
+      "opensearch_security_realm"
+    ],
+    "discover": true,
+    "discover_coverage": {
+      "complete": false,
+      "indices_closed": 0,
+      "indices_denied": 5,
+      "indices_enumerated": 9,
+      "indices_failed": 0,
+      "indices_scanned": 4,
+      "limitations": [
+        "secure keystore settings are not readable through the API",
+        "closed indices, snapshots, Watcher, connectors, Alerting, Notifications and stored scripts are not scanned",
+        "FLS/DLS and current authorization can hide documents or fields"
+      ],
+      "limits": {
+        "max_array_items": 256,
+        "max_depth": 32,
+        "max_documents": 50000,
+        "max_embedded_json_bytes": 65536,
+        "max_findings": 10000,
+        "max_scalar_bytes": 262144,
+        "max_seconds": 300.0,
+        "max_source_bytes": 134217728
+      },
+      "locations_dropped": 0,
+      "missing_source_documents": 0,
+      "scope": {
+        "configuration": [
+          "cluster_settings",
+          "node_settings",
+          "index_settings",
+          "mappings",
+          "index_templates",
+          "component_templates",
+          "legacy_templates",
+          "ingest_pipelines"
+        ],
+        "documents": "open and hidden indices plus resolved data-stream backing indices"
+      },
+      "shard_failures": [],
+      "source_disabled_indices": [],
+      "source_filtered_indices": [],
+      "status": "partial",
+      "surfaces": {
+        "cluster_settings": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "component_templates": {
+          "error": "no permissions for [cluster:admin/component_template/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+          "error_detail": {
+            "reason": "no permissions for [cluster:admin/component_template/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+            "root_cause": [
+              {
+                "reason": "no permissions for [cluster:admin/component_template/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+                "type": "security_exception"
+              }
+            ],
+            "status": 403,
+            "type": "security_exception"
+          },
+          "objects_attempted": 1,
+          "objects_scanned": 0,
+          "status": "denied"
+        },
+        "index_inventory": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "index_settings": {
+          "objects_attempted": 9,
+          "objects_scanned": 9,
+          "status": "complete"
+        },
+        "index_templates": {
+          "error": "no permissions for [indices:admin/index_template/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+          "error_detail": {
+            "reason": "no permissions for [indices:admin/index_template/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+            "root_cause": [
+              {
+                "reason": "no permissions for [indices:admin/index_template/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+                "type": "security_exception"
+              }
+            ],
+            "status": 403,
+            "type": "security_exception"
+          },
+          "objects_attempted": 1,
+          "objects_scanned": 0,
+          "status": "denied"
+        },
+        "ingest_pipelines": {
+          "error": "no permissions for [cluster:admin/ingest/pipeline/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+          "error_detail": {
+            "reason": "no permissions for [cluster:admin/ingest/pipeline/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+            "root_cause": [
+              {
+                "reason": "no permissions for [cluster:admin/ingest/pipeline/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+                "type": "security_exception"
+              }
+            ],
+            "status": 403,
+            "type": "security_exception"
+          },
+          "objects_attempted": 1,
+          "objects_scanned": 0,
+          "status": "denied"
+        },
+        "legacy_templates": {
+          "error": "no permissions for [indices:admin/template/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+          "error_detail": {
+            "reason": "no permissions for [indices:admin/template/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+            "root_cause": [
+              {
+                "reason": "no permissions for [indices:admin/template/get] and User [name=observer, backend_roles=[], requestedTenant=null]",
+                "type": "security_exception"
+              }
+            ],
+            "status": 403,
+            "type": "security_exception"
+          },
+          "objects_attempted": 1,
+          "objects_scanned": 0,
+          "status": "denied"
+        },
+        "mapping_configuration": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "mappings": {
+          "objects_attempted": 9,
+          "objects_scanned": 9,
+          "status": "complete"
+        },
+        "node_settings": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        }
+      },
+      "timed_out": false,
+      "truncated": false,
+      "truncated_reasons": []
+    },
+    "discover_error": null,
+    "discover_error_detail": null,
+    "discover_findings": [
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "private_key_pem"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "private-and-encoded",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/private-and-encoded",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 100,
+        "secret_type": "private_key",
+        "value": "-----BEGIN PRIVATE KEY-----\nQ29ycHVzUHJpdmF0ZUtleTIwMjY=\n-----END PRIVATE KEY-----"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "private_key_pem"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "service-account",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/service-account",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 100,
+        "secret_type": "private_key",
+        "value": "-----BEGIN PRIVATE KEY-----\nQ29ycHVzU2VydmljZUFjY291bnRLZXk=\n-----END PRIVATE KEY-----"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "aws_credential_pair",
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 99,
+        "secret_type": "aws_secret_access_key",
+        "value": "CorpusAwsSecretKey2026AbCdEfGhIjKlMnOpQr"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "azure_storage_connection_string",
+          "credential_pair"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "azure-uri-kv",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/azure-uri-kv",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 98,
+        "secret_type": "azure_storage_key",
+        "value": "CorpusAzureAccountKey2026+/="
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "github_token_format"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "structured-formats",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/structured-formats",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 98,
+        "secret_type": "github_token",
+        "value": "ghp_CorpusGithubToken2026ABCDEFGHIJ"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "gitlab_token_format"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "structured-formats",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/structured-formats",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 98,
+        "secret_type": "gitlab_token",
+        "value": "glpat-CorpusGitlabToken2026ABCDE"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "google_api_key_format"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "structured-formats",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/structured-formats",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 98,
+        "secret_type": "google_api_key",
+        "value": "AIzaCorpusGoogleApiKey2026ABCDEFGHIJKLM"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "npm_token_format"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "structured-formats",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/structured-formats",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 98,
+        "secret_type": "npm_token",
+        "value": "npm_CorpusNpmToken2026ABCDEFGHIJ"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "slack_token_format"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "structured-formats",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/structured-formats",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 98,
+        "secret_type": "slack_token",
+        "value": "xoxb-CorpusSlackToken-2026-ABCDEFGHIJ"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "stripe_key_format"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "structured-formats",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/structured-formats",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 98,
+        "secret_type": "stripe_key",
+        "value": "sk_test_CorpusStripeKey2026ABCDE"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "vault_token_format"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "structured-formats",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/structured-formats",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 98,
+        "secret_type": "vault_token",
+        "value": "hvs.CorpusVaultToken2026ABCDE"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "azure_sas"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "azure-uri-kv",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/azure-uri-kv",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 96,
+        "secret_type": "azure_sas_signature",
+        "value": "CorpusAzureSasSignature+2026="
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "jwe_structure"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "jwt-jwe-auth",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 95,
+        "secret_type": "jwe",
+        "value": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..Y29ycHVzaXY.Y29ycHVzY2lwaGVydGV4dA.Y29ycHVzdGFn"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "jwt_structure"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "jwt-jwe-auth",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 95,
+        "secret_type": "jwt",
+        "value": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjb3JwdXMtMjAyNiJ9.CorpusSignature2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "credential_pair",
+          "credential_uri"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "azure-uri-kv",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/azure-uri-kv",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 92,
+        "secret_type": "password",
+        "value": "CorpusDsnPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "basic_auth",
+          "credential_pair"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "jwt-jwe-auth",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 92,
+        "secret_type": "password",
+        "value": "CorpusBasicPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "credential_pair",
+          "credential_uri"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "secret-2",
+            "index": "redposture-secrets-2026.05",
+            "object": "redposture-secrets-2026.05/secret-2",
+            "source_kind": "document"
+          },
+          {
+            "id": "secret-2",
+            "index": "redposture-secrets-2026.05",
+            "object": "redposture-secrets-2026.05/secret-2",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 92,
+        "secret_type": "password",
+        "value": "PayDb!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "base64_credential",
+          "credential_pair"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 92,
+        "secret_type": "password",
+        "value": "CorpusDockerPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "azure_storage_key",
+        "value": "CorpusAzureStorageKey!2026-NotBase64"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "bearer_auth"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "jwt-jwe-auth",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/jwt-jwe-auth",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "bearer_token",
+        "value": "CorpusBearerToken.2026-AbCdEfGh"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          },
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 90,
+        "secret_type": "password",
+        "value": "CorpusUnindexedPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/_settings",
+            "source_kind": "index_settings"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "password",
+        "value": "CorpusIndexSettingPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "/_cluster/settings",
+            "source_kind": "cluster_settings"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "password",
+        "value": "CorpusClusterSettingPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          },
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          },
+          {
+            "id": "duplicate",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/duplicate",
+            "source_kind": "document"
+          },
+          {
+            "id": "duplicate",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/duplicate",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 4,
+        "score": 90,
+        "secret_type": "password",
+        "value": "CorpusPassword!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "_mapping",
+            "source_kind": "mapping_configuration"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusMappingMetaSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "_mapping",
+            "source_kind": "mapping_configuration"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusDerivedParamSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "_mapping",
+            "source_kind": "mapping_configuration"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusFieldMetaSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "service-account",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/service-account",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusServiceAccountSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          },
+          {
+            "id": "sensitive-fields",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/sensitive-fields",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusClientSecret!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "object": "_mapping",
+            "source_kind": "mapping_configuration"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusDynamicTemplateToken!2026"
+      },
+      {
+        "confidence": "very_high",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          },
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 90,
+        "secret_type": "secret",
+        "value": "CorpusEmbeddedClientSecret!2026"
+      },
+      {
+        "confidence": "high",
+        "detectors": [
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "log-2",
+            "index": "redposture-logs-2026.05",
+            "object": "redposture-logs-2026.05/log-2",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 85,
+        "secret_type": "password",
+        "value": "metricspass"
+      },
+      {
+        "confidence": "high",
+        "detectors": [
+          "credential_pair",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "azure-uri-kv",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/azure-uri-kv",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 85,
+        "secret_type": "secret",
+        "value": "CorpusKeyValueSecret!2026"
+      },
+      {
+        "confidence": "high",
+        "detectors": [
+          "base64_credential"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "private-and-encoded",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/private-and-encoded",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 78,
+        "secret_type": "encoded_credentials",
+        "value": "{CorpusEncodedCredential2026}"
+      },
+      {
+        "confidence": "medium",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "duplicate",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/duplicate",
+            "source_kind": "document"
+          },
+          {
+            "id": "duplicate",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/duplicate",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 2,
+        "score": 73,
+        "secret_type": "secret",
+        "value": "CorpusDynamicFieldSecret!2026"
+      },
+      {
+        "confidence": "medium",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "secret-1",
+            "index": "redposture-secrets-2026.05",
+            "object": "redposture-secrets-2026.05/secret-1",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 73,
+        "secret_type": "secret",
+        "value": "elastic-prod-api-key-2026"
+      },
+      {
+        "confidence": "medium",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "semantic-pair",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/semantic-pair",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 73,
+        "secret_type": "secret",
+        "value": "CorpusSemanticApiKey!2026"
+      },
+      {
+        "confidence": "medium",
+        "detectors": [
+          "plausible_value",
+          "sensitive_field"
+        ],
+        "fingerprint": "sha256:<DOCKER_ID>",
+        "locations": [
+          {
+            "id": "nested-credentials",
+            "index": "redposture-discover-corpus-v2",
+            "object": "redposture-discover-corpus-v2/nested-credentials",
+            "source_kind": "document"
+          }
+        ],
+        "occurrence_count": 1,
+        "score": 73,
+        "secret_type": "secret",
+        "value": "CorpusNestedApiKey!2026"
+      }
+    ],
+    "discover_schema_version": 2,
+    "effective_username": "observer",
+    "endpoint_diagnostics": [
+      {
+        "endpoint": "/_cat?help",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases",
+        "error": null,
+        "status": 403
+      },
+      {
+        "endpoint": "/_cat/aliases/",
+        "error": null,
+        "status": 403
+      },
+      {
+        "endpoint": "/_cat/allocation",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/cluster_manager",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/count",
+        "error": null,
+        "status": 403
+      },
+      {
+        "endpoint": "/_cat/count/",
+        "error": null,
+        "status": 403
+      },
+      {
+        "endpoint": "/_cat/fielddata",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/health",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodeattrs",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodes",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/pending_tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/pit_segments",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/pit_segments/",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/plugins",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/repositories",
+        "error": null,
+        "status": 403
+      },
+      {
+        "endpoint": "/_cat/segment_replication",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segment_replication/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/snapshots/",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/templates",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_ingest/pipeline",
+        "error": null,
+        "status": 403
+      },
+      {
+        "endpoint": "/_remote/info",
+        "error": null,
+        "status": 200
+      }
+    ],
+    "endpoints_error": null,
+    "error": null,
+    "host": "127.0.0.1",
+    "insecure_effective": true,
+    "is_elastic": true,
+    "misconfig_error": null,
+    "misconfig_findings": [
+      {
+        "key": "network.host",
+        "reason": "service is bound to all interfaces",
+        "value": "0.0.0.0"
+      }
+    ],
+    "module": "elastic",
+    "network_attempted": true,
+    "plugins_error": null,
+    "port": 29201,
+    "provided_credentials": true,
+    "provided_token": false,
+    "provided_username": "observer",
+    "rights_error": "privilege verification unsupported for OpenSearch",
+    "scheme": "https",
+    "service": "elastic",
+    "show_cluster": true,
+    "show_endpoints": true,
+    "show_plugins": false,
+    "show_users": false,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "auth_required",
+        "stage_name": "auth_inference_credentials"
+      }
+    ],
+    "status": "valid_credentials",
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
+    "users": null,
+    "users_error": null,
+    "vendor": "opensearch",
+    "verification_capability": "identity_endpoint_supported"
+  }
+]

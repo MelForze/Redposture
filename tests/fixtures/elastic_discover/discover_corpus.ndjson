@@ -1,0 +1,20 @@
+{"index":{"_index":"redposture-discover-corpus-v2","_id":"sensitive-fields"}}
+{"case":"sensitive_fields","databasePassword":"CorpusPassword!2026","clientSecret":"CorpusClientSecret!2026","unindexedPassword":"CorpusUnindexedPassword!2026","payload":{"awsAccessKeyId":"AKIACORPUS2026ABCDEF","awsSecretAccessKey":"CorpusAwsSecretKey2026AbCdEfGhIjKlMnOpQr","azureStorageKey":"CorpusAzureStorageKey!2026-NotBase64"}}
+{"index":{"_index":"redposture-discover-corpus-v2","_id":"structured-formats"}}
+{"case":"structured_formats","message":"google=AIzaCorpusGoogleApiKey2026ABCDEFGHIJKLM github=ghp_CorpusGithubToken2026ABCDEFGHIJ gitlab=glpat-CorpusGitlabToken2026ABCDE slack=xoxb-CorpusSlackToken-2026-ABCDEFGHIJ stripe=sk_test_CorpusStripeKey2026ABCDE vault=hvs.CorpusVaultToken2026ABCDE npm=npm_CorpusNpmToken2026ABCDEFGHIJ"}
+{"index":{"_index":"redposture-discover-corpus-v2","_id":"jwt-jwe-auth"}}
+{"case":"jwt_jwe_auth","message":"jwt=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjb3JwdXMtMjAyNiJ9.CorpusSignature2026 jwe=eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..Y29ycHVzaXY.Y29ycHVzY2lwaGVydGV4dA.Y29ycHVzdGFn Authorization: Bearer CorpusBearerToken.2026-AbCdEfGh Authorization: Basic Y29ycHVzOkNvcnB1c0Jhc2ljUGFzc3dvcmQhMjAyNg=="}
+{"index":{"_index":"redposture-discover-corpus-v2","_id":"azure-uri-kv"}}
+{"case":"azure_uri_kv","message":"sas=https://corpus.blob.core.windows.net/c/b?sv=2023-11-03&se=2030-01-01T00%3A00%3A00Z&sp=r&sr=b&sig=CorpusAzureSasSignature%2B2026%3D account=DefaultEndpointsProtocol=https;AccountName=corpus;AccountKey=CorpusAzureAccountKey2026+/=;EndpointSuffix=core.windows.net client_secret=CorpusKeyValueSecret!2026","connectionString":"postgresql://corpus:CorpusDsnPassword%212026@db.corpus.invalid/app"}
+{"index":{"_index":"redposture-discover-corpus-v2","_id":"private-and-encoded"}}
+{"case":"private_and_encoded","private_key":"-----BEGIN PRIVATE KEY-----\nQ29ycHVzUHJpdmF0ZUtleTIwMjY=\n-----END PRIVATE KEY-----","credentials":"e0NvcnB1c0VuY29kZWRDcmVkZW50aWFsMjAyNn0="}
+{"index":{"_index":"redposture-discover-corpus-v2","_id":"nested-credentials"}}
+{"case":"nested_credentials","payload":{"services":[{"credentials":{"apiKey":"CorpusNestedApiKey!2026"}},{"dockerconfigjson":{"auths":{"registry.corpus.invalid":{"auth":"Y29ycHVzLWRvY2tlcjpDb3JwdXNEb2NrZXJQYXNzd29yZCEyMDI2"}}}}]},"embedded":"{\"oauth\":{\"clientSecret\":\"CorpusEmbeddedClientSecret!2026\"}}"}
+{"index":{"_index":"redposture-discover-corpus-v2","_id":"service-account"}}
+{"case":"service_account","credentials":"eyJ0eXBlIjoic2VydmljZV9hY2NvdW50IiwiY2xpZW50X3NlY3JldCI6IkNvcnB1c1NlcnZpY2VBY2NvdW50U2VjcmV0ITIwMjYiLCJwcml2YXRlX2tleSI6Ii0tLS0tQkVHSU4gUFJJVkFURSBLRVktLS0tLVxuUTI5eWNIVnpVMlZ5ZG1salpVRmpZMjkxYm5STFpYaz1cbi0tLS0tRU5EIFBSSVZBVEUgS0VZLS0tLS0ifQ=="}
+{"index":{"_index":"redposture-discover-corpus-v2","_id":"semantic-pair"}}
+{"case":"semantic_pair","payload":{"kind":"api_key","value":"CorpusSemanticApiKey!2026"}}
+{"index":{"_index":"redposture-discover-corpus-v2","_id":"duplicate"}}
+{"case":"duplicate","databasePassword":"CorpusPassword!2026","dynamic_secret_value":"CorpusDynamicFieldSecret!2026"}
+{"index":{"_index":"redposture-discover-corpus-v2","_id":"negative-controls"}}
+{"case":"negative_controls","negative":{"password":"${CORPUS_PASSWORD}","client_secret":"REDACTED","api_token":"********","public_key":"ssh-rsa CORPUS_NEGATIVE_PUBLIC_KEY_2026","certificate":"-----BEGIN CERTIFICATE-----\nQ29ycHVzTm90QVNlY3JldA==\n-----END CERTIFICATE-----","api_key_id":"CORPUS_NEGATIVE_API_KEY_ID_2026","token_id":"550e8400-e29b-41d4-a716-446655440000","checksum":"8f14e45fceea167a5a36dedd4bea2543","transaction_id":"txn-corpus-2026","amount":1299.50,"currency":"USD","status":"settled"}}

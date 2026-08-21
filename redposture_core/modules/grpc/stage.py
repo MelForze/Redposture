@@ -9,6 +9,7 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.grpc import GrpcTlsConfig
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -16,8 +17,10 @@ from ...stage_runtime import (
     AuditCredentialRun,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    command_result_exit_code,
     install_record_callback,
     merge_audit_credential_runs,
+    sort_default_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -62,7 +65,7 @@ def build_grpc_plan(args: Any) -> AuditCommandPlan:
     token = str(getattr(args, "token", "") or "").strip() or None
     token_runs = (AuditCredentialRun(token=token, source="provided"),) if token is not None else ()
     default_runs = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(
                 token=str(item.get("token") or "") or None if item.get("type") == "token" else None,
                 username=str(item.get("username") or "") if item.get("type") == "basic" else None,
@@ -134,6 +137,27 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
         and not getattr(args, "analyze", False)
         and not str(getattr(args, "invoke", "") or "").strip()
     )
+    tls_material = any(
+        (
+            bool(getattr(args, "insecure", False)),
+            bool(getattr(args, "tls_ca", None)),
+            bool(getattr(args, "tls_cert", None)),
+            bool(getattr(args, "tls_server_name", None)),
+        )
+    )
+    if bool(getattr(args, "plaintext", False)):
+        requested_use_tls: bool | None = False
+    elif bool(getattr(args, "tls", False)) or tls_material:
+        requested_use_tls = True
+    else:
+        requested_use_tls = None
+    tls_config = GrpcTlsConfig(
+        insecure=bool(getattr(args, "insecure", False)),
+        ca_file=str(getattr(args, "tls_ca", "") or "").strip() or None,
+        cert_file=str(getattr(args, "tls_cert", "") or "").strip() or None,
+        key_file=str(getattr(args, "tls_key", "") or "").strip() or None,
+        server_name=str(getattr(args, "tls_server_name", "") or "").strip() or None,
+    )
 
     def _detect(ctx: Any) -> AuditRecord:
         return AuditRecord.from_mapping(actions.detect_grpc(ctx, options), module="grpc", service="grpc")
@@ -161,7 +185,14 @@ def build_grpc_spec(args: Any) -> ModuleAuditSpec:
         detect=_detect if use_lifecycle_hooks else None,
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
-        lifecycle_state_factory=(lambda _ctx: actions.GrpcLifecycleState()) if use_lifecycle_hooks else None,
+        lifecycle_state_factory=(
+            lambda _ctx: actions.GrpcLifecycleState(
+                requested_use_tls=requested_use_tls,
+                tls_config=tls_config,
+            )
+        )
+        if use_lifecycle_hooks
+        else None,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         deep_gate=actions.grpc_deep_gate,
         credential_gate=_grpc_credential_gate,
@@ -293,7 +324,7 @@ def run_grpc_stage(args: Any, logger: Any) -> int:
         console.success(f"gRPC OpenAPI exported: {openapi_path} ({operation_count} {operation_label})")
     if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all grpc targets are unreachable")
-    return 0
+    return command_result_exit_code(result)
 
 
 __all__ = [

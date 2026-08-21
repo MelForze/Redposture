@@ -29,7 +29,6 @@ _AUDIT_MODULES = (
     "grpc",
     "kafka",
     "zookeeper",
-    "keeper",
 )
 
 
@@ -86,3 +85,11 @@ def test_audit_module_explicit_cli_port_is_added_to_target_file_ports(
     }
     assert len(pairs) == len(set(pairs)) == 4
     assert plan.target_count == 4
+
+
+@pytest.mark.parametrize("module_name", _AUDIT_MODULES)
+def test_audit_module_out_target_excludes_hosts_before_port_expansion(module_name: str) -> None:
+    args = parse_args([module_name, "-t", "10.0.0.1,10.0.0.2,blocked.example", "-ot", "10.0.0.1,BLOCKED.EXAMPLE."])
+    plan = _plan_builder(module_name)(args)
+
+    assert {host for _idx, host, _port, _spec in plan.iter_target_specs()} == {"10.0.0.2"}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import ssl
 from collections.abc import Callable
 from typing import Any
 
@@ -19,7 +20,7 @@ from .discovery_logic import (
     resolve_prometheus_port_fallback,
     score_metrics_candidate,
 )
-from .http_client import http_get_details
+from .http_client import activate_exporter_tls_context, build_http_url, http_get_details
 from .http_pool import HTTPConnectionPool, activate_http_pool
 from .output import emit_line as emit_output_line
 from .output import format_scan_record
@@ -27,7 +28,7 @@ from .postprocess import AsyncPostprocessWorker
 from .workflows import build_exporter_http_pool, iter_scan_work_items, scan_max_inflight, scan_work_item_count
 
 HttpGetDetails = Callable[..., dict[str, Any]]
-ScanTask = Callable[[str, int, list[dict[str, Any]], float, int], tuple[dict[str, Any], dict[str, Any] | None]]
+ScanTask = Callable[..., tuple[dict[str, Any], dict[str, Any] | None]]
 ActivatePool = Callable[[Any], Any]
 
 SCAN_RESPONSE_BODY_MAX_BYTES = 256 * 1024
@@ -41,12 +42,13 @@ def scan_presence_task(
     timeout: float,
     retries: int,
     *,
+    scheme: str = "http",
     http_get_details_fn: HttpGetDetails = http_get_details,
     response_body_max_bytes: int = SCAN_RESPONSE_BODY_MAX_BYTES,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
     exporter_name = str(exporter["name"])
     port = int(exporter["port"])
-    url = f"http://{host}:{port}/metrics"
+    url = build_http_url(host, port, "/metrics", scheme=scheme)
     result = http_get_details_fn(url, timeout=timeout, retries=retries, max_bytes=response_body_max_bytes)
 
     status = result["status"]
@@ -64,7 +66,7 @@ def scan_presence_task(
         marker_hit = None
 
     is_prometheus_like = looks_like_prometheus_metrics(body)
-    is_http_ok = status is not None and int(status) < 400
+    is_http_ok = status is not None and 200 <= int(status) < 300
     detected = bool(is_http_ok and marker_hit)
     if not detected and is_http_ok and is_prometheus_like and not negative_markers:
         # Fall back to "prometheus-shaped body without strong marker" ONLY when
@@ -109,6 +111,7 @@ def fetch_fingerprint_bodies_default(
     timeout: float,
     retries: int,
     *,
+    scheme: str = "http",
     http_get_details_fn: HttpGetDetails = http_get_details,
     fingerprint_body_max_bytes: int = SCAN_FINGERPRINT_BODY_MAX_BYTES,
 ) -> tuple[str, str]:
@@ -117,6 +120,7 @@ def fetch_fingerprint_bodies_default(
         port,
         timeout,
         retries,
+        scheme=scheme,
         http_get_details_fn=http_get_details_fn,
         max_bytes=fingerprint_body_max_bytes,
     )
@@ -129,17 +133,18 @@ def scan_presence_port_task(
     timeout: float,
     retries: int,
     *,
+    scheme: str = "http",
     http_get_details_fn: HttpGetDetails = http_get_details,
     fetch_fingerprint_bodies_fn: Callable[[str, int, float, int], tuple[str, str]] | None = None,
     response_body_max_bytes: int = SCAN_RESPONSE_BODY_MAX_BYTES,
     weak_candidate_confidence_score: int = WEAK_CANDIDATE_CONFIDENCE_SCORE,
 ) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    url = f"http://{host}:{port}/metrics"
+    url = build_http_url(host, port, "/metrics", scheme=scheme)
     result = http_get_details_fn(url, timeout=timeout, retries=retries, max_bytes=response_body_max_bytes)
 
     status = result["status"]
     body = str(result["body"] or "")
-    is_http_ok = status is not None and int(status) < 400
+    is_http_ok = status is not None and 200 <= int(status) < 300
     is_prometheus_like = looks_like_prometheus_metrics(body)
     if not is_http_ok:
         record = {
@@ -197,6 +202,7 @@ def scan_presence_port_task(
                 p,
                 t,
                 r,
+                scheme=scheme,
                 http_get_details_fn=http_get_details_fn,
             )
 
@@ -299,6 +305,9 @@ def scan_exporter_presence(
     progress_leave: bool = True,
     output_mode: str = "w",
     progress_owner: Any = None,
+    stats_sink: dict[str, int] | None = None,
+    scheme: str = "http",
+    tls_context: ssl.SSLContext | None = None,
     *,
     scan_task_fn: ScanTask | None = None,
     pool_cls: type[HTTPConnectionPool] = HTTPConnectionPool,
@@ -314,6 +323,7 @@ def scan_exporter_presence(
         )
     total_checks = 0
     total_found = 0
+    total_errors = 0
     found_by_host: dict[str, list[dict[str, Any]]] = {str(host): [] for host in hosts}
     max_workers = max(1, workers)
     max_inflight = scan_max_inflight(max_workers)
@@ -364,8 +374,8 @@ def scan_exporter_presence(
             "SCAN", work_item_count, enabled=show_progress, leave=progress_leave, owner=progress_owner
         )
         try:
-            pool = build_exporter_http_pool(max_workers, pool_cls)
-            with activate_pool_fn(pool):
+            pool = build_exporter_http_pool(max_workers, pool_cls, tls_context=tls_context)
+            with activate_exporter_tls_context(tls_context), activate_pool_fn(pool):
                 scheduler: BoundedScheduler[tuple[str, int], tuple[dict[str, Any], dict[str, Any] | None]] = (
                     BoundedScheduler(max_workers=max_workers, max_inflight=max_inflight)
                 )
@@ -373,13 +383,26 @@ def scan_exporter_presence(
                 def _scan_item(item: tuple[str, int]) -> tuple[dict[str, Any], dict[str, Any] | None]:
                     host, port = item
                     try:
-                        return scan_task(host, port, exporters, timeout, retries)
+                        if scan_task_fn is None:
+                            return scan_presence_port_task(
+                                host,
+                                port,
+                                exporters,
+                                timeout,
+                                retries,
+                                scheme=scheme,
+                            )
+                        if scheme == "http":
+                            return scan_task(host, port, exporters, timeout, retries)
+                        return scan_task(host, port, exporters, timeout, retries, scheme=scheme)
                     except Exception as exc:
                         return build_scan_error_record(host, port, exc), None
 
                 for _item, result in scheduler.iter_completed(iter_scan_work_items(hosts, ports), _scan_item):
                     record, hit = result
                     total_checks += 1
+                    if record.get("error"):
+                        total_errors += 1
                     if hit is not None:
                         total_found += 1
                         found_by_host.setdefault(str(record["host"]), []).append(hit)
@@ -407,12 +430,17 @@ def scan_exporter_presence(
                 "hosts": len(hosts),
                 "checks": total_checks,
                 "found": total_found,
+                "errors": total_errors,
                 "output_path": output_path,
                 "found_exporters_by_host": {
                     host: [str(item["exporter"]) for item in hits] for host, hits in found_by_host.items()
                 },
             }
             emit_output_line(out_fh, emit_line, format_scan_record(summary, output_format))
+        if stats_sink is not None:
+            stats_sink["checks"] = total_checks
+            stats_sink["found"] = total_found
+            stats_sink["errors"] = total_errors
     finally:
         _finalize_postprocess()
         if out_fh is not None:

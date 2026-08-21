@@ -120,11 +120,15 @@ class ZooKeeperLifecycleState:
 
     anonymous_client: _ZkClient | None = None
     selected_transport_config: ZkTransportConfig | None = None
+    selected_transport: str | None = None
     root_children: list[str] | None = None
     root_err: int | None = None
     auth_required: bool | None = None
     auth_inference_source: str = "not_run"
     auth_probe_trace: list[str] = dataclass_field(default_factory=list)
+    anonymous_auth_probe_results: dict[str, int | None] = dataclass_field(default_factory=dict)
+    anonymous_auth_probe_errors: dict[str, str] = dataclass_field(default_factory=dict)
+    digest_auth_unsupported: bool = False
     credential_clients: dict[tuple[str | None, str | None, str], _ZkClient] = dataclass_field(default_factory=dict)
 
     def close(self) -> None:
@@ -253,12 +257,17 @@ def _infer_auth_required_from_anonymous_probes(
         return True, "root_noauth", trace
     if root_state == "auth_required":
         return True, "session_closed_requires_auth", trace
-    if root_state == "ok":
+    if root_state == "ok" and not query_znode:
         return False, "root_ok", trace
 
-    probe_paths: list[str] = ["/zookeeper", "/zookeeper/config"]
-    if query_znode:
-        probe_paths.append(query_znode)
+    # A caller-selected znode is authoritative even when / is public.  Only
+    # fall back to the generic system probes when the root result itself was
+    # inconclusive; querying them on every public endpoint adds noise and
+    # cannot improve the explicit-path decision.
+    probe_paths: list[str] = [] if root_state == "ok" else ["/zookeeper", "/zookeeper/config"]
+    normalized_query = _normalize_znode_path(query_znode)
+    if normalized_query and normalized_query not in probe_paths:
+        probe_paths.append(normalized_query)
 
     saw_ok = False
     for probe_path in probe_paths:
@@ -284,9 +293,111 @@ def _infer_auth_required_from_anonymous_probes(
         if probe_state == "ok":
             saw_ok = True
 
+    if root_state == "ok":
+        return False, "root_ok", trace
     if saw_ok:
         return False, "probe_ok", trace
     return None, "inconclusive", trace
+
+
+def _credential_verification_paths(
+    query_znode: str | None,
+    auth_probe_trace: tuple[str, ...] | list[str] = (),
+) -> tuple[str, ...]:
+    """Return the small read-only path set replayed around digest auth."""
+
+    paths = ["/"]
+    for trace_entry in auth_probe_trace:
+        entry = str(trace_entry or "").strip()
+        if not entry.endswith((":noauth", ":sessionclosedrequiresaslauth")):
+            continue
+        inferred_path = _normalize_znode_path(entry.rsplit(":", 1)[0])
+        if inferred_path and inferred_path not in paths:
+            paths.append(inferred_path)
+    normalized_query = _normalize_znode_path(query_znode)
+    if normalized_query and normalized_query not in paths:
+        paths.append(normalized_query)
+    return tuple(paths)
+
+
+def _is_sasl_required_error(value: Any) -> bool:
+    return "SESSIONCLOSEDREQUIRESASLAUTH" in str(value or "").upper().replace("_", "")
+
+
+def _collect_session_auth_probes(
+    client: _ZkClient,
+    paths: tuple[str, ...],
+    *,
+    known_root_err: int | None = None,
+) -> tuple[dict[str, int | None], dict[str, str]]:
+    """Probe a fixed path set on one session without mutating server state."""
+
+    results: dict[str, int | None] = {}
+    errors: dict[str, str] = {}
+    for path in paths:
+        if path == "/" and known_root_err is not None:
+            results[path] = int(known_root_err)
+            continue
+        try:
+            _children, err, _stat = client.get_children2(path)
+            results[path] = int(err)
+            if int(err) == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH:
+                break
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            results[path] = None
+            errors[path] = _friendly_error_from_exception(exc)
+            # SESSIONCLOSEDREQUIRESASLAUTH closes the anonymous session. Once a
+            # server has done that, later reads on the same session are noise.
+            if results.get("/") == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH:
+                break
+    return results, errors
+
+
+def _serialized_auth_probe_results(
+    results: Mapping[str, int | None],
+    errors: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    serialized: dict[str, str] = {}
+    for path, code in results.items():
+        if code is None:
+            serialized[path] = f"error:{str((errors or {}).get(path) or 'unknown')}"
+        else:
+            serialized[path] = _zk_error_name(int(code)).lower()
+    return serialized
+
+
+def _credential_probe_verdict(
+    anonymous_results: Mapping[str, int | None],
+    authenticated_results: Mapping[str, int | None],
+) -> str:
+    """Classify digest credentials from access changes on identical paths."""
+
+    protected = {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH}
+    saw_protected = False
+    saw_confirmed_transition = False
+    saw_unchanged_denial = False
+    saw_anonymous_readable = False
+    saw_authenticated_readable = False
+    for path, anonymous_code in anonymous_results.items():
+        authenticated_code = authenticated_results.get(path)
+        if anonymous_code in protected:
+            saw_protected = True
+            if authenticated_code == _ZK_ERR_OK:
+                saw_confirmed_transition = True
+            elif authenticated_code in protected or authenticated_code == _ZK_ERR_AUTHFAILED:
+                saw_unchanged_denial = True
+        elif anonymous_code == _ZK_ERR_OK:
+            saw_anonymous_readable = True
+            if authenticated_code == _ZK_ERR_OK:
+                saw_authenticated_readable = True
+
+    if saw_confirmed_transition:
+        return "valid"
+    if saw_protected and saw_unchanged_denial:
+        return "rejected"
+    if saw_anonymous_readable and saw_authenticated_readable:
+        return "unverified_anonymous"
+    return "unverified"
 
 
 def _get_thread_debug_emitter() -> Callable[[str], None] | None:
@@ -402,9 +513,11 @@ def _audit_zookeeper_host(
     normalized_username = str(username).strip() if username is not None else None
     if normalized_username == "":
         normalized_username = None
-    normalized_password = str(password).strip() if password is not None else None
-    if normalized_username is None and normalized_password == "":
-        normalized_password = None
+    # Do not trim passwords: ZooKeeper digest auth hashes the exact byte
+    # sequence supplied by the operator.
+    normalized_password = (
+        str(password) if password is not None and (str(password) != "" or normalized_username is not None) else None
+    )
 
     base_attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -656,7 +769,12 @@ def _audit_zookeeper_host(
         clients_to_close = [client]
         try:
             connect_started = time.monotonic()
-            client.connect()
+            connect_and_get_root = getattr(client, "connect_and_get_root", None)
+            if callable(connect_and_get_root):
+                root_children, root_err, _ = connect_and_get_root()
+            else:
+                client.connect()
+                root_children, root_err, _ = client.get_children2("/")
             selected_transport = getattr(client, "selected_transport", None)
             if selected_transport not in {"plaintext", "tls"}:
                 selected_transport = (
@@ -678,8 +796,8 @@ def _audit_zookeeper_host(
             auth_applied_ok: bool | None = None
             auth_error: str | None = None
             credential_verdict: str | None = None
-            root_children, root_err, _ = client.get_children2("/")
             anonymous_root_err = root_err
+            authenticated_root_err: int | None = None
 
             _stage_trace(
                 _STAGE_DETECT_PROTOCOL,
@@ -721,7 +839,7 @@ def _audit_zookeeper_host(
                 auth_ms = int((time.monotonic() - auth_started) * 1000)
                 last_auth_ms = auth_ms
                 if auth_applied_ok:
-                    authenticated_children, authenticated_root_err, _ = authenticated_client.get_children2("/")
+                    _authenticated_children, authenticated_root_err, _ = authenticated_client.get_children2("/")
                     if (
                         anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH}
                         and authenticated_root_err == _ZK_ERR_OK
@@ -729,7 +847,6 @@ def _audit_zookeeper_host(
                         provided_credentials_ok = True
                         credential_verdict = "valid"
                         client = authenticated_client
-                        root_children = authenticated_children
                         root_err = authenticated_root_err
                     elif anonymous_root_err == _ZK_ERR_OK and authenticated_root_err == _ZK_ERR_OK:
                         # A successful digest frame only adds an identity to the session.
@@ -751,6 +868,18 @@ def _audit_zookeeper_host(
                     credential_verdict = "rejected"
                 if not auth_applied_ok and not auth_error:
                     auth_error = "authentication failed"
+
+                if _is_sasl_required_error(auth_error) or (
+                    authenticated_root_err == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH
+                ):
+                    # Digest is not an invalid credential when the server
+                    # policy requires SASL.  Preserve the distinction for both
+                    # public/monolithic callers and the canonical lifecycle.
+                    provided_credentials_ok = None
+                    credential_verdict = "unsupported_sasl"
+                    inferred_auth_required = True
+                    root_err = _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH
+                    auth_error = "server requires SASL; digest authentication is unsupported"
                 auth_error_detail = auth_error
                 last_auth_error = auth_error_detail
 
@@ -925,7 +1054,7 @@ def _audit_zookeeper_host(
             if (
                 root_err == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH
                 and inferred_auth_required is True
-                and not provided_credentials
+                and (not provided_credentials or credential_verdict == "unsupported_sasl")
             ):
                 query_error_detail = _zk_error_name(root_err)
                 last_query_error = query_error_detail
@@ -942,7 +1071,7 @@ def _audit_zookeeper_host(
                     f"auth_ms={auth_ms if auth_ms is not None else '-'} "
                     f"enumerate_ms=- dump_ms=- total_ms={int((time.monotonic() - started) * 1000)}"
                 )
-                return _record(
+                record = _record(
                     is_zookeeper=True,
                     status="auth_required",
                     auth_required=True,
@@ -961,7 +1090,7 @@ def _audit_zookeeper_host(
                     auth_inference_source=auth_inference_source,
                     auth_probe_trace=auth_probe_trace,
                     elapsed_ms=int((time.monotonic() - started) * 1000),
-                    error=None,
+                    error=auth_error if credential_verdict == "unsupported_sasl" else None,
                     connect_ms=connect_ms,
                     auth_ms=auth_ms,
                     enumerate_ms=None,
@@ -973,7 +1102,16 @@ def _audit_zookeeper_host(
                     dump_error=dump_error_detail,
                     attempts=attempt + 1,
                     max_attempts=max_attempts,
+                    credential_verdict=credential_verdict,
                 )
+                if credential_verdict == "unsupported_sasl":
+                    record.update(
+                        {
+                            "auth_mechanism": "sasl",
+                            "verification_capability": "unsupported",
+                        }
+                    )
+                return record
 
             if root_err != _ZK_ERR_OK:
                 query_error_detail = _zk_error_name(root_err)
@@ -1039,7 +1177,8 @@ def _audit_zookeeper_host(
                 error=auth_error_detail,
             )
 
-            if not run_deep_checks:
+            requested_read_action = bool(show_znodes or dump or query_znode)
+            if not run_deep_checks or not requested_read_action:
                 detect_status = (
                     "valid_credentials"
                     if provided_credentials_ok
@@ -1047,8 +1186,9 @@ def _audit_zookeeper_host(
                     if invalid_provided_credentials
                     else "open_no_auth"
                 )
+                phase = "detect-only" if not run_deep_checks else "read-only-no-actions"
                 _debug(
-                    f"attempt={attempt + 1}/{max_attempts} detect-only result={detect_status} "
+                    f"attempt={attempt + 1}/{max_attempts} {phase} result={detect_status} "
                     f"connect_ms={connect_ms if connect_ms is not None else '-'} "
                     f"auth_ms={auth_ms if auth_ms is not None else '-'} "
                     f"total_ms={int((time.monotonic() - started) * 1000)}"
@@ -1092,49 +1232,19 @@ def _audit_zookeeper_host(
             can_delete_znode: bool | None = None
             znode_capability_error: str | None = None
             stage3_started = time.monotonic()
-            if not invalid_provided_credentials:
-                can_create_znode, can_delete_znode, znode_capability_error = _probe_znode_create_delete(
-                    client, host, port
-                )
-            if znode_capability_error:
-                if _is_retryable_stage_error(znode_capability_error) and attempt < max_attempts - 1:
-                    last_error = znode_capability_error
-                    _stage_trace(
-                        _STAGE_ACCESS_CAPABILITIES,
-                        attempt=attempt + 1,
-                        started_at=stage3_started,
-                        result="retry",
-                        error=znode_capability_error,
-                    )
-                    delay = _retry_delay(attempt)
-                    _debug_retry_decision(
-                        _STAGE_ACCESS_CAPABILITIES,
-                        attempt=attempt + 1,
-                        max_attempts=max_attempts,
-                        delay_s=delay,
-                        reason=znode_capability_error,
-                    )
-                    time.sleep(delay)
-                    continue
-                _stage_trace(
-                    _STAGE_ACCESS_CAPABILITIES,
-                    attempt=attempt + 1,
-                    started_at=stage3_started,
-                    result="error",
-                    error=znode_capability_error,
-                )
-            else:
-                _stage_trace(
-                    _STAGE_ACCESS_CAPABILITIES,
-                    attempt=attempt + 1,
-                    started_at=stage3_started,
-                    result="ok",
-                    error=None,
-                )
+            # No write-probe flag exists.  Keep capability fields unknown and
+            # make the public/monolithic facade just as read-only as the typed
+            # lifecycle used by the CLI.
+            _stage_trace(
+                _STAGE_ACCESS_CAPABILITIES,
+                attempt=attempt + 1,
+                started_at=stage3_started,
+                result="skip",
+                error="read-only audit",
+            )
 
             stage4_started = time.monotonic()
-            enum_started = time.monotonic()
-            collect_znode_paths = bool(show_znodes or (dump and not query_znode))
+            collect_znode_paths = bool((show_znodes or dump) and not query_znode)
             enum_auth_username = normalized_username if provided_credentials_ok else None
             enum_auth_password = normalized_password if provided_credentials_ok else None
 
@@ -1175,61 +1285,68 @@ def _audit_zookeeper_host(
 
                 progress_hook = _progress
 
-            try:
-                enum_kwargs: dict[str, Any] = {
-                    "collect_paths": collect_znode_paths,
-                    "enum_workers": enum_workers,
-                    "auth_username": enum_auth_username,
-                    "auth_password": enum_auth_password,
-                }
-                if expose_transport:
-                    enum_kwargs["transport_config"] = selected_transport_config
-                listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
-                    client,
-                    max_znodes,
-                    progress_hook,
-                    **enum_kwargs,
-                )
-            except TypeError as exc:
-                if not is_signature_compat_typeerror(
-                    exc,
-                    expected_keywords={
-                        "collect_paths",
-                        "enum_workers",
-                        "auth_username",
-                        "auth_password",
-                        "transport_config",
-                    },
-                ):
-                    raise
-                # Backward-safe for patched tests/helpers that may expose legacy signatures.
+            listed_znodes: list[str] = []
+            total_count = 0
+            truncated = False
+            listed_meta: dict[str, dict[str, Any]] = {}
+            enum_error: str | None = None
+            if collect_znode_paths:
+                enum_started = time.monotonic()
                 try:
+                    enum_kwargs: dict[str, Any] = {
+                        "collect_paths": True,
+                        "enum_workers": enum_workers,
+                        "auth_username": enum_auth_username,
+                        "auth_password": enum_auth_password,
+                    }
+                    if expose_transport:
+                        enum_kwargs["transport_config"] = selected_transport_config
                     listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
                         client,
                         max_znodes,
                         progress_hook,
-                        collect_paths=collect_znode_paths,
+                        **enum_kwargs,
                     )
                 except TypeError as exc:
-                    if not is_signature_compat_typeerror(exc, expected_keywords={"collect_paths"}):
+                    if not is_signature_compat_typeerror(
+                        exc,
+                        expected_keywords={
+                            "collect_paths",
+                            "enum_workers",
+                            "auth_username",
+                            "auth_password",
+                            "transport_config",
+                        },
+                    ):
                         raise
+                    # Backward-safe for patched tests/helpers that may expose legacy signatures.
                     try:
                         listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
                             client,
                             max_znodes,
                             progress_hook,
+                            collect_paths=True,
                         )
                     except TypeError as exc:
-                        if not is_signature_compat_typeerror(
-                            exc, expected_keywords={"progress_hook"}, allow_positional_mismatch=True
-                        ):
+                        if not is_signature_compat_typeerror(exc, expected_keywords={"collect_paths"}):
                             raise
-                        listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
-                            client,
-                            max_znodes,
-                        )
-            enumerate_ms = int((time.monotonic() - enum_started) * 1000)
-            last_enumerate_ms = enumerate_ms
+                        try:
+                            listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
+                                client,
+                                max_znodes,
+                                progress_hook,
+                            )
+                        except TypeError as exc:
+                            if not is_signature_compat_typeerror(
+                                exc, expected_keywords={"progress_hook"}, allow_positional_mismatch=True
+                            ):
+                                raise
+                            listed_znodes, total_count, truncated, listed_meta, enum_error = _enumerate_znodes(
+                                client,
+                                max_znodes,
+                            )
+                enumerate_ms = int((time.monotonic() - enum_started) * 1000)
+                last_enumerate_ms = enumerate_ms
             if enum_error:
                 last_error = enum_error
                 enum_error_detail = enum_error
@@ -1353,10 +1470,6 @@ def _audit_zookeeper_host(
                 error=stage4_error_value,
             )
 
-            root_count = len(root_children or [])
-            if total_count == 0 and root_count > 0:
-                total_count = root_count
-
             auth_required_value = inferred_auth_required
 
             elapsed_ms = int((time.monotonic() - started) * 1000)
@@ -1379,11 +1492,11 @@ def _audit_zookeeper_host(
                 status=final_status,
                 auth_required=auth_required_value,
                 provided_credentials_ok=provided_credentials_ok,
-                znode_count=total_count,
+                znode_count=total_count if collect_znode_paths else None,
                 znodes=sorted_znodes,
                 znode_details=znode_details,
                 znode_values=znode_values,
-                znodes_truncated=truncated,
+                znodes_truncated=truncated if collect_znode_paths else False,
                 query_znode_value=query_znode_value,
                 query_znode_dump=query_znode_dump,
                 query_znode_dump_error=query_znode_dump_error,
@@ -1510,6 +1623,10 @@ def _zookeeper_lifecycle_payload(
         "timestamp": utc_now_iso(),
         "host": str(ctx.host),
         "port": int(ctx.port),
+        "implementation": "zookeeper-compatible",
+        "is_keeper": None,
+        "version": None,
+        "transport": state.selected_transport,
         "is_zookeeper": is_zookeeper,
         "status": status,
         "auth_required": state.auth_required,
@@ -1537,6 +1654,13 @@ def _zookeeper_lifecycle_payload(
         "znode_capability_error": None,
         "auth_inference_source": state.auth_inference_source,
         "auth_probe_trace": list(state.auth_probe_trace),
+        "anonymous_auth_probe_results": _serialized_auth_probe_results(
+            state.anonymous_auth_probe_results,
+            state.anonymous_auth_probe_errors,
+        ),
+        "credential_auth_probe_results": {},
+        "auth_mechanism": "digest",
+        "verification_capability": "available",
         "connect_ms": None,
         "auth_ms": None,
         "enumerate_ms": None,
@@ -1651,7 +1775,14 @@ def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
             requested_transport if isinstance(requested_transport, ZkTransportConfig) else None,
         )
         try:
-            client.connect()
+            connect_and_get_root = getattr(client, "connect_and_get_root", None)
+            if callable(connect_and_get_root):
+                root_children, root_err, _root_stat = connect_and_get_root()
+            else:
+                # Compatibility boundary for tests and third-party client
+                # doubles that implement the historical connect/get pair.
+                client.connect()
+                root_children, root_err, _root_stat = client.get_children2("/")
             selected_transport = getattr(client, "selected_transport", None)
             if isinstance(requested_transport, ZkTransportConfig):
                 selected_mode = (
@@ -1659,8 +1790,16 @@ def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
                 )
                 selected_config = replace(requested_transport, mode=selected_mode)
             else:
+                selected_mode = selected_transport if selected_transport in {"plaintext", "tls"} else "plaintext"
                 selected_config = None
-            root_children, root_err, _root_stat = client.get_children2("/")
+            if (
+                root_err != _ZK_ERR_OK
+                and _is_retryable_stage_error(_zk_error_name(root_err))
+                and attempt < attempts - 1
+            ):
+                client.close()
+                time.sleep(_retry_delay(attempt))
+                continue
             if selected_config is not None:
                 auth_required, source, trace = _infer_auth_required_from_anonymous_probes(
                     str(ctx.host),
@@ -1680,13 +1819,34 @@ def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
                 )
             state.anonymous_client = client
             state.selected_transport_config = selected_config
+            state.selected_transport = str(selected_mode)
             state.root_children = list(root_children or [])
             state.root_err = int(root_err)
             state.auth_required = auth_required
             state.auth_inference_source = source
             state.auth_probe_trace = list(trace)
+            auth_requested = bool(
+                getattr(ctx.args, "defcreds", False)
+                or getattr(ctx.args, "username", None) is not None
+                or getattr(ctx.args, "password", None) is not None
+            )
+            if auth_requested:
+                probe_paths = _credential_verification_paths(
+                    options.get("query_znode"),
+                    trace,
+                )
+                probe_results, probe_errors = _collect_session_auth_probes(
+                    client,
+                    probe_paths,
+                    known_root_err=int(root_err),
+                )
+                state.anonymous_auth_probe_results = probe_results
+                state.anonymous_auth_probe_errors = probe_errors
+            else:
+                state.anonymous_auth_probe_results = {"/": int(root_err)}
+                state.anonymous_auth_probe_errors = {}
             if root_err == _ZK_ERR_OK:
-                status = "open_no_auth"
+                status = "auth_required" if auth_required is True else "open_no_auth"
                 error = None
             elif root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH} and auth_required is True:
                 status = "auth_required"
@@ -1755,14 +1915,74 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
     password = credential.password or ""
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
     last_transient_error: str | None = None
+
+    anonymous_probe_results = dict(state.anonymous_auth_probe_results)
+    if not anonymous_probe_results and state.root_err is not None:
+        anonymous_probe_results["/"] = int(state.root_err)
+
+    def _unsupported_sasl(
+        authenticated_results: Mapping[str, int | None] | None = None,
+        authenticated_errors: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        unsupported_error = "server requires SASL; digest authentication is unsupported"
+        state.auth_required = True
+        state.digest_auth_unsupported = True
+        _zookeeper_update_lifecycle_payload(
+            payload,
+            _zookeeper_lifecycle_payload(
+                ctx,
+                options,
+                state,
+                status="auth_required",
+                is_zookeeper=True,
+                provided_credentials_ok=None,
+                credential_verdict="unsupported_sasl",
+                error=unsupported_error,
+            ),
+        )
+        payload.update(
+            {
+                "auth_required": True,
+                "auth_mechanism": "sasl",
+                "verification_capability": "unsupported",
+                "credential_auth_probe_results": _serialized_auth_probe_results(
+                    authenticated_results or {},
+                    authenticated_errors or {},
+                ),
+                "auth_error": unsupported_error,
+            }
+        )
+        return payload
+
+    if (
+        state.digest_auth_unsupported
+        or state.root_err == _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH
+        or _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH in anonymous_probe_results.values()
+    ):
+        return _unsupported_sasl()
+
+    probe_paths = tuple(anonymous_probe_results) or _credential_verification_paths(
+        options.get("query_znode"),
+        state.auth_probe_trace,
+    )
     for attempt in range(attempts):
         client = _zookeeper_lifecycle_client(ctx, state.selected_transport_config)
         try:
             client.connect()
             auth_ok, auth_error = client.auth_digest(username, password)
-            authenticated_root_err: int | None = None
+            authenticated_results: dict[str, int | None] = {}
+            authenticated_errors: dict[str, str] = {}
             if auth_ok:
-                _children, authenticated_root_err, _stat = client.get_children2("/")
+                authenticated_results, authenticated_errors = _collect_session_auth_probes(
+                    client,
+                    probe_paths,
+                )
+            if _is_sasl_required_error(auth_error) or (
+                _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH in authenticated_results.values()
+            ):
+                client.close()
+                return _unsupported_sasl(authenticated_results, authenticated_errors)
+            authenticated_root_err = authenticated_results.get("/")
 
             transient_error: str | None = None
             if not auth_ok and _is_retryable_stage_error(auth_error):
@@ -1782,28 +2002,41 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
                     continue
                 break
 
-            anonymous_root_err = state.root_err
             provided_ok: bool | None
             credential_verdict: str
             result_error: str | None = None
-            if (
-                auth_ok
-                and anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH}
-                and authenticated_root_err == _ZK_ERR_OK
-            ):
+            probe_verdict = (
+                _credential_probe_verdict(
+                    anonymous_probe_results,
+                    authenticated_results,
+                )
+                if auth_ok
+                else "rejected"
+            )
+            if auth_ok and probe_verdict == "valid":
                 provided_ok = True
                 credential_verdict = "valid"
-                previous = state.credential_clients.get(_zookeeper_lifecycle_key(ctx))
-                state.credential_clients[_zookeeper_lifecycle_key(ctx)] = client
-                if previous is not None and previous is not client:
-                    previous.close()
+                credential_key = _zookeeper_lifecycle_key(ctx)
+                previous = state.credential_clients.get(credential_key)
+                if previous is not None:
+                    state.credential_clients[credential_key] = client
+                    if previous is not client:
+                        previous.close()
+                elif not state.credential_clients:
+                    # Exhaustive --defcreds may verify many identities.  The
+                    # runtime deliberately selects the first accepted one for
+                    # data collection, so retaining later sessions only leaks
+                    # one file descriptor per successful candidate.
+                    state.credential_clients[credential_key] = client
+                else:
+                    client.close()
                 status = "weak_default_creds" if credential.source == "default" else "valid_credentials"
-            elif auth_ok and anonymous_root_err == _ZK_ERR_OK and authenticated_root_err == _ZK_ERR_OK:
+            elif auth_ok and probe_verdict == "unverified_anonymous":
                 provided_ok = None
                 credential_verdict = "unverified_anonymous"
                 status = "open_no_auth"
                 client.close()
-            elif not auth_ok:
+            elif not auth_ok or probe_verdict == "rejected":
                 provided_ok = False
                 credential_verdict = "rejected"
                 status = "invalid_credentials_anonymous" if state.auth_required is False else "auth_required"
@@ -1834,6 +2067,16 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
                     credential_verdict=credential_verdict,
                     error=result_error,
                 ),
+            )
+            payload.update(
+                {
+                    "credential_auth_probe_results": _serialized_auth_probe_results(
+                        authenticated_results,
+                        authenticated_errors,
+                    ),
+                    "auth_mechanism": "digest",
+                    "verification_capability": "available",
+                }
             )
             return payload
         except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
@@ -1893,6 +2136,112 @@ def _reopen_zookeeper_lifecycle_client(
     return client
 
 
+def _refresh_zookeeper_lifecycle_client(
+    ctx: Any,
+    state: ZooKeeperLifecycleState,
+    *,
+    authenticated: bool,
+) -> tuple[_ZkClient | None, str | None]:
+    """Open a fresh selected-identity session with the configured retry budget."""
+
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    last_error: str | None = None
+    for attempt in range(attempts):
+        try:
+            return (
+                _reopen_zookeeper_lifecycle_client(
+                    ctx,
+                    state,
+                    authenticated=authenticated,
+                ),
+                None,
+            )
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            last_error = _friendly_error_from_exception(exc)
+            if attempt < attempts - 1:
+                time.sleep(_retry_delay(attempt))
+    return None, last_error or "failed to refresh ZooKeeper session"
+
+
+def _is_retryable_zookeeper_read_error(value: Any) -> bool:
+    """Return whether a read can be safely replayed on a fresh session."""
+
+    if _is_retryable_stage_error(value):
+        return True
+    text = str(value or "").strip().lower()
+    return any(
+        marker in text
+        for marker in (
+            "connection reset",
+            "reset by peer",
+            "connection aborted",
+            "broken pipe",
+            "sessionexpired",
+            "sessionmoved",
+            "closing",
+        )
+    )
+
+
+def _read_zookeeper_lifecycle_with_retry(
+    ctx: Any,
+    state: ZooKeeperLifecycleState,
+    client: _ZkClient,
+    *,
+    authenticated: bool,
+    operation: str,
+    path: str,
+) -> tuple[_ZkClient, tuple[Any, int, Any] | None, str | None, int]:
+    """Replay one idempotent read on a fresh selected-identity session."""
+
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    current_client = client
+    last_error: str | None = None
+
+    if operation not in {"children", "data"}:
+        raise ValueError(f"unsupported ZooKeeper read operation: {operation}")
+
+    for attempt in range(attempts):
+        if attempt > 0:
+            try:
+                current_client = _reopen_zookeeper_lifecycle_client(
+                    ctx,
+                    state,
+                    authenticated=authenticated,
+                )
+            except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+                last_error = _friendly_error_from_exception(exc)
+                if attempt < attempts - 1 and _is_retryable_zookeeper_read_error(last_error):
+                    time.sleep(_retry_delay(attempt))
+                    continue
+                return current_client, None, last_error, attempt + 1
+
+        try:
+            result = current_client.get_children2(path) if operation == "children" else current_client.get_data(path)
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            last_error = _friendly_error_from_exception(exc)
+            retryable = _is_retryable_zookeeper_read_error(last_error)
+        else:
+            error_name = _zk_error_name(int(result[1]))
+            retryable = _is_retryable_zookeeper_read_error(error_name)
+            if not retryable or attempt >= attempts - 1:
+                return current_client, result, None, attempt + 1
+            last_error = error_name
+
+        if not retryable or attempt >= attempts - 1:
+            return current_client, None, last_error, attempt + 1
+
+        emitter = getattr(ctx, "debug_emit", None)
+        if callable(emitter):
+            emitter(
+                f"{ctx.host}:{ctx.port} data retry operation={operation} path={path} "
+                f"attempt={attempt + 1}/{attempts} reason={last_error or '-'}"
+            )
+        time.sleep(_retry_delay(attempt))
+
+    return current_client, None, last_error or "ZooKeeper read failed", attempts
+
+
 def _enumerate_zookeeper_lifecycle(
     ctx: Any,
     options: Mapping[str, Any],
@@ -1906,7 +2255,7 @@ def _enumerate_zookeeper_lifecycle(
     credential = ctx.credential
     enum_kwargs: dict[str, Any] = {
         "collect_paths": collect_paths,
-        "enum_workers": int(options["enum_workers"]),
+        "enum_workers": int(options.get("enum_workers", 3) or 3),
         "auth_username": credential.username if authenticated else None,
         "auth_password": credential.password if authenticated else None,
     }
@@ -1952,7 +2301,7 @@ def _enumerate_zookeeper_lifecycle(
 
 
 def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
-    """Run capability, enumeration and dump work once on the selected session."""
+    """Run only explicitly requested, read-only znode work."""
 
     state = ctx.lifecycle_state
     if not isinstance(state, ZooKeeperLifecycleState):
@@ -1970,7 +2319,41 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
     show_znodes = bool(options["show_znodes"])
     dump = bool(options["dump"])
     query_znode = options.get("query_znode")
-    collect_paths = bool(show_znodes or (dump and not query_znode))
+    # A direct --znode lookup always scopes data access to that one path, even
+    # if legacy callers also pass tree-oriented show/dump options.
+    collect_paths = bool((show_znodes or dump) and not query_znode)
+    if not collect_paths and not query_znode:
+        payload.update(
+            {
+                "timestamp": utc_now_iso(),
+                "znode_count": None,
+                "znodes": None,
+                "znode_details": None,
+                "znode_values": None,
+                "znodes_truncated": False,
+                "znode_count_partial": False,
+                "can_create_znode": None,
+                "can_delete_znode": None,
+                "znode_capability_error": None,
+                "enumerate_ms": None,
+                "dump_ms": None,
+                "elapsed_ms": 0,
+            }
+        )
+        return payload
+
+    # Detection, fingerprinting and exhaustive credential checks can outlive
+    # the short negotiated ZooKeeper session. Re-establish exactly the
+    # selected identity before every requested read phase.
+    refreshed_client, reopen_error = _refresh_zookeeper_lifecycle_client(
+        ctx,
+        state,
+        authenticated=authenticated,
+    )
+    if refreshed_client is not None:
+        client = refreshed_client
+    refresh_action_error = f"session refresh failed: {reopen_error}" if reopen_error else None
+
     progress_hook: Callable[[dict[str, Any]], None] | None = None
     if callable(ctx.debug_emit):
 
@@ -1997,76 +2380,101 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
         progress_hook = _progress
 
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
-    can_create: bool | None = None
-    can_delete: bool | None = None
-    capability_error: str | None = None
     listed: list[str] = []
     total_count = 0
     truncated = False
     listed_meta: dict[str, dict[str, Any]] = {}
-    enum_error: str | None = None
+    enum_error: str | None = refresh_action_error if collect_paths else None
     enumerate_ms = 0
-    reopen_error: str | None = None
     attempts_done = 0
-    for attempt in range(attempts):
-        attempts_done = attempt + 1
-        if attempt > 0:
+    enumeration_attempted = False
+    if collect_paths and reopen_error is None:
+        for attempt in range(attempts):
+            attempts_done = attempt + 1
+            if attempt > 0:
+                try:
+                    client = _reopen_zookeeper_lifecycle_client(
+                        ctx,
+                        state,
+                        authenticated=authenticated,
+                    )
+                    reopen_error = None
+                except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+                    reopen_error = _friendly_error_from_exception(exc)
+                    if attempt < attempts - 1:
+                        time.sleep(_retry_delay(attempt))
+                        continue
+                    enum_error = f"session refresh failed: {reopen_error}"
+                    refresh_action_error = enum_error
+                    break
+
+            enum_started = time.monotonic()
+            enumeration_attempted = True
             try:
-                client = _reopen_zookeeper_lifecycle_client(
+                listed, total_count, truncated, listed_meta, enum_error = _enumerate_zookeeper_lifecycle(
                     ctx,
+                    options,
                     state,
+                    client,
                     authenticated=authenticated,
+                    collect_paths=True,
+                    progress_hook=progress_hook,
                 )
-                reopen_error = None
-            except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
-                reopen_error = _friendly_error_from_exception(exc)
-                if attempt < attempts - 1:
-                    time.sleep(_retry_delay(attempt))
-                    continue
-                break
-
-        can_create, can_delete, capability_error = _probe_znode_create_delete(
-            client,
-            str(ctx.host),
-            int(ctx.port),
-        )
-        if capability_error and _is_retryable_stage_error(capability_error) and attempt < attempts - 1:
-            time.sleep(_retry_delay(attempt))
-            continue
-
-        enum_started = time.monotonic()
-        try:
-            listed, total_count, truncated, listed_meta, enum_error = _enumerate_zookeeper_lifecycle(
-                ctx,
-                options,
-                state,
-                client,
-                authenticated=authenticated,
-                collect_paths=collect_paths,
-                progress_hook=progress_hook,
-            )
-        finally:
-            enumerate_ms += int((time.monotonic() - enum_started) * 1000)
-        if enum_error and _is_retryable_stage_error(enum_error) and attempt < attempts - 1:
-            time.sleep(_retry_delay(attempt))
-            continue
-        break
+            finally:
+                enumerate_ms += int((time.monotonic() - enum_started) * 1000)
+            if enum_error and _is_retryable_stage_error(enum_error) and attempt < attempts - 1:
+                time.sleep(_retry_delay(attempt))
+                continue
+            break
+    else:
+        attempts_done = 1
 
     sorted_znodes = sorted(listed) if collect_paths else []
     znode_details = (
         [_znode_detail_entry(path, listed_meta.get(path)) for path in sorted_znodes] if collect_paths else None
+    )
+    noauth_partial = any(
+        str(meta.get("error") or "") == "Access Denied" for meta in listed_meta.values() if isinstance(meta, dict)
     )
 
     noauth_text = "Access Denied"
     dump_started = time.monotonic() if (dump or query_znode) else None
     dump_errors: set[str] = set()
     znode_values: list[str] | None = None
+    if dump and collect_paths and reopen_error is None:
+        refreshed_client, dump_reopen_error = _refresh_zookeeper_lifecycle_client(
+            ctx,
+            state,
+            authenticated=authenticated,
+        )
+        if refreshed_client is not None:
+            client = refreshed_client
+        elif dump_reopen_error:
+            reopen_error = dump_reopen_error
+            refresh_action_error = f"session refresh failed: {dump_reopen_error}"
+            dump_errors.add(refresh_action_error)
+    elif dump and collect_paths and refresh_action_error:
+        dump_errors.add(refresh_action_error)
     if dump and not query_znode and reopen_error is None:
         znode_values = []
         dump_limit = options.get("dump_limit")
         dump_paths = sorted_znodes[: int(dump_limit)] if isinstance(dump_limit, int) else sorted_znodes
         for path in dump_paths:
-            value, value_err, _stat = client.get_data(path)
+            client, read_result, read_error, read_attempts = _read_zookeeper_lifecycle_with_retry(
+                ctx,
+                state,
+                client,
+                authenticated=authenticated,
+                operation="data",
+                path=path,
+            )
+            attempts_done = max(attempts_done, read_attempts)
+            if read_result is None:
+                error_text = str(read_error or "ZooKeeper read failed")
+                znode_values.append(f"{path}:<error:{error_text}>")
+                dump_errors.add(error_text)
+                continue
+            value, value_err, _stat = read_result
             if value_err == _ZK_ERR_OK:
                 znode_values.append(f"{path}:{_format_znode_data(value)}")
             elif value_err == _ZK_ERR_NOAUTH:
@@ -2084,51 +2492,85 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
     query_dump: str | None = None
     query_dump_error: str | None = None
     query_error: str | None = None
+    if query_znode and reopen_error is not None:
+        query_error = refresh_action_error or f"session refresh failed: {reopen_error}"
+        query_value = f"{query_znode}:<error:{query_error}>"
+        if dump:
+            query_dump_error = query_error
+            dump_errors.add(query_error)
     if query_znode and reopen_error is None:
-        children, query_err, query_stat = client.get_children2(str(query_znode))
-        if query_err == _ZK_ERR_OK:
-            query_value = (
-                f"{query_znode} (children:{len(children or [])},"
-                f"bytes:{int((query_stat or {}).get('data_length') or 0)})"
-            )
-            if dump:
-                value, value_err, _stat = client.get_data(str(query_znode))
-                if value_err == _ZK_ERR_OK:
-                    query_dump = _format_znode_data(value)
-                elif value_err == _ZK_ERR_NOAUTH:
-                    query_dump_error = noauth_text
-                    dump_errors.add("NOAUTH")
-                elif value_err == _ZK_ERR_NONODE:
-                    query_dump_error = "znode not found"
-                    dump_errors.add("NONODE")
-                else:
-                    query_dump_error = _zk_error_name(value_err)
-                    dump_errors.add(query_dump_error)
-        elif query_err == _ZK_ERR_NOAUTH:
-            query_value = f"{query_znode}:<{noauth_text}>"
-            query_error = "NOAUTH"
-            if dump:
-                query_dump_error = noauth_text
-                dump_errors.add("NOAUTH")
-        elif query_err == _ZK_ERR_NONODE:
-            query_value = f"{query_znode}:<not found>"
-            query_error = "NONODE"
-            if dump:
-                query_dump_error = "znode not found"
-                dump_errors.add("NONODE")
-        else:
-            query_error = _zk_error_name(query_err)
+        client, query_result, query_read_error, query_attempts = _read_zookeeper_lifecycle_with_retry(
+            ctx,
+            state,
+            client,
+            authenticated=authenticated,
+            operation="children",
+            path=str(query_znode),
+        )
+        attempts_done = max(attempts_done, query_attempts)
+        if query_result is None:
+            query_error = str(query_read_error or "ZooKeeper read failed")
             query_value = f"{query_znode}:<error:{query_error}>"
             if dump:
                 query_dump_error = query_error
                 dump_errors.add(query_error)
+        else:
+            children, query_err, query_stat = query_result
+            if query_err == _ZK_ERR_OK:
+                query_value = (
+                    f"{query_znode} (children:{len(children or [])},"
+                    f"bytes:{int((query_stat or {}).get('data_length') or 0)})"
+                )
+                if dump:
+                    client, data_result, data_read_error, data_attempts = _read_zookeeper_lifecycle_with_retry(
+                        ctx,
+                        state,
+                        client,
+                        authenticated=authenticated,
+                        operation="data",
+                        path=str(query_znode),
+                    )
+                    attempts_done = max(attempts_done, data_attempts)
+                    if data_result is None:
+                        query_dump_error = str(data_read_error or "ZooKeeper read failed")
+                        dump_errors.add(query_dump_error)
+                    else:
+                        value, value_err, _stat = data_result
+                        if value_err == _ZK_ERR_OK:
+                            query_dump = _format_znode_data(value)
+                        elif value_err == _ZK_ERR_NOAUTH:
+                            query_dump_error = noauth_text
+                            dump_errors.add("NOAUTH")
+                        elif value_err == _ZK_ERR_NONODE:
+                            query_dump_error = "znode not found"
+                            dump_errors.add("NONODE")
+                        else:
+                            query_dump_error = _zk_error_name(value_err)
+                            dump_errors.add(query_dump_error)
+            elif query_err == _ZK_ERR_NOAUTH:
+                query_value = f"{query_znode}:<{noauth_text}>"
+                query_error = "NOAUTH"
+                if dump:
+                    query_dump_error = noauth_text
+                    dump_errors.add("NOAUTH")
+            elif query_err == _ZK_ERR_NONODE:
+                query_value = f"{query_znode}:<not found>"
+                query_error = "NONODE"
+                if dump:
+                    query_dump_error = "znode not found"
+                    dump_errors.add("NONODE")
+            else:
+                query_error = _zk_error_name(query_err)
+                query_value = f"{query_znode}:<error:{query_error}>"
+                if dump:
+                    query_dump_error = query_error
+                    dump_errors.add(query_error)
 
     dump_ms = int((time.monotonic() - dump_started) * 1000) if dump_started is not None else None
-    root_count = len(state.root_children or [])
-    if total_count == 0 and root_count > 0:
-        total_count = root_count
+    refresh_blocked_enumeration = bool(collect_paths and not enumeration_attempted and refresh_action_error)
+    coverage_partial = bool(truncated or noauth_partial or enum_error or refresh_blocked_enumeration)
     errors: list[str] = []
-    for item in (payload.get("error"), reopen_error, capability_error, enum_error):
+    for item in (payload.get("error"), refresh_action_error, enum_error):
         clean = str(item or "").strip()
         if clean and clean not in errors:
             errors.append(clean)
@@ -2144,30 +2586,41 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
             "dump_limit": options.get("dump_limit"),
             "query_znode": query_znode,
             "max_znodes": int(options["max_znodes"]),
-            "znode_count": total_count,
+            "znode_count": None if refresh_blocked_enumeration else total_count if collect_paths else None,
             "znodes": sorted_znodes,
             "znode_details": znode_details,
             "znode_values": znode_values,
-            "znodes_truncated": bool(truncated),
+            "znodes_truncated": bool(truncated or noauth_partial or refresh_blocked_enumeration),
             "query_znode_value": query_value,
             "query_znode_dump": query_dump,
             "query_znode_dump_error": query_dump_error,
-            "can_create_znode": can_create,
-            "can_delete_znode": can_delete,
-            "znode_capability_error": capability_error,
-            "enumerate_ms": enumerate_ms,
+            "can_create_znode": None,
+            "can_delete_znode": None,
+            "znode_capability_error": None,
+            "enumerate_ms": enumerate_ms if collect_paths else None,
             "dump_ms": dump_ms,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "connect_error": reopen_error,
             "enum_error": enum_error,
             "query_error": query_error,
             "dump_error": ",".join(sorted(dump_errors)) if dump_errors else None,
-            "znode_count_partial": bool(enum_error),
+            "znode_count_partial": coverage_partial,
+            "znode_count_unknown": coverage_partial,
+            "znode_truncated_reason": (
+                "session_refresh"
+                if refresh_blocked_enumeration
+                else "max_znodes"
+                if truncated and not enum_error
+                else "noauth"
+                if noauth_partial and not enum_error
+                else None
+            ),
+            "stage2_error": refresh_action_error or enum_error or payload.get("stage2_error"),
             "attempts": attempts_done,
             "max_attempts": attempts,
             "stage_attempts": {
                 **prior_stage_attempts,
-                "access_capabilities": attempts_done,
+                "access_capabilities": 0,
                 "data": attempts_done,
             },
             "error": "; ".join(errors) if errors else None,
@@ -2179,12 +2632,30 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
 def _nxc_prefix(record: dict[str, Any]) -> str:
     host = _clip(str(record.get("host") or "-"), 64)
     port = str(record.get("port") or "-")
-    tag = "KEEPER" if str(record.get("module") or "").lower() == "keeper" else "ZOOKEEPER"
-    return f"{tag:<12}\t{host}\t{port}\t"
+    return f"{'ZOOKEEPER':<12}\t{host}\t{port}\t"
 
 
 def _record_service(record: dict[str, Any]) -> str:
-    return str(record.get("service") or ("keeper" if record.get("module") == "keeper" else "zookeeper"))
+    return str(record.get("service") or "zookeeper")
+
+
+def _zookeeper_implementation(record: Mapping[str, Any]) -> str:
+    implementation = str(record.get("implementation") or record.get("service") or "").strip().lower()
+    keeper_match = record.get("is_keeper")
+    if keeper_match is True or implementation in {"clickhouse-keeper", "clickhouse keeper", "keeper"}:
+        return "clickhouse-keeper"
+    if keeper_match is False or implementation in {"apache-zookeeper", "apache zookeeper"}:
+        return "apache-zookeeper"
+    return "zookeeper-compatible"
+
+
+def _zookeeper_implementation_label(record: Mapping[str, Any]) -> str:
+    implementation = _zookeeper_implementation(record)
+    if implementation == "clickhouse-keeper":
+        return "ClickHouse Keeper"
+    if implementation == "apache-zookeeper":
+        return "Apache ZooKeeper"
+    return "ZooKeeper-compatible"
 
 
 def _with_optional_znodes(record: dict[str, Any], message: str) -> str:
@@ -2241,6 +2712,10 @@ def _merge_stage2_record(
         "enum_error",
         "query_error",
         "dump_error",
+        "znode_count_partial",
+        "znode_count_unknown",
+        "znode_truncated_reason",
+        "znode_count_attempt_timeouts",
         "attempts",
         "max_attempts",
         "stages",
@@ -2264,8 +2739,10 @@ def _merge_stage2_record(
         if not partial_hint and isinstance(deep_record.get("znode_count"), int):
             partial_hint = int(deep_record.get("znode_count") or 0) > 0
 
-        merged["znode_count_unknown"] = bool(enum_error)
-        merged["znode_count_partial"] = bool(enum_error) and partial_hint
+        merged["znode_count_unknown"] = bool(deep_record.get("znode_count_unknown")) or bool(enum_error)
+        merged["znode_count_partial"] = bool(deep_record.get("znode_count_partial")) or (
+            bool(enum_error) and partial_hint
+        )
         merged["znode_count_attempt_timeouts"] = (
             [float(timeout)] * stage2_attempts if _is_connection_timeout_error(enum_error) else []
         )
@@ -2316,51 +2793,62 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
         "True" if auth_required_value is True else "False" if auth_required_value is False else "unknown"
     )
 
-    is_keeper_module = str(record.get("module") or "").lower() == "keeper"
-    keeper_match = record.get("is_keeper")
-    detected = (
-        bool(record.get("is_zookeeper_compatible")) and keeper_match is not False
-        if is_keeper_module
-        else bool(record.get("is_zookeeper"))
-    )
+    detected = bool(record.get("is_zookeeper"))
 
     if output_format == "json":
+        detect_payload = {
+            "timestamp": record.get("timestamp"),
+            "type": "detect",
+            "host": record.get("host"),
+            "port": record.get("port"),
+            "service": _record_service(record),
+            "detected": detected,
+            "auth_required": auth_required_value,
+            "auth_inference_source": record.get("auth_inference_source"),
+            "auth_probe_trace": record.get("auth_probe_trace") or [],
+        }
+        implementation = _zookeeper_implementation(record)
+        implementation_confirmed = record.get("is_keeper") is not None
+        vendor = (
+            "clickhouse"
+            if implementation == "clickhouse-keeper"
+            else "apache"
+            if implementation == "apache-zookeeper"
+            else None
+        )
         return json.dumps(
             {
-                "timestamp": record.get("timestamp"),
-                "type": "detect",
-                "host": record.get("host"),
-                "port": record.get("port"),
-                "service": _record_service(record),
-                "detected": detected,
-                "auth_required": auth_required_value,
-                "auth_inference_source": record.get("auth_inference_source"),
-                "auth_probe_trace": record.get("auth_probe_trace") or [],
+                **detect_payload,
+                "module": record.get("module"),
+                "protocol": record.get("protocol") or "zookeeper",
+                "implementation": implementation,
+                "implementation_confidence": record.get("implementation_confidence")
+                or ("confirmed" if implementation_confirmed else "unconfirmed"),
+                "vendor": record.get("vendor") or vendor,
+                "is_keeper": record.get("is_keeper"),
+                "transport": record.get("transport") or "plaintext",
+                "version": record.get("version"),
             },
             ensure_ascii=False,
         )
 
-    if is_keeper_module and keeper_match is False:
-        return ""
     prefix = _nxc_prefix(record)
-    if is_keeper_module:
-        transport = str(record.get("transport") or "unknown")
-        if keeper_match is True:
-            version = str(record.get("version") or "unknown")
-            return f"{prefix} [*] ClickHouse Keeper version:{version} (auth required:{auth_required_text})"
-        return (
-            f"{prefix} [!] ZooKeeper-compatible service "
-            f"(Keeper not confirmed, transport:{transport}, auth required:{auth_required_text})"
-        )
-    return f"{prefix} [*] ZooKeeper Service (auth required:{auth_required_text})"
+    implementation_label = _zookeeper_implementation_label(record)
+    transport = str(record.get("transport") or "plaintext")
+    version = str(record.get("version") or "-")
+    service_label = (
+        "ZooKeeper-compatible Service (implementation:unconfirmed)"
+        if implementation_label == "ZooKeeper-compatible"
+        else implementation_label
+    )
+    return (
+        f"{prefix} [*] {service_label} (auth required:{auth_required_text}) (transport:{transport}) (version:{version})"
+    )
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
     if output_format == "json":
         return json.dumps(record, ensure_ascii=False)
-
-    if str(record.get("module") or "").lower() == "keeper" and record.get("is_keeper") is False:
-        return ""
 
     status = str(record.get("status") or "fail")
     prefix = _nxc_prefix(record)
@@ -2369,6 +2857,10 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     has_attempt_details = isinstance(attempted_credentials, list) and len(attempted_credentials) > 1
 
     if status == "open_no_auth":
+        if record.get("provided_credentials"):
+            credential_verdict = str(record.get("credential_verdict") or "").strip().lower()
+            if credential_verdict.startswith("unverified") or record.get("provided_credentials_ok") is None:
+                return f"{prefix} [!] {_credentials_label(record)} (unverified)"
         return ""
 
     if status == "invalid_credentials_anonymous":
@@ -2385,13 +2877,13 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         if has_attempt_details:
             return ""
         if record.get("provided_credentials"):
-            return f"{prefix} [-] {_credentials_label(record)}"
-        if record.get("auth_inference_source") in {
-            "session_closed_requires_auth",
-            "probe_session_closed_requires_auth",
-        }:
-            return f"{prefix} [-] authentication required by server policy"
-        return f"{prefix} [-] authentication required"
+            credential_verdict = str(record.get("credential_verdict") or "").strip().lower()
+            if credential_verdict == "unsupported_sasl":
+                return f"{prefix} [!] {_credentials_label(record)} (unsupported:SASL)"
+            if record.get("provided_credentials_ok") is False or credential_verdict == "rejected":
+                return f"{prefix} [-] {_credentials_label(record)}"
+            return f"{prefix} [!] {_credentials_label(record)} (unverified)"
+        return ""
 
     if status == "fail" and record.get("provided_credentials") and err.lower().startswith("authentication failed"):
         return f"{prefix} [-] {_credentials_label(record)}"
@@ -2422,10 +2914,19 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         else:
             password_text = str(password)
         verified = attempt.get("provided_credentials_ok") is True
+        explicitly_rejected = (
+            attempt.get("provided_credentials_ok") is False
+            or str(attempt.get("credential_verdict") or "").strip().lower() == "rejected"
+        )
+        credential_verdict = str(attempt.get("credential_verdict") or "").strip().lower()
         status = str(attempt.get("status") or "")
         accepted = verified or status in {"valid_credentials", "weak_default_creds"}
-        if not accepted:
+        if explicitly_rejected:
             lines.append(f"{prefix} [-] {username}:{password_text}")
+            continue
+        if not accepted:
+            detail = "unsupported:SASL" if credential_verdict == "unsupported_sasl" else "unverified"
+            lines.append(f"{prefix} [!] {username}:{password_text} ({detail})")
             continue
         suffix = ""
         if not selected_success_rendered:
@@ -2442,6 +2943,8 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
     query_znode_value = record.get("query_znode_value")
     query_znode_dump = record.get("query_znode_dump")
     query_znode_dump_error = str(record.get("query_znode_dump_error") or "").strip()
+    query_error = str(record.get("query_error") or "").strip()
+    dump_error = str(record.get("dump_error") or "").strip()
 
     znodes_raw = record.get("znodes")
     znode_details_raw = record.get("znode_details")
@@ -2478,6 +2981,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
     znode_count = record.get("znode_count")
     max_znodes = record.get("max_znodes")
     truncated = bool(record.get("znodes_truncated"))
+    truncated_reason = str(record.get("znode_truncated_reason") or "")
     znode_count_unknown = bool(record.get("znode_count_unknown"))
     znode_count_partial = bool(record.get("znode_count_partial"))
     stage2_error = str(record.get("stage2_error") or "").strip()
@@ -2489,8 +2993,13 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
                 attempt_timeouts.append(float(item))
     shown_count = len(znode_details) if znode_details else len(znodes)
     truncation_note = None
-    if truncated and isinstance(znode_count, int) and isinstance(max_znodes, int):
-        truncation_note = f"showing first {shown_count} of {znode_count} znodes (max_znodes={max_znodes})"
+    if truncated_reason == "noauth":
+        truncation_note = "scan partial: one or more znode subtrees are access denied"
+    elif truncated and isinstance(znode_count, int) and isinstance(max_znodes, int):
+        if znode_count_partial:
+            truncation_note = f"scanned first {shown_count} znodes; more may exist (max_znodes={max_znodes})"
+        else:
+            truncation_note = f"showing first {shown_count} of {znode_count} znodes (max_znodes={max_znodes})"
     unknown_note = None
     if znode_count_unknown:
         unknown_note = "znode count unknown"
@@ -2520,6 +3029,9 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
                         "znodes": znodes,
                         "znodes_shown": shown_count,
                         "znodes_truncated": truncated,
+                        "znode_count_partial": znode_count_partial,
+                        "znode_count_unknown": znode_count_unknown,
+                        "znode_truncated_reason": record.get("znode_truncated_reason"),
                         "max_znodes": max_znodes,
                         "znode_details": znode_details,
                     },
@@ -2537,6 +3049,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
                         "port": record.get("port"),
                         "znode": query_znode,
                         "value": query_znode_value,
+                        "error": query_error or None,
                     },
                     ensure_ascii=False,
                 )
@@ -2557,7 +3070,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
                     ensure_ascii=False,
                 )
             )
-        if dump and not query_znode and znode_values:
+        if dump and not query_znode and (znode_values_raw is not None or dump_error):
             lines.append(
                 json.dumps(
                     {
@@ -2568,6 +3081,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
                         "port": record.get("port"),
                         "znode_count": record.get("znode_count"),
                         "znode_values": znode_values,
+                        "error": dump_error or None,
                     },
                     ensure_ascii=False,
                 )
@@ -2610,7 +3124,7 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
             lines.append(f"{prefix} [-] {query_znode_dump_error}")
         else:
             lines.append(f"{prefix} <no data>")
-    if dump and not query_znode and znode_values:
+    if dump and not query_znode and (znode_values_raw is not None or dump_error):
         lines.append(f"{prefix} [*] Dump Znodes")
         if unknown_note:
             lines.append(f"{prefix} [*] {unknown_note}")
@@ -2618,26 +3132,28 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
             lines.append(f"{prefix} [*] {truncation_note}")
         for item in znode_values:
             lines.append(f"{prefix} {item}")
-    if unknown_note and not znode_details and not znode_values and (show_znodes or dump):
+        if dump_error and not znode_values:
+            lines.append(f"{prefix} [-] {dump_error}")
+    dump_section_rendered = bool(dump and not query_znode and (znode_values_raw is not None or dump_error))
+    if unknown_note and not znode_details and not znode_values and (show_znodes or dump) and not dump_section_rendered:
         lines.append(f"{prefix} [*] {unknown_note}")
     return lines
 
 
 def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
-    tag = "KEEPER" if line.startswith("KEEPER") else "ZOOKEEPER"
     if render_colored_marker_line(
         console,
         line,
-        tag=tag,
+        tag="ZOOKEEPER",
         booleans=(BooleanColorRule("create"), BooleanColorRule("delete")),
         counts=(CountColorRule("znodes", "red"),),
     ):
         return True
-    if line.startswith(tag) and "\t" in line:
+    if line.startswith("ZOOKEEPER") and "\t" in line:
         return render_tagged_detail_line(
             console,
             line,
-            tag=tag,
+            tag="ZOOKEEPER",
             default_color="orange",
             count_pattern_color="white",
             strip_paren_wrappers=False,

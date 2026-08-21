@@ -144,14 +144,60 @@ def test_http_get_details_http_error_truncates_body_without_headers() -> None:
         "truncated": True,
         "error": None,
     }
+    assert details.raw_body == b"service"
+
+
+def test_exporter_http_url_brackets_ipv6_literal() -> None:
+    assert http_client.build_http_url("2001:db8::7", 9100, "/metrics") == "http://[2001:db8::7]:9100/metrics"
+    assert http_pool.HTTPConnectionPool._target_from_url("http://[2001:db8::7]:9100/metrics") == (
+        "http",
+        "2001:db8::7",
+        9100,
+        "/metrics",
+    )
+
+
+def test_urllib_and_pool_return_redirect_without_following(monkeypatch: pytest.MonkeyPatch) -> None:
+    redirect = urllib.error.HTTPError(
+        "http://example.test/metrics",
+        302,
+        "found",
+        {"Location": "/login"},
+        _Response(302, b"redirect"),
+    )
+
+    class _Opener:
+        def open(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise redirect
+
+    monkeypatch.setattr(http_client, "_NO_REDIRECT_OPENER", _Opener())
+    direct = http_client.http_get_details("http://example.test/metrics", 1.0, retries=0)
+
+    class _Pool:
+        def get(self, *_args: Any, **_kwargs: Any) -> tuple[int, bytes, str, None, bool]:
+            return 302, b"redirect", "text/plain", None, False
+
+        def close(self) -> None:
+            return None
+
+    with http_pool.activate_http_pool(_Pool()):
+        pooled = http_client.http_get_details("http://example.test/metrics", 1.0, retries=0)
+
+    assert direct["status"] == pooled["status"] == 302
+    assert direct["body"] == pooled["body"] == "redirect"
 
 
 def test_http_connection_pool_target_release_and_compat_paths(monkeypatch) -> None:
-    with pytest.raises(ValueError):
-        http_pool.HTTPConnectionPool._target_from_url("https://example.test/")
+    assert http_pool.HTTPConnectionPool._target_from_url("https://example.test/") == (
+        "https",
+        "example.test",
+        443,
+        "/",
+    )
     with pytest.raises(ValueError):
         http_pool.HTTPConnectionPool._target_from_url("http:///missing-host")
     assert http_pool.HTTPConnectionPool._target_from_url("http://example.test:8080/a?b=1") == (
+        "http",
         "example.test",
         8080,
         "/a?b=1",
@@ -208,7 +254,7 @@ def test_http_connection_pool_target_release_and_compat_paths(monkeypatch) -> No
     assert created[0].closed is True
 
     new = FakeConnection("other.test", 80, 1.0)
-    pool._release("other.test", 80, new, True)
+    pool._release("http", "other.test", 80, new, True)
     assert pool._idle_total == 1
     pool.close()
     assert pool._idle_total == 0
@@ -241,15 +287,15 @@ def test_http_connection_pool_close_error_and_exception_paths(monkeypatch) -> No
     assert truncated is False
 
     reusable = CloseRaises()
-    pool._release("example.test", 80, reusable, True)
+    pool._release("http", "example.test", 80, reusable, True)
     duplicate = CloseRaises()
-    pool._release("example.test", 80, duplicate, True)
+    pool._release("http", "example.test", 80, duplicate, True)
     assert pool._idle_total == 1
     pool.close()
     assert pool._idle_total == 0
 
     non_reusable = CloseRaises()
-    pool._release("example.test", 80, non_reusable, False)
+    pool._release("http", "example.test", 80, non_reusable, False)
 
 
 def test_activate_http_pool_restores_previous_and_http_client_pooled_paths() -> None:

@@ -87,6 +87,27 @@ def configure_mongodb_parser(
         action="store_true",
         help="Try the curated MongoDB default/common credential set after provided or file credentials.",
     )
+    transport = parser.add_argument_group("TLS")
+    transport.add_argument("--tls", action="store_true", help="Use TLS for MongoDB connections.")
+    transport.add_argument(
+        "--tls-ca",
+        dest="tls_ca",
+        default=None,
+        metavar="file",
+        help="CA bundle used to verify the MongoDB server certificate (implies --tls).",
+    )
+    transport.add_argument(
+        "--tls-cert-key",
+        dest="tls_cert_key",
+        default=None,
+        metavar="pem",
+        help="Client certificate and private key PEM for MongoDB mTLS (implies --tls).",
+    )
+    transport.add_argument(
+        "--tls-insecure",
+        action="store_true",
+        help="Use TLS without certificate or hostname verification.",
+    )
 
     discovery.add_argument(
         "--show-databases",

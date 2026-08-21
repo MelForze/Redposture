@@ -114,14 +114,14 @@ def test_logger_trigger_callback_mode_debug_shows_duplicates(capsys: pytest.Capt
     assert out.count("[CRED]") == 2
 
 
-def test_logger_trigger_callback_stats_are_unique_even_in_debug_mode() -> None:
+def test_logger_trigger_callback_stats_count_connections_not_rendered_duplicates() -> None:
     logger = AttemptLogger()
     logger.set_trigger_callback_mode(True, deduplicate=False)
     logger.log("redis", ("10.0.0.8", 50003), username="default", password="redis", listen_port=6379)
     logger.log("redis", ("10.0.0.8", 50004), username="default", password="redis", listen_port=6379)
     stats = logger.get_trigger_callback_stats()
-    assert stats["total"] == 1
-    assert stats["by_service"]["redis"] == 1
+    assert stats["total"] == 2
+    assert stats["by_service"]["redis"] == 2
 
 
 def test_logger_writes_full_unclipped_line_to_text_file(tmp_path: Path) -> None:

@@ -18,6 +18,7 @@ def configure_grpc_parser(
 ) -> None:
     common = parser.add_argument_group("Common")
     auth = parser.add_argument_group("Auth")
+    tls = parser.add_argument_group("TLS")
     analysis = parser.add_argument_group("Analysis")
     invoke = parser.add_argument_group("Invoke / Metadata")
     schema = parser.add_argument_group("Schema")
@@ -43,6 +44,51 @@ def configure_grpc_parser(
         choices=("json", "txt"),
         default="txt",
         help="gRPC audit output format for stdout/file.",
+    )
+
+    transport_mode = tls.add_mutually_exclusive_group()
+    transport_mode.add_argument(
+        "--tls",
+        action="store_true",
+        help="Require TLS for native gRPC and gRPC-Web probes.",
+    )
+    transport_mode.add_argument(
+        "--plaintext",
+        action="store_true",
+        help="Require plaintext and disable automatic TLS probing.",
+    )
+    tls.add_argument(
+        "--insecure",
+        action="store_true",
+        help="Disable gRPC TLS certificate and hostname verification.",
+    )
+    tls.add_argument(
+        "--tls-ca",
+        dest="tls_ca",
+        default=None,
+        metavar="file",
+        help="CA certificate bundle for gRPC TLS verification.",
+    )
+    tls.add_argument(
+        "--tls-cert",
+        dest="tls_cert",
+        default=None,
+        metavar="file",
+        help="Client certificate for gRPC mTLS.",
+    )
+    tls.add_argument(
+        "--tls-key",
+        dest="tls_key",
+        default=None,
+        metavar="file",
+        help="Client private key for gRPC mTLS.",
+    )
+    tls.add_argument(
+        "--tls-server-name",
+        dest="tls_server_name",
+        default=None,
+        metavar="name",
+        help="Override the gRPC TLS SNI and certificate hostname (useful when connecting by IP).",
     )
 
     auth.add_argument(

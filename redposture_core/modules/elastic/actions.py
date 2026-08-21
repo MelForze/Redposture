@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig
+from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url
 from ...console import Console
 from ...rendering import BooleanColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
@@ -100,18 +100,18 @@ _COMMON_ENDPOINT_PROBES = (
     "/_remote/info",
 )
 _ELASTIC_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
+    ("admin", "admin"),
+    ("admin", "changeme"),
+    ("admin", "password"),
     ("elastic", "changeme"),
     ("elastic", "elastic"),
     ("elastic", "password"),
-    ("admin", "admin"),
-    ("admin", "password"),
-    ("admin", "changeme"),
-    ("opensearch", "opensearch"),
-    ("opensearch", "password"),
-    ("kibana", "kibana"),
     ("kibana", "changeme"),
+    ("kibana", "kibana"),
     ("logstash", "logstash"),
     ("logstash_system", "changeme"),
+    ("opensearch", "opensearch"),
+    ("opensearch", "password"),
 )
 _AUTH_UNSUPPORTED_REASON_RE = re.compile(
     r"(?:"
@@ -122,6 +122,8 @@ _AUTH_UNSUPPORTED_REASON_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+_OPENSEARCH_PRIVILEGE_VERIFICATION_UNSUPPORTED = "privilege verification unsupported for OpenSearch"
+_SECURITY_USERS_API_UNSUPPORTED = "security users API unsupported"
 
 
 @dataclass
@@ -210,7 +212,7 @@ def _redact_auth_state_details(state: ElasticLifecycleState, api_token: str | No
 
 def _auth_probe_status(result: ElasticAuthProbeResult) -> str:
     if result.valid is True:
-        return "verified"
+        return "verified" if result.username is not None else "accepted"
     if result.valid is False:
         return "rejected"
     if result.status == 0:
@@ -433,7 +435,7 @@ def _elastic_request(
             data=data,
         )
     else:
-        url = f"{scheme}://{_http_url_host(host)}:{port}{path}"
+        url = build_http_target_url(host, port, path, default_scheme=scheme)
         response = HttpApiClient(
             HttpClientConfig(
                 timeout=timeout,
@@ -918,6 +920,18 @@ def _classify_detect_probe(
 
     if error and status <= 0:
         return {"signal_kind": kind, "signals": signals, "version": version, "vendor": vendor}
+
+    authenticate = str(_header_lookup(headers, "WWW-Authenticate") or "").strip().lower()
+    if status in {401, 403} and "opensearch security" in authenticate:
+        # OpenSearch Security deliberately returns a plain-text ``Unauthorized`` body
+        # before authentication.  The realm is an explicit product fingerprint and lets
+        # detection stay anonymous (credentials/tokens are only sent in the auth stage).
+        return {
+            "signal_kind": "hard_positive",
+            "signals": ["opensearch_security_realm"],
+            "version": None,
+            "vendor": "opensearch",
+        }
 
     body = _load_json_dict_loose(payload, headers)
     opensearch_marker = _detect_opensearch_marker(headers, body)
@@ -1598,7 +1612,7 @@ def _fetch_cluster_data(
     nodes_status, nodes_payload, _nodes_headers, nodes_error = _elastic_request(
         host,
         port,
-        "/_nodes?filter_path=nodes.*.name,nodes.*.roles,nodes.*.ip,nodes.*.host",
+        "/_nodes?filter_path=nodes.*.name,nodes.*.roles,nodes.*.ip,nodes.*.host,nodes.*.version",
         timeout,
         use_https=scheme == "https",
         insecure=insecure,
@@ -1624,6 +1638,8 @@ def _fetch_cluster_data(
                 continue
             roles = node_data.get("roles")
             role_list = [str(role) for role in roles if isinstance(role, str)] if isinstance(roles, list) else []
+            raw_version = node_data.get("version")
+            node_version = raw_version.strip() if isinstance(raw_version, str) and raw_version.strip() else None
             parsed_nodes.append(
                 {
                     "id": str(node_id),
@@ -1631,11 +1647,24 @@ def _fetch_cluster_data(
                     "ip": str(node_data.get("ip") or "-"),
                     "host": str(node_data.get("host") or "-"),
                     "roles": role_list,
+                    "version": node_version,
                 }
             )
 
     parsed_nodes.sort(key=lambda item: str(item.get("name") or ""))
     return health, parsed_nodes, None
+
+
+def _server_version_from_cluster_nodes(nodes: list[dict[str, Any]] | None) -> str | None:
+    """Return an authoritative node version already fetched by ``--cluster``."""
+
+    if not isinstance(nodes, list):
+        return None
+    for node in nodes:
+        raw_version = node.get("version")
+        if isinstance(raw_version, str) and raw_version.strip():
+            return raw_version.strip()
+    return None
 
 
 def _normalize_setting_value(value: Any) -> str:
@@ -1738,9 +1767,10 @@ def _build_misconfig_findings(values_by_key: dict[str, list[str]]) -> list[dict[
                 add(key, value, "http tls is disabled")
             if key in {"http.bind_host", "network.host"} and _is_world_bind(value):
                 add(key, value, "service is bound to all interfaces")
-            if key in {"script.allowed_types", "script.allowed_contexts"} and (
-                "inline" in value.lower() or value.strip() in {"*", "all"}
-            ):
+            if key in {"script.allowed_types", "script.allowed_contexts"} and value.strip().lower() in {
+                "*",
+                "all",
+            }:
                 add(key, value, "script execution appears permissive")
             if key == "script.inline" and _is_truthy_setting(value):
                 add(key, value, "inline script execution is enabled")
@@ -1822,43 +1852,80 @@ def _fetch_security_users(
     insecure: bool,
     ca_file: str | None,
     auth_headers: dict[str, str],
+    vendor: str | None = None,
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
-    status, payload, _headers, error = _elastic_request(
-        host,
-        port,
-        "/_security/user",
-        timeout,
-        use_https=scheme == "https",
-        insecure=insecure,
-        ca_file=ca_file,
-        headers=auth_headers,
-    )
-    if error:
-        return None, error
-    if status in {401, 403}:
-        return None, "Access Denied"
-    if status != 200:
-        return None, f"status={status}"
+    normalized_vendor = _normalize_vendor(vendor)
+    paths: tuple[str, ...]
+    if normalized_vendor == "opensearch":
+        paths = ("/_plugins/_security/api/internalusers", "/_security/user")
+    elif normalized_vendor == "elasticsearch":
+        paths = ("/_security/user",)
+    else:
+        paths = ("/_security/user", "/_plugins/_security/api/internalusers")
 
-    body = _load_json_dict(payload)
-    if body is None:
-        return None, "invalid users payload"
-
-    users: list[dict[str, Any]] = []
-    for username, meta in body.items():
-        if not isinstance(meta, dict):
-            continue
-        roles = meta.get("roles")
-        users.append(
-            {
-                "username": str(username),
-                "roles": [str(role) for role in roles if isinstance(role, str)] if isinstance(roles, list) else [],
-                "enabled": bool(meta.get("enabled")) if meta.get("enabled") is not None else None,
-                "full_name": str(meta.get("full_name") or ""),
-            }
+    last_status: int | None = None
+    for index, path in enumerate(paths):
+        status, payload, _headers, error = _elastic_request(
+            host,
+            port,
+            path,
+            timeout,
+            use_https=scheme == "https",
+            insecure=insecure,
+            ca_file=ca_file,
+            headers=auth_headers,
         )
-    users.sort(key=lambda item: str(item.get("username") or ""))
-    return users, None
+        if error:
+            return None, error
+        if status in {401, 403}:
+            return None, "Access Denied"
+        last_status = status
+        if status != 200:
+            body_text = payload.decode("utf-8", errors="replace")
+            unsupported = status in {404, 405} or (
+                status == 400 and _AUTH_UNSUPPORTED_REASON_RE.search(body_text) is not None
+            )
+            if unsupported:
+                if index + 1 < len(paths):
+                    continue
+                return None, _SECURITY_USERS_API_UNSUPPORTED
+            return None, f"status={status}"
+
+        body = _load_json_dict(payload)
+        if body is None:
+            return None, "invalid users payload"
+
+        users: list[dict[str, Any]] = []
+        for username, meta in body.items():
+            if not isinstance(meta, dict):
+                continue
+            role_keys = (
+                ("backend_roles", "opendistro_security_roles", "roles")
+                if path.endswith("/internalusers")
+                else ("roles",)
+            )
+            roles: list[str] = []
+            for role_key in role_keys:
+                role_values = meta.get(role_key)
+                if not isinstance(role_values, list):
+                    continue
+                for role in role_values:
+                    if isinstance(role, str) and role not in roles:
+                        roles.append(role)
+            enabled_value = meta.get("enabled")
+            if enabled_value is None and meta.get("disabled") is not None:
+                enabled_value = not bool(meta.get("disabled"))
+            users.append(
+                {
+                    "username": str(username),
+                    "roles": roles,
+                    "enabled": bool(enabled_value) if enabled_value is not None else None,
+                    "full_name": str(meta.get("full_name") or meta.get("description") or ""),
+                }
+            )
+        users.sort(key=lambda item: str(item.get("username") or ""))
+        return users, None
+    return None, f"status={last_status}" if last_status is not None else "users endpoint unavailable"
 
 
 def _check_privileges(
@@ -1870,7 +1937,15 @@ def _check_privileges(
     insecure: bool,
     ca_file: str | None,
     auth_headers: dict[str, str],
+    vendor: str | None = None,
 ) -> tuple[bool | None, bool | None, bool | None, bool | None, str | None]:
+    if _normalize_vendor(vendor) == "opensearch":
+        # OpenSearch has no equivalent of Elasticsearch's `_has_privileges` response.
+        # `permissionsinfo` only describes access to the Security REST API, so mapping it
+        # to read/write/manage would overstate endpoint access. Preserve the limitation
+        # in structured/debug data without sending another network request.
+        return None, None, None, None, _OPENSEARCH_PRIVILEGE_VERIFICATION_UNSUPPORTED
+
     body = {
         "cluster": ["monitor", "manage", "manage_security"],
         "index": [
@@ -2425,6 +2500,22 @@ def _probe_authenticate(
                 capability_state.unsupported_auth_endpoints.discard(endpoint)
                 capability_state.unsupported_auth_details.pop(endpoint, None)
             detail = _parse_elastic_error(status, payload)
+            if status == 403:
+                detail.update(
+                    {
+                        "type": "credential_accepted_identity_forbidden",
+                        "reason": "credential was accepted but cannot access the identity endpoint",
+                    }
+                )
+                return ElasticAuthProbeResult(
+                    valid=True,
+                    error=None,
+                    username=None,
+                    status=status,
+                    endpoint=endpoint,
+                    detail=detail,
+                    verification_capability="credential_accepted_identity_unavailable",
+                )
             return ElasticAuthProbeResult(
                 valid=False,
                 error="authentication failed",
@@ -2487,6 +2578,22 @@ def _probe_authenticate(
         fallback_detail = _parse_elastic_error(root_status, root_payload)
         fallback_detail["fallback"] = True
         fallback_detail["fallback_endpoint"] = "/"
+        if root_status == 403:
+            fallback_detail.update(
+                {
+                    "type": "credential_accepted_access_forbidden",
+                    "reason": "credential was accepted but cannot access the root endpoint",
+                }
+            )
+            return ElasticAuthProbeResult(
+                valid=True,
+                error=None,
+                username=None,
+                status=root_status,
+                endpoint="/",
+                detail=fallback_detail,
+                verification_capability="credential_accepted_identity_unavailable",
+            )
         return ElasticAuthProbeResult(
             valid=False,
             error="authentication failed",
@@ -2988,6 +3095,8 @@ def _audit_elastic_host(
                     "api_key_probe_error": None,
                     "effective_username": None,
                     "auth_valid": None,
+                    "credential_accepted": None,
+                    "identity_verified": None,
                     "show_endpoints": show_endpoints,
                     "show_plugins": show_plugins,
                     "show_cluster": show_cluster,
@@ -3149,6 +3258,8 @@ def _audit_elastic_host(
             "api_key_probe_error": None,
             "effective_username": effective_username,
             "auth_valid": auth_valid,
+            "credential_accepted": auth_valid is True,
+            "identity_verified": auth_valid is True and effective_username is not None,
             "auth_probe_status": auth_probe_status,
             "auth_probe_http_status": auth_probe_http_status,
             "auth_probe_endpoint": auth_probe_endpoint,
@@ -3158,6 +3269,8 @@ def _audit_elastic_host(
             "credential_verification": {
                 "status": auth_probe_status or "not_requested",
                 "capability": verification_capability,
+                "credential_accepted": auth_valid is True,
+                "identity_verified": auth_valid is True and effective_username is not None,
                 "supported_endpoint": auth_probe_endpoint
                 if verification_capability == "identity_endpoint_supported"
                 else None,
@@ -3243,6 +3356,7 @@ def _audit_elastic_host(
                 insecure=effective_insecure,
                 ca_file=ca_file,
                 auth_headers=deep_auth_headers,
+                vendor=str(base_record.get("vendor") or "compatible"),
             )
             access_level = _normalize_access_level(
                 can_read=can_read,
@@ -3261,7 +3375,9 @@ def _audit_elastic_host(
                     auth_headers=deep_auth_headers,
                 )
             stage3_error = "; ".join(
-                str(item) for item in (rights_error, api_key_probe_error) if str(item or "").strip()
+                str(item)
+                for item in (rights_error, api_key_probe_error)
+                if str(item or "").strip() not in {"", _OPENSEARCH_PRIVILEGE_VERIFICATION_UNSUPPORTED}
             )
             _stage_trace(
                 _STAGE_ACCESS_CAPABILITIES,
@@ -3327,6 +3443,8 @@ def _audit_elastic_host(
                 ca_file=ca_file,
                 auth_headers=deep_auth_headers,
             )
+            if base_record.get("server_version") is None:
+                base_record["server_version"] = _server_version_from_cluster_nodes(cluster_nodes)
             misconfig_findings, misconfig_error = _fetch_cluster_misconfig_findings(
                 host,
                 port,
@@ -3345,6 +3463,7 @@ def _audit_elastic_host(
                 insecure=effective_insecure,
                 ca_file=ca_file,
                 auth_headers=deep_auth_headers,
+                vendor=str(base_record.get("vendor") or "compatible"),
             )
         if discover:
             discover_report = _collect_discover_report(
@@ -3366,7 +3485,7 @@ def _audit_elastic_host(
         stage4_error = "; ".join(
             str(item)
             for item in (endpoints_error, plugins_error, cluster_error, misconfig_error, users_error, discover_error)
-            if str(item or "").strip()
+            if str(item or "").strip() not in {"", _SECURITY_USERS_API_UNSUPPORTED}
         )
         stage4_requested = requested_actions
         _stage_trace(
@@ -3391,6 +3510,11 @@ def _audit_elastic_host(
             discover_error,
         ):
             clean = str(value or "").strip()
+            if clean in {
+                _OPENSEARCH_PRIVILEGE_VERIFICATION_UNSUPPORTED,
+                _SECURITY_USERS_API_UNSUPPORTED,
+            }:
+                continue
             if clean and clean not in errors:
                 errors.append(clean)
 
@@ -3457,6 +3581,8 @@ def _audit_elastic_host(
             "api_key_probe_error": None,
             "effective_username": None,
             "auth_valid": None,
+            "credential_accepted": None,
+            "identity_verified": None,
             "show_endpoints": show_endpoints,
             "show_plugins": show_plugins,
             "show_cluster": show_cluster,
@@ -3554,6 +3680,8 @@ def _credential_verification_payload(
     return {
         "status": _auth_probe_status(auth_probe),
         "capability": auth_probe.verification_capability,
+        "credential_accepted": auth_probe.valid is True,
+        "identity_verified": auth_probe.valid is True and auth_probe.username is not None,
         "supported_endpoint": state.supported_auth_endpoint,
         "unsupported_endpoints": sorted(state.unsupported_auth_endpoints),
     }
@@ -3669,6 +3797,8 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
             "api_token": None,
             "effective_username": effective_username,
             "auth_valid": auth_valid,
+            "credential_accepted": auth_valid is True,
+            "identity_verified": auth_valid is True and effective_username is not None,
             "auth_probe_status": _auth_probe_status(auth_probe),
             "auth_probe_http_status": auth_probe.status,
             "auth_probe_endpoint": auth_probe.endpoint,
@@ -3736,6 +3866,7 @@ def _collect_elastic_data_with_session(
             insecure=insecure,
             ca_file=ca_file,
             auth_headers=auth_headers,
+            vendor=str(payload.get("vendor") or "compatible"),
         )
         access_level = _normalize_access_level(
             can_read=can_read,
@@ -3802,6 +3933,8 @@ def _collect_elastic_data_with_session(
             ca_file=ca_file,
             auth_headers=auth_headers,
         )
+        if payload.get("server_version") is None:
+            payload["server_version"] = _server_version_from_cluster_nodes(cluster_nodes)
         misconfig_findings, misconfig_error = _fetch_cluster_misconfig_findings(
             host,
             port,
@@ -3820,6 +3953,7 @@ def _collect_elastic_data_with_session(
             insecure=insecure,
             ca_file=ca_file,
             auth_headers=auth_headers,
+            vendor=str(payload.get("vendor") or "compatible"),
         )
     if bool(options["discover"]):
         discover_report = _collect_discover_report(
@@ -3852,6 +3986,11 @@ def _collect_elastic_data_with_session(
         discover_error,
     ):
         clean = str(item or "").strip()
+        if clean in {
+            _OPENSEARCH_PRIVILEGE_VERIFICATION_UNSUPPORTED,
+            _SECURITY_USERS_API_UNSUPPORTED,
+        }:
+            continue
         if clean and clean not in errors:
             errors.append(clean)
     payload.update(
@@ -4474,7 +4613,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
         coverage = record.get("discover_coverage")
         complete = bool(coverage.get("complete")) if isinstance(coverage, dict) else False
         if findings:
-            suffix = f" ({confidence_text})" if confidence_text else ""
+            suffix = f" ({confidence_text})" if debug and confidence_text else ""
             lines.append(f"{prefix} [*] {len(findings)} Secret Findings{suffix}")
             for finding in findings:
                 secret_type = str(finding.get("secret_type") or "secret")
@@ -4491,10 +4630,19 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
                         if location_value is not None and str(location_value).strip():
                             location_parts.append(f"{key}={json.dumps(str(location_value), ensure_ascii=False)}")
                 location_text = " ".join(location_parts) or "location=unknown"
-                lines.append(
-                    f"{prefix} [+] secret_type={secret_type} confidence={confidence} score={score} "
-                    f"value={encoded_value} occurrences={occurrence_count} {location_text}"
-                )
+                finding_line = f"{prefix} [+] secret_type={secret_type} value={encoded_value} {location_text}"
+                if debug:
+                    detectors = finding.get("detectors")
+                    detector_text = json.dumps(
+                        [str(item) for item in detectors] if isinstance(detectors, list) else [],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    finding_line += (
+                        f" confidence={confidence} score={score} detectors={detector_text} "
+                        f"occurrences={occurrence_count}"
+                    )
+                lines.append(finding_line)
         elif complete:
             lines.append(f"{prefix} [*] 0 Secret Findings")
         else:
@@ -4532,11 +4680,34 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
             reasons = ",".join(str(reason) for reason in reasons_raw) if isinstance(reasons_raw, list) else ""
             coverage_status = str(coverage.get("status") or ("complete" if complete else "partial"))
             reason_suffix = f" reasons={reasons}" if reasons else ""
+            surfaces = coverage.get("surfaces")
+            inventory_surface = surfaces.get("index_inventory") if isinstance(surfaces, dict) else None
+            inventory_suffix = ""
+            if indices_discovered == 0 and isinstance(inventory_surface, dict):
+                raw_inventory_status = str(inventory_surface.get("status") or "error").strip().lower()
+                inventory_status = (
+                    raw_inventory_status
+                    if raw_inventory_status in {"complete", "unsupported", "denied", "error"}
+                    else "error"
+                )
+                inventory_suffix = f" inventory={inventory_status}"
             lines.append(
-                f"{prefix} [*] Discover coverage status={coverage_status} "
+                f"{prefix} [*] Discover coverage status={coverage_status}{inventory_suffix} "
                 f"indices={indices_scanned}/{indices_discovered} pages={pages} "
                 f"documents={documents_analyzed} source_bytes={source_bytes}{reason_suffix}"
             )
+            if debug and isinstance(inventory_surface, dict):
+                inventory_error = str(inventory_surface.get("error") or "").strip()
+                if not inventory_error:
+                    inventory_detail = inventory_surface.get("error_detail")
+                    if isinstance(inventory_detail, dict):
+                        inventory_error = str(inventory_detail.get("reason") or "").strip()
+                inventory_reason_suffix = f" reason={_clip(inventory_error, 180)}" if inventory_error else ""
+                lines.append(
+                    f"{prefix} [debug] discover surface=index_inventory "
+                    f"status={str(inventory_surface.get('status') or 'unknown')}"
+                    f"{inventory_reason_suffix}"
+                )
 
         discover_error = str(record.get("discover_error") or "").strip()
         if isinstance(discover_results, list) and discover_results:
@@ -4618,6 +4789,14 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
     return lines
 
 
+def _elastic_finding_color_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
+    """Highlight the complete Elastic secret-finding payload in orange."""
+
+    if "secret_type=" not in payload or "value=" not in payload:
+        return []
+    return [(0, len(payload), "orange")]
+
+
 def _render_colored_elastic_line(console: Console, line: str) -> bool:
     if render_colored_marker_line(
         console,
@@ -4629,6 +4808,7 @@ def _render_colored_elastic_line(console: Console, line: str) -> bool:
             BooleanColorRule("manage"),
             BooleanColorRule("manage_security"),
         ),
+        extra_spans=_elastic_finding_color_spans,
     ):
         return True
     if line.startswith(_ELASTIC_TAG) and "\t" in line:

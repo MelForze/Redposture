@@ -12,6 +12,16 @@ def validate_args(args: Any, console: Any) -> int | None:
     common_rc = validate_basic_module_args(args, console, module="postgres", pure_http=False)
     if common_rc is not None:
         return common_rc
+    sslmode = str(getattr(args, "sslmode", "disable") or "disable")
+    ssl_ca = getattr(args, "ssl_ca", None)
+    ssl_cert = getattr(args, "ssl_cert", None)
+    ssl_key = getattr(args, "ssl_key", None)
+    if ssl_key and not ssl_cert:
+        console.error("--ssl-key requires --ssl-cert")
+        return 2
+    if sslmode == "disable" and any((ssl_ca, ssl_cert, ssl_key, getattr(args, "ssl_server_name", None))):
+        console.error("PostgreSQL TLS certificate options require --sslmode prefer/require/verify-ca/verify-full")
+        return 2
     table_targets = list(getattr(args, "tables", None) or getattr(args, "table", None) or [])
     normalized_tables, _grouped, table_error = _pg_group_table_targets(
         _pg_split_csv_identifiers([str(item) for item in table_targets]),

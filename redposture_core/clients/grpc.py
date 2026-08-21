@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +75,17 @@ class _InvokeResult(dict):
 
 class _GrpcWebCallResult(dict):
     """Typed map wrapper for gRPC-Web call results."""
+
+
+@dataclass(frozen=True)
+class GrpcTlsConfig:
+    """TLS trust and optional client identity for native and gRPC-Web calls."""
+
+    insecure: bool = False
+    ca_file: str | None = None
+    cert_file: str | None = None
+    key_file: str | None = None
+    server_name: str | None = None
 
 
 def _grpc_authority(host: str, port: int) -> str:
@@ -276,18 +288,38 @@ def _http2_headers_to_map(raw_headers: list[tuple[bytes | str, bytes | str]]) ->
     return result
 
 
-def _open_grpc_socket(host: str, port: int, timeout: float, *, use_tls: bool) -> socket.socket:
+def _grpc_ssl_context(config: GrpcTlsConfig | None, *, alpn_h2: bool) -> ssl.SSLContext:
+    tls = config or GrpcTlsConfig(insecure=True)
+    context = ssl.create_default_context(cafile=tls.ca_file) if tls.ca_file else ssl.create_default_context()
+    if tls.insecure:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    if tls.cert_file or tls.key_file:
+        if not tls.cert_file or not tls.key_file:
+            raise ValueError("TLS client certificate and key must be provided together")
+        context.load_cert_chain(certfile=tls.cert_file, keyfile=tls.key_file)
+    if alpn_h2:
+        context.set_alpn_protocols(["h2"])
+    return context
+
+
+def _open_grpc_socket(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    use_tls: bool,
+    tls_config: GrpcTlsConfig | None = None,
+) -> socket.socket:
     base_sock = socket.create_connection((host, port), timeout=timeout)
     base_sock.settimeout(timeout)
     if not use_tls:
         return base_sock
 
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
-    context.set_alpn_protocols(["h2"])
+    context = _grpc_ssl_context(tls_config, alpn_h2=True)
     try:
-        wrapped = context.wrap_socket(base_sock, server_hostname=host)
+        tls = tls_config or GrpcTlsConfig(insecure=True)
+        wrapped = context.wrap_socket(base_sock, server_hostname=tls.server_name or host)
     except BaseException:
         base_sock.close()
         raise
@@ -368,11 +400,20 @@ def _finish_grpc_call_result(
 class _GrpcH2Session:
     """A reusable, sequential HTTP/2 connection for calls to one gRPC target."""
 
-    def __init__(self, host: str, port: int, *, timeout: float, use_tls: bool) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout: float,
+        use_tls: bool,
+        tls_config: GrpcTlsConfig | None = None,
+    ) -> None:
         self.host = host
         self.port = int(port)
         self.timeout = float(timeout)
         self.use_tls = bool(use_tls)
+        self.tls_config = tls_config
         self._sock: socket.socket | None = None
         self._conn: H2Connection | None = None
         self._closed = False
@@ -402,7 +443,13 @@ class _GrpcH2Session:
             self._sock.settimeout(timeout)
             return self._sock, self._conn
 
-        sock = _open_grpc_socket(self.host, self.port, timeout, use_tls=self.use_tls)
+        sock = _open_grpc_socket(
+            self.host,
+            self.port,
+            timeout,
+            use_tls=self.use_tls,
+            tls_config=self.tls_config,
+        )
         conn = H2Connection()
         try:
             conn.initiate_connection()
@@ -475,20 +522,11 @@ class _GrpcH2Session:
                 if normalized_authorization:
                     headers.append(("authorization", normalized_authorization))
 
-                conn.send_headers(stream_id, headers, end_stream=False)
-                conn.send_data(stream_id, _encode_grpc_frame(payload), end_stream=True)
-                pending = conn.data_to_send()
-                if pending:
-                    sock.sendall(pending)
-
                 stream_closed = False
-                while not stream_closed and not connection_terminated:
-                    chunk = sock.recv(64 * 1024)
-                    if not chunk:
-                        result["error"] = "connection closed before gRPC stream ended"
-                        connection_terminated = True
-                        break
-                    events = conn.receive_data(chunk)
+                framed_payload = _encode_grpc_frame(payload)
+
+                def _handle_events(events: Sequence[Any]) -> None:
+                    nonlocal stream_closed, connection_terminated
                     for event in events:
                         event_stream_id = getattr(event, "stream_id", stream_id)
                         if isinstance(event, DataReceived):
@@ -508,6 +546,47 @@ class _GrpcH2Session:
                             connection_terminated = True
                             if not stream_closed and result.get("error") is None:
                                 result["error"] = f"HTTP/2 connection terminated (code={event.error_code})"
+
+                conn.send_headers(stream_id, headers, end_stream=False)
+                offset = 0
+                while offset < len(framed_payload) and not stream_closed and not connection_terminated:
+                    window_getter = getattr(conn, "local_flow_control_window", None)
+                    available_window = (
+                        int(window_getter(stream_id)) if callable(window_getter) else len(framed_payload) - offset
+                    )
+                    window = min(
+                        available_window,
+                        int(getattr(conn, "max_outbound_frame_size", 16_384)),
+                    )
+                    if window <= 0:
+                        pending = conn.data_to_send()
+                        if pending:
+                            sock.sendall(pending)
+                        incoming = sock.recv(64 * 1024)
+                        if not incoming:
+                            result["error"] = "connection closed before request body was sent"
+                            connection_terminated = True
+                            break
+                        _handle_events(conn.receive_data(incoming))
+                        continue
+                    end = min(len(framed_payload), offset + window)
+                    conn.send_data(
+                        stream_id,
+                        framed_payload[offset:end],
+                        end_stream=end == len(framed_payload),
+                    )
+                    offset = end
+                    pending = conn.data_to_send()
+                    if pending:
+                        sock.sendall(pending)
+
+                while not stream_closed and not connection_terminated:
+                    chunk = sock.recv(64 * 1024)
+                    if not chunk:
+                        result["error"] = "connection closed before gRPC stream ended"
+                        connection_terminated = True
+                        break
+                    _handle_events(conn.receive_data(chunk))
 
                     pending = conn.data_to_send()
                     if pending:
@@ -536,6 +615,7 @@ def _grpc_call(
     authorization: str | None,
     metadata: Sequence[tuple[str, str | bytes]] | None = None,
     session: _GrpcH2Session | None = None,
+    tls_config: GrpcTlsConfig | None = None,
 ) -> _GrpcCallResult:
     if session is not None:
         if (session.host, session.port, session.use_tls) != (host, int(port), bool(use_tls)):
@@ -547,7 +627,13 @@ def _grpc_call(
             authorization=authorization,
             metadata=metadata,
         )
-    with _GrpcH2Session(host, port, timeout=timeout, use_tls=use_tls) as owned_session:
+    with _GrpcH2Session(
+        host,
+        port,
+        timeout=timeout,
+        use_tls=use_tls,
+        tls_config=tls_config,
+    ) as owned_session:
         return owned_session.call(
             path=path,
             payload=payload,
@@ -557,16 +643,22 @@ def _grpc_call(
         )
 
 
-def _open_http_socket(host: str, port: int, timeout: float, *, use_tls: bool) -> socket.socket:
+def _open_http_socket(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    use_tls: bool,
+    tls_config: GrpcTlsConfig | None = None,
+) -> socket.socket:
     base_sock = socket.create_connection((host, port), timeout=timeout)
     base_sock.settimeout(timeout)
     if not use_tls:
         return base_sock
-    context = ssl.create_default_context()
-    context.check_hostname = False
-    context.verify_mode = ssl.CERT_NONE
+    context = _grpc_ssl_context(tls_config, alpn_h2=False)
     try:
-        wrapped = context.wrap_socket(base_sock, server_hostname=host)
+        tls = tls_config or GrpcTlsConfig(insecure=True)
+        wrapped = context.wrap_socket(base_sock, server_hostname=tls.server_name or host)
     except BaseException:
         base_sock.close()
         raise
@@ -576,6 +668,65 @@ def _open_http_socket(host: str, port: int, timeout: float, *, use_tls: bool) ->
         wrapped.close()
         raise
     return wrapped
+
+
+def _chunked_http_body_complete(payload: bytes) -> bool:
+    """Return whether an HTTP chunked body contains its complete terminator.
+
+    Invalid framing is also terminal: the response parser will report the
+    specific error, while the socket reader must not wait for a timeout for
+    bytes that cannot make the already-invalid response valid.
+    """
+
+    offset = 0
+    while True:
+        line_end = payload.find(b"\r\n", offset)
+        if line_end < 0:
+            return False
+        size_token = payload[offset:line_end].split(b";", 1)[0].strip()
+        try:
+            size = int(size_token, 16)
+        except ValueError:
+            return True
+        offset = line_end + 2
+        if size < 0:
+            return True
+        if size == 0:
+            if len(payload) < offset + 2:
+                return False
+            if payload[offset : offset + 2] == b"\r\n":
+                return True
+            return payload.find(b"\r\n\r\n", offset) >= 0
+        end = offset + size
+        if len(payload) < end + 2:
+            return False
+        if payload[end : end + 2] != b"\r\n":
+            return True
+        offset = end + 2
+
+
+def _http1_response_complete(raw: bytes) -> bool:
+    """Recognize self-delimited HTTP/1 responses without waiting for EOF."""
+
+    header_blob, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        return False
+    headers: dict[str, str] = {}
+    for line in header_blob.decode("iso-8859-1", errors="replace").split("\r\n")[1:]:
+        key, colon, value = line.partition(":")
+        if colon:
+            headers[key.strip().lower()] = value.strip()
+    transfer_encoding = headers.get("transfer-encoding", "").lower()
+    if "chunked" in {item.strip() for item in transfer_encoding.split(",")}:
+        return _chunked_http_body_complete(body)
+    content_length = headers.get("content-length")
+    if content_length is None:
+        return False
+    try:
+        expected = int(content_length)
+    except ValueError:
+        return True
+    return expected < 0 or len(body) >= expected
 
 
 def _parse_http1_response(raw: bytes) -> tuple[int | None, dict[str, str], bytes, str | None]:
@@ -593,7 +744,54 @@ def _parse_http1_response(raw: bytes) -> tuple[int | None, dict[str, str], bytes
         key, colon, value = line.partition(":")
         if colon:
             headers[key.strip().lower()] = value.strip()
+    transfer_encoding = headers.get("transfer-encoding", "").lower()
+    if "chunked" in {item.strip() for item in transfer_encoding.split(",")}:
+        try:
+            body = _decode_http1_chunked_body(body)
+        except ValueError as exc:
+            return status, headers, b"", str(exc)
+    elif "content-length" in headers:
+        try:
+            expected = int(headers["content-length"])
+        except ValueError:
+            return status, headers, b"", "malformed HTTP response: invalid Content-Length"
+        if expected < 0:
+            return status, headers, b"", "malformed HTTP response: invalid Content-Length"
+        if len(body) < expected:
+            return status, headers, body, "truncated HTTP response body"
+        body = body[:expected]
     return status, headers, body, None
+
+
+def _decode_http1_chunked_body(payload: bytes) -> bytes:
+    """Decode RFC 9112 chunk framing, including extensions and trailers."""
+
+    output = bytearray()
+    offset = 0
+    while True:
+        line_end = payload.find(b"\r\n", offset)
+        if line_end < 0:
+            raise ValueError("malformed chunked HTTP response: incomplete chunk size")
+        size_token = payload[offset:line_end].split(b";", 1)[0].strip()
+        try:
+            size = int(size_token, 16)
+        except ValueError as exc:
+            raise ValueError("malformed chunked HTTP response: invalid chunk size") from exc
+        offset = line_end + 2
+        if size == 0:
+            # A zero chunk is followed by an optional trailer section ending
+            # in CRLF CRLF; an empty trailer is represented by one CRLF.
+            if payload[offset : offset + 2] == b"\r\n":
+                return bytes(output)
+            trailer_end = payload.find(b"\r\n\r\n", offset)
+            if trailer_end < 0:
+                raise ValueError("malformed chunked HTTP response: incomplete trailers")
+            return bytes(output)
+        end = offset + size
+        if end > len(payload) or payload[end : end + 2] != b"\r\n":
+            raise ValueError("malformed chunked HTTP response: truncated chunk")
+        output.extend(payload[offset:end])
+        offset = end + 2
 
 
 def _decode_grpc_web_frames(payload: bytes) -> tuple[list[bytes], dict[str, str], str | None]:
@@ -634,6 +832,7 @@ def _grpc_web_call(
     use_tls: bool,
     authorization: str | None,
     metadata: Sequence[tuple[str, str | bytes]] | None = None,
+    tls_config: GrpcTlsConfig | None = None,
 ) -> _GrpcWebCallResult:
     started = time.monotonic()
     result: _GrpcWebCallResult = _GrpcWebCallResult(
@@ -660,7 +859,7 @@ def _grpc_web_call(
     try:
         normalized_metadata = _normalize_metadata(metadata)
         normalized_authorization = _normalize_authorization(authorization)
-        sock = _open_http_socket(host, port, timeout, use_tls=use_tls)
+        sock = _open_http_socket(host, port, timeout, use_tls=use_tls, tls_config=tls_config)
         result["transport_ok"] = True
         body = _encode_grpc_frame(payload)
         header_lines = [
@@ -685,6 +884,8 @@ def _grpc_web_call(
             if not chunk:
                 break
             response.extend(chunk)
+            if _http1_response_complete(bytes(response)):
+                break
 
         http_status, response_headers, response_body, parse_error = _parse_http1_response(bytes(response))
         result["http_status"] = http_status
@@ -779,6 +980,7 @@ def _grpc_web_health_check_call(
     use_tls: bool,
     authorization: str | None,
     service_name: str = "",
+    tls_config: GrpcTlsConfig | None = None,
 ) -> _HealthResult:
     call = _grpc_web_call(
         host,
@@ -788,6 +990,7 @@ def _grpc_web_health_check_call(
         timeout=timeout,
         use_tls=use_tls,
         authorization=authorization,
+        tls_config=tls_config,
     )
     grpc_status = call.get("grpc_status")
     messages = call.get("messages") or []
@@ -1441,6 +1644,7 @@ def _invoke_unary_method(
     invoke_path: str,
     request_json: dict[str, Any],
     session: _GrpcH2Session | None = None,
+    tls_config: GrpcTlsConfig | None = None,
 ) -> _InvokeResult:
     started = time.monotonic()
     result: _InvokeResult = _InvokeResult(
@@ -1488,6 +1692,7 @@ def _invoke_unary_method(
                 use_tls=use_tls,
                 authorization=authorization,
                 metadata=metadata,
+                tls_config=tls_config,
             )
         else:
             call = _grpc_call(
@@ -1500,6 +1705,7 @@ def _invoke_unary_method(
                 authorization=authorization,
                 metadata=metadata,
                 session=session,
+                tls_config=tls_config,
             )
         grpc_status = call.get("grpc_status")
         result["grpc_status"] = grpc_status

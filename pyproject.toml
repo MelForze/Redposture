@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "5.13.11"
+version = "5.14.0"
 description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/MongoDB/Docker/Oracle/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper/Keeper/Elasticsearch/gRPC auditing"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -46,6 +46,11 @@ Issues = "https://github.com/MelForze/Redposture/issues"
 redposture = "redposture_core.cli:main"
 
 [project.optional-dependencies]
+kafka-codecs = [
+  "lz4>=4.3.3",
+  "python-snappy>=0.7.3",
+  "zstandard>=0.23.0",
+]
 dev = [
   "mypy>=1.11.0",
   "pre-commit>=3.5.0",

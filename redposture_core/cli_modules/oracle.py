@@ -28,7 +28,7 @@ def configure_oracle_parser(
         type=port_type,
         default=None,
         metavar="port",
-        help="Oracle TNS listener port (default: 1521, 11521).",
+        help="Oracle TNS/TCPS listener port (default: 1521, 2484, 11521).",
     )
     add_multi_ports_flag(common)
     # F9 fix: align --save alias with every other module.

@@ -6,14 +6,17 @@ import argparse
 import json
 import os
 import re
+import ssl
 import sys
 import time
+from collections.abc import Iterable, Iterator
 from typing import Any, TextIO, cast
 
 from .console import Console
 from .constants import COLLECT_DEEP_ENDPOINT_TEMPLATES
 from .exporters.collect import collect_exporter_debug_data
 from .exporters.discover import scan_exporter_presence
+from .exporters.http_client import build_exporter_tls_context
 from .exporters.output import emit_line as emit_output_line
 from .exporters.output import format_collect_record
 from .logger import AttemptLogger
@@ -23,7 +26,6 @@ from .utils import (
     DEFAULT_MAX_NETWORK_HOSTS,
     TargetParsePolicy,
     build_scan_execution_groups,
-    chunked_hosts,
     collect_scan_ports,
     collect_scan_target_specs,
     stream_scan_target_specs,
@@ -37,6 +39,38 @@ COLLECT_VALIDATE_SHOW = True
 COLLECT_VALIDATE_MAX_LINES = 0
 COLLECT_VALIDATE_FAIL_ON_CREDS = False
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _chunk_collect_specs_by_scheme(
+    specs: Iterable[Any],
+    *,
+    size: int = 4096,
+) -> Iterator[tuple[str, list[str]]]:
+    buckets: dict[str, list[str]] = {}
+    seen: dict[str, set[str]] = {}
+    for spec in specs:
+        scheme = str(getattr(spec, "scheme", None) or "http").lower()
+        host = str(spec.host)
+        if host in seen.setdefault(scheme, set()):
+            continue
+        seen[scheme].add(host)
+        bucket = buckets.setdefault(scheme, [])
+        bucket.append(host)
+        if len(bucket) >= size:
+            yield scheme, bucket
+            buckets[scheme] = []
+    for scheme, bucket in buckets.items():
+        if bucket:
+            yield scheme, bucket
+
+
+def _collect_transport_kwargs(scheme: str, tls_context: ssl.SSLContext | None) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {}
+    if scheme != "http":
+        kwargs["scheme"] = scheme
+    if tls_context is not None:
+        kwargs["tls_context"] = tls_context
+    return kwargs
 
 
 def _collect_output_base_dir(args: argparse.Namespace) -> str:
@@ -74,10 +108,21 @@ def _resolve_collect_checkpoint_path(args: argparse.Namespace) -> str:
     return ".redposture_collect.checkpoint.jsonl"
 
 
-def _load_collect_completed_jobs(path: str, *, console: Console | None = None) -> set[tuple[str, str, int, str]]:
-    completed: set[tuple[str, str, int, str]] = set()
+def _load_collect_checkpoint_state(
+    path: str,
+    *,
+    console: Console | None = None,
+) -> dict[tuple[str, str, int, str], dict[str, Any]]:
+    """Load the latest durable state for each collect job.
+
+    JSONL can contain several attempts for a job.  Last-write-wins is
+    intentional here: a later successful retry supersedes an earlier failure,
+    while a failed/latest attempt must remain retryable.
+    """
+
+    state: dict[tuple[str, str, int, str], dict[str, Any]] = {}
     if not path or not os.path.exists(path):
-        return completed
+        return state
     try:
         with open(path, encoding="utf-8") as fh:
             for raw in fh:
@@ -99,11 +144,18 @@ def _load_collect_completed_jobs(path: str, *, console: Console | None = None) -
                     continue
                 if not host or not exporter or not endpoint or port <= 0:
                     continue
-                completed.add((host, exporter, port, endpoint))
+                state[(host, exporter, port, endpoint)] = payload
     except OSError as exc:
         if console is not None:
             console.warn(f"failed to load collect checkpoint '{path}': {exc}")
-    return completed
+    return state
+
+
+def _load_collect_completed_jobs(path: str, *, console: Console | None = None) -> set[tuple[str, str, int, str]]:
+    state = _load_collect_checkpoint_state(path, console=console)
+    # Only an explicitly successful terminal result is safe to skip.  Legacy
+    # rows without `ok` and all failed/transport-error rows are retried.
+    return {key for key, payload in state.items() if payload.get("ok") is True}
 
 
 def _materialize_collect_endpoint(template: str, pprof_seconds: int, trace_seconds: int) -> str:
@@ -237,16 +289,16 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         target_plan = stream_scan_target_specs(
             targets,
             policy=TargetParsePolicy(url_mode="preserve", path_policy="preserve"),
+            exclude_targets=getattr(args, "out_targets", None),
         )
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
         return 2
-    if target_plan.has_scheme("https"):
-        console.error("exporters collect accepts only http:// URL targets for -t/--targets")
-        return 2
     try:
         target_specs = (
-            [] if target_plan.target_count > DEFAULT_MAX_NETWORK_HOSTS else collect_scan_target_specs(targets)
+            []
+            if target_plan.target_count > DEFAULT_MAX_NETWORK_HOSTS
+            else collect_scan_target_specs(targets, exclude_targets=getattr(args, "out_targets", None))
         )
     except (OSError, ValueError) as exc:
         console.error(f"failed to parse targets: {exc}")
@@ -261,6 +313,16 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         custom_ports = collect_scan_ports(getattr(args, "ports", None))
     except ValueError as exc:
         console.error(f"failed to parse --ports: {exc}")
+        return 2
+    try:
+        tls_context = build_exporter_tls_context(
+            insecure=bool(getattr(args, "insecure", False)),
+            ca_file=getattr(args, "tls_ca", None),
+            cert_file=getattr(args, "tls_cert", None),
+            key_file=getattr(args, "tls_key", None),
+        )
+    except (OSError, ValueError, ssl.SSLError) as exc:
+        console.error(f"invalid exporter TLS configuration: {exc}")
         return 2
     target_plan = target_plan.with_additional_ports_for_bare_explicit_targets(bool(custom_ports))
     try:
@@ -278,6 +340,9 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     )
 
     if not target_plan or (target_plan.target_count <= DEFAULT_MAX_NETWORK_HOSTS and not target_specs):
+        if targets and getattr(args, "out_targets", None):
+            console.error("all targets were excluded by --out-target")
+            return 2
         console.error("collect requires -t/--targets")
         return 2
     hosts = list(dict.fromkeys(spec.host for spec in target_specs))
@@ -289,10 +354,12 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     checkpoint_requested = bool(getattr(args, "checkpoint_file", None))
     checkpoint_path: str | None = None
     completed_jobs: set[tuple[str, str, int, str]] = set()
+    checkpoint_state: dict[tuple[str, str, int, str], dict[str, Any]] = {}
     if resume_enabled or checkpoint_requested:
         checkpoint_path = _resolve_collect_checkpoint_path(args)
     if resume_enabled and checkpoint_path:
-        completed_jobs = _load_collect_completed_jobs(checkpoint_path, console=console)
+        checkpoint_state = _load_collect_checkpoint_state(checkpoint_path, console=console)
+        completed_jobs = {key for key, payload in checkpoint_state.items() if payload.get("ok") is True}
     pprof_seconds = int(getattr(args, "pprof_seconds", 5))
     trace_seconds = int(getattr(args, "trace_seconds", 2))
     adaptive_collect = bool(getattr(args, "adaptive_collect", True))
@@ -309,6 +376,24 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         pprof_seconds=pprof_seconds,
         trace_seconds=trace_seconds,
     )
+    selected_profile_names = {
+        str(item.get("name") or "") for item in collect_exporters if str(item.get("name") or "").strip()
+    }
+    scoped_completed_jobs = {
+        key
+        for key in completed_jobs
+        if (key[0] in hosts if hosts else target_plan.contains_host(key[0]))
+        and (not selected_profile_names or key[1] in selected_profile_names)
+        and key[3] in collect_endpoints
+    }
+    if resume_enabled:
+        for job_key in sorted(scoped_completed_jobs):
+            payload = checkpoint_state.get(job_key, {})
+            prior_record = payload.get("record")
+            if isinstance(prior_record, dict):
+                validator.feed(dict(prior_record))
+    completed_jobs = scoped_completed_jobs
+    resumed_success = len(completed_jobs)
     if args.debug:
         mode = "deep" if deep else "default"
         console.debug(f"collect endpoints mode={mode} count={len(collect_endpoints)}")
@@ -331,7 +416,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         is_discovery_line = line.startswith("SCAN")
         if is_discovery_line:
             line = f"{'DISCOVER':<8}" + line[8:]
-        if is_discovery_line and not args.debug and " [+] " not in line:
+        if is_discovery_line and not args.debug and " [+] " not in line and " [!] " not in line:
             return
         if " [*] " in line:
             if args.debug:
@@ -455,20 +540,31 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         finally:
             validate_console.close()
 
-    def _emit_collect_summary(hosts_count: int, requests_count: int, success_count: int, *, mode: str = "a") -> None:
-        if not args.output:
-            return
-        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+    def _emit_collect_summary(
+        hosts_count: int,
+        requests_count: int,
+        success_count: int,
+        *,
+        errors_count: int = 0,
+        mode: str = "a",
+    ) -> None:
         summary = {
             "timestamp": utc_now_iso(),
             "type": "summary",
             "hosts": hosts_count,
             "requests": requests_count,
             "success": success_count,
+            "errors": errors_count,
+            "resumed": resumed_success,
             "output_path": args.output,
         }
-        with open(args.output, mode, encoding="utf-8") as out_fh:
-            emit_output_line(out_fh, emit_line, format_collect_record(summary, args.output_format))
+        line = format_collect_record(summary, args.output_format)
+        if args.output:
+            os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
+            with open(args.output, mode, encoding="utf-8") as out_fh:
+                emit_output_line(out_fh, emit_line, line)
+        else:
+            emit_output_line(None, emit_line, line)
 
     if target_plan.target_count > DEFAULT_MAX_NETWORK_HOSTS:
         if args.debug:
@@ -476,14 +572,23 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         default_ports = default_exporter_ports(discovery_exporters)
         scan_checks = 0
         scan_found = 0
+        scan_errors = 0
         requests = 0
         success = 0
+        collect_errors = 0
         collect_stats: dict[str, int] = {}
+        skipped_jobs_total = 0
         collect_chunk_index = 0
         data_started_at = time.monotonic()
 
-        def _process_host_chunk(host_chunk: list[str], ports_for_scan: list[int] | None) -> int:
-            nonlocal scan_checks, scan_found, requests, success, collect_chunk_index
+        def _process_host_chunk(
+            host_chunk: list[str],
+            ports_for_scan: list[int] | None,
+            scheme: str,
+        ) -> int:
+            nonlocal scan_checks, scan_found, scan_errors, requests, success, collect_errors
+            nonlocal collect_chunk_index, skipped_jobs_total
+            part_scan_stats: dict[str, int] = {}
             part_checks, part_found, part_found_by_host = scan_exporter_presence(
                 hosts=host_chunk,
                 timeout=args.timeout,
@@ -499,9 +604,12 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 show_progress=False,
                 progress_leave=False,
                 progress_owner=getattr(args, "_progress_owner", None),
+                stats_sink=part_scan_stats,
+                **_collect_transport_kwargs(scheme, tls_context),
             )
             scan_checks += part_checks
             scan_found += part_found
+            scan_errors += int(part_scan_stats.get("errors", 0))
             if part_found <= 0:
                 return 0
             part_requests, part_success = collect_exporter_debug_data(
@@ -528,21 +636,26 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 checkpoint_mode="a" if (resume_enabled or collect_chunk_index > 0) else "w",
                 stats_sink=collect_stats,
                 progress_owner=getattr(args, "_progress_owner", None),
+                **_collect_transport_kwargs(scheme, tls_context),
             )
             collect_chunk_index += 1
             requests += part_requests
             success += part_success
+            collect_errors += int(collect_stats.get("errors", 0))
+            skipped_jobs_total += int(collect_stats.get("skipped_jobs", 0))
             return part_found
 
         try:
             if not target_plan.has_explicit_port_targets:
-                for host_chunk in chunked_hosts(target_plan.iter_hosts()):
-                    _process_host_chunk(host_chunk, custom_ports or None)
+                for scheme, host_chunk in _chunk_collect_specs_by_scheme(target_plan.iter_specs()):
+                    _process_host_chunk(host_chunk, custom_ports or None, scheme)
             else:
                 matrix_ports = tuple(custom_ports or default_ports)
                 for port in target_plan.execution_ports(matrix_ports):
-                    for host_chunk in chunked_hosts(target_plan.iter_hosts_for_port(int(port), matrix_ports)):
-                        _process_host_chunk(host_chunk, [int(port)])
+                    for scheme, host_chunk in _chunk_collect_specs_by_scheme(
+                        target_plan.iter_specs_for_port(int(port), matrix_ports)
+                    ):
+                        _process_host_chunk(host_chunk, [int(port)], scheme)
         except OSError as exc:
             console.error(f"failed to process collect output: {exc}")
             return 2
@@ -557,9 +670,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 f"stage_timing_summary status=ok attempts=1/1 detect_ms=0 data_ms={data_ms} total_ms={total_ms}"
             )
         save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
-        resume_suffix = (
-            f" resumed={collect_stats.get('skipped_jobs', 0)}" if (resume_enabled and checkpoint_path) else ""
-        )
+        resume_suffix = f" resumed={skipped_jobs_total}" if (resume_enabled and checkpoint_path) else ""
         if stream_to_stdout and args.output_format == "txt":
             console.info(
                 f"collect complete: hosts={target_plan.target_count} checks={scan_checks} "
@@ -573,11 +684,25 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             )
         validate_rc = _finish_validation()
         summary_mode = "a" if (resume_enabled or collect_chunk_index > 0) else "w"
-        _emit_collect_summary(target_plan.target_count, requests, success, mode=summary_mode)
+        _emit_collect_summary(
+            target_plan.target_count,
+            resumed_success + requests,
+            resumed_success + success,
+            errors_count=collect_errors,
+            mode=summary_mode,
+        )
         _write_vulnerable_targets_files(args=args, validator=validator, console=console)
         if validate_rc == 2:
             return 2
         if validate_rc == 1:
+            return 1
+        if scan_found == 0 and scan_errors > 0:
+            console.error(
+                f"collect inconclusive: no exporter confirmed; {scan_errors}/{scan_checks} discovery requests failed"
+            )
+            return 1
+        if requests > 0 and collect_errors == requests:
+            console.error("collect inconclusive: every data request failed")
             return 1
         return 0
 
@@ -585,8 +710,11 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         console.debug(f"pass=1 detect start total={len(hosts)}")
     detect_started_at = time.monotonic()
 
-    has_explicit_port_targets = any(spec.explicit_port is not None for spec in target_specs)
-    if not has_explicit_port_targets:
+    has_target_overrides = any(spec.explicit_port is not None or spec.scheme is not None for spec in target_specs)
+    scan_errors = 0
+    found_by_scheme: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    if not has_target_overrides:
+        scan_stats: dict[str, int] = {}
         try:
             scan_checks, scan_found, found_by_host = scan_exporter_presence(
                 hosts=hosts,
@@ -603,7 +731,11 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 show_progress=True,
                 progress_leave=False,
                 progress_owner=getattr(args, "_progress_owner", None),
+                stats_sink=scan_stats,
+                **_collect_transport_kwargs("http", tls_context),
             )
+            scan_errors = int(scan_stats.get("errors", 0))
+            found_by_scheme["http"] = found_by_host
         except OSError as exc:
             console.error(f"failed to process collect discovery scan: {exc}")
             return 2
@@ -612,15 +744,16 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         execution_groups = build_scan_execution_groups(
             target_specs,
             custom_ports or default_ports,
-            include_scheme_in_key=False,
+            include_scheme_in_key=True,
             include_matrix_ports_for_bare_explicit_targets=bool(custom_ports),
         )
         scan_checks = 0
         scan_found = 0
         found_by_host = {host: [] for host in hosts}
-        seen_hits: dict[str, set[tuple[str, int]]] = {host: set() for host in hosts}
+        seen_hits: dict[str, set[tuple[str, int, str]]] = {host: set() for host in hosts}
         try:
             for group in execution_groups:
+                part_scan_stats: dict[str, int] = {}
                 part_checks, part_found, part_found_by_host = scan_exporter_presence(
                     hosts=group.hosts,
                     timeout=args.timeout,
@@ -636,9 +769,12 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     show_progress=False,
                     progress_leave=False,
                     progress_owner=getattr(args, "_progress_owner", None),
+                    stats_sink=part_scan_stats,
+                    **_collect_transport_kwargs(group.scheme_hint or "http", tls_context),
                 )
                 scan_checks += part_checks
                 scan_found += part_found
+                scan_errors += int(part_scan_stats.get("errors", 0))
                 for host, hits in part_found_by_host.items():
                     for hit in hits:
                         exporter = str(hit.get("exporter") or "")
@@ -646,11 +782,13 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                             hit_port = int(hit.get("port", ""))
                         except (TypeError, ValueError):
                             continue
-                        hit_key = (exporter, hit_port)
+                        hit_key = (exporter, hit_port, str(hit.get("url") or ""))
                         if hit_key in seen_hits.setdefault(host, set()):
                             continue
                         seen_hits[host].add(hit_key)
                         found_by_host.setdefault(host, []).append(hit)
+                        scheme_key = group.scheme_hint or "http"
+                        found_by_scheme.setdefault(scheme_key, {}).setdefault(host, []).append(hit)
         except OSError as exc:
             console.error(f"failed to process collect discovery scan: {exc}")
             return 2
@@ -682,31 +820,44 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
     if scan_found > 0:
         data_started_at = time.monotonic()
         try:
-            requests, success = collect_exporter_debug_data(
-                logger=logger if args.debug else None,
-                hosts=hosts,
-                timeout=args.timeout,
-                output_path=args.output,
-                output_format=args.output_format,
-                emit_line=emit_line,
-                workers=args.workers,
-                retries=args.retries,
-                collect_exporters=collect_exporters,
-                collect_debug_endpoints=collect_endpoints,
-                found_by_host=found_by_host,
-                save_responses_dir=save_responses_dir,
-                record_callback=validator.feed,
-                output_mode="a" if resume_enabled else "w",
-                index_mode="a" if resume_enabled else "w",
-                emit_summary=False,
-                adaptive_collect=adaptive_collect,
-                max_inflight_requests=max_inflight,
-                resume_completed_jobs=completed_jobs if resume_enabled else None,
-                checkpoint_path=checkpoint_path,
-                checkpoint_mode="a" if resume_enabled else "w",
-                stats_sink=collect_stats,
-                progress_owner=getattr(args, "_progress_owner", None),
-            )
+            aggregate_collect_stats = {"errors": 0, "skipped_jobs": 0}
+            collect_call_index = 0
+            for scheme, scheme_found_by_host in found_by_scheme.items():
+                if not any(scheme_found_by_host.values()):
+                    continue
+                part_collect_stats: dict[str, int] = {}
+                part_requests, part_success = collect_exporter_debug_data(
+                    logger=logger if args.debug else None,
+                    hosts=hosts,
+                    timeout=args.timeout,
+                    output_path=args.output,
+                    output_format=args.output_format,
+                    emit_line=emit_line,
+                    workers=args.workers,
+                    retries=args.retries,
+                    collect_exporters=collect_exporters,
+                    collect_debug_endpoints=collect_endpoints,
+                    found_by_host=scheme_found_by_host,
+                    save_responses_dir=save_responses_dir,
+                    record_callback=validator.feed,
+                    output_mode="a" if (resume_enabled or collect_call_index > 0) else "w",
+                    index_mode="a" if (resume_enabled or collect_call_index > 0) else "w",
+                    emit_summary=False,
+                    adaptive_collect=adaptive_collect,
+                    max_inflight_requests=max_inflight,
+                    resume_completed_jobs=completed_jobs if resume_enabled else None,
+                    checkpoint_path=checkpoint_path,
+                    checkpoint_mode="a" if (resume_enabled or collect_call_index > 0) else "w",
+                    stats_sink=part_collect_stats,
+                    progress_owner=getattr(args, "_progress_owner", None),
+                    **_collect_transport_kwargs(scheme, tls_context),
+                )
+                collect_call_index += 1
+                requests += part_requests
+                success += part_success
+                aggregate_collect_stats["errors"] += int(part_collect_stats.get("errors", 0))
+                aggregate_collect_stats["skipped_jobs"] += int(part_collect_stats.get("skipped_jobs", 0))
+            collect_stats.update(aggregate_collect_stats)
         except OSError as exc:
             console.error(f"failed to process collect output: {exc}")
             return 2
@@ -720,27 +871,18 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             console.debug(
                 f"stage_timing_summary status=ok attempts=1/1 detect_ms={detect_ms} data_ms=0 total_ms={total_ms}"
             )
-        if args.output and args.output_format == "json":
-            os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-            with open(args.output, "w", encoding="utf-8") as out_fh:
-                out_fh.write(
-                    json.dumps(
-                        {
-                            "timestamp": utc_now_iso(),
-                            "type": "summary",
-                            "hosts": len(hosts),
-                            "requests": 0,
-                            "success": 0,
-                            "output_path": args.output,
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
+        summary_mode = "a" if resume_enabled else "w"
+        _emit_collect_summary(
+            len(hosts),
+            resumed_success,
+            resumed_success,
+            errors_count=0,
+            mode=summary_mode,
+        )
         if save_responses_dir:
             os.makedirs(save_responses_dir, exist_ok=True)
             index_path = os.path.join(save_responses_dir, "index.jsonl")
-            with open(index_path, "w", encoding="utf-8"):
+            with open(index_path, "a" if resume_enabled else "w", encoding="utf-8"):
                 pass
         if stream_to_stdout and args.output_format == "txt":
             save_suffix = f" saved={save_responses_dir}" if save_responses_dir else ""
@@ -767,6 +909,11 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         if validate_rc == 2:
             return 2
         if validate_rc == 1:
+            return 1
+        if scan_errors > 0:
+            console.error(
+                f"collect inconclusive: no exporter confirmed; {scan_errors}/{scan_checks} discovery requests failed"
+            )
             return 1
         return 0
 
@@ -800,9 +947,19 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             f"stage_timing_summary status=ok attempts=1/1 detect_ms={detect_ms} data_ms={data_ms} total_ms={total_ms}"
         )
     validate_rc = _finish_validation()
+    _emit_collect_summary(
+        len(hosts),
+        resumed_success + requests,
+        resumed_success + success,
+        errors_count=int(collect_stats.get("errors", 0)),
+        mode="a" if resume_enabled or requests > 0 else "w",
+    )
     _write_vulnerable_targets_files(args=args, validator=validator, console=console)
     if validate_rc == 2:
         return 2
     if validate_rc == 1:
+        return 1
+    if requests > 0 and int(collect_stats.get("errors", 0)) == requests:
+        console.error("collect inconclusive: every data request failed")
         return 1
     return 0

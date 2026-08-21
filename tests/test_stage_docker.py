@@ -7,6 +7,8 @@ from typing import Any
 import pytest
 
 from redposture_core import stage_docker as docker_stage
+from redposture_core.modules.docker import render as docker_render
+from redposture_core.stage_runtime import build_render_plan, render_with_plan
 from tests.stage_runtime_helpers import run_module_targets_for_test
 
 
@@ -275,7 +277,11 @@ def test_probe_docker_transport_error_branches(monkeypatch: pytest.MonkeyPatch) 
 
     class ForbiddenClient(InfoFallbackClient):
         def ping(self) -> None:
-            raise docker_stage.DockerEngineHTTPError(403, "forbidden")
+            raise docker_stage.DockerEngineHTTPError(
+                403,
+                "client certificate required",
+                headers={"Server": "Docker/26.0"},
+            )
 
     monkeypatch.setattr(docker_stage, "_docker_client", lambda *_args, **_kwargs: ForbiddenClient("plaintext"))
     client, version, transport, error, auth_required = docker_stage._probe_docker(
@@ -290,8 +296,32 @@ def test_probe_docker_transport_error_branches(monkeypatch: pytest.MonkeyPatch) 
     assert isinstance(client, ForbiddenClient)
     assert version is None
     assert transport == "plaintext"
-    assert "forbidden" in str(error)
+    assert "client certificate required" in str(error)
     assert auth_required is True
+
+    class GenericForbiddenClient(InfoFallbackClient):
+        def ping(self) -> None:
+            raise docker_stage.DockerEngineHTTPError(403, "client certificate required")
+
+    monkeypatch.setattr(
+        docker_stage,
+        "_docker_client",
+        lambda *_args, **_kwargs: GenericForbiddenClient("tls"),
+    )
+    client, version, transport, error, auth_required = docker_stage._probe_docker(
+        "127.0.0.1",
+        2376,
+        1.0,
+        insecure=True,
+        tls_ca=None,
+        tls_cert=None,
+        tls_key=None,
+    )
+    assert client is None
+    assert version is None
+    assert transport is None
+    assert "client certificate required" in str(error)
+    assert auth_required is False
 
 
 def test_docker_small_helpers_and_probe_failure_branches(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -371,10 +401,11 @@ def test_docker_small_helpers_and_probe_failure_branches(monkeypatch: pytest.Mon
         tls_cert=None,
         tls_key=None,
     )
-    assert isinstance(client, BadVersionClient)
+    assert client is None
     assert version is None
-    assert transport == "plaintext"
-    assert auth_required is True
+    assert transport is None
+    assert "client certificate required" in str(error)
+    assert auth_required is False
 
 
 def test_docker_inventory_error_and_empty_exec_output_branches(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -414,6 +445,7 @@ def test_docker_inventory_error_and_empty_exec_output_branches(monkeypatch: pyte
         2375,
         1.0,
         0,
+        show_containers=True,
         show_images=True,
         show_networks=True,
         show_volumes=True,
@@ -423,7 +455,30 @@ def test_docker_inventory_error_and_empty_exec_output_branches(monkeypatch: pyte
     )
     assert record["capabilities"]["can_list_images"] is False
     assert record["capabilities"]["can_read_system_info"] is False
+    assert record["partial"] is True
+    assert record["data_complete"] is False
+    assert record["partial_errors"]["images"] == "images denied"
+    assert record["partial_errors"]["system_info"] == "info denied"
+    assert "Containers (count:1)" in "\n".join(docker_stage._format_container_lines(record, "txt"))
+    partial_lines = "\n".join(docker_stage._format_partial_error_lines(record, "txt"))
+    assert "partial images failed err=images denied" in partial_lines
+    assert "partial system_info failed err=info denied" in partial_lines
+    rendered_txt = "\n".join(render_with_plan(build_render_plan(docker_render), record, "txt"))
+    assert "Containers (count:1)" in rendered_txt
+    assert "partial images failed err=images denied" in rendered_txt
     assert "<no output>" in "\n".join(docker_stage._format_exec_lines(record, "txt"))
+
+    staged = docker_stage._audit_docker_host_stage(
+        "127.0.0.1",
+        2375,
+        1.0,
+        0,
+        show_containers=True,
+        show_images=True,
+    )
+    data_stage = next(item for item in staged["stages"] if item["stage_name"] == "data")
+    assert data_stage["result"] == "error"
+    assert "images: images denied" in str(data_stage["error"])
 
     missing = docker_stage._audit_docker_host(
         "127.0.0.1",
@@ -469,3 +524,28 @@ def test_detail_formatters_cover_inventory_system_and_exec(monkeypatch: pytest.M
     assert "Volumes" in joined
     assert "System" in joined
     assert "Exec Result" in joined
+
+
+def test_docker_does_not_claim_client_cert_without_complete_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        docker_stage,
+        "_probe_docker",
+        lambda *_args, **_kwargs: (
+            _FakeDockerClient(),
+            {"Version": "25.0.5", "ApiVersion": "1.45", "Os": "linux"},
+            "tls",
+            None,
+            False,
+        ),
+    )
+    record = docker_stage._audit_docker_host(
+        "127.0.0.1",
+        2376,
+        1.0,
+        0,
+        tls_cert="client.pem",
+        tls_key=None,
+        run_deep_checks=False,
+    )
+    assert record["status"] == "open_no_auth"
+    assert record["tls_client_cert_used"] is False

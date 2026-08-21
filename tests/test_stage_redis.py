@@ -438,9 +438,9 @@ def test_resp_readers_and_send_cmd_cover_types() -> None:
     assert simple == ("simple", "PONG")
     assert error == ("error", "NOAUTH Authentication required.")
     assert integer == ("integer", 2)
-    assert bulk == ("bulk", "hello")
+    assert bulk == ("bulk", b"hello")
     assert null_bulk == ("null", None)
-    assert array == ("array", ["one", "two"])
+    assert array == ("array", [b"one", b"two"])
 
     sock = _ReadSocket(b"+OK\r\n")
     resp_type, resp_value = redis_stage._send_cmd(sock, "PING")
@@ -787,7 +787,7 @@ def test_audit_redis_targets_suppresses_pre_detect_connection_noise(
 
     assert totals == (2, 0, 0, 0, 0, 2)
     assert len(emitted) == 1
-    assert "No REDIS service detected" in emitted[0]
+    assert "REDIS audit inconclusive" in emitted[0]
     assert all("Connection refused" not in line for line in emitted)
 
 
@@ -908,7 +908,7 @@ def test_run_redis_stage_connection_refused_suppression_matches_debug(
             return
 
     rc = redis_stage.run_redis_stage(args, _DummyLogger())
-    assert rc == 0
+    assert rc == 1
     assert captured["phase"] == "detect"
     assert captured["username"] is None
     assert captured["run_deep_checks"] is False
@@ -955,7 +955,7 @@ def test_run_redis_stage_non_debug_suppresses_unreachable_summary(
             return
 
     rc = redis_stage.run_redis_stage(args, _DummyLogger())
-    assert rc == 0
+    assert rc == 1
     captured = capsys.readouterr()
     assert "all redis targets are unreachable" not in captured.out
 
@@ -999,7 +999,7 @@ def test_run_redis_stage_debug_shows_unreachable_summary(
             return
 
     rc = redis_stage.run_redis_stage(args, _DummyLogger())
-    assert rc == 0
+    assert rc == 1
     captured = capsys.readouterr()
     assert "all redis targets are unreachable" in captured.out
 
@@ -1063,7 +1063,7 @@ def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypa
     )
 
     rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
-    assert rc == 0
+    assert rc == 1
     assert [call[1] for call in captured_calls] == [6379, 26380, 26381]
     assert all(call[2] == "detect" for call in captured_calls)
     assert progress_totals == [3]
@@ -1270,23 +1270,23 @@ def _run_redis_lifecycle_result(args):
 
 def test_redis_defcreds_expand_after_provided_and_file_candidates(tmp_path) -> None:
     defaults = [
-        ("redis", "redis", "default"),
-        ("default", "redis", "default"),
-        ("default", "password", "default"),
-        ("redis", "password", "default"),
-        ("default", "changeme", "default"),
-        ("redis", "changeme", "default"),
         ("admin", "admin", "default"),
-        ("default", "default", "default"),
-        ("admin", "password", "default"),
         ("admin", "changeme", "default"),
-        ("root", "root", "default"),
+        ("admin", "password", "default"),
+        ("default", "changeme", "default"),
+        ("default", "default", "default"),
+        ("default", "password", "default"),
+        ("default", "redis", "default"),
+        ("dev", "dev", "default"),
+        ("redis", "changeme", "default"),
+        ("redis", "password", "default"),
+        ("redis", "redis", "default"),
         ("root", "password", "default"),
-        ("user", "user", "default"),
-        ("user", "password", "default"),
+        ("root", "root", "default"),
         ("service", "service", "default"),
         ("test", "test", "default"),
-        ("dev", "dev", "default"),
+        ("user", "password", "default"),
+        ("user", "user", "default"),
     ]
     direct_args = parse_args(
         [
@@ -1353,7 +1353,7 @@ def test_redis_explicit_default_overlap_stays_provided_and_is_stably_deduplicate
     assert (runs[0].username, runs[0].password, runs[0].source) == ("redis", "redis", "provided")
     assert [(run.username, run.password) for run in runs] == [
         ("redis", "redis"),
-        *redis_actions._REDIS_DEFAULT_CREDENTIALS[1:],
+        *[pair for pair in redis_actions._REDIS_DEFAULT_CREDENTIALS if pair != ("redis", "redis")],
     ]
     assert sum((run.username, run.password) == ("redis", "redis") for run in runs) == 1
 
@@ -1497,16 +1497,16 @@ def test_redis_legacy_auth_fallback_is_deduplicated_by_password_without_skipping
 
     assert acl_pairs == list(redis_actions._REDIS_DEFAULT_CREDENTIALS)
     assert legacy_passwords == [
-        "redis",
-        "password",
-        "changeme",
         "admin",
+        "changeme",
+        "password",
         "default",
+        "redis",
+        "dev",
         "root",
-        "user",
         "service",
         "test",
-        "dev",
+        "user",
     ]
     assert result.records[0]["status"] == "auth_required"
 
@@ -1787,7 +1787,7 @@ def test_run_redis_stage_username_file_keeps_all_hosts_for_protocol_detect(
 
     rc = redis_stage.run_redis_stage(args, SimpleNamespace(log=lambda *_a, **_k: None))
 
-    assert rc == 0
+    assert rc == 1
     assert [call for call in captured_calls if call[0] == "detect"] == [
         ("detect", "closed", None, None),
         ("detect", "open-a", None, None),
@@ -1967,3 +1967,105 @@ def test_stream_dump_redis_keys_reports_bad_scan_response(monkeypatch: pytest.Mo
 
     assert entries == []
     assert err is not None and "unexpected SCAN response" in err
+
+
+def test_redis_noperm_ping_still_attempts_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[tuple[str, ...]] = []
+    monkeypatch.setattr(redis_actions.socket, "create_connection", lambda *_a, **_k: _DummySocket())
+
+    def _send(_sock: object, *parts: str):
+        command = tuple(parts)
+        commands.append(command)
+        if command == ("PING",):
+            return "error", "NOPERM this user has no permissions to run PING"
+        if command == ("AUTH", "app", "secret"):
+            return "simple", "OK"
+        if command == ("DBSIZE",):
+            return "integer", 0
+        pytest.fail(f"unexpected Redis command: {command!r}")
+
+    monkeypatch.setattr(redis_actions, "_send_cmd", _send)
+    args = parse_args(["redis", "-t", "127.0.0.1", "--port", "6379", "-u", "app", "-p", "secret", "-f", "json"])
+    result = _run_redis_lifecycle_result(args)
+    assert commands[:2] == [("PING",), ("AUTH", "app", "secret")]
+    assert result.records[0]["status"] == "valid_credentials"
+
+
+def test_redis_tls_loads_ca_and_client_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    class _Socket(_DummySocket):
+        def close(self) -> None:
+            calls["closed"] = True
+
+    class _Context:
+        check_hostname = True
+        verify_mode = redis_actions.ssl.CERT_REQUIRED
+
+        def load_cert_chain(self, *, certfile: str, keyfile: str) -> None:
+            calls["identity"] = (certfile, keyfile)
+
+        def wrap_socket(self, sock: _Socket, *, server_hostname: str) -> _Socket:
+            calls["server_hostname"] = server_hostname
+            return sock
+
+    def _default_context(*, cafile: str | None = None):
+        calls["cafile"] = cafile
+        return _Context()
+
+    monkeypatch.setattr(redis_actions.socket, "create_connection", lambda *_a, **_k: _Socket())
+    monkeypatch.setattr(redis_actions.ssl, "create_default_context", _default_context)
+    sock = redis_actions._open_redis_socket(
+        "redis.internal",
+        6380,
+        1.0,
+        use_tls=True,
+        ca_file="ca.pem",
+        cert_file="client.pem",
+        key_file="client.key",
+    )
+    assert sock is not None
+    assert calls["cafile"] == "ca.pem"
+    assert calls["identity"] == ("client.pem", "client.key")
+    assert calls["server_hostname"] == "redis.internal"
+
+
+def test_redis_insecure_flag_selects_tls_transport() -> None:
+    args = parse_args(["redis", "-t", "redis.internal", "--insecure"])
+    ctx = SimpleNamespace(
+        args=args,
+        target=SimpleNamespace(scheme=None),
+        host="redis.internal",
+        port=6379,
+        debug_emit=None,
+    )
+    state = redis_actions.redis_lifecycle_state_factory(ctx)
+    assert state.use_tls is True
+    assert state.insecure is True
+    assert state.transport_mode == "tls"
+
+
+def test_redis_invalid_utf8_bulk_values_are_lossless_base64() -> None:
+    assert redis_actions._read_resp(_ReadSocket(b"$2\r\n\xff\x00\r\n")) == ("bulk", b"\xff\x00")
+    assert redis_actions._format_redis_text(b"\xff\x00") == "base64:/wA="
+
+
+def test_redis_stream_dump_queries_binary_keys_without_reencoding(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands: list[tuple[str | bytes, ...]] = []
+
+    def _send(_sock: object, *parts: str | bytes):
+        commands.append(parts)
+        if parts[0] == "SCAN":
+            return "array", [b"0", [b"\xffkey"]]
+        if parts == ("TYPE", b"\xffkey"):
+            return "bulk", b"string"
+        if parts == ("GET", b"\xffkey"):
+            return "bulk", b"\x00\xff"
+        pytest.fail(f"unexpected Redis command: {parts!r}")
+
+    monkeypatch.setattr(redis_actions, "_send_cmd", _send)
+    entries, error = redis_actions._stream_dump_redis_keys(object(), batch=10, delay_ms=0)
+    assert error is None
+    assert entries == [{"key": "base64:/2tleQ==", "value": "base64:AP8=", "error": None}]
+    assert ("TYPE", b"\xffkey") in commands
+    assert ("GET", b"\xffkey") in commands

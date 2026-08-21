@@ -119,6 +119,7 @@ class AttemptLogger:
         self._trigger_callback_stats_total = 0
         self._trigger_callback_stats_by_service: dict[str, int] = {}
         self._trigger_callback_stats_signatures: set[tuple[str, ...]] = set()
+        self._trigger_callback_event_signatures: set[tuple[str, ...]] = set()
         self._trigger_callback_events: list[dict[str, Any]] = []
 
     @contextmanager
@@ -159,6 +160,7 @@ class AttemptLogger:
             self._trigger_callback_stats_total = 0
             self._trigger_callback_stats_by_service = {}
             self._trigger_callback_stats_signatures.clear()
+            self._trigger_callback_event_signatures.clear()
             self._trigger_callback_events = []
             if callback_targets is None:
                 self._trigger_callback_targets = ()
@@ -275,14 +277,26 @@ class AttemptLogger:
         if str(event.get("method") or "").strip().upper() == "PARSE_ERROR":
             return
 
-        if signature in self._trigger_callback_stats_signatures:
-            return
-        self._trigger_callback_stats_signatures.add(signature)
-
         service = signature[0]
-        self._trigger_callback_stats_total += 1
-        self._trigger_callback_stats_by_service[service] = self._trigger_callback_stats_by_service.get(service, 0) + 1
-        self._trigger_callback_events.append(dict(event))
+        # Count one callback per accepted connection, not one callback per
+        # protocol command. Redis clients commonly issue PING and INFO on the
+        # same socket before AUTH, which otherwise inflated confirmations. The
+        # remote source port distinguishes separate connections from the same
+        # exporter host.
+        stats_signature = (
+            service,
+            str(event.get("remote_addr") or "-"),
+            str(event.get("listen_port") or "-"),
+        )
+        if stats_signature not in self._trigger_callback_stats_signatures:
+            self._trigger_callback_stats_signatures.add(stats_signature)
+            self._trigger_callback_stats_total += 1
+            self._trigger_callback_stats_by_service[service] = (
+                self._trigger_callback_stats_by_service.get(service, 0) + 1
+            )
+        if signature not in self._trigger_callback_event_signatures:
+            self._trigger_callback_event_signatures.add(signature)
+            self._trigger_callback_events.append(dict(event))
 
     def _is_duplicate_trigger_callback_event(self, event: dict[str, Any]) -> bool:
         signature = self._trigger_callback_signature(event)

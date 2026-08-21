@@ -60,6 +60,19 @@ def test_parse_www_authenticate() -> None:
     assert params["service"] == "registry"
 
 
+def test_registry_fingerprint_rejects_generic_login_and_auth_pages() -> None:
+    assert registry._registry_probe_has_fingerprint(200, b"<html>Sign in</html>", {}) is False
+    assert registry._registry_probe_has_fingerprint(401, b'{"error":"unauthorized"}', {}) is False
+    assert (
+        registry._registry_probe_has_fingerprint(
+            401,
+            b'{"errors":[{"code":"UNAUTHORIZED"}]}',
+            {"www-authenticate": 'Bearer realm="https://auth.local/token",service="registry"'},
+        )
+        is True
+    )
+
+
 def test_error_and_auth_helpers() -> None:
     assert registry._friendly_error_text("[Errno 61] Connection refused") == (
         "connection refused (service is not listening on target port)"
@@ -104,6 +117,54 @@ def test_fetch_registry_catalog_supports_pagination(monkeypatch: pytest.MonkeyPa
     assert error is None
     assert repositories == ["repo/a", "repo/b", "repo/c"]
     assert calls == ["/v2/_catalog?n=1000", "/v2/_catalog?n=1000&last=repo/b"]
+
+
+def test_registry_bearer_retry_and_partial_catalog_are_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
+    request_headers: list[dict[str, str]] = []
+
+    class _Client:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return
+
+        def request(self, _method, _url, *, headers, **_kwargs):
+            request_headers.append(dict(headers))
+            if headers.get("Authorization") == "Bearer exchanged-token":
+                return SimpleNamespace(status=200, body=b"{}", headers={}, error=None)
+            return SimpleNamespace(
+                status=401,
+                body=b'{"errors":[{"code":"UNAUTHORIZED"}]}',
+                headers={
+                    "WWW-Authenticate": (
+                        'Bearer realm="https://auth.local/token",service="registry",scope="registry:catalog:*"'
+                    )
+                },
+                error=None,
+            )
+
+    monkeypatch.setattr(registry, "resolve_http_scheme", lambda *_args, **_kwargs: "https")
+    monkeypatch.setattr(registry, "HttpApiClient", _Client)
+    monkeypatch.setattr(registry, "_fetch_registry_bearer_token", lambda *_args, **_kwargs: ("exchanged-token", None))
+
+    status, _body, headers, error = registry._http_request("registry.local", 5000, "GET", "/v2/", 1.0, headers={})
+    assert (status, error) == (200, None)
+    assert request_headers[-1]["Authorization"] == "Bearer exchanged-token"
+    assert headers["x-redposture-bearer-exchanged"] == "true"
+
+    responses = iter(
+        [
+            (
+                200,
+                b'{"repositories":["repo/a"]}',
+                {"link": '</v2/_catalog?n=1000&last=repo%2Fa>; rel="next"'},
+                None,
+            ),
+            (500, b"{}", {}, None),
+        ]
+    )
+    monkeypatch.setattr(registry, "_http_request", lambda *_args, **_kwargs: next(responses))
+    repositories, partial_error = registry._fetch_registry_catalog("registry.local", 5000, 1.0, headers={})
+    assert repositories == ["repo/a"]
+    assert str(partial_error).startswith("partial:")
 
 
 def test_build_gitlab_repository_summaries_sorts_and_enriches() -> None:
@@ -1248,13 +1309,13 @@ def test_run_registry_stage_validation_errors(
     assert any(expected_error in msg for msg in errors)
 
 
-def test_run_registry_stage_https_target_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_registry_stage_accepts_https_target(monkeypatch: pytest.MonkeyPatch) -> None:
     _RegistryConsoleCapture.instances.clear()
     monkeypatch.setattr(registry, "Console", _RegistryConsoleCapture)
     rc = registry.run_registry_stage(_registry_args(targets="https://registry.local:5000/v2/_catalog"), logger=object())
-    assert rc == 2
+    assert rc == 1
     errors = [msg for level, msg in _RegistryConsoleCapture.instances[-1].messages if level == "error"]
-    assert any("accepts only http:// URL targets" in msg for msg in errors)
+    assert not any("accepts only http:// URL targets" in msg for msg in errors)
 
 
 def test_run_registry_stage_debug_and_unreachable_summary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1283,7 +1344,7 @@ def test_run_registry_stage_debug_and_unreachable_summary(monkeypatch: pytest.Mo
 
     patch_module_host_stage_for_test(monkeypatch, "registry", fake_audit_registry_targets)
     rc = registry.run_registry_stage(_registry_args(debug=True, docker=True, images=True), logger=object())
-    assert rc == 0
+    assert rc == 1
     assert len(captured_kwargs) == 2
     assert captured_kwargs[0]["port"] == 15000
     assert captured_kwargs[1]["port"] == 15010
@@ -2395,7 +2456,7 @@ def test_run_registry_stage_multi_port_uses_single_global_progress(monkeypatch: 
     patch_module_host_stage_for_test(monkeypatch, "registry", fake_audit)
 
     rc = registry.run_registry_stage(_registry_args(), logger=object())
-    assert rc == 0
+    assert rc == 1
     assert len(captured) == 2
     assert [call["port"] for call in captured] == [5000, 5001]
     assert all(call["run_deep_checks"] is False for call in captured)
@@ -2459,7 +2520,7 @@ def test_registry_lifecycle_sends_no_auth_on_classification_and_reuses_selected_
         registry._auth_headers("bad", "bad", None)["Authorization"],
         registry._auth_headers("good", "good", None)["Authorization"],
     ]
-    assert catalog_authorizations == [registry._auth_headers("good", "good", None)["Authorization"]]
+    assert catalog_authorizations == []
     assert result.records[0]["status"] == "valid_credentials"
     assert [stage["stage_name"] for stage in result.records[0]["stages"]] == [
         "detect_protocol",
@@ -2520,7 +2581,7 @@ def test_registry_auth_retries_transient_failure_without_repeating_anonymous_pro
         authorization = (headers or {}).get("Authorization")
         probe_authorizations.append(authorization)
         if authorization is None:
-            return 401, b"unauthorized", {"www-authenticate": "Basic"}, None
+            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
         authenticated_attempts += 1
         if authenticated_attempts == 1:
             return 0, b"", {}, "connection timeout"
@@ -2574,9 +2635,9 @@ def test_registry_definitive_auth_rejection_is_not_retried(
         nonlocal authenticated_attempts
         _ = body
         if not (headers or {}).get("Authorization"):
-            return 401, b"unauthorized", {"www-authenticate": "Basic"}, None
+            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
         authenticated_attempts += 1
-        return 401, b"unauthorized", {"www-authenticate": "Basic"}, None
+        return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
 
     monkeypatch.setattr(registry, "_http_request", fake_request)
 
@@ -2617,7 +2678,7 @@ def test_registry_transient_auth_exhaustion_is_not_reported_as_rejected_credenti
         _ = body
         if not (headers or {}).get("Authorization"):
             anonymous_probes += 1
-            return 401, b"unauthorized", {"www-authenticate": "Basic"}, None
+            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
         authenticated_attempts += 1
         return 0, b"", {}, "connection timeout"
 
@@ -2663,7 +2724,7 @@ def test_registry_data_retries_transient_result_without_reprobing_v2(
         _ = body
         probe_calls += 1
         if not (headers or {}).get("Authorization"):
-            return 401, b"unauthorized", {"www-authenticate": "Basic"}, None
+            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
         return 200, b"{}", {"docker-distribution-api-version": "registry/2.0"}, None
 
     def fake_core(host, port, _timeout, retries, **_kwargs):

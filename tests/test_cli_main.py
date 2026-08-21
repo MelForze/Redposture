@@ -17,7 +17,6 @@ from redposture_core.cli_args import (
     COMMAND_GRAFANA,
     COMMAND_GRPC,
     COMMAND_KAFKA,
-    COMMAND_KEEPER,
     COMMAND_KUBEAPI,
     COMMAND_MONGODB,
     COMMAND_ORACLE,
@@ -89,7 +88,6 @@ def test_tee_console_output_mirrors_stdout_and_stderr(tmp_path, capsys) -> None:
         (SimpleNamespace(command=COMMAND_ETCD), "run_etcd_stage"),
         (SimpleNamespace(command=COMMAND_PROXMOX), "run_proxmox_stage"),
         (SimpleNamespace(command=COMMAND_ZOOKEEPER), "run_zookeeper_stage"),
-        (SimpleNamespace(command=COMMAND_KEEPER), "run_keeper_stage"),
     ],
 )
 def test_run_command_dispatches_to_stage_functions(

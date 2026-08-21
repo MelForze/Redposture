@@ -14,6 +14,7 @@ from ...stage_runtime import (
     build_basic_audit_plan,
     merge_audit_credential_runs,
     run_basic_host_audit,
+    sort_default_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -23,8 +24,11 @@ _DEFAULT_PORTS: tuple[int, ...] | None = (2379, 12379)
 
 def build_etcd_plan(args: Any) -> AuditCommandPlan:
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
     default_runs = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source="default")
             for username, password in actions._ETCD_DEFAULT_CREDS
         )

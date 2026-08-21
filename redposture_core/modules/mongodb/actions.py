@@ -45,24 +45,24 @@ _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _MONGODB_DEEP_STATUSES = {"open_no_auth", "valid_credentials", "weak_default_creds"}
 _MONGODB_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
-    ("root", "root"),
     ("admin", "admin"),
-    ("root", "password"),
-    ("mongo", "mongo"),
-    ("mongodb", "mongodb"),
-    ("admin", "password"),
+    ("admin", "changeme"),
     ("admin", "mongo"),
     ("admin", "mongodb"),
+    ("admin", "password"),
+    ("dev", "dev"),
+    ("mongo", "mongo"),
+    ("mongo", "password"),
+    ("mongodb", "mongodb"),
+    ("mongodb", "password"),
+    ("root", "admin"),
     ("root", "mongo"),
     ("root", "mongodb"),
-    ("mongo", "password"),
-    ("mongodb", "password"),
-    ("admin", "changeme"),
-    ("root", "admin"),
-    ("user", "user"),
-    ("user", "password"),
+    ("root", "password"),
+    ("root", "root"),
     ("test", "test"),
-    ("dev", "dev"),
+    ("user", "password"),
+    ("user", "user"),
 )
 _MONGODB_DUMP_SAFETY_LIMIT = 1000
 
@@ -168,11 +168,8 @@ def _group_collection_targets(
         value = str(raw or "").strip()
         if not value:
             continue
-        # A8 fix: split on `.` FIRST so `--database mydb --collection users.audit`
-        # correctly resolves to the (mydb, users.audit) → but split naturally
-        # yields (users, audit). Prior behavior treated it as literal collection
-        # "users.audit" under mydb and produced empty dumps. When --database is
-        # set, a bare (no-dot) target still routes to that DB.
+        # An explicit db.collection target is unambiguous and takes precedence
+        # over the command-wide --database used for bare collection names.
         if "." in value:
             database, collection = value.split(".", 1)
             database = database.strip()
@@ -198,7 +195,21 @@ def _open_client(
     username: str | None,
     password: str | None,
     auth_db: str,
+    tls: bool = False,
+    tls_ca: str | None = None,
+    tls_cert_key: str | None = None,
+    tls_insecure: bool = False,
 ) -> MongoAuditClient:
+    kwargs: dict[str, Any] = {}
+    if tls or tls_ca or tls_cert_key or tls_insecure:
+        kwargs.update(
+            {
+                "tls": tls,
+                "tls_ca_file": tls_ca,
+                "tls_certificate_key_file": tls_cert_key,
+                "tls_insecure": tls_insecure,
+            }
+        )
     raw_client = open_mongodb_client(
         host,
         port,
@@ -206,8 +217,25 @@ def _open_client(
         password=password,
         auth_db=auth_db,
         timeout=timeout,
+        **kwargs,
     )
     return MongoAuditClient(raw_client)
+
+
+def _mongodb_tls_kwargs(
+    tls: bool,
+    tls_ca: str | None,
+    tls_cert_key: str | None,
+    tls_insecure: bool,
+) -> dict[str, Any]:
+    if not (tls or tls_ca or tls_cert_key or tls_insecure):
+        return {}
+    return {
+        "tls": tls,
+        "tls_ca": tls_ca,
+        "tls_cert_key": tls_cert_key,
+        "tls_insecure": tls_insecure,
+    }
 
 
 def _try_list_databases(client: MongoAuditClient) -> tuple[list[str] | None, str | None]:
@@ -226,6 +254,10 @@ def _try_credentials(
     *,
     auth_db: str,
     credential_candidates: list[dict[str, Any]],
+    tls: bool = False,
+    tls_ca: str | None = None,
+    tls_cert_key: str | None = None,
+    tls_insecure: bool = False,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Try every candidate; return the first success + the complete attempt log.
 
@@ -251,6 +283,7 @@ def _try_credentials(
                 username=str(username or ""),
                 password=None if password is None else str(password),
                 auth_db=auth_db,
+                **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
             )
             raw_client = mongo.client
             mongo.hello()
@@ -319,7 +352,8 @@ def _collect_mongodb_data(
     index_rows: list[dict[str, Any]] = []
     document_rows: list[dict[str, Any]] = []
     query_rows: list[dict[str, Any]] = []
-    query_error: str | None = None
+    operation_errors: list[str] = []
+    operation_results: list[dict[str, Any]] = []
     nosql_command_result: dict[str, Any] | None = None
     nosql_command_error: str | None = None
     capabilities: dict[str, bool | None] = {
@@ -329,6 +363,33 @@ def _collect_mongodb_data(
         "can_list_indexes": None,
         "can_run_command": None,
     }
+    capability_outcomes: dict[str, list[bool]] = {
+        "can_list_collections": [],
+        "can_read_documents": [],
+        "can_list_indexes": [],
+        "can_run_command": [],
+    }
+
+    def note(
+        capability: str,
+        ok: bool,
+        operation: str,
+        *,
+        database: str | None = None,
+        collection: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        capability_outcomes[capability].append(ok)
+        row: dict[str, Any] = {"operation": operation, "ok": ok}
+        if database is not None:
+            row["database"] = database
+        if collection is not None:
+            row["collection"] = collection
+        if error:
+            row["error"] = error
+            if error not in operation_errors:
+                operation_errors.append(error)
+        operation_results.append(row)
 
     target_map: dict[str, list[str] | None] = {}
     if collection_targets_by_database:
@@ -356,29 +417,59 @@ def _collect_mongodb_data(
                 if explicit_collections is not None
                 else client.list_collection_names(db_name)
             )
-            capabilities["can_list_collections"] = True
+            if explicit_collections is None:
+                note("can_list_collections", True, "list_collections", database=db_name)
         except Exception as exc:
-            capabilities["can_list_collections"] = False
-            query_error = query_error or normalize_mongodb_error(exc)
+            error = normalize_mongodb_error(exc)
+            note("can_list_collections", False, "list_collections", database=db_name, error=error)
             continue
 
         for collection_name in collections:
-            count = client.count_documents(db_name, collection_name)
+            try:
+                count = client.count_documents(db_name, collection_name)
+                if count is not None:
+                    note(
+                        "can_read_documents",
+                        True,
+                        "count_documents",
+                        database=db_name,
+                        collection=collection_name,
+                    )
+            except Exception as exc:
+                count = None
+                note(
+                    "can_read_documents",
+                    False,
+                    "count_documents",
+                    database=db_name,
+                    collection=collection_name,
+                    error=normalize_mongodb_error(exc),
+                )
             collection_rows.append({"database": db_name, "collection": collection_name, "documents": count})
-            if count is not None:
-                capabilities["can_read_documents"] = True
 
             if show_indexes or index_filter:
                 try:
                     indexes = client.list_indexes(db_name, collection_name)
-                    capabilities["can_list_indexes"] = True
+                    note(
+                        "can_list_indexes",
+                        True,
+                        "list_indexes",
+                        database=db_name,
+                        collection=collection_name,
+                    )
                     for item in indexes:
                         if index_filter and str(item.get("name") or "") != index_filter:
                             continue
                         index_rows.append({"database": db_name, "collection": collection_name, "index": item})
                 except Exception as exc:
-                    capabilities["can_list_indexes"] = False
-                    query_error = query_error or normalize_mongodb_error(exc)
+                    note(
+                        "can_list_indexes",
+                        False,
+                        "list_indexes",
+                        database=db_name,
+                        collection=collection_name,
+                        error=normalize_mongodb_error(exc),
+                    )
 
             if dump_documents or query_requested:
                 limit = dump_limit if dump_limit is not None else _MONGODB_DUMP_SAFETY_LIMIT
@@ -390,21 +481,58 @@ def _collect_mongodb_data(
                         projection=projection,
                         limit=limit,
                     )
-                    capabilities["can_read_documents"] = True
+                    note(
+                        "can_read_documents",
+                        True,
+                        "find_documents",
+                        database=db_name,
+                        collection=collection_name,
+                    )
                     target = query_rows if query_requested else document_rows
                     for doc in docs:
                         target.append({"database": db_name, "collection": collection_name, "document": doc})
                 except Exception as exc:
-                    capabilities["can_read_documents"] = False
-                    query_error = query_error or normalize_mongodb_error(exc)
+                    note(
+                        "can_read_documents",
+                        False,
+                        "find_documents",
+                        database=db_name,
+                        collection=collection_name,
+                        error=normalize_mongodb_error(exc),
+                    )
 
     if nosql_command is not None:
         try:
             nosql_command_result = client.run_command(command_database, nosql_command)
-            capabilities["can_run_command"] = True
+            note("can_run_command", True, "run_command", database=command_database)
         except Exception as exc:
-            capabilities["can_run_command"] = False
             nosql_command_error = normalize_mongodb_error(exc)
+            note(
+                "can_run_command",
+                False,
+                "run_command",
+                database=command_database,
+                error=nosql_command_error,
+            )
+
+    capability_coverage: dict[str, dict[str, Any]] = {}
+    for capability, outcomes in capability_outcomes.items():
+        if not outcomes:
+            continue
+        successes = sum(1 for outcome in outcomes if outcome)
+        failures = len(outcomes) - successes
+        capabilities[capability] = successes > 0
+        capability_coverage[capability] = {
+            "state": "partial" if successes and failures else "allowed" if successes else "denied",
+            "successes": successes,
+            "failures": failures,
+        }
+    coverage_successes = sum(int(item["successes"]) for item in capability_coverage.values())
+    coverage_failures = sum(int(item["failures"]) for item in capability_coverage.values())
+    # A request is also partial when one requested capability is completely
+    # denied while another succeeds.  Looking only for a mixed state inside a
+    # single capability hid that cross-operation partial coverage.
+    partial = coverage_successes > 0 and coverage_failures > 0
 
     return {
         "database_names": database_names if show_databases else None,
@@ -415,7 +543,10 @@ def _collect_mongodb_data(
         "indexes": index_rows if (show_indexes or index_filter) else [],
         "documents": document_rows if dump_documents else [],
         "query_documents": query_rows if query_requested else [],
-        "query_error": query_error,
+        "query_error": "; ".join(operation_errors) if operation_errors else None,
+        "operation_results": operation_results,
+        "capability_coverage": capability_coverage,
+        "partial": partial,
         "index_filter": index_filter,
         "nosql_command": json_safe(nosql_command) if nosql_command is not None else None,
         "nosql_command_database": command_database if nosql_command is not None else None,
@@ -512,6 +643,10 @@ def _audit_mongodb_host(
     document_selector: Any | None = None,
     index_filter: str | None = None,
     nosql_command: dict[str, Any] | None = None,
+    tls: bool = False,
+    tls_ca: str | None = None,
+    tls_cert_key: str | None = None,
+    tls_insecure: bool = False,
 ) -> dict[str, Any]:
     attempts = max(1, int(retries) + 1)
     last_error: str | None = None
@@ -544,7 +679,15 @@ def _audit_mongodb_host(
         active_client_ref: MongoAuditClient | None = None
         active_client_owned_ref = False
         try:
-            client = _open_client(host, port, timeout, username=None, password=None, auth_db=auth_database)
+            client = _open_client(
+                host,
+                port,
+                timeout,
+                username=None,
+                password=None,
+                auth_db=auth_database,
+                **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
+            )
             hello = client.hello()
             version = None
             try:
@@ -572,6 +715,7 @@ def _audit_mongodb_host(
                     timeout,
                     auth_db=auth_database,
                     credential_candidates=credential_candidates,
+                    **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
                 )
                 # A12: cache the attempt log immediately after _try_credentials
                 # returns, before any subsequent step can raise and lose it.
@@ -587,6 +731,7 @@ def _audit_mongodb_host(
                         if selected_credential.get("password") is None
                         else str(selected_credential.get("password")),
                         auth_db=auth_database,
+                        **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
                     )
                     active_client_owned = True
                     # A10 fix: mirror ownership onto the outer refs so the finally
@@ -749,6 +894,10 @@ def _audit_mongodb_host_stage(
     show_databases_limit: int | None = None,
     show_collections_limit: int | None = None,
     show_indexes_limit: int | None = None,
+    tls: bool = False,
+    tls_ca: str | None = None,
+    tls_cert_key: str | None = None,
+    tls_insecure: bool = False,
     *,
     run_deep_checks: bool,
     debug: bool,
@@ -775,6 +924,10 @@ def _audit_mongodb_host_stage(
         document_selector if run_deep_checks else None,
         index_filter if run_deep_checks else None,
         nosql_command if run_deep_checks else None,
+        tls=tls,
+        tls_ca=tls_ca,
+        tls_cert_key=tls_cert_key,
+        tls_insecure=tls_insecure,
     )
     record["show_databases_limit"] = show_databases_limit if run_deep_checks else None
     record["show_collections_limit"] = show_collections_limit if run_deep_checks else None
@@ -1104,6 +1257,31 @@ def _format_query_detail_records(record: dict[str, Any], output_format: str) -> 
     return lines
 
 
+def _format_partial_operation_records(record: dict[str, Any], output_format: str) -> list[str]:
+    """Make per-database/collection failures visible in manual text output."""
+
+    raw_results = record.get("operation_results")
+    if not isinstance(raw_results, list):
+        return []
+    failures = [item for item in raw_results if isinstance(item, dict) and item.get("ok") is False]
+    if not failures or output_format == "json":
+        return []
+    prefix = _nxc_prefix(record)
+    lines = [f"{prefix} [!] partial MongoDB data: {len(failures)} operation(s) failed"]
+    for item in failures[:20]:
+        target = ".".join(
+            str(value) for value in (item.get("database"), item.get("collection")) if value not in (None, "")
+        )
+        target_suffix = f" target={target}" if target else ""
+        lines.append(
+            f"{prefix} [!] {item.get('operation') or 'operation'}{target_suffix} "
+            f"err={_clip(str(item.get('error') or 'denied'), 120)}"
+        )
+    if len(failures) > 20:
+        lines.append(f"{prefix} [!] ... {len(failures) - 20} more failed operation(s)")
+    return lines
+
+
 def _format_nosql_command_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
     command = record.get("nosql_command")
     result = record.get("nosql_command_result")
@@ -1161,6 +1339,10 @@ def _open_client_for_successful_record(
     *,
     timeout: float,
     auth_db: str,
+    tls: bool = False,
+    tls_ca: str | None = None,
+    tls_cert_key: str | None = None,
+    tls_insecure: bool = False,
 ) -> MongoAuditClient:
     status = str(record.get("status") or "")
     if status == "open_no_auth":
@@ -1171,6 +1353,7 @@ def _open_client_for_successful_record(
             username=None,
             password=None,
             auth_db=auth_db,
+            **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
         )
     if status in {"valid_credentials", "weak_default_creds"}:
         return _open_client(
@@ -1180,6 +1363,7 @@ def _open_client_for_successful_record(
             username=str(record.get("effective_username") or record.get("provided_username") or ""),
             password=None if record.get("provided_password") is None else str(record.get("provided_password")),
             auth_db=auth_db,
+            **_mongodb_tls_kwargs(tls, tls_ca, tls_cert_key, tls_insecure),
         )
     raise RuntimeError(f"mongodb shell requires successful access/auth, got status={status}")
 
@@ -1234,6 +1418,10 @@ def _run_mongodb_nosql_shell(
     emit_line: Callable[[str], None],
     shell_emit_line: Callable[[str], None],
     input_func: Callable[[str], str] = input,
+    tls: bool = False,
+    tls_ca: str | None = None,
+    tls_cert_key: str | None = None,
+    tls_insecure: bool = False,
 ) -> int:
     record = _audit_mongodb_host(
         host,
@@ -1252,6 +1440,10 @@ def _run_mongodb_nosql_shell(
         None,
         None,
         None,
+        tls=tls,
+        tls_ca=tls_ca,
+        tls_cert_key=tls_cert_key,
+        tls_insecure=tls_insecure,
     )
     if bool(record.get("is_mongodb")):
         emit_line(_format_detect_record(record, "txt"))
@@ -1260,7 +1452,15 @@ def _run_mongodb_nosql_shell(
         emit_line(record_line)
     if str(record.get("status") or "") not in _MONGODB_DEEP_STATUSES:
         return 1
-    client = _open_client_for_successful_record(record, timeout=timeout, auth_db=auth_db)
+    client = _open_client_for_successful_record(
+        record,
+        timeout=timeout,
+        auth_db=auth_db,
+        tls=tls,
+        tls_ca=tls_ca,
+        tls_cert_key=tls_cert_key,
+        tls_insecure=tls_insecure,
+    )
     try:
         return _run_mongodb_nosql_shell_session(
             client,

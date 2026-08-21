@@ -89,6 +89,27 @@ def configure_postgres_parser(
             "and pgbouncer:pgbouncer, after provided or file credentials."
         ),
     )
+    tls = postgres_parser.add_argument_group("TLS")
+    tls.add_argument(
+        "--sslmode",
+        choices=("disable", "prefer", "require", "verify-ca", "verify-full"),
+        default="prefer",
+        help="PostgreSQL TLS mode (default: prefer).",
+    )
+    tls.add_argument("--ssl-ca", dest="ssl_ca", default=None, metavar="file", help="CA bundle for TLS verification.")
+    tls.add_argument(
+        "--ssl-cert", dest="ssl_cert", default=None, metavar="file", help="Client certificate for PostgreSQL mTLS."
+    )
+    tls.add_argument(
+        "--ssl-key", dest="ssl_key", default=None, metavar="file", help="Client private key for PostgreSQL mTLS."
+    )
+    tls.add_argument(
+        "--ssl-server-name",
+        dest="ssl_server_name",
+        default=None,
+        metavar="name",
+        help="TLS SNI/certificate hostname override.",
+    )
     discovery.add_argument(
         "--show-databases",
         **optional_show_count_kwargs(

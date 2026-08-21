@@ -16,13 +16,9 @@ from redposture_core.modules.proxmox import actions as proxmox_actions
 from redposture_core.stage_collect import run_collect_stage
 from redposture_core.stage_consul import run_consul_stage
 from redposture_core.stage_elastic import run_elastic_stage
-from redposture_core.stage_etcd import run_etcd_stage
 from redposture_core.stage_gitlab import build_gitlab_plan, run_gitlab_stage
-from redposture_core.stage_grafana import run_grafana_stage
 from redposture_core.stage_kubeapi import run_kubeapi_stage
 from redposture_core.stage_proxmox import run_proxmox_stage
-from redposture_core.stage_qdrant import run_qdrant_stage
-from redposture_core.stage_registry import run_registry_stage
 from redposture_core.stage_scan import run_scan_stage
 from redposture_core.stage_trigger import run_trigger_stage
 
@@ -49,45 +45,40 @@ class _HostStageCapture:
 
 
 @pytest.mark.parametrize(
-    ("argv", "runner", "expected_error"),
+    ("argv", "runner", "patch_target"),
     [
-        (["exporters", "scan", "-t", "https://127.0.0.1:19100/metrics"], run_scan_stage, "accepts only http://"),
+        (
+            ["exporters", "scan", "-t", "https://127.0.0.1:19100/metrics"],
+            run_scan_stage,
+            "redposture_core.stage_scan.scan_exporter_presence",
+        ),
         (
             ["exporters", "collect", "-t", "https://127.0.0.1:19100/debug/vars"],
             run_collect_stage,
-            "accepts only http://",
-        ),
-        (
-            ["registry", "-t", "https://127.0.0.1:15000/v2/_catalog", "--docker", "--images"],
-            run_registry_stage,
-            "accepts only http://",
-        ),
-        (["grafana", "-t", "https://127.0.0.1:3000/login"], run_grafana_stage, "accepts only http://"),
-        (
-            ["etcd", "-t", "https://127.0.0.1:2379/v2/keys?recursive=true", "--show-keys"],
-            run_etcd_stage,
-            "accepts only http://",
-        ),
-        (
-            ["qdrant", "-t", "https://127.0.0.1:6333/collections", "--collections"],
-            run_qdrant_stage,
-            "accepts only http://",
+            "redposture_core.stage_collect.scan_exporter_presence",
         ),
     ],
 )
-def test_pure_http_modules_reject_https_targets(
-    argv: list[str], runner, expected_error: str, capsys: pytest.CaptureFixture[str]
+def test_exporter_stages_accept_and_preserve_https_targets(
+    argv: list[str], runner, patch_target: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    schemes: list[str] = []
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        schemes.append(str(kwargs.get("scheme") or "http"))
+        return 1, 0, {"127.0.0.1": []}
+
+    monkeypatch.setattr(patch_target, fake_scan)
     args = parse_args(argv)
     if runner is run_scan_stage:
         rc = runner(args)
     else:
         rc = runner(args, AttemptLogger())
-    assert rc == 2
-    assert expected_error in capsys.readouterr().err
+    assert rc == 0
+    assert schemes == ["https"]
 
 
-def test_trigger_rejects_https_targets(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_trigger_accepts_and_preserves_https_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     args = parse_args(
         [
             "exporters",
@@ -102,10 +93,17 @@ def test_trigger_rejects_https_targets(monkeypatch: pytest.MonkeyPatch, capsys: 
     monkeypatch.setattr(
         "redposture_core.stage_trigger.load_profiles", lambda *_args, **_kwargs: {"trigger_exporters": []}
     )
+    schemes: list[str] = []
+
+    def fake_trigger(*_args: object, **kwargs: object) -> dict[str, object]:
+        schemes.append(str(kwargs.get("scheme") or "http"))
+        return {"attempted": 0, "triggered": 0}
+
+    monkeypatch.setattr("redposture_core.stage_trigger._run_trigger_requests", fake_trigger)
 
     rc = run_trigger_stage(args, AttemptLogger())
-    assert rc == 2
-    assert "accepts only http://" in capsys.readouterr().err
+    assert rc == 0
+    assert schemes == ["https"]
 
 
 def test_scan_uses_explicit_url_port_over_ports_flag(monkeypatch: pytest.MonkeyPatch) -> None:

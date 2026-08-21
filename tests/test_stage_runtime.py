@@ -20,16 +20,20 @@ from redposture_core.stage_runtime import (
     StageTelemetryBuilder,
     StageTrace,
     build_basic_audit_plan,
+    command_result_exit_code,
     format_pass_marker,
     format_retry_decision,
     format_stage2_gate,
     format_stage_trace,
     install_record_callback,
     is_pre_detect_network_noise,
+    is_pre_detect_operational_failure,
     merge_audit_credential_runs,
     merge_stage_records,
     progress_total_from_groups,
+    run_basic_host_audit,
     should_use_global_progress,
+    sort_default_audit_credential_runs,
     validate_basic_module_args,
 )
 from redposture_core.utils import ScanTargetSpec
@@ -96,6 +100,30 @@ def test_merge_audit_credential_runs_handles_anonymous_and_empty_groups() -> Non
         (AuditCredentialRun(source="anonymous"),),
         (AuditCredentialRun(username="root", password="root", source="default"),),
     ) == (AuditCredentialRun(username="root", password="root", source="default"),)
+
+
+def test_sort_default_audit_credential_runs_orders_tokens_then_login_and_password() -> None:
+    runs = (
+        AuditCredentialRun(username="root", password="z", source="default"),
+        AuditCredentialRun(username="Admin", password="z", source="default"),
+        AuditCredentialRun(token="z-token", source="default"),
+        AuditCredentialRun(username="admin", password="A", source="default"),
+        AuditCredentialRun(username="admin", password="a", source="default"),
+        AuditCredentialRun(token="A-token", source="default"),
+        AuditCredentialRun(username=None, password="secret", source="default"),
+        AuditCredentialRun(source="anonymous"),
+    )
+
+    assert sort_default_audit_credential_runs(runs) == (
+        AuditCredentialRun(token="A-token", source="default"),
+        AuditCredentialRun(token="z-token", source="default"),
+        AuditCredentialRun(username=None, password="secret", source="default"),
+        AuditCredentialRun(username="admin", password="A", source="default"),
+        AuditCredentialRun(username="admin", password="a", source="default"),
+        AuditCredentialRun(username="Admin", password="z", source="default"),
+        AuditCredentialRun(username="root", password="z", source="default"),
+        AuditCredentialRun(source="anonymous"),
+    )
 
 
 def test_merge_stage_records_combines_debug_and_stage_telemetry() -> None:
@@ -198,7 +226,6 @@ def test_global_progress_policy_is_independent_from_output_destination() -> None
         "mongodb",
         "clickhouse",
         "zookeeper",
-        "keeper",
         "elastic",
         "grafana",
         "grpc",
@@ -490,9 +517,11 @@ def test_audit_command_runner_json_fail_records_emit_and_do_not_abort(tmp_path) 
     assert records_by_host["bad"]["error"] == "malformed protocol frame"
     assert records_by_host["next"]["status"] == "not_service"
     payloads = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
-    payloads_by_host = {payload["host"]: payload for payload in payloads}
+    payloads_by_host = {payload["host"]: payload for payload in payloads if payload.get("type") != "summary"}
     assert payloads_by_host["bad"]["status"] == "fail"
     assert payloads_by_host["next"]["status"] == "not_service"
+    assert payloads[-1]["status"] == "inconclusive"
+    assert payloads[-1]["operational_failure_count"] == 1
 
 
 def test_audit_command_runner_invokes_public_and_installed_record_callbacks() -> None:
@@ -786,13 +815,18 @@ def test_audit_command_runner_suppresses_pre_detect_noise_in_non_debug_txt() -> 
 
     result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
 
-    assert len(emitted) == 1
-    assert "No REDIS service detected" in emitted[0]
+    assert emitted == [
+        "[!] REDIS audit inconclusive: no service confirmed; 1/1 target unreachable or failed before detection"
+    ]
     assert all("protocol closed" not in line and "unexpected EOF" not in line for line in emitted)
     assert result.emitted_lines == 1
     assert result.suppressed_records == 1
+    assert result.operational_failure_count == 1
+    assert result.inconclusive is True
+    assert command_result_exit_code(result) == 1
     assert result.records[0]["protocol_error"] == "unexpected EOF"
     assert is_pre_detect_network_noise(result.typed_records[0]) is True
+    assert is_pre_detect_operational_failure(result.typed_records[0]) is True
 
 
 def test_credential_file_targets_are_not_tcp_prefiltered(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -1092,7 +1126,10 @@ def test_audit_command_runner_keeps_pre_detect_noise_in_debug_txt() -> None:
 
     result = AuditCommandRunner(args=args, spec=spec, emit_line=emitted.append).run_plan(plan)
 
-    assert emitted == ["127.0.0.1:9092 connection reset by peer"]
+    assert emitted == [
+        "127.0.0.1:9092 connection reset by peer",
+        "[!] KAFKA audit inconclusive: no service confirmed; 1/1 target unreachable or failed before detection",
+    ]
     assert result.suppressed_records == 0
 
 
@@ -1119,8 +1156,11 @@ def test_audit_command_runner_keeps_noise_diagnostics_in_json() -> None:
 
     result = AuditCommandRunner(args=object(), spec=spec, emit_line=emitted.append).run_plan(plan)
 
-    assert len(emitted) == 1
+    assert len(emitted) == 2
     assert '"error": "connection timeout"' in emitted[0]
+    summary = json.loads(emitted[1])
+    assert summary["status"] == "inconclusive"
+    assert summary["operational_failure_count"] == 1
     assert result.suppressed_records == 0
 
 
@@ -2569,3 +2609,152 @@ def test_run_plan_closes_prepared_sink_when_lifecycle_setup_fails(monkeypatch, t
 
     assert closed == [str(output_path)]
     assert output_path.read_text(encoding="utf-8") == ""
+
+
+def test_operational_detect_failure_emits_json_inconclusive_summary() -> None:
+    emitted: list[str] = []
+
+    def detect(_ctx) -> AuditRecord:
+        raise OSError("connection refused")
+
+    result = AuditCommandRunner(
+        args=SimpleNamespace(),
+        spec=ModuleAuditSpec(module="demo", label="DEMO", default_port=1234, detect=detect),
+        emit_line=emitted.append,
+    ).run_plan(AuditCommandPlan(targets_by_port={1234: ("host",)}, output_format="json"))
+
+    payloads = [json.loads(line) for line in emitted]
+    assert [payload["status"] for payload in payloads] == ["fail", "inconclusive"]
+    assert payloads[-1]["operational_failure_count"] == 1
+    assert payloads[-1]["conclusive_negative_count"] == 0
+    assert payloads[-1]["reason"] == "operational_failures_before_detection"
+    assert result.inconclusive is True
+    assert command_result_exit_code(result) == 1
+
+
+def test_conclusive_negative_detection_remains_successful() -> None:
+    emitted: list[str] = []
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="not_demo",
+            extra={"is_demo": False},
+        )
+
+    result = AuditCommandRunner(
+        args=SimpleNamespace(),
+        spec=ModuleAuditSpec(module="demo", label="DEMO", default_port=1234, detect=detect),
+        emit_line=emitted.append,
+    ).run_plan(AuditCommandPlan(targets_by_port={1234: ("host",)}, output_format="txt"))
+
+    assert emitted == ["[*] No DEMO service detected on target"]
+    assert result.operational_failure_count == 0
+    assert result.inconclusive is False
+    assert command_result_exit_code(result) == 0
+
+
+def test_failed_detect_trace_with_conclusive_wrong_service_is_not_operational() -> None:
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="fail",
+            extra={
+                "is_demo": False,
+                "error": "service is not demo",
+                "stages": [
+                    {
+                        "stage_name": "detect_protocol",
+                        "attempt": 1,
+                        "duration_ms": 1,
+                        "result": "error",
+                        "error": "service is not demo",
+                    }
+                ],
+            },
+        )
+
+    result = AuditCommandRunner(
+        args=SimpleNamespace(),
+        spec=ModuleAuditSpec(module="demo", label="DEMO", default_port=1234, detect=detect),
+        emit_line=lambda _line: None,
+    ).run_plan(AuditCommandPlan(targets_by_port={1234: ("host",)}, output_format="txt"))
+
+    assert result.operational_failure_count == 0
+    assert command_result_exit_code(result) == 0
+
+
+def test_mixed_detected_and_operational_failure_emits_partial_summary_and_nonzero() -> None:
+    emitted: list[str] = []
+
+    def detect(ctx) -> AuditRecord:
+        if ctx.host == "down":
+            raise OSError("connection refused")
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="open_no_auth",
+            extra={"is_demo": True},
+        )
+
+    result = AuditCommandRunner(
+        args=SimpleNamespace(),
+        spec=ModuleAuditSpec(module="demo", label="DEMO", default_port=1234, detect=detect),
+        emit_line=emitted.append,
+    ).run_plan(AuditCommandPlan(targets_by_port={1234: ("up", "down")}, output_format="json"))
+
+    payloads = [json.loads(line) for line in emitted]
+    assert payloads[-1]["status"] == "partial"
+    assert payloads[-1]["detected_count"] == 1
+    assert payloads[-1]["operational_failure_count"] == 1
+    assert command_result_exit_code(result) == 1
+
+
+def test_run_basic_host_audit_returns_nonzero_for_inconclusive_result() -> None:
+    class ConsoleRecorder:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def set_structured_output(self, _enabled: bool) -> None:
+            return None
+
+        def plain(self, message: str) -> None:
+            self.lines.append(message)
+
+        def info(self, message: str) -> None:
+            self.lines.append(message)
+
+        def warn(self, message: str) -> None:
+            self.lines.append(message)
+
+        def error(self, message: str) -> None:
+            self.lines.append(message)
+
+    console = ConsoleRecorder()
+
+    def detect(_ctx) -> AuditRecord:
+        raise TimeoutError("connection timeout")
+
+    args = SimpleNamespace(output_format="txt", output=None, debug=False, workers=1)
+    rc = run_basic_host_audit(
+        args,
+        logger=None,
+        console=console,
+        label="DEMO",
+        validate=lambda _args, _console: None,
+        build_plan=lambda _args: AuditCommandPlan(targets_by_port={1234: ("host",)}, output_format="txt"),
+        build_spec=lambda _args: ModuleAuditSpec(module="demo", label="DEMO", default_port=1234, detect=detect),
+    )
+
+    assert rc == 1
+    assert console.lines == [
+        "[!] DEMO audit inconclusive: no service confirmed; 1/1 target unreachable or failed before detection"
+    ]

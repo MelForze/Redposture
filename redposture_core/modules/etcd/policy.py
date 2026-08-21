@@ -8,7 +8,7 @@ from ...stage_runtime import validate_basic_module_args
 
 
 def validate_args(args: Any, console: Any) -> int | None:
-    return validate_basic_module_args(args, console, module="etcd", pure_http=True)
+    return validate_basic_module_args(args, console, module="etcd")
 
 
 __all__ = ["validate_args"]

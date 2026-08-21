@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
+from redposture_core.console import Console
 from redposture_core.stage_clickhouse import _render_colored_clickhouse_line
 from redposture_core.stage_consul import _render_colored_consul_line
 from redposture_core.stage_elastic import _render_colored_elastic_line
@@ -12,7 +13,6 @@ from redposture_core.stage_gitlab import _render_colored_gitlab_line
 from redposture_core.stage_grafana import _render_colored_grafana_line
 from redposture_core.stage_grpc import _render_colored_grpc_line
 from redposture_core.stage_kafka import _render_colored_kafka_line
-from redposture_core.stage_keeper import _render_colored_keeper_line
 from redposture_core.stage_kubeapi import _render_colored_kubeapi_line
 from redposture_core.stage_postgres import _render_colored_postgres_line
 from redposture_core.stage_proxmox import _render_colored_proxmox_line
@@ -151,7 +151,6 @@ def test_render_colored_zookeeper_colors_znodes_red() -> None:
     ("renderer", "tag", "port"),
     [
         (_render_colored_zookeeper_line, "ZOOKEEPER", 2181),
-        (_render_colored_keeper_line, "KEEPER", 9181),
     ],
 )
 def test_zookeeper_compatible_detail_metadata_is_white(
@@ -228,6 +227,41 @@ def test_render_colored_elastic_colors_access_and_capabilities() -> None:
     assert _contains_paint(console.paint_calls, "(write:False)", "bright_green")
     assert _contains_paint(console.paint_calls, "(manage:unknown)", "yellow")
     assert _contains_paint(console.paint_calls, "(manage_security:False)", "bright_green")
+
+
+def test_render_colored_elastic_highlights_complete_secret_finding() -> None:
+    console = _RecordingConsole()
+    line = (
+        "ELASTIC\t127.0.0.1\t9200\t [+] secret_type=bearer_token "
+        'value="line one\\nsource_kind=\\"fake\\"" source_kind="document" '
+        'object="logs/doc-1" index="logs" id="doc-1" path="/event/original"'
+    )
+
+    assert _render_colored_elastic_line(console, line) is True
+    assert _contains_paint(
+        console.paint_calls,
+        (
+            'secret_type=bearer_token value="line one\\nsource_kind=\\"fake\\"" '
+            'source_kind="document" object="logs/doc-1" index="logs" '
+            'id="doc-1" path="/event/original"'
+        ),
+        "orange",
+    )
+
+
+def test_render_colored_elastic_no_color_preserves_plain_finding(capsys: pytest.CaptureFixture[str]) -> None:
+    console = Console(no_color=True)
+    line = (
+        'ELASTIC\t127.0.0.1\t9200\t [+] secret_type=password value="S3cr3t!" '
+        'source_kind="document" object="logs/doc-1" path="/password"'
+    )
+
+    assert _render_colored_elastic_line(console, line) is True
+
+    captured = capsys.readouterr()
+    assert captured.out == f"{line}\n"
+    assert "\x1b[" not in captured.out
+    assert captured.err == ""
 
 
 def test_render_colored_kubeapi_colors_resources() -> None:

@@ -260,6 +260,7 @@ def test_redis_listener_handler_logs_auth_and_http_probe(tmp_path) -> None:
 
 def test_redis_listener_handler_protocol_ping_and_noauth_paths(tmp_path) -> None:
     logger = AttemptLogger()
+    logger.set_trigger_callback_mode(True, callback_targets=["127.0.0.1"])
     log_path = tmp_path / "redis-extra.log"
     logger.set_text_output(str(log_path))
     server = SimpleNamespace(server_address=("127.0.0.1", 16379), attempt_logger=logger)
@@ -275,6 +276,8 @@ def test_redis_listener_handler_protocol_ping_and_noauth_paths(tmp_path) -> None
             right.close()
 
     assert b"+PONG" in roundtrip(b"*1\r\n$4\r\nPING\r\n")
+    assert logger.get_trigger_callback_stats() == {"total": 1, "by_service": {"redis": 1}}
+    assert logger.get_trigger_callback_events()[0]["command"] == "PING"
     assert b"-NOAUTH Authentication required." in roundtrip(b"*1\r\n$6\r\nDBSIZE\r\n")
     assert b"-ERR protocol error" in roundtrip(b"*x\r\n")
 

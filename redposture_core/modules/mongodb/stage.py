@@ -13,7 +13,9 @@ from ...stage_runtime import (
     ModuleAuditSpec,
     build_basic_audit_plan,
     build_basic_credential_runs,
+    command_result_exit_code,
     merge_audit_credential_runs,
+    sort_default_audit_credential_runs,
 )
 from . import actions, policy, render
 
@@ -68,7 +70,7 @@ def run_mongodb_stage(args: Any, logger: Any) -> int:
         console.error(str(exc))
         return 2
     default_runs = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source="default")
             for username, password in actions._MONGODB_DEFAULT_CREDS
         )
@@ -96,9 +98,9 @@ def run_mongodb_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process mongodb output: {exc}")
         return 2
-    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
+    if cfg.debug and command_result_exit_code(result) != 0 and hasattr(console, "warn"):
         console.warn("all mongodb targets are unreachable")
-    return 0
+    return command_result_exit_code(result)
 
 
 __all__ = ["build_mongodb_plan", "build_mongodb_spec", "run_mongodb_stage"]
@@ -126,6 +128,10 @@ def _run_mongodb_nosql_shell(args: Any, plan: AuditCommandPlan, console: Any) ->
         database=getattr(args, "database", None),
         emit_line=console.plain,
         shell_emit_line=console.plain,
+        tls=bool(getattr(args, "tls", False)),
+        tls_ca=getattr(args, "tls_ca", None),
+        tls_cert_key=getattr(args, "tls_cert_key", None),
+        tls_insecure=bool(getattr(args, "tls_insecure", False)),
     )
 
 

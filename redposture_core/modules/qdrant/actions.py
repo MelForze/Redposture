@@ -16,7 +16,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig, resolve_http_scheme
+from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, resolve_http_scheme
 from ...console import Console
 from ...rendering import (
     CountColorRule,
@@ -118,7 +118,7 @@ def _http_json_request(
     payload: dict[str, Any] | None = None,
 ) -> tuple[int, Any, str | None]:
     scheme = resolve_http_scheme(host, port, timeout, probe_path="/collections")
-    url = f"{scheme}://{host}:{port}{path}"
+    url = build_http_target_url(host, port, path, default_scheme=scheme)
     body_bytes: bytes | None = None
     req_headers = {
         "User-Agent": "RedPosture/1.0",
@@ -202,11 +202,7 @@ def _qdrant_is_root_payload(payload: Any) -> bool:
     if not isinstance(payload, dict):
         return False
     title = str(payload.get("title") or "").strip().lower()
-    version = str(payload.get("version") or "").strip()
     if "qdrant" in title:
-        return True
-    if title == "" and version and "result" in payload:
-        # Some proxied responses may wrap the object but still expose version fields.
         return True
     return False
 
@@ -271,7 +267,8 @@ def _qdrant_looks_like_response(payload: Any) -> bool:
             return True
         status_value = payload.get("status")
         if isinstance(status_value, dict) and "error" in status_value:
-            return True
+            error_text = str(status_value.get("error") or "").lower()
+            return "time" in payload or "usage" in payload or "qdrant" in error_text or "api key" in error_text
     return False
 
 
@@ -764,6 +761,7 @@ def _start_qdrant_ssrf_capture_listener(port: int) -> dict[str, Any]:
 
     thread = threading.Thread(target=server.serve_forever, daemon=True, name=f"qdrant-ssrf-capture-{port_value}")
     thread.start()
+    result["port"] = server_listen_port(server)
     result["started"] = True
     result["thread"] = thread
     result["server"] = server
@@ -904,9 +902,6 @@ def _audit_qdrant_host(
             elif _qdrant_looks_like_response(anon_col_payload):
                 is_qdrant = True
             elif _qdrant_looks_like_response(root_payload) or _qdrant_looks_like_response(root_auth_payload):
-                is_qdrant = True
-            elif anon_col_status in {401, 403} and isinstance(anon_col_payload, dict):
-                # Auth-required collections endpoint still strongly indicates Qdrant.
                 is_qdrant = True
 
             if not is_qdrant:
@@ -1571,7 +1566,6 @@ def detect_qdrant(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             _qdrant_is_root_payload(root_payload)
             or _qdrant_looks_like_response(root_payload)
             or _qdrant_looks_like_response(col_payload)
-            or (col_status in {401, 403} and isinstance(col_payload, dict))
         )
         if is_qdrant:
             anonymous_ok = col_status == 200 and isinstance(names, list)

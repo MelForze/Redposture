@@ -85,6 +85,10 @@ def test_build_mongodb_uri_escapes_auth_and_auth_source() -> None:
 
     password_only_uri = build_mongodb_uri("mongo.local", 27017, username=None, password="", auth_db="auth/db")
     assert password_only_uri == "mongodb://:@mongo.local:27017/?authSource=auth%2Fdb&directConnection=true"
+    assert build_mongodb_uri("2001:db8::1", 27017) == (
+        "mongodb://[2001:db8::1]:27017/?authSource=admin&directConnection=true"
+    )
+    assert build_mongodb_uri("[::1]", 27017) == "mongodb://[::1]:27017/?authSource=admin&directConnection=true"
 
 
 def test_mongo_audit_client_wraps_database_collection_helpers() -> None:
@@ -174,6 +178,30 @@ def test_open_mongodb_client_uses_fake_client_without_pymongo_import() -> None:
     assert kwargs["appname"] == "redposture"
 
 
+def test_open_mongodb_client_passes_tls_and_mtls_options() -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class FakeMongoClient:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            calls.append((args, kwargs))
+
+    open_mongodb_client(
+        "mongo.local",
+        27017,
+        tls=True,
+        tls_ca_file="/tmp/ca.pem",
+        tls_certificate_key_file="/tmp/client.pem",
+        tls_insecure=True,
+        mongo_client_cls=FakeMongoClient,
+    )
+    _args, kwargs = calls[0]
+    assert kwargs["tls"] is True
+    assert kwargs["tlsCAFile"] == "/tmp/ca.pem"
+    assert kwargs["tlsCertificateKeyFile"] == "/tmp/client.pem"
+    assert kwargs["tlsAllowInvalidCertificates"] is True
+    assert kwargs["tlsAllowInvalidHostnames"] is True
+
+
 def test_mongodb_optional_dependency_loaders(monkeypatch: pytest.MonkeyPatch) -> None:
     real_import = __import__
 
@@ -230,7 +258,8 @@ def test_mongo_audit_client_fallbacks_and_close_quietly() -> None:
     client.close()
     assert raw.closed is True
 
-    assert MongoAuditClient(FallbackRaw(WorseCountCollection)).count_documents("redposture", "demo_accounts") is None
+    with pytest.raises(RuntimeError, match="count failed"):
+        MongoAuditClient(FallbackRaw(WorseCountCollection)).count_documents("redposture", "demo_accounts")
 
     class BrokenClose:
         def close(self):

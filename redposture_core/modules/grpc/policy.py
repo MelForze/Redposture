@@ -29,6 +29,22 @@ def validate_args(args: Any, console: Any) -> int | None:
     if getattr(args, "proto_path", None) and not getattr(args, "proto", None):
         console.error("--proto-path requires --proto")
         return 2
+    if bool(getattr(args, "tls_cert", None)) != bool(getattr(args, "tls_key", None)):
+        console.error("--tls-cert and --tls-key must be used together")
+        return 2
+    if getattr(args, "tls_ca", None) and bool(getattr(args, "insecure", False)):
+        console.error("--tls-ca cannot be combined with --insecure")
+        return 2
+    if bool(getattr(args, "plaintext", False)) and any(
+        (
+            bool(getattr(args, "insecure", False)),
+            bool(getattr(args, "tls_ca", None)),
+            bool(getattr(args, "tls_cert", None)),
+            bool(getattr(args, "tls_server_name", None)),
+        )
+    ):
+        console.error("--plaintext cannot be combined with TLS options")
+        return 2
     return None
 
 

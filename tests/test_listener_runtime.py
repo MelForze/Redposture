@@ -184,6 +184,139 @@ def test_stop_started_listeners_ignores_shutdown_errors(tmp_path) -> None:
     assert not temp_cert_dir.exists()
 
 
+def test_start_servers_rolls_back_earlier_listener_when_later_bind_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    console = _DummyConsole()
+    logger = AttemptLogger()
+    lifecycle: list[str] = []
+
+    class _Server:
+        def shutdown(self) -> None:
+            lifecycle.append("shutdown")
+
+        def server_close(self) -> None:
+            lifecycle.append("close")
+
+    args = Namespace(
+        bind="127.0.0.1",
+        postgres_port=15432,
+        redis_port=16379,
+        proxmox_port=18006,
+        blackbox_port=19115,
+        postgres_tls=False,
+        proxmox_tls=False,
+        cert_file=None,
+        key_file=None,
+    )
+    started_server = _Server()
+    monkeypatch.setattr("redposture_core.listener_runtime.make_postgres_server", lambda *_a, **_k: started_server)
+    monkeypatch.setattr(
+        "redposture_core.listener_runtime.start_server",
+        lambda name, bind, port, server, tls=False: RunningServer(
+            name=name,
+            bind=bind,
+            port=port,
+            server=server,
+            thread=threading.Thread(),
+            tls=tls,
+        ),
+    )
+    monkeypatch.setattr(
+        "redposture_core.listener_runtime.make_redis_server",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("address already in use")),
+    )
+
+    with pytest.raises(OSError, match="redis listener"):
+        _start_servers(args, logger, {"postgres", "redis"}, console)
+
+    assert lifecycle == ["shutdown", "close"]
+
+
+def test_start_servers_rolls_back_and_closes_unregistered_server_on_unexpected_start_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    console = _DummyConsole()
+    logger = AttemptLogger()
+    lifecycle: list[str] = []
+
+    class _Server:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def shutdown(self) -> None:
+            lifecycle.append(f"shutdown:{self.name}")
+
+        def server_close(self) -> None:
+            lifecycle.append(f"close:{self.name}")
+
+    args = Namespace(
+        bind="127.0.0.1",
+        postgres_port=15432,
+        redis_port=16379,
+        proxmox_port=18006,
+        blackbox_port=19115,
+        postgres_tls=False,
+        proxmox_tls=False,
+        cert_file=None,
+        key_file=None,
+    )
+    postgres_server = _Server("postgres")
+    redis_server = _Server("redis")
+    monkeypatch.setattr("redposture_core.listener_runtime.make_postgres_server", lambda *_a, **_k: postgres_server)
+    monkeypatch.setattr("redposture_core.listener_runtime.make_redis_server", lambda *_a, **_k: redis_server)
+
+    def fake_start(name: str, bind: str, port: int, server: object, tls: bool = False) -> RunningServer:
+        if name == "redis":
+            raise RuntimeError("thread failed")
+        return RunningServer(name=name, bind=bind, port=port, server=server, thread=threading.Thread(), tls=tls)
+
+    monkeypatch.setattr("redposture_core.listener_runtime.start_server", fake_start)
+
+    with pytest.raises(RuntimeError, match="thread failed"):
+        _start_servers(args, logger, {"postgres", "redis"}, console)
+
+    assert lifecycle == ["close:redis", "shutdown:postgres", "close:postgres"]
+
+
+def test_start_servers_removes_generated_cert_dir_when_ssl_context_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    console = _DummyConsole()
+    logger = AttemptLogger()
+    cert_dir = tmp_path / "generated-cert"
+    cert_dir.mkdir()
+    cert = cert_dir / "cert.pem"
+    key = cert_dir / "key.pem"
+    cert.write_text("cert", encoding="utf-8")
+    key.write_text("key", encoding="utf-8")
+    args = Namespace(
+        bind="127.0.0.1",
+        postgres_port=15432,
+        redis_port=16379,
+        proxmox_port=18006,
+        blackbox_port=19115,
+        postgres_tls=True,
+        proxmox_tls=False,
+        cert_file=None,
+        key_file=None,
+    )
+    monkeypatch.setattr("redposture_core.listener_runtime._autodetect_cert_key_files", lambda _cwd: (None, None))
+    monkeypatch.setattr(
+        "redposture_core.listener_runtime.prepare_cert_files",
+        lambda *_a, **_k: (str(cert), str(key), str(cert_dir)),
+    )
+    monkeypatch.setattr(
+        "redposture_core.listener_runtime.build_ssl_context",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("bad certificate")),
+    )
+
+    with pytest.raises(ValueError, match="bad certificate"):
+        _start_servers(args, logger, {"postgres"}, console)
+
+    assert not cert_dir.exists()
+
+
 def test_run_listeners_handles_invalid_services_and_runtime_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

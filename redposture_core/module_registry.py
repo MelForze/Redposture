@@ -17,7 +17,6 @@ from .cli_modules.exporters import configure_collect_parser, configure_scan_pars
 from .cli_modules.gitlab import configure_gitlab_parser
 from .cli_modules.grafana import configure_grafana_parser
 from .cli_modules.grpc import configure_grpc_parser
-from .cli_modules.keeper import configure_keeper_parser
 from .cli_modules.kubeapi import configure_kubeapi_parser
 from .cli_modules.mongodb import MongoDBHelpFormatter, configure_mongodb_parser
 from .cli_modules.oracle import configure_oracle_parser
@@ -43,7 +42,6 @@ COMMAND_CONSUL = "consul"
 COMMAND_QDRANT = "qdrant"
 COMMAND_KUBEAPI = "kubeapi"
 COMMAND_KAFKA = "kafka"
-COMMAND_KEEPER = "keeper"
 COMMAND_ZOOKEEPER = "zookeeper"
 COMMAND_ELASTIC = "elastic"
 COMMAND_GRPC = "grpc"
@@ -110,7 +108,6 @@ _STAGE_RUNNER_MODULES: dict[str, str] = {
     COMMAND_QDRANT: "redposture_core.modules.qdrant.stage",
     COMMAND_KUBEAPI: "redposture_core.modules.kubeapi.stage",
     COMMAND_KAFKA: "redposture_core.modules.kafka.stage",
-    COMMAND_KEEPER: "redposture_core.modules.keeper.stage",
     COMMAND_ZOOKEEPER: "redposture_core.modules.zookeeper.stage",
     COMMAND_ELASTIC: "redposture_core.modules.elastic.stage",
     COMMAND_GRPC: "redposture_core.modules.grpc.stage",
@@ -375,19 +372,13 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         name=COMMAND_ZOOKEEPER,
-        help="Audit ZooKeeper exposure, auth requirements, and znode visibility.",
+        help="Audit ZooKeeper and ClickHouse Keeper exposure, auth, transport, and znodes.",
+        description=(
+            "ZooKeeper module auto-detects plaintext/TLS ZooKeeper-compatible services, classifies Apache "
+            "ZooKeeper and ClickHouse Keeper, and audits digest auth and znode visibility."
+        ),
         runner_attr="run_zookeeper_stage",
         configure_parser=_make_configurator(configure_zookeeper_parser, (*_HTTP_MODULE_HELPERS, "positive_int")),
-    ),
-    CommandSpec(
-        name=COMMAND_KEEPER,
-        help="Audit ClickHouse Keeper identity, transport, auth, health, and znode visibility.",
-        description=(
-            "Keeper module verifies ClickHouse Keeper via four-letter diagnostics, auto-detects plaintext/TLS, "
-            "and reuses the ZooKeeper-compatible auth and znode audit."
-        ),
-        runner_attr="run_keeper_stage",
-        configure_parser=_make_configurator(configure_keeper_parser, (*_HTTP_MODULE_HELPERS, "positive_int")),
     ),
 )
 

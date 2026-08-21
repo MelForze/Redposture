@@ -673,6 +673,24 @@ def test_trigger_requires_callback_ip_or_dns(monkeypatch: pytest.MonkeyPatch) ->
     assert rc == 2
 
 
+def test_trigger_excludes_out_targets_before_scanning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        trigger,
+        "scan_exporters_and_trigger",
+        lambda *_a, **_k: pytest.fail("excluded target reached trigger scanner"),
+    )
+
+    rc = run_trigger_stage(
+        _base_args(targets="10.0.0.1", out_targets=["10.0.0.0/24"]),
+        AttemptLogger(),
+    )
+
+    assert rc == 2
+    assert "all targets were excluded by --out-target" in capsys.readouterr().err
+
+
 def test_trigger_rejects_hostname_in_callback_ip(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_load_profiles(_path: object) -> dict[str, object]:
         return {"trigger_exporters": []}
@@ -999,7 +1017,7 @@ def test_trigger_json_with_listen_keeps_listener_output_off_stdout(
     monotonic_values = iter([10.0, 10.2])
 
     def fake_start_listeners(*_args: object, **_kwargs: object) -> tuple[list[object], None]:
-        logger.log("redis", ("10.0.0.3", 60000), command="PING", listen_port=16379)
+        logger.log("redis", ("10.0.0.1", 60000), command="PING", listen_port=16379)
         return [], None
 
     def fake_scan(*_args: object, **kwargs: object) -> dict[str, object]:
@@ -1029,8 +1047,10 @@ def test_trigger_json_with_listen_keeps_listener_output_off_stdout(
     assert rc == 0
     captured = capsys.readouterr()
     stdout_lines = captured.out.splitlines()
-    assert len(stdout_lines) == 1
+    assert len(stdout_lines) == 2
     assert json.loads(stdout_lines[0])["source_type"] == "trigger"
+    assert json.loads(stdout_lines[1])["type"] == "summary"
+    assert json.loads(stdout_lines[1])["callback_confirmed"] == 1
     assert output_path.read_text(encoding="utf-8").splitlines() == stdout_lines
     assert "command=PING" in captured.err
     assert "phase=listener_stopped" in captured.err
@@ -1286,7 +1306,28 @@ def test_trigger_with_listen_summary_uses_received_callbacks(
     rc = run_trigger_stage(_base_args(with_listen=True), logger)
     assert rc == 0
     out = capsys.readouterr().out
-    assert "trigger complete: hosts=1 detected=4 attempts=4 success=2 fail=2" in out
+    assert (
+        "trigger complete: attempts=4 accepted=0 probe_confirmed=1 callback_confirmed=2 unconfirmed=0 fail=2"
+    ) in out
+
+
+def test_correlated_callback_stats_ignore_unrelated_same_service_callback() -> None:
+    summaries = [
+        {
+            "attempts_by_exporter_host": {"redis_exporter": {"127.0.0.1": 2}},
+            "by_exporter": {"redis_exporter": {"attempted": 2}},
+            "by_host": {"127.0.0.1": {"attempted": 2}},
+        }
+    ]
+    events = [
+        {"service": "redis", "remote_addr": "127.0.0.1:60100", "listen_port": 16379},
+        {"service": "redis", "remote_addr": "192.0.2.44:60101", "listen_port": 16379},
+    ]
+
+    assert trigger._correlated_callback_stats(summaries, events) == {
+        "total": 1,
+        "by_service": {"redis": 1},
+    }
 
 
 def test_trigger_with_listen_closes_progress_before_credential_checks(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1488,7 +1529,7 @@ def test_trigger_stage_argument_and_validation_paths(monkeypatch: pytest.MonkeyP
     )
     monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", lambda *_a, **_k: {"trigger_exporters": []})
     rc = run_trigger_stage(_base_args(), AttemptLogger())
-    assert rc == 2
+    assert rc == 0
 
     monkeypatch.setattr(
         "redposture_core.stage_trigger.collect_scan_target_specs",

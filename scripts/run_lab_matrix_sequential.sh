@@ -43,7 +43,7 @@ fi
 
 MATRIX_SERVICES=(
   exporters registry grafana gitlab consul kubeapi postgres mongodb oracle docker
-  clickhouse redis etcd qdrant elastic grpc kafka zookeeper zookeeper-auth keeper proxmox proxy-isolated
+  clickhouse redis etcd qdrant elastic opensearch grpc kafka zookeeper zookeeper-auth keeper proxmox proxy-isolated
 )
 READINESS_ALLOWED_COMPLETED=(
   redposture-lab-registry-seed
@@ -321,35 +321,34 @@ run_raw_case() {
 }
 
 run_negative_cli_cases() {
-  run_raw_case exporters fuzz_exporters_scan_missing_targets 2 exporters scan -p 9100
+  run_raw_case exporters fuzz_exporters_scan_missing_targets 2 exporters scan -p 9100 -ot excluded.invalid --tls-ca /tmp/redposture-missing-ca.pem --tls-cert /tmp/redposture-missing-cert.pem --tls-key /tmp/redposture-missing-key.pem --insecure
   run_raw_case exporters fuzz_exporters_scan_invalid_ports 2 exporters scan -t 127.0.0.1 -p bad
   run_raw_case exporters fuzz_exporters_scan_zero_timeout 2 exporters scan -t 127.0.0.1 --timeout 0
-  run_raw_case exporters fuzz_exporters_collect_zero_max_inflight 2 exporters collect -t 127.0.0.1 --max-inflight 0
-  run_raw_case exporters fuzz_exporters_trigger_missing_callback 2 exporters trigger -t 127.0.0.1 --no-with-listen
+  run_raw_case exporters fuzz_exporters_collect_zero_max_inflight 2 exporters collect -t 127.0.0.1 -ot excluded.invalid --max-inflight 0 --tls-ca /tmp/redposture-missing-ca.pem --tls-cert /tmp/redposture-missing-cert.pem --tls-key /tmp/redposture-missing-key.pem --insecure
+  run_raw_case exporters fuzz_exporters_trigger_missing_callback 2 exporters trigger -t 127.0.0.1 -ot excluded.invalid --no-with-listen --tls-ca /tmp/redposture-missing-ca.pem --tls-cert /tmp/redposture-missing-cert.pem --tls-key /tmp/redposture-missing-key.pem --insecure
   run_raw_case exporters fuzz_exporters_trigger_bad_callback_ip 2 exporters trigger -t 127.0.0.1 --callback-ip 999.999.999.999 --no-with-listen
   run_raw_case exporters fuzz_exporters_trigger_check_without_listen 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --no-with-listen --check-credentials
   run_raw_case exporters fuzz_exporters_trigger_json_listen_without_output 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --with-listen --format json
   run_raw_case exporters fuzz_exporters_trigger_negative_listen_seconds 2 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 --with-listen --listen-seconds -1
 
-  run_raw_case registry fuzz_registry_missing_targets 2 registry --docker --images
-  run_raw_case grafana fuzz_grafana_missing_targets 2 grafana --defcreds
-  run_raw_case gitlab fuzz_gitlab_missing_targets 2 gitlab
-  run_raw_case consul fuzz_consul_missing_targets 2 consul --keys
-  run_raw_case kubeapi fuzz_kubeapi_missing_targets 2 kubeapi --namespaces
-  run_raw_case postgres fuzz_postgres_missing_targets 2 postgres --show-databases
-  run_raw_case mongodb fuzz_mongodb_missing_targets 2 mongodb --show-databases
-  run_raw_case oracle fuzz_oracle_missing_targets 2 oracle --service FREEPDB1
-  run_raw_case docker fuzz_docker_missing_targets 2 docker --containers
-  run_raw_case clickhouse fuzz_clickhouse_missing_targets 2 clickhouse --show-databases
-  run_raw_case redis fuzz_redis_missing_targets 2 redis --show-keys
-  run_raw_case etcd fuzz_etcd_missing_targets 2 etcd --show-keys
-  run_raw_case qdrant fuzz_qdrant_missing_targets 2 qdrant --collections
-  run_raw_case elastic fuzz_elastic_missing_targets 2 elastic --endpoints
-  run_raw_case grpc fuzz_grpc_missing_targets 2 grpc
-  run_raw_case kafka fuzz_kafka_missing_targets 2 kafka --show-topics
-  run_raw_case zookeeper fuzz_zookeeper_missing_targets 2 zookeeper --show-znodes
-  run_raw_case keeper fuzz_keeper_missing_targets 2 keeper --show-znodes
-  run_raw_case proxmox fuzz_proxmox_missing_targets 2 proxmox --pveapitoken "monitor@pve!audit=token"
+  run_raw_case registry fuzz_registry_missing_targets 2 registry -ot excluded.invalid --docker --images
+  run_raw_case grafana fuzz_grafana_missing_targets 2 grafana -ot excluded.invalid --defcreds
+  run_raw_case gitlab fuzz_gitlab_missing_targets 2 gitlab -ot excluded.invalid
+  run_raw_case consul fuzz_consul_missing_targets 2 consul -ot excluded.invalid --keys --tls --insecure --tls-cert /nonexistent/consul-client.crt --tls-key /nonexistent/consul-client.key
+  run_raw_case kubeapi fuzz_kubeapi_missing_targets 2 kubeapi -ot excluded.invalid --namespaces
+  run_raw_case postgres fuzz_postgres_missing_targets 2 postgres -ot excluded.invalid --show-databases --sslmode verify-full --ssl-ca /nonexistent/postgres-ca.crt --ssl-cert /nonexistent/postgres-client.crt --ssl-key /nonexistent/postgres-client.key --ssl-server-name postgres.internal
+  run_raw_case mongodb fuzz_mongodb_missing_targets 2 mongodb -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/mongodb-ca.crt --tls-cert-key /nonexistent/mongodb-client.pem --tls-insecure
+  run_raw_case oracle fuzz_oracle_missing_targets 2 oracle -ot excluded.invalid --service FREEPDB1
+  run_raw_case docker fuzz_docker_missing_targets 2 docker -ot excluded.invalid --containers
+  run_raw_case clickhouse fuzz_clickhouse_missing_targets 2 clickhouse -ot excluded.invalid --show-databases --tls --tls-ca /nonexistent/clickhouse-ca.crt --tls-cert /nonexistent/clickhouse-client.crt --tls-key /nonexistent/clickhouse-client.key --tls-server-name clickhouse.internal --insecure
+  run_raw_case redis fuzz_redis_missing_targets 2 redis -ot excluded.invalid --show-keys --tls --insecure --tls-ca /nonexistent/redis-ca.crt --tls-cert /nonexistent/redis-client.crt --tls-key /nonexistent/redis-client.key
+  run_raw_case etcd fuzz_etcd_missing_targets 2 etcd -ot excluded.invalid --show-keys
+  run_raw_case qdrant fuzz_qdrant_missing_targets 2 qdrant -ot excluded.invalid --collections
+  run_raw_case elastic fuzz_elastic_missing_targets 2 elastic -ot excluded.invalid --endpoints
+  run_raw_case grpc fuzz_grpc_missing_targets 2 grpc -ot excluded.invalid --tls --tls-server-name grpc.internal --insecure --tls-ca /nonexistent/grpc-ca.crt --tls-cert /nonexistent/grpc-client.crt --tls-key /nonexistent/grpc-client.key
+  run_raw_case kafka fuzz_kafka_missing_targets 2 kafka -ot excluded.invalid --show-topics --tls --insecure --tls-ca /nonexistent/kafka-ca.crt --tls-cert /nonexistent/kafka-client.crt --tls-key /nonexistent/kafka-client.key
+  run_raw_case zookeeper fuzz_zookeeper_missing_targets 2 zookeeper -ot excluded.invalid --show-znodes
+  run_raw_case proxmox fuzz_proxmox_missing_targets 2 proxmox -ot excluded.invalid --pveapitoken "monitor@pve!audit=token" --grant-role Auditor --grant-path / --no-grant-propagate
 
   run_raw_case registry fuzz_registry_username_without_password 2 registry -t 127.0.0.1 -u admin --docker --images
   run_raw_case registry fuzz_registry_token_basic_conflict 2 registry -t 127.0.0.1 --token token -u admin -p admin --docker --images
@@ -362,12 +361,12 @@ run_negative_cli_cases() {
   run_raw_case kubeapi fuzz_kubeapi_username_without_password 2 kubeapi -t 127.0.0.1 -u audit --namespaces
   run_raw_case elastic fuzz_elastic_username_without_password 2 elastic -t 127.0.0.1 -u elastic --endpoints
   run_raw_case grpc fuzz_grpc_username_without_password 2 grpc -t 127.0.0.1 -u grpcuser
-  run_raw_case kafka fuzz_kafka_username_without_password 2 kafka -t 127.0.0.1 -u metrics --show-topics
+  run_raw_case kafka fuzz_kafka_username_without_password 2 kafka -t 127.0.0.1 -u metrics --show-topics --plaintext
   run_raw_case zookeeper fuzz_zookeeper_username_without_password 2 zookeeper -t 127.0.0.1 -u zkuser --show-znodes
   run_raw_case proxmox fuzz_proxmox_username_without_password 2 proxmox -t 127.0.0.1 -u root@pam --nodes
   run_raw_case redis fuzz_redis_username_without_password 2 redis -t 127.0.0.1 -u redis --show-keys
 
-  run_raw_case consul fuzz_consul_username_without_password 2 consul -t 127.0.0.1 -u matrix --keys
+  run_raw_case consul fuzz_consul_username_without_password 2 consul -t 127.0.0.1 -u matrix --keys --plaintext --tls-ca /nonexistent/consul-ca.crt
   run_raw_case consul fuzz_consul_key_without_dump 2 consul -t 127.0.0.1 --key redposture/kafka/sasl_password
   run_raw_case consul fuzz_consul_service_without_dump 2 consul -t 127.0.0.1 --service svc-redposture-api
   run_raw_case consul fuzz_consul_agent_without_dump 2 consul -t 127.0.0.1 --agent redposture-lab-consul
@@ -419,11 +418,9 @@ run_negative_cli_cases() {
 
   run_raw_case zookeeper fuzz_zookeeper_zero_max_znodes 2 zookeeper -t 127.0.0.1 --max-znodes 0
   run_raw_case zookeeper fuzz_zookeeper_zero_enum_workers 2 zookeeper -t 127.0.0.1 --enum-workers 0
-  run_raw_case keeper fuzz_keeper_incomplete_mtls 2 keeper -t 127.0.0.1 --tls-cert client.pem
-  run_raw_case keeper fuzz_keeper_incomplete_mtls_key 2 keeper -t 127.0.0.1 --tls-key client.key
-  run_raw_case keeper fuzz_keeper_ca_insecure_conflict 2 keeper -t 127.0.0.1 --ca-file ca.pem --insecure
-  run_raw_case keeper fuzz_keeper_removed_tls_flag 2 keeper -t 127.0.0.1 --tls
-  run_raw_case keeper fuzz_keeper_removed_no_tls_flag 2 keeper -t 127.0.0.1 --no-tls
+  run_raw_case zookeeper fuzz_zookeeper_incomplete_mtls 2 zookeeper -t 127.0.0.1 --tls-cert client.pem
+  run_raw_case zookeeper fuzz_zookeeper_incomplete_mtls_key 2 zookeeper -t 127.0.0.1 --tls-key client.key
+  run_raw_case zookeeper fuzz_zookeeper_ca_insecure_conflict 2 zookeeper -t 127.0.0.1 --ca-file ca.pem --insecure
 }
 
 run_exporters_cases() {
@@ -432,11 +429,11 @@ run_exporters_cases() {
   run_case exporters exporters_trigger 0 exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal -p "19121,19308" --with-listen --listen-seconds 8 \
     --postgres-port 15432 --redis-port 16379 --proxmox-port 28006 --blackbox-port 29115
   run_case exporters exporters_scan_url_http 0 exporters scan -t "http://127.0.0.1:19100/metrics?from=matrix"
-  run_case exporters exporters_scan_url_https_reject 2 exporters scan -t "https://127.0.0.1:19100/metrics"
+  run_case exporters exporters_scan_url_https_transport_fail 1 exporters scan -t "https://127.0.0.1:19100/metrics"
   run_case exporters exporters_collect_url_http 0 exporters collect -t "http://127.0.0.1:19100/debug/vars" --exporters node --save-responses-dir "${OUT_DIR}/collect_raw_url"
-  run_case exporters exporters_collect_url_https_reject 2 exporters collect -t "https://127.0.0.1:19100/debug/vars"
+  run_case exporters exporters_collect_url_https_transport_fail 1 exporters collect -t "https://127.0.0.1:19100/debug/vars"
   run_case exporters exporters_trigger_url_http 0 exporters trigger -t "http://127.0.0.1:19121/scrape?target=redis://127.0.0.1:6379" --callback-dns host.docker.internal --no-with-listen
-  run_case exporters exporters_trigger_url_https_reject 2 exporters trigger -t "https://127.0.0.1:19121/scrape" --callback-dns host.docker.internal --no-with-listen
+  run_case exporters exporters_trigger_url_https_transport_mismatch 0 exporters trigger -t "https://127.0.0.1:19121/scrape" --callback-dns host.docker.internal --no-with-listen
   run_text_case exporters exporters_debug_smoke 0 exporters scan -t 127.0.0.1 -p "19100,19121" --debug
   if is_extended_matrix; then
     local collect_checkpoint="${OUT_DIR}/exporters_collect_extended.checkpoint"
@@ -456,7 +453,7 @@ run_registry_cases() {
   run_case registry registry_gitlab 0 registry -t 127.0.0.1 --port 15003 --token glrt-lab-token --gitlab --images
   run_case registry registry_nexus 0 registry -t 127.0.0.1 --port 15004 --nexus --assets
   run_case registry registry_url_http 0 registry -t "http://127.0.0.1:15000/v2/_catalog?n=1000" --docker --images
-  run_case registry registry_url_https_reject 2 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
+  run_case registry registry_url_https_transport_fail 1 registry -t "https://127.0.0.1:15000/v2/_catalog" --docker --images
   run_case registry registry_multi_instance_urls 0 registry -t "http://127.0.0.1:15000/v2/_catalog,http://127.0.0.1:15010/v2/_catalog,http://127.0.0.1:15011/v2/_catalog,http://127.0.0.1:15012/v2/_catalog,http://127.0.0.1:15013/v2/_catalog" --docker --images
   run_text_case registry registry_debug_smoke 0 registry -t 127.0.0.1 --port 15000 --docker --images --debug
   if is_extended_matrix; then
@@ -471,7 +468,7 @@ run_grafana_cases() {
   run_case grafana grafana_default 0 grafana -t 127.0.0.1 --defcreds --show-datasources
   run_case grafana grafana_apitoken 0 grafana -t 127.0.0.1 --port 3000 --apitoken glsa-fake-token-2026 --show-datasources
   run_case grafana grafana_url_http 0 grafana -t "http://127.0.0.1:3000/login?next=%2F" --defcreds --show-datasources
-  run_case grafana grafana_url_https_reject 2 grafana -t "https://127.0.0.1:3000/login"
+  run_case grafana grafana_url_https_transport_fail 1 grafana -t "https://127.0.0.1:3000/login"
   run_case grafana grafana_ssrf_edge 0 grafana -t 127.0.0.1 --defcreds --ssrf-target "http://grafana-2:3000/api/health" --show-datasources
   run_case grafana grafana_multi_instance_urls 0 grafana -t "http://127.0.0.1:3000/login,http://127.0.0.1:13001/login,http://127.0.0.1:13002/login,http://127.0.0.1:13003/login,http://127.0.0.1:13004/login" --defcreds
   run_text_case grafana grafana_debug_smoke 0 grafana -t 127.0.0.1 --defcreds --debug
@@ -690,7 +687,7 @@ run_etcd_cases() {
   run_case etcd etcd_auth_defcreds 0 etcd -t 127.0.0.1 --port 22379 --defcreds --show-keys
   run_case etcd etcd_auth_user_pass 0 etcd -t 127.0.0.1 --port 22379 -u root -p root --show-keys
   run_case etcd etcd_url_http 0 etcd -t "http://127.0.0.1:2379/v2/keys?recursive=true" --show-keys --dump
-  run_case etcd etcd_url_https_reject 2 etcd -t "https://127.0.0.1:2379/v2/keys?recursive=true" --show-keys
+  run_case etcd etcd_url_https_transport_fail 1 etcd -t "https://127.0.0.1:2379/v2/keys?recursive=true" --show-keys
   run_case etcd etcd_multi_instance_urls 0 etcd -t "http://127.0.0.1:2379/v2/keys,http://127.0.0.1:23790/v2/keys,http://127.0.0.1:23791/v2/keys,http://127.0.0.1:23792/v2/keys,http://127.0.0.1:23793/v2/keys" --show-keys
   run_text_case etcd etcd_debug_smoke 0 etcd -t 127.0.0.1 --port 2379 --debug
   if is_extended_matrix; then
@@ -711,7 +708,7 @@ run_etcd_cases() {
 run_qdrant_cases() {
   run_case qdrant qdrant_default 0 qdrant -t 127.0.0.1 --collections --dump
   run_case qdrant qdrant_url_http 0 qdrant -t "http://127.0.0.1:6333/collections?from=matrix" --collections --dump
-  run_case qdrant qdrant_url_https_reject 2 qdrant -t "https://127.0.0.1:6333/collections" --collections
+  run_case qdrant qdrant_url_https_transport_fail 1 qdrant -t "https://127.0.0.1:6333/collections" --collections
   run_case qdrant qdrant_multi_instance_urls 0 qdrant -t "http://127.0.0.1:6333/collections,http://127.0.0.1:26333/collections,http://127.0.0.1:26334/collections,http://127.0.0.1:26335/collections,http://127.0.0.1:26336/collections" --collections --dump
   run_text_case qdrant qdrant_debug_smoke 0 qdrant -t 127.0.0.1 --collections --debug
   if is_extended_matrix; then
@@ -765,8 +762,20 @@ run_elastic_cases() {
   fi
 }
 
+run_opensearch_cases() {
+  # Keep detection, anonymous discovery, authenticated actions and least-privilege
+  # discovery as separate contracts.  This catches vendor-specific regressions (PIT,
+  # security endpoints and HTTPS) that a single all-in-one happy path can hide.
+  run_case elastic opensearch_detect 0 elastic -t 127.0.0.1 --port 29200
+  run_case elastic opensearch_open 0 elastic -t 127.0.0.1 --port 29200 --endpoints --plugins --cluster --discover
+  run_case elastic opensearch_auth 0 elastic -t "https://127.0.0.1:29201/" -u admin -p "R3dPosture-Lab!2026" --endpoints --plugins --cluster --user --discover
+  run_case elastic opensearch_observer 0 elastic -t "https://127.0.0.1:29201/" -u observer -p "V13w-Only!2026" --endpoints --cluster --discover
+  run_case elastic opensearch_defcreds 0 elastic -t "https://127.0.0.1:29201/" --defcreds
+  run_text_case elastic opensearch_debug_smoke 0 elastic -t 127.0.0.1 --port 29200 --discover --debug
+}
+
 run_grpc_cases() {
-  run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051 --analyze
+  run_case grpc grpc_open 0 grpc -t 127.0.0.1 --port 50051 --plaintext --analyze
   run_case grpc grpc_auth_token 0 grpc -t 127.0.0.1 --port 50061 --token "grpc-lab-token-2026" --analyze
   run_case grpc grpc_auth_defcreds 0 grpc -t 127.0.0.1 --port 50061 --defcreds --analyze
   run_case grpc grpc_multi_ports 0 grpc -t 127.0.0.1 --ports "50051,25052,25053,25054,25055" --analyze
@@ -777,7 +786,7 @@ run_grpc_cases() {
   run_case grpc grpc_proto_invoke 0 grpc -t 127.0.0.1 --port 50051 --proto redposture_core/proto/grpc_health.proto --proto-path redposture_core/proto --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
   run_case grpc grpc_protoset_invoke 0 grpc -t 127.0.0.1 --port 50051 --protoset "${grpc_protoset}" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
   run_case grpc grpc_openapi_export 0 grpc -t 127.0.0.1 --port 50051 --openapi "${OUT_DIR}/json/grpc_openapi.json"
-  run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071
+  run_case grpc grpc_web_detect 0 grpc -t 127.0.0.1 --port 50071 --plaintext
   if is_extended_matrix; then
     run_case grpc grpc_extended_metadata_invoke 0 grpc -t 127.0.0.1 --port 50051 --meta "x-redposture-matrix=extended" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
     run_case grpc grpc_extended_basic_empty_password 0 grpc -t 127.0.0.1 --port 50061 -u grpcuser -p "" --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
@@ -796,8 +805,8 @@ run_kafka_cases() {
   # so `--defcreds` must land the `weak_default_creds` status; text output
   # must carry the `(transport:tls)` marker. Regression against the
   # pre-fix crash `invalid Kafka frame size 352518912`.
-  run_case kafka kafka_tls_defcreds 0 kafka -t 127.0.0.1 --port 29093 --defcreds --show-topics --dump --max-messages 5
-  run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 -u admin -p admin --show-topics --dump --max-messages 5
+  run_case kafka kafka_tls_defcreds 0 kafka -t 127.0.0.1 --port 29093 --tls --insecure --tls-server-name kafka-tls --defcreds --show-topics --dump --max-messages 5
+  run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 --tls --insecure -u admin -p admin --show-topics --dump --max-messages 5
   run_text_case kafka kafka_tls_debug_smoke 0 kafka -t 127.0.0.1 --port 29093 --debug
   if is_extended_matrix; then
     run_case kafka kafka_extended_topic_dump_count 0 kafka -t 127.0.0.1 --port 9092 --topic orders --show-topics --dump 3
@@ -836,15 +845,10 @@ run_zookeeper_auth_cases() {
 }
 
 run_keeper_cases() {
-  run_case keeper keeper_cluster 0 keeper -t 127.0.0.1 --ports "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3
-  run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
-  run_case keeper keeper_no4lw 0 keeper -t 127.0.0.1 --port 39181 -u lab -p lab --show-znodes 10 --dump 10 --znode /keeper/api_version
-  run_case keeper keeper_apache_control 0 keeper -t 127.0.0.1 --port 12181 --show-znodes 5
-  if is_extended_matrix; then
-    run_text_case keeper keeper_debug_smoke 0 keeper -t 127.0.0.1 --port 9181 --debug
-    run_case keeper keeper_force_plaintext 0 keeper -t 127.0.0.1 --port 9181 --show-znodes 5
-    run_case keeper keeper_force_tls 0 keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 5
-  fi
+  run_case zookeeper keeper_cluster 0 zookeeper -t 127.0.0.1 --port "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3
+  run_case zookeeper keeper_tls 0 zookeeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
+  run_case zookeeper keeper_no4lw 0 zookeeper -t 127.0.0.1 --port 39181 -u lab -p lab --znode /keeper/api_version --dump
+  run_case zookeeper keeper_apache_control 0 zookeeper -t 127.0.0.1 --port 12181 --show-znodes 5
 }
 
 run_proxmox_cases() {
@@ -907,6 +911,7 @@ run_service_block redis run_redis_cases
 run_service_block etcd run_etcd_cases
 run_service_block qdrant run_qdrant_cases
 run_service_block elastic run_elastic_cases
+run_service_block opensearch run_opensearch_cases
 run_service_block grpc run_grpc_cases
 run_service_block kafka run_kafka_cases
 run_service_block zookeeper run_zookeeper_cases

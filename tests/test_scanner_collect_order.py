@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from redposture_core.exporters.collect import collect_exporter_debug_data as collect_exporter_debug_data_impl
+from redposture_core.exporters.collect import plan_collect_endpoints_for_target
 from redposture_core.scanner import collect_exporter_debug_data
 
 
@@ -260,7 +261,7 @@ def test_collect_can_save_raw_responses_and_index(tmp_path: Path, monkeypatch) -
     assert "password=redis" in saved_file.read_text(encoding="utf-8")
 
 
-def test_collect_skips_deep_pprof_when_pprof_index_is_unavailable(monkeypatch) -> None:
+def test_collect_keeps_deep_pprof_when_pprof_index_is_unavailable(monkeypatch) -> None:
     called_urls: list[str] = []
 
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
@@ -275,7 +276,14 @@ def test_collect_skips_deep_pprof_when_pprof_index_is_unavailable(monkeypatch) -
                 "error": None,
             }
         if "/debug/pprof/goroutine?debug=1" in url:
-            raise AssertionError("deep pprof endpoint must be skipped when pprof index is unavailable")
+            return {
+                "status": 200,
+                "body": "goroutine dump",
+                "content_type": "text/plain",
+                "elapsed_ms": 1,
+                "truncated": False,
+                "error": None,
+            }
         return {
             "status": 200,
             "body": "ok",
@@ -302,14 +310,14 @@ def test_collect_skips_deep_pprof_when_pprof_index_is_unavailable(monkeypatch) -
         found_by_host={"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]},
     )
 
-    assert total == 3
-    assert success == 2
-    assert all("/debug/pprof/goroutine?debug=1" not in url for url in called_urls)
+    assert total == 4
+    assert success == 3
+    assert any("/debug/pprof/goroutine?debug=1" in url for url in called_urls)
 
     payloads = [json.loads(line) for line in lines]
     records = [item for item in payloads if item.get("type") != "summary"]
     endpoints = [str(item.get("endpoint")) for item in records]
-    assert sorted(endpoints) == sorted(["/debug/vars", "/debug/pprof/", "/metrics"])
+    assert sorted(endpoints) == sorted(["/debug/vars", "/debug/pprof/", "/debug/pprof/goroutine?debug=1", "/metrics"])
 
 
 def test_collect_reuses_pprof_probe_response_without_duplicate_request(monkeypatch) -> None:
@@ -483,9 +491,10 @@ def test_collect_writes_checkpoint_records(monkeypatch, tmp_path: Path) -> None:
     assert payloads[0]["exporter"] == "node_exporter"
     assert payloads[0]["port"] == 9100
     assert payloads[0]["endpoint"] == "/debug/vars"
+    assert payloads[0]["record"]["body"] == "ok"
 
 
-def test_collect_adaptive_preflight_collapses_stale_targets(monkeypatch) -> None:
+def test_collect_adaptive_preflight_does_not_assume_stale_pprof_handlers(monkeypatch) -> None:
     called_urls: list[str] = []
 
     def fake_http_get_details(url: str, timeout: float, retries: int = 1) -> dict[str, object]:
@@ -518,8 +527,6 @@ def test_collect_adaptive_preflight_collapses_stale_targets(monkeypatch) -> None
                 "truncated": False,
                 "error": None,
             }
-        if "/debug/pprof/goroutine?debug=1" in url:
-            raise AssertionError("deep pprof endpoint must be skipped for stale targets")
         return {
             "status": 404,
             "body": "not found",
@@ -546,9 +553,35 @@ def test_collect_adaptive_preflight_collapses_stale_targets(monkeypatch) -> None
         adaptive_collect=True,
     )
 
-    assert total == 3
+    assert total == 4
     assert success == 0
-    assert all("/debug/pprof/goroutine?debug=1" not in item for item in called_urls)
+    assert any("/debug/pprof/goroutine?debug=1" in item for item in called_urls)
+
+
+def test_collect_adaptive_preflight_never_prunes_custom_endpoint() -> None:
+    def fake_collect(
+        host: str,
+        exporter: str,
+        port: int,
+        endpoint: str,
+        timeout: float,
+        retries: int,
+    ) -> tuple[dict[str, object], bool]:
+        _ = (host, exporter, port, timeout, retries)
+        return ({"endpoint": endpoint, "status": 404, "error": None}, False)
+
+    planned, _prefetched = plan_collect_endpoints_for_target(
+        "10.0.0.1",
+        "custom_exporter",
+        9100,
+        ("/metrics", "/debug/vars", "/custom-diagnostics"),
+        1.0,
+        0,
+        True,
+        collect_task_fn=fake_collect,
+    )
+
+    assert "/custom-diagnostics" in planned
 
 
 def test_collect_record_callback_runs_in_postprocess_thread(monkeypatch) -> None:

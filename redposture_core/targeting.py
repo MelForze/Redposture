@@ -67,6 +67,30 @@ class ScanExecutionGroup:
 
 
 @dataclass(frozen=True)
+class TargetExclusions:
+    """Host-level exclusions applied before scan work items are created."""
+
+    hostnames: frozenset[str] = frozenset()
+    ipv4_ranges: tuple[tuple[int, int], ...] = ()
+    ipv6_networks: tuple[ipaddress.IPv6Network, ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.hostnames or self.ipv4_ranges or self.ipv6_networks)
+
+    def matches(self, host: str) -> bool:
+        value = str(host or "").strip()
+        if not value:
+            return False
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            return value.rstrip(".").lower() in self.hostnames
+        if isinstance(address, ipaddress.IPv4Address):
+            return _range_contains(self.ipv4_ranges, int(address))
+        return any(address in network for network in self.ipv6_networks)
+
+
+@dataclass(frozen=True)
 class _ListTargetEntry:
     specs: tuple[ScanTargetSpec, ...]
 
@@ -134,6 +158,29 @@ class StreamingTargetPlan:
     def iter_hosts(self) -> Iterator[str]:
         for spec in self.iter_specs():
             yield spec.host
+
+    def contains_host(self, host: str) -> bool:
+        """Return whether a normalized host belongs to this lazy target plan."""
+
+        value = str(host or "").strip()
+        if not value:
+            return False
+        ipv4_value: int | None = None
+        try:
+            parsed_ip = ipaddress.ip_address(value)
+            if isinstance(parsed_ip, ipaddress.IPv4Address):
+                ipv4_value = int(parsed_ip)
+        except ValueError:
+            pass
+
+        for entry in self._entries:
+            if isinstance(entry, _IPv4RangeTargetEntry):
+                if ipv4_value is not None and any(start <= ipv4_value <= end for start, end in entry.ranges):
+                    return True
+                continue
+            if any(spec.host == value for spec in entry.specs):
+                return True
+        return False
 
     def _spec_matches_port(
         self,
@@ -548,13 +595,103 @@ def _merge_ipv4_range(ranges: list[tuple[int, int]], new_range: tuple[int, int])
     return merged
 
 
-def _range_contains(ranges: list[tuple[int, int]], value: int) -> bool:
+def _range_contains(ranges: Iterable[tuple[int, int]], value: int) -> bool:
     for start, end in ranges:
         if value < start:
             return False
         if start <= value <= end:
             return True
     return False
+
+
+def parse_target_exclusions(values: str | Iterable[str] | None) -> TargetExclusions:
+    """Parse comma-separated host, IP, CIDR, URL-host, and file exclusions.
+
+    Matching is host-level: ports, URL schemes, paths, and queries do not
+    affect exclusion. DNS names are compared case-insensitively without a
+    trailing dot. Files use the same comma/newline/comment syntax as targets
+    and may include other existing files.
+    """
+
+    if values is None:
+        return TargetExclusions()
+    raw_values = (values,) if isinstance(values, str) else tuple(str(item) for item in values)
+    hostnames: set[str] = set()
+    ipv4_ranges: list[tuple[int, int]] = []
+    ipv6_networks: list[ipaddress.IPv6Network] = []
+    processed_files: set[str] = set()
+
+    def _remember_host(host: str) -> None:
+        value = str(host or "").strip()
+        if not value:
+            raise ValueError("empty --out-target entry")
+        try:
+            address = ipaddress.ip_address(value)
+        except ValueError:
+            hostnames.add(value.rstrip(".").lower())
+            return
+        if isinstance(address, ipaddress.IPv4Address):
+            merged = _merge_ipv4_range(ipv4_ranges, (int(address), int(address)))
+            ipv4_ranges[:] = merged
+        else:
+            ipv6_networks.append(ipaddress.IPv6Network(f"{address}/128"))
+
+    def _consume(raw_token: str, *, source: str | None = None) -> None:
+        item = str(raw_token or "").strip()
+        if not item:
+            return
+        expanded_path = os.path.expanduser(item)
+        if os.path.isfile(expanded_path):
+            real = os.path.realpath(expanded_path)
+            if real in processed_files:
+                return
+            processed_files.add(real)
+            with open(real, encoding="utf-8") as fh:
+                for line_no, raw_line in enumerate(fh, start=1):
+                    clean = raw_line.split("#", 1)[0].strip()
+                    if not clean:
+                        continue
+                    for part in clean.split(","):
+                        _consume(part, source=f"{real}:{line_no}")
+            return
+        if "://" in item:
+            parsed = urlparse(item)
+            if not parsed.hostname:
+                location = f" at {source}" if source else ""
+                raise ValueError(f"invalid --out-target URL '{item}'{location}: missing host")
+            _remember_host(parsed.hostname)
+            return
+        if "/" in item:
+            try:
+                network = ipaddress.ip_network(item, strict=False)
+            except ValueError as exc:
+                location = f" at {source}" if source else ""
+                raise ValueError(f"invalid --out-target network or file '{item}'{location}: {exc}") from exc
+            if isinstance(network, ipaddress.IPv4Network):
+                merged = _merge_ipv4_range(
+                    ipv4_ranges,
+                    (int(network.network_address), int(network.broadcast_address)),
+                )
+                ipv4_ranges[:] = merged
+            else:
+                ipv6_networks.append(network)
+            return
+        try:
+            host, _port = _parse_bare_target_authority(item, source=source)
+        except ValueError as exc:
+            raise ValueError(f"invalid --out-target entry '{item}': {exc}") from exc
+        _remember_host(host)
+
+    for raw_value in raw_values:
+        for token in raw_value.split(","):
+            _consume(token)
+
+    unique_ipv6 = tuple(dict.fromkeys(ipv6_networks))
+    return TargetExclusions(
+        hostnames=frozenset(hostnames),
+        ipv4_ranges=tuple(ipv4_ranges),
+        ipv6_networks=unique_ipv6,
+    )
 
 
 def _consume_target_tokens(
@@ -693,6 +830,7 @@ def stream_scan_target_specs(
     targets: str | None,
     *,
     policy: TargetParsePolicy | None = None,
+    exclude_targets: str | Iterable[str] | None = None,
 ) -> StreamingTargetPlan:
     """Parse targets into a lazy plan.
 
@@ -703,6 +841,7 @@ def stream_scan_target_specs(
     """
 
     active_policy = policy or TargetParsePolicy()
+    exclusions = parse_target_exclusions(exclude_targets)
     entries: list[_ListTargetEntry | _IPv4RangeTargetEntry] = []
     seen_specs: set[str] = set()
     seen_ipv4_ranges: list[tuple[int, int]] = []
@@ -732,6 +871,8 @@ def stream_scan_target_specs(
 
     def _append_list_spec(spec: ScanTargetSpec) -> None:
         nonlocal target_count, seen_ipv4_ranges
+        if exclusions.matches(spec.host):
+            return
         key = spec.normalized_key or _make_normalized_key(
             host=spec.host,
             scheme=spec.scheme,
@@ -764,6 +905,12 @@ def stream_scan_target_specs(
             return
         remaining = _subtract_ranges(host_range, seen_ipv4_ranges)
         seen_ipv4_ranges = _merge_ipv4_range(seen_ipv4_ranges, host_range)
+        if exclusions.ipv4_ranges:
+            remaining = [
+                segment
+                for base_segment in remaining
+                for segment in _subtract_ranges(base_segment, list(exclusions.ipv4_ranges))
+            ]
         if not remaining:
             return
         entry = _IPv4RangeTargetEntry(tuple(remaining), item, source or active_policy.source)
@@ -824,6 +971,7 @@ def parse_scan_target_specs(
     targets: str | None,
     *,
     policy: TargetParsePolicy | None = None,
+    exclude_targets: str | Iterable[str] | None = None,
 ) -> list[ScanTargetSpec]:
     """Parse target tokens into normalized specs using one shared implementation."""
 
@@ -831,11 +979,14 @@ def parse_scan_target_specs(
         return []
 
     active_policy = policy or TargetParsePolicy()
+    exclusions = parse_target_exclusions(exclude_targets)
     unique: list[ScanTargetSpec] = []
     seen_specs: set[str] = set()
     processed_files: set[str] = set()
 
     def _append_spec(spec: ScanTargetSpec) -> None:
+        if exclusions.matches(spec.host):
+            return
         key = spec.normalized_key or _make_normalized_key(
             host=spec.host,
             scheme=spec.scheme,
@@ -878,9 +1029,16 @@ def parse_scan_target_specs(
 
 
 def collect_scan_target_specs(
-    targets: str | None, max_network_hosts: int = DEFAULT_MAX_NETWORK_HOSTS
+    targets: str | None,
+    max_network_hosts: int = DEFAULT_MAX_NETWORK_HOSTS,
+    *,
+    exclude_targets: str | Iterable[str] | None = None,
 ) -> list[ScanTargetSpec]:
-    return parse_scan_target_specs(targets, policy=TargetParsePolicy(max_network_hosts=max_network_hosts))
+    return parse_scan_target_specs(
+        targets,
+        policy=TargetParsePolicy(max_network_hosts=max_network_hosts),
+        exclude_targets=exclude_targets,
+    )
 
 
 def chunked_hosts(hosts: Iterable[Any], size: int = DEFAULT_STREAM_TARGET_WINDOW_SIZE) -> Iterator[list[str]]:
@@ -896,12 +1054,18 @@ def chunked_hosts(hosts: Iterable[Any], size: int = DEFAULT_STREAM_TARGET_WINDOW
         yield chunk
 
 
-def collect_scan_targets(targets: str | None, max_network_hosts: int = DEFAULT_MAX_NETWORK_HOSTS) -> list[str]:
+def collect_scan_targets(
+    targets: str | None,
+    max_network_hosts: int = DEFAULT_MAX_NETWORK_HOSTS,
+    *,
+    exclude_targets: str | Iterable[str] | None = None,
+) -> list[str]:
     """Return unique host tokens through the canonical parser in URL-strip mode."""
 
     specs = parse_scan_target_specs(
         targets,
         policy=TargetParsePolicy(max_network_hosts=max_network_hosts, url_mode="strip"),
+        exclude_targets=exclude_targets,
     )
     hosts: list[str] = []
     seen: set[str] = set()

@@ -12,6 +12,12 @@ def validate_args(args: Any, console: Any) -> int | None:
     common_rc = validate_basic_module_args(args, console, module="mongodb", pure_http=False)
     if common_rc is not None:
         return common_rc
+    if getattr(args, "proxy", None):
+        # PyMongo opens sockets inside its topology layer and does not expose a
+        # supported HTTP/SOCKS proxy transport.  The global socket shim cannot
+        # guarantee routing, so fail closed instead of leaking a direct request.
+        console.error("mongodb does not support --proxy with the PyMongo transport; remove --proxy or use a tunnel")
+        return 2
     query_raw = getattr(args, "query", None)
     projection_raw = getattr(args, "projection", None)
     nosql_cmd_raw = getattr(args, "nosql_cmd", None)

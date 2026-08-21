@@ -14,10 +14,10 @@ from redposture_core.clients.zookeeper import (
 from redposture_core.modules.clickhouse import actions as clickhouse
 from redposture_core.modules.elastic import actions as elastic
 from redposture_core.modules.kafka import actions as kafka
-from redposture_core.modules.keeper import actions as keeper
-from redposture_core.modules.keeper.types import KeeperFingerprintCache
 from redposture_core.modules.registry import actions as registry
 from redposture_core.modules.zookeeper import actions as zookeeper
+from redposture_core.modules.zookeeper import engine as zookeeper_engine
+from redposture_core.modules.zookeeper.types import ZooKeeperFingerprintCache
 from redposture_core.stage_runtime import AuditCredentialRun, AuditHookContext
 from redposture_core.targeting import ScanTargetSpec
 
@@ -195,13 +195,13 @@ def test_clickhouse_lifecycle_close_deduplicates_and_swallows_close_errors() -> 
     assert state.credential_sessions == {}
 
 
-def test_keeper_non_zookeeper_and_apache_fingerprint_short_circuit(
+def test_zookeeper_implementation_handles_failed_protocol_and_apache_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     options = {
         **_zookeeper_options(),
         "show_znodes_limit": None,
-        "keeper_probe_cache": KeeperFingerprintCache(),
+        "fingerprint_cache": ZooKeeperFingerprintCache(),
         "tls": False,
         "no_tls": True,
         "insecure": False,
@@ -209,10 +209,10 @@ def test_keeper_non_zookeeper_and_apache_fingerprint_short_circuit(
         "tls_cert": None,
         "tls_key": None,
     }
-    state = keeper.KeeperLifecycleState(ZkTransportConfig(mode="plaintext"))
+    state = zookeeper_engine.ZooKeeperImplementationLifecycleState(ZkTransportConfig(mode="plaintext"))
     ctx = _ctx(state)
     monkeypatch.setattr(
-        keeper.zookeeper_actions,
+        zookeeper_engine.zookeeper_actions,
         "detect_zookeeper",
         lambda *_args, **_kwargs: {
             "status": "fail",
@@ -222,7 +222,7 @@ def test_keeper_non_zookeeper_and_apache_fingerprint_short_circuit(
         },
     )
 
-    failed = keeper.detect_keeper(ctx, options)
+    failed = zookeeper_engine.detect_zookeeper_implementation(ctx, options)
 
     assert failed["status"] == "fail"
     assert failed["is_keeper"] is None
@@ -230,7 +230,7 @@ def test_keeper_non_zookeeper_and_apache_fingerprint_short_circuit(
 
     state.zookeeper_state.selected_transport_config = ZkTransportConfig(mode="plaintext")
     monkeypatch.setattr(
-        keeper.zookeeper_actions,
+        zookeeper_engine.zookeeper_actions,
         "detect_zookeeper",
         lambda *_args, **_kwargs: {
             "status": "open_no_auth",
@@ -239,7 +239,7 @@ def test_keeper_non_zookeeper_and_apache_fingerprint_short_circuit(
         },
     )
     monkeypatch.setattr(
-        options["keeper_probe_cache"],
+        options["fingerprint_cache"],
         "get_or_probe",
         lambda *_args, **_kwargs: ZkImplementationFingerprint(
             "apache-zookeeper",
@@ -248,15 +248,27 @@ def test_keeper_non_zookeeper_and_apache_fingerprint_short_circuit(
             version="3.9.3",
         ),
     )
+    monkeypatch.setattr(
+        zookeeper_engine.zookeeper_actions,
+        "authenticate_zookeeper",
+        lambda _ctx, record, _options: dict(record),
+    )
+    monkeypatch.setattr(
+        zookeeper_engine.zookeeper_actions,
+        "collect_zookeeper_data",
+        lambda _ctx, record, _options: dict(record),
+    )
 
-    apache = keeper.detect_keeper(ctx, options)
-    auth = keeper.authenticate_keeper(ctx, apache, options)
-    data = keeper.collect_keeper_data(ctx, auth, options)
+    apache = zookeeper_engine.detect_zookeeper_implementation(ctx, options)
+    auth = zookeeper_engine.authenticate_zookeeper_implementation(ctx, apache, options)
+    data = zookeeper_engine.collect_zookeeper_implementation_data(ctx, auth, options)
 
-    assert apache["status"] == "not_keeper"
+    assert apache["status"] == "open_no_auth"
     assert apache["is_zookeeper_compatible"] is True
-    assert auth == apache
-    assert data == apache
+    assert apache["implementation"] == "apache-zookeeper"
+    assert apache["vendor"] == "apache"
+    assert auth["implementation"] == "apache-zookeeper"
+    assert data["implementation"] == "apache-zookeeper"
 
 
 def test_registry_detect_and_authenticate_nexus_only_with_transient_retry(
@@ -797,7 +809,7 @@ def test_zookeeper_definitive_rejection_and_anonymous_fallback(
     assert result["error"] is None
 
 
-def test_zookeeper_collect_reopens_after_transient_capability_and_records_dump_errors(
+def test_zookeeper_collect_is_read_only_and_records_dump_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeClient:
@@ -824,17 +836,12 @@ def test_zookeeper_collect_reopens_after_transient_capability_and_records_dump_e
         root_err=_ZK_ERR_OK,
         auth_required=False,
     )
-    capability_calls = 0
-
-    def fake_capability(*_args: Any, **_kwargs: Any) -> tuple[bool | None, bool | None, str | None]:
-        nonlocal capability_calls
-        capability_calls += 1
-        if capability_calls == 1:
-            return None, None, "OPERATIONTIMEOUT"
-        return True, False, None
-
     monkeypatch.setattr(zookeeper, "_zookeeper_lifecycle_client", lambda *_args, **_kwargs: reopened)
-    monkeypatch.setattr(zookeeper, "_probe_znode_create_delete", fake_capability)
+    monkeypatch.setattr(
+        zookeeper,
+        "_probe_znode_create_delete",
+        lambda *_args, **_kwargs: pytest.fail("read-only collection must not probe create/delete"),
+    )
     monkeypatch.setattr(
         zookeeper,
         "_enumerate_zookeeper_lifecycle",
@@ -854,18 +861,19 @@ def test_zookeeper_collect_reopens_after_transient_capability_and_records_dump_e
         _zookeeper_options(show_znodes=True, dump=True, dump_limit=2),
     )
 
-    assert capability_calls == 2
     assert old.close_calls == 1
     assert state.anonymous_client is reopened
-    assert result["attempts"] == 2
+    assert result["attempts"] == 1
     assert result["znodes"] == ["/a", "/b"]
     assert result["znode_values"] == ["/a:value", "/b:<Access Denied>"]
     assert result["dump_error"] == "NOAUTH"
     assert result["stage_attempts"] == {
         "detect_protocol": 1,
-        "access_capabilities": 2,
-        "data": 2,
+        "access_capabilities": 0,
+        "data": 1,
     }
+    assert result["can_create_znode"] is None
+    assert result["can_delete_znode"] is None
 
 
 def test_zookeeper_lifecycle_close_deduplicates_and_ignores_oserror() -> None:

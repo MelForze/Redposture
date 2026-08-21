@@ -57,7 +57,12 @@ def build_mongodb_uri(
     user = str(username or "").strip()
     secret = password
     auth_source = str(auth_db or "admin").strip() or "admin"
-    host_part = f"{host}:{int(port)}"
+    normalized_host = str(host or "").strip()
+    if normalized_host.startswith("[") and normalized_host.endswith("]"):
+        normalized_host = normalized_host[1:-1]
+    # RFC 3986 requires an IPv6 literal in a URI authority to be bracketed.
+    uri_host = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
+    host_part = f"{uri_host}:{int(port)}"
     if user or secret is not None:
         auth = quote(user, safe="")
         if secret is not None:
@@ -165,6 +170,10 @@ def open_mongodb_client(
     password: str | None = None,
     auth_db: str | None = "admin",
     timeout: float = 1.0,
+    tls: bool = False,
+    tls_ca_file: str | None = None,
+    tls_certificate_key_file: str | None = None,
+    tls_insecure: bool = False,
     mongo_client_cls: Any | None = None,
 ) -> Any:
     client_cls = mongo_client_cls
@@ -172,13 +181,22 @@ def open_mongodb_client(
         client_cls = _load_pymongo().MongoClient
     timeout_ms = max(100, int(float(timeout) * 1000))
     uri = build_mongodb_uri(host, port, username=username, password=password, auth_db=auth_db)
-    return client_cls(
-        uri,
-        serverSelectionTimeoutMS=timeout_ms,
-        connectTimeoutMS=timeout_ms,
-        socketTimeoutMS=timeout_ms,
-        appname="redposture",
-    )
+    kwargs: dict[str, Any] = {
+        "serverSelectionTimeoutMS": timeout_ms,
+        "connectTimeoutMS": timeout_ms,
+        "socketTimeoutMS": timeout_ms,
+        "appname": "redposture",
+    }
+    if tls or tls_ca_file or tls_certificate_key_file or tls_insecure:
+        kwargs["tls"] = True
+        if tls_ca_file:
+            kwargs["tlsCAFile"] = tls_ca_file
+        if tls_certificate_key_file:
+            kwargs["tlsCertificateKeyFile"] = tls_certificate_key_file
+        if tls_insecure:
+            kwargs["tlsAllowInvalidCertificates"] = True
+            kwargs["tlsAllowInvalidHostnames"] = True
+    return client_cls(uri, **kwargs)
 
 
 class MongoAuditClient:
@@ -232,10 +250,11 @@ class MongoAuditClient:
         try:
             return int(coll.estimated_document_count())
         except Exception:
-            try:
-                return int(coll.count_documents({}))
-            except Exception:
-                return None
+            # The exact fallback is useful for views/engines that do not
+            # support estimated counts.  If it also fails, surface that error
+            # so the audit can report a partial collection result instead of
+            # silently turning an authorization/network failure into None.
+            return int(coll.count_documents({}))
 
     def find_documents(
         self,

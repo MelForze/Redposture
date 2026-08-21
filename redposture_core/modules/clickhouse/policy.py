@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 from ...audit_config import AuditConfig
 from ...stage_runtime import build_basic_audit_plan, validate_basic_module_args
@@ -14,6 +15,22 @@ def validate_args(args: Any, console: Any) -> int | None:
     common_rc = validate_basic_module_args(args, console, module="clickhouse", pure_http=False)
     if common_rc is not None:
         return common_rc
+    if getattr(args, "tls_key", None) and not getattr(args, "tls_cert", None):
+        console.error("--tls-key requires --tls-cert")
+        return 2
+    if any(getattr(args, name, None) for name in ("tls_ca", "tls_cert", "tls_key", "tls_server_name")) and not bool(
+        getattr(args, "tls", False)
+    ):
+        console.error("ClickHouse TLS certificate options require --tls")
+        return 2
+    proxy = str(getattr(args, "proxy", "") or "").strip()
+    if proxy:
+        if not bool(getattr(args, "http", False)):
+            console.error("ClickHouse native driver cannot guarantee --proxy routing; use --http or a tunnel")
+            return 2
+        if urlsplit(proxy).scheme.lower() not in {"http", "https"}:
+            console.error("ClickHouse HTTP transport supports only http:// or https:// proxies")
+            return 2
 
     table_targets = _normalize_table_targets(list(getattr(args, "tables", None) or getattr(args, "table", None) or []))
     _columns, columns_error = _normalize_column_names(

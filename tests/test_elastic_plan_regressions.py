@@ -822,35 +822,35 @@ def test_credential_file_and_api_token_keep_defcreds_as_fallbacks(
     assert [(run.username, run.password, run.source) for run in file_runs] == [
         ("alice", "one", "file"),
         ("bob", "two", "file"),
+        ("admin", "admin", "default"),
+        ("admin", "changeme", "default"),
+        ("admin", "password", "default"),
         ("elastic", "changeme", "default"),
         ("elastic", "elastic", "default"),
         ("elastic", "password", "default"),
-        ("admin", "admin", "default"),
-        ("admin", "password", "default"),
-        ("admin", "changeme", "default"),
-        ("opensearch", "opensearch", "default"),
-        ("opensearch", "password", "default"),
-        ("kibana", "kibana", "default"),
         ("kibana", "changeme", "default"),
+        ("kibana", "kibana", "default"),
         ("logstash", "logstash", "default"),
         ("logstash_system", "changeme", "default"),
+        ("opensearch", "opensearch", "default"),
+        ("opensearch", "password", "default"),
     ]
 
     token_runs = captured_plans[1].credential_runs
     assert [(run.token, run.username, run.password, run.source) for run in token_runs] == [
         ("token-secret", None, None, "token"),
+        (None, "admin", "admin", "default"),
+        (None, "admin", "changeme", "default"),
+        (None, "admin", "password", "default"),
         (None, "elastic", "changeme", "default"),
         (None, "elastic", "elastic", "default"),
         (None, "elastic", "password", "default"),
-        (None, "admin", "admin", "default"),
-        (None, "admin", "password", "default"),
-        (None, "admin", "changeme", "default"),
-        (None, "opensearch", "opensearch", "default"),
-        (None, "opensearch", "password", "default"),
-        (None, "kibana", "kibana", "default"),
         (None, "kibana", "changeme", "default"),
+        (None, "kibana", "kibana", "default"),
         (None, "logstash", "logstash", "default"),
         (None, "logstash_system", "changeme", "default"),
+        (None, "opensearch", "opensearch", "default"),
+        (None, "opensearch", "password", "default"),
     ]
 
 

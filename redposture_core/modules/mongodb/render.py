@@ -10,6 +10,7 @@ from .actions import (
     _format_documents_detail_records,
     _format_indexes_detail_records,
     _format_nosql_command_detail_records,
+    _format_partial_operation_records,
     _format_query_detail_records,
     _format_record,
     _nxc_prefix,
@@ -27,5 +28,6 @@ __all__ = [
     "_format_documents_detail_records",
     "_format_query_detail_records",
     "_format_nosql_command_detail_records",
+    "_format_partial_operation_records",
     "_render_colored_mongodb_line",
 ]

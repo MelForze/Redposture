@@ -37,6 +37,42 @@ def test_extended_matrix_labels_are_present_in_script() -> None:
         assert label in labels
 
 
+def test_keeper_lab_uses_only_canonical_zookeeper_command() -> None:
+    cases = parse_matrix_cases(Path("scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8"))
+    by_label = {case.label: case for case in cases}
+
+    for label in ("keeper_cluster", "keeper_tls", "keeper_no4lw", "keeper_apache_control"):
+        case = by_label[label]
+        assert case.module == "zookeeper"
+        assert case.command_key == "zookeeper"
+
+    cluster = by_label["keeper_cluster"]
+    assert "--port" in cluster.tokens
+    assert "--ports" not in cluster.tokens
+
+    assert all(case.command_key != "keeper" for case in cases)
+
+
+def test_zookeeper_fuzz_cases_keep_numeric_and_tls_validation_failures_isolated() -> None:
+    cases = parse_matrix_cases(Path("scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8"))
+    by_label = {case.label: case for case in cases}
+
+    zero_max = by_label["fuzz_zookeeper_zero_max_znodes"].tokens
+    zero_workers = by_label["fuzz_zookeeper_zero_enum_workers"].tokens
+    assert "--ca-file" not in zero_max
+    assert "--insecure" not in zero_max
+    assert "--tls-cert" not in zero_workers
+    assert "--tls-key" not in zero_workers
+
+    assert "--tls-cert" in by_label["fuzz_zookeeper_incomplete_mtls"].tokens
+    assert "--tls-key" not in by_label["fuzz_zookeeper_incomplete_mtls"].tokens
+    assert "--tls-key" in by_label["fuzz_zookeeper_incomplete_mtls_key"].tokens
+    assert "--tls-cert" not in by_label["fuzz_zookeeper_incomplete_mtls_key"].tokens
+    conflict = by_label["fuzz_zookeeper_ca_insecure_conflict"].tokens
+    assert "--ca-file" in conflict
+    assert "--insecure" in conflict
+
+
 def test_extended_verifier_labels_cover_script_labels() -> None:
     cases = parse_matrix_cases(Path("scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8"))
     script_labels = {case.label for case in cases}

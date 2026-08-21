@@ -1,14 +1,331 @@
 [
   {
+    "anonymous_auth_probe_results": {
+      "/": "noauth",
+      "/redposture-auth": "noauth"
+    },
+    "attempted_credentials": [
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "admin",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "changeme",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "kafka",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "password",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "zookeeper",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "admin"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "broker",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "broker"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "brokerpass",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "broker"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "client",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "client"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "dev",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "dev"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "guest",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "guest"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "hadoop",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "hadoop"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "changeme",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "kafka"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "kafka",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "kafka"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "password",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "kafka"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "zookeeper",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "kafka"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "admin",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "password",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "root",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "rootpass",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "zookeeper",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "root"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "password",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "service"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "service",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "service"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "solr",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "solr"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "super",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "super"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "test",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "test"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "password",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "user"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "user",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "user"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "12345",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "user1"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "password",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "zk"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "zk",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "zk"
+      },
+      {
+        "credential_verdict": "valid",
+        "error": null,
+        "password": "zookeeper",
+        "provided_credentials_ok": true,
+        "source": "default",
+        "status": "weak_default_creds",
+        "username": "zk"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "admin",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "zookeeper"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "password",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "zookeeper"
+      },
+      {
+        "credential_verdict": "rejected",
+        "error": "authentication failed",
+        "password": "zookeeper",
+        "provided_credentials_ok": false,
+        "source": "default",
+        "status": "auth_required",
+        "username": "zookeeper"
+      }
+    ],
     "auth_error": null,
     "auth_inference_source": "root_noauth",
+    "auth_mechanism": "digest",
     "auth_probe_trace": [
       "/:noauth"
     ],
     "auth_required": true,
-    "can_create_znode": true,
-    "can_delete_znode": true,
+    "can_create_znode": null,
+    "can_delete_znode": null,
     "connect_error": null,
+    "credential_auth_probe_results": {
+      "/": "ok",
+      "/redposture-auth": "ok"
+    },
     "credential_verdict": "valid",
     "defcreds_enabled": true,
     "dump": true,
@@ -16,11 +333,18 @@
     "dump_limit": null,
     "enum_error": null,
     "error": null,
+    "fingerprint_confidence": "rejected",
+    "fingerprint_errors": {},
     "host": "127.0.0.1",
+    "implementation": "apache-zookeeper",
+    "implementation_confidence": "confirmed",
+    "is_keeper": false,
     "is_zookeeper": true,
+    "is_zookeeper_compatible": true,
     "max_znodes": 2000,
     "module": "zookeeper",
     "port": 22185,
+    "protocol": "zookeeper",
     "provided_credentials": false,
     "provided_credentials_ok": true,
     "provided_password": null,
@@ -30,6 +354,26 @@
     "query_znode_dump": "digest-acl-late-default-hit",
     "query_znode_dump_error": null,
     "query_znode_value": "/redposture-auth (children:0,bytes:27)",
+    "quorum_status": "unknown",
+    "raft": {
+      "commit_lag": null,
+      "first_log_idx": null,
+      "first_log_term": null,
+      "followers": null,
+      "last_committed_idx": null,
+      "last_log_idx": null,
+      "last_log_term": null,
+      "last_snapshot_idx": null,
+      "leader_committed_log_idx": null,
+      "log_dir_size": null,
+      "peer_state": null,
+      "pending_syncs": null,
+      "snapshot_dir_size": null,
+      "synced_followers": null,
+      "target_committed_log_idx": null
+    },
+    "read_only": null,
+    "server_state": "standalone",
     "service": "zookeeper",
     "show_znodes": false,
     "stage2_error": null,
@@ -60,12 +404,17 @@
       }
     ],
     "status": "weak_default_creds",
+    "transport": "plaintext",
+    "vendor": "apache",
+    "verification_capability": "available",
+    "version": "3.9.5-293c895a8d966a3ecb92872be4a1daf87d725da2, built on 2026-02-11 20:18 UTC",
     "znode_capability_error": null,
-    "znode_count": 1,
+    "znode_count": null,
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
     "znode_details": null,
+    "znode_truncated_reason": null,
     "znode_values": null,
     "znodes": [],
     "znodes_truncated": false

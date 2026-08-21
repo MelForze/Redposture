@@ -32,17 +32,8 @@ dist/
 
 # Local outputs
 .redposture/
-# The general lab checkout remains local-only; focused Keeper and ZooKeeper
-# auth labs are versioned regression fixtures.
+# Local integration labs are never versioned.
 lab/
-!lab/
-lab/*
-!lab/services/
-lab/services/*
-!lab/services/keeper/
-!lab/services/keeper/**
-!lab/services/zookeeper-auth/
-!lab/services/zookeeper-auth/**
 lab_tests/
 /docker/
 *.jsonl

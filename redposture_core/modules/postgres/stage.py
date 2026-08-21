@@ -18,8 +18,11 @@ from ...stage_runtime import (
     ModuleAuditSpec,
     build_basic_audit_plan,
     build_basic_credential_runs,
+    command_result_exit_code,
     merge_audit_credential_runs,
+    sort_default_audit_credential_runs,
 )
+from ...utils import is_signature_compat_typeerror
 from . import actions, policy, render
 
 _DEFAULT_PORT = 5432
@@ -55,6 +58,29 @@ def _postgres_record(payload: AuditRecord | dict[str, Any]) -> AuditRecord:
     return AuditRecord.from_mapping(dict(payload), module="postgres", service="postgres")
 
 
+def _postgres_tls_config_from_args(args: Any) -> actions._PgTlsConfig:
+    return actions._pg_tls_config(
+        str(getattr(args, "sslmode", "disable") or "disable"),
+        getattr(args, "ssl_ca", None),
+        getattr(args, "ssl_cert", None),
+        getattr(args, "ssl_key", None),
+        getattr(args, "ssl_server_name", None),
+    )
+
+
+def _postgres_tls_stage_kwargs(args: Any) -> dict[str, Any]:
+    config = _postgres_tls_config_from_args(args)
+    if config == actions._PgTlsConfig():
+        return {}
+    return {
+        "sslmode": config.sslmode,
+        "ssl_ca": config.ca_file,
+        "ssl_cert": config.cert_file,
+        "ssl_key": config.key_file,
+        "ssl_server_name": config.server_name,
+    }
+
+
 def _resolved_postgres_host_stage() -> Any:
     if actions.host_stage is not _POSTGRES_HOST_STAGE:
         return actions.host_stage
@@ -85,8 +111,12 @@ def _postgres_detect(ctx: AuditHookContext) -> AuditRecord:
 
     for attempt in range(attempts):
         try:
-            with actions.socket.create_connection((ctx.host, ctx.port), timeout=cfg.timeout) as sock:
-                sock.settimeout(cfg.timeout)
+            with actions._pg_open_socket(
+                ctx.host,
+                ctx.port,
+                cfg.timeout,
+                tls_config=_postgres_tls_config_from_args(ctx.args),
+            ) as sock:
                 try:
                     session = actions._pg_startup_and_auth(
                         sock,
@@ -221,6 +251,7 @@ def _postgres_run_host_stage(
         run_deep_checks=run_deep_checks,
         debug=cfg.debug,
         debug_emit=ctx.debug_emit,
+        **_postgres_tls_stage_kwargs(ctx.args),
     )
     return _postgres_record(record)
 
@@ -268,8 +299,12 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
 
     for attempt in range(attempts):
         try:
-            with actions.socket.create_connection((ctx.host, ctx.port), timeout=cfg.timeout) as sock:
-                sock.settimeout(cfg.timeout)
+            with actions._pg_open_socket(
+                ctx.host,
+                ctx.port,
+                cfg.timeout,
+                tls_config=_postgres_tls_config_from_args(ctx.args),
+            ) as sock:
                 try:
                     session = actions._pg_startup_and_auth(
                         sock,
@@ -463,7 +498,7 @@ def run_postgres_stage(args: Any, logger: Any) -> int:
         console.error(str(exc))
         return 2
     default_runs = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(username=username, password=password, source="default")
             for username, password in actions._POSTGRES_DEFAULT_CREDENTIALS
         )
@@ -491,9 +526,9 @@ def run_postgres_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process postgres output: {exc}")
         return 2
-    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
+    if cfg.debug and command_result_exit_code(result) != 0 and hasattr(console, "warn"):
         console.warn("all postgres targets are unreachable")
-    return 0
+    return command_result_exit_code(result)
 
 
 __all__ = ["build_postgres_plan", "build_postgres_spec", "run_postgres_stage"]
@@ -545,7 +580,7 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
             console.error(str(exc))
             return 2
         default_runs = (
-            tuple(
+            sort_default_audit_credential_runs(
                 AuditCredentialRun(username=username, password=password, source="default")
                 for username, password in actions._POSTGRES_DEFAULT_CREDENTIALS
             )
@@ -576,6 +611,7 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
             dump_row_limit=None,
             execute_command=None,
             sql_command=None,
+            **_postgres_tls_stage_kwargs(args),
         )
         if (
             credential.source == "default"
@@ -614,16 +650,31 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
                 continue
             if command.lower() in {"exit", "quit"}:
                 break
-            output, exec_error = actions._pg_execute_remote_command(
-                host=str(host),
-                port=int(port),
-                timeout=cfg.timeout,
-                retries=cfg.retries,
-                username=username,
-                password=password,
-                database=database,
-                command=command,
-            )
+            try:
+                output, exec_error = actions._pg_execute_remote_command(
+                    host=str(host),
+                    port=int(port),
+                    timeout=cfg.timeout,
+                    retries=cfg.retries,
+                    username=username,
+                    password=password,
+                    database=database,
+                    command=command,
+                    tls_config=_postgres_tls_config_from_args(args),
+                )
+            except TypeError as exc:
+                if not is_signature_compat_typeerror(exc, expected_keywords={"tls_config"}):
+                    raise
+                output, exec_error = actions._pg_execute_remote_command(
+                    host=str(host),
+                    port=int(port),
+                    timeout=cfg.timeout,
+                    retries=cfg.retries,
+                    username=username,
+                    password=password,
+                    database=database,
+                    command=command,
+                )
             for line in output or []:
                 console.plain(str(line))
             if exec_error:
@@ -648,6 +699,7 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
             password=password,
             database=database,
             query=query,
+            tls_config=_postgres_tls_config_from_args(args),
         )
         for line in output or []:
             console.plain(str(line))

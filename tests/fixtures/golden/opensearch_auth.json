@@ -1,0 +1,659 @@
+[
+  {
+    "access_level": "unknown",
+    "anonymous_root_status": 401,
+    "api_key_probe_error": null,
+    "api_key_probe_status": "not_run",
+    "attempted_credentials": [
+      {
+        "auth_error_detail": null,
+        "auth_probe_endpoint": "/_plugins/_security/authinfo",
+        "auth_probe_http_status": 200,
+        "auth_probe_status": "verified",
+        "error": null,
+        "network_attempted": true,
+        "password": "R3dPosture-Lab!2026",
+        "source": "provided",
+        "status": "valid_credentials",
+        "username": "admin",
+        "verification_capability": "identity_endpoint_supported"
+      }
+    ],
+    "auth_error_detail": null,
+    "auth_probe_endpoint": "/_plugins/_security/authinfo",
+    "auth_probe_http_status": 200,
+    "auth_probe_status": "verified",
+    "auth_required": true,
+    "auth_valid": true,
+    "can_manage": null,
+    "can_manage_security": null,
+    "can_read": null,
+    "can_write": null,
+    "cat_endpoints": [
+      "/_cat/aliases",
+      "/_cat/aliases/",
+      "/_cat/allocation",
+      "/_cat/cluster_manager",
+      "/_cat/count",
+      "/_cat/count/",
+      "/_cat/fielddata",
+      "/_cat/fielddata/",
+      "/_cat/health",
+      "/_cat/indices",
+      "/_cat/indices/",
+      "/_cat/nodeattrs",
+      "/_cat/nodes",
+      "/_cat/pending_tasks",
+      "/_cat/plugins",
+      "/_cat/recovery",
+      "/_cat/recovery/",
+      "/_cat/repositories",
+      "/_cat/segment_replication",
+      "/_cat/segment_replication/",
+      "/_cat/segments",
+      "/_cat/segments/",
+      "/_cat/shards",
+      "/_cat/shards/",
+      "/_cat/tasks",
+      "/_cat/templates",
+      "/_cat/thread_pool",
+      "/_cat/thread_pool/",
+      "/_ingest/pipeline",
+      "/_remote/info"
+    ],
+    "cat_plugins": [
+      {
+        "component": "opensearch-alerting",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-anomaly-detection",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-asynchronous-search",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-cross-cluster-replication",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-custom-codecs",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-flow-framework",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-geospatial",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-index-management",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-job-scheduler",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-knn",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-ltr",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-ml",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-neural-search",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-notifications",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-notifications-core",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-observability",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-performance-analyzer",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-reports-scheduler",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-security",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-security-analytics",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-skills",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-sql",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "opensearch-system-templates",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      },
+      {
+        "component": "query-insights",
+        "description": "-",
+        "node": "opensearch-auth-1",
+        "version": "2.19.1.0"
+      }
+    ],
+    "cluster_error": null,
+    "cluster_health": {
+      "active_primary_shards": 9,
+      "active_shards": 9,
+      "active_shards_percent_as_number": 90.0,
+      "cluster_name": "redposture-opensearch-auth",
+      "delayed_unassigned_shards": 0,
+      "discovered_cluster_manager": true,
+      "discovered_master": true,
+      "initializing_shards": 0,
+      "number_of_data_nodes": 1,
+      "number_of_in_flight_fetch": 0,
+      "number_of_nodes": 1,
+      "number_of_pending_tasks": 0,
+      "relocating_shards": 0,
+      "status": "yellow",
+      "task_max_waiting_in_queue_millis": 0,
+      "timed_out": false,
+      "unassigned_shards": 1
+    },
+    "cluster_nodes": [
+      {
+        "roles": [
+          "cluster_manager",
+          "data",
+          "ingest",
+          "remote_cluster_client"
+        ],
+        "version": "2.19.1"
+      }
+    ],
+    "credential_verification": {
+      "capability": "identity_endpoint_supported",
+      "status": "verified",
+      "supported_endpoint": "/_plugins/_security/authinfo",
+      "unsupported_endpoints": []
+    },
+    "credentials_source": "provided",
+    "defcreds_enabled": false,
+    "detect_confidence": "high",
+    "detect_probe_trace": [
+      {
+        "error": null,
+        "scheme": "https",
+        "signal_kind": "hard_positive",
+        "signals": [
+          "opensearch_security_realm"
+        ],
+        "status": 401,
+        "transport_error": null,
+        "vendor": "opensearch"
+      }
+    ],
+    "detect_signals": [
+      "opensearch_security_realm"
+    ],
+    "discover": true,
+    "discover_coverage": {
+      "complete": true,
+      "indices_closed": 0,
+      "indices_denied": 0,
+      "indices_enumerated": 9,
+      "indices_failed": 0,
+      "indices_scanned": 9,
+      "limitations": [
+        "secure keystore settings are not readable through the API",
+        "closed indices, snapshots, Watcher, connectors, Alerting, Notifications and stored scripts are not scanned",
+        "FLS/DLS and current authorization can hide documents or fields"
+      ],
+      "limits": {
+        "max_array_items": 256,
+        "max_depth": 32,
+        "max_documents": 50000,
+        "max_embedded_json_bytes": 65536,
+        "max_findings": 10000,
+        "max_scalar_bytes": 262144,
+        "max_seconds": 300.0,
+        "max_source_bytes": 134217728
+      },
+      "locations_dropped": 0,
+      "missing_source_documents": 0,
+      "scope": {
+        "configuration": [
+          "cluster_settings",
+          "node_settings",
+          "index_settings",
+          "mappings",
+          "index_templates",
+          "component_templates",
+          "legacy_templates",
+          "ingest_pipelines"
+        ],
+        "documents": "open and hidden indices plus resolved data-stream backing indices"
+      },
+      "shard_failures": [],
+      "source_disabled_indices": [],
+      "source_filtered_indices": [],
+      "status": "complete",
+      "surfaces": {
+        "cluster_settings": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "component_templates": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "index_inventory": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "index_settings": {
+          "objects_attempted": 9,
+          "objects_scanned": 9,
+          "status": "complete"
+        },
+        "index_templates": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "ingest_pipelines": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "legacy_templates": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "mapping_configuration": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        },
+        "mappings": {
+          "objects_attempted": 9,
+          "objects_scanned": 9,
+          "status": "complete"
+        },
+        "node_settings": {
+          "objects_attempted": 1,
+          "objects_scanned": 1,
+          "status": "complete"
+        }
+      },
+      "timed_out": false,
+      "truncated": false,
+      "truncated_reasons": []
+    },
+    "discover_error": null,
+    "discover_error_detail": null,
+    "discover_schema_version": 2,
+    "effective_username": "admin",
+    "endpoint_diagnostics": [
+      {
+        "endpoint": "/_cat?help",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/aliases/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/allocation",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/cluster_manager",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/count",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/count/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/fielddata/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/health",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/indices/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodeattrs",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/nodes",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/pending_tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/pit_segments",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/pit_segments/",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/plugins",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/recovery/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/repositories",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segment_replication",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segment_replication/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/segments/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/shards/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/snapshots/",
+        "error": null,
+        "status": 400
+      },
+      {
+        "endpoint": "/_cat/tasks",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/templates",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_cat/thread_pool/",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_ingest/pipeline",
+        "error": null,
+        "status": 200
+      },
+      {
+        "endpoint": "/_remote/info",
+        "error": null,
+        "status": 200
+      }
+    ],
+    "endpoints_error": null,
+    "error": null,
+    "host": "127.0.0.1",
+    "insecure_effective": true,
+    "is_elastic": true,
+    "misconfig_error": null,
+    "misconfig_findings": [
+      {
+        "key": "network.host",
+        "reason": "service is bound to all interfaces",
+        "value": "0.0.0.0"
+      }
+    ],
+    "module": "elastic",
+    "network_attempted": true,
+    "plugins_error": null,
+    "port": 29201,
+    "provided_credentials": true,
+    "provided_token": false,
+    "provided_username": "admin",
+    "rights_error": "privilege verification unsupported for OpenSearch",
+    "scheme": "https",
+    "service": "elastic",
+    "show_cluster": true,
+    "show_endpoints": true,
+    "show_plugins": true,
+    "show_users": true,
+    "stages": [
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "ok",
+        "stage_name": "detect_protocol"
+      },
+      {
+        "attempt": 1,
+        "error": null,
+        "result": "auth_required",
+        "stage_name": "auth_inference_credentials"
+      }
+    ],
+    "status": "valid_credentials",
+    "tls_auto_plain": false,
+    "transport_error_kind": null,
+    "transport_errors": {},
+    "users": [
+      {
+        "enabled": null,
+        "full_name": "Demo admin user",
+        "roles": [
+          "admin"
+        ],
+        "username": "admin"
+      },
+      {
+        "enabled": null,
+        "full_name": "Demo anomaly admin user, using internal role",
+        "roles": [
+          "anomaly_full_access"
+        ],
+        "username": "anomalyadmin"
+      },
+      {
+        "enabled": null,
+        "full_name": "Demo OpenSearch Dashboards read only user, using external role mapping",
+        "roles": [
+          "kibanauser",
+          "readall"
+        ],
+        "username": "kibanaro"
+      },
+      {
+        "enabled": null,
+        "full_name": "Demo OpenSearch Dashboards user",
+        "roles": [],
+        "username": "kibanaserver"
+      },
+      {
+        "enabled": null,
+        "full_name": "Demo logstash user, using external role mapping",
+        "roles": [
+          "logstash"
+        ],
+        "username": "logstash"
+      },
+      {
+        "enabled": null,
+        "full_name": "",
+        "roles": [
+          "redposture_observer"
+        ],
+        "username": "observer"
+      },
+      {
+        "enabled": null,
+        "full_name": "Demo readall user, using external role mapping",
+        "roles": [
+          "readall"
+        ],
+        "username": "readall"
+      },
+      {
+        "enabled": null,
+        "full_name": "Demo snapshotrestore user, using external role mapping",
+        "roles": [
+          "snapshotrestore"
+        ],
+        "username": "snapshotrestore"
+      }
+    ],
+    "users_error": null,
+    "vendor": "opensearch",
+    "verification_capability": "identity_endpoint_supported"
+  }
+]

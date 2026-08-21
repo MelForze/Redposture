@@ -41,6 +41,21 @@ def test_run_scan_stage_rejects_negative_retries(capsys: pytest.CaptureFixture[s
     assert "--retries must be >= 0" in capsys.readouterr().err
 
 
+def test_run_scan_stage_excludes_out_targets_before_scanning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        stage_scan,
+        "scan_exporter_presence",
+        lambda *_a, **_k: pytest.fail("excluded target reached scanner"),
+    )
+
+    rc = run_scan_stage(_args(targets="10.0.0.1", out_targets=["10.0.0.0/24"]))
+
+    assert rc == 2
+    assert "all targets were excluded by --out-target" in capsys.readouterr().err
+
+
 def test_run_scan_stage_large_cidr_uses_chunked_output_and_single_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -70,6 +85,7 @@ def test_run_scan_stage_large_cidr_uses_chunked_output_and_single_summary(
         progress_leave=True,
         output_mode="w",
         progress_owner=None,
+        stats_sink=None,
     ):
         _ = (
             timeout,
@@ -82,6 +98,7 @@ def test_run_scan_stage_large_cidr_uses_chunked_output_and_single_summary(
             show_progress,
             progress_leave,
             progress_owner,
+            stats_sink,
         )
         host_list = list(hosts)
         calls.append((host_list, output_mode))
@@ -490,3 +507,28 @@ def test_run_scan_stage_explicit_url_targets_use_single_global_progress(
     assert progress_totals == [5]
     assert sum(progress_advances) == 5
     assert progress_closed == 1
+
+
+@pytest.mark.parametrize(("checks", "errors"), [(1, 1), (2, 1)])
+def test_scan_returns_inconclusive_when_no_detection_has_operational_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    checks: int,
+    errors: int,
+) -> None:
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        stats = kwargs.get("stats_sink")
+        assert isinstance(stats, dict)
+        stats.update({"checks": checks, "found": 0, "errors": errors})
+        emit = kwargs.get("emit_line")
+        if callable(emit):
+            emit("SCAN    \t10.0.0.1\t9100\t [!] exporter=unknown request failed err=timed out")
+        return checks, 0, {"10.0.0.1": []}
+
+    monkeypatch.setattr("redposture_core.stage_scan.scan_exporter_presence", fake_scan)
+    rc = run_scan_stage(_args(targets="10.0.0.1", output=None, output_format="txt"))
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "request failed err=timed out" in captured.out
+    assert "scan inconclusive" in captured.err

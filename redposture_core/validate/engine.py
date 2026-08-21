@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..console import Console
+from ..exporters.http_client import format_http_host
 from .context import (
     VALIDATION_PRECISION_COLLECT_STRICT,
     VALIDATION_PRECISION_LEGACY,
@@ -539,7 +540,7 @@ class ValidationRecordAccumulator:
                 continue
             if not endpoint_text.startswith("/"):
                 continue
-            urls.add(f"http://{host_text}:{int(port_text)}{endpoint_text}")
+            urls.add(f"http://{format_http_host(host_text)}:{int(port_text)}{endpoint_text}")
         hosts.update(row[0] for row in self.vulnerable_login_rows_from_shown_hits() if row[0] != "-")
         return sorted(hosts), sorted(urls)
 

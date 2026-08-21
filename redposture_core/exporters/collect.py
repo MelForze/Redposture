@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 from collections.abc import Callable
 from typing import Any
 
@@ -13,7 +14,7 @@ from ..scheduler import BoundedScheduler
 from ..stage_runtime import start_audit_progress
 from ..utils import utc_now_iso
 from .artifacts import save_collect_body
-from .http_client import http_get_details
+from .http_client import activate_exporter_tls_context, build_http_url, http_get_details
 from .http_pool import HTTPConnectionPool, activate_http_pool
 from .output import emit_line as emit_output_line
 from .output import format_collect_record
@@ -46,12 +47,13 @@ def collect_task(
     timeout: float,
     retries: int,
     *,
+    scheme: str = "http",
     http_get_details_fn: HttpGetDetails = http_get_details,
 ) -> tuple[dict[str, Any], bool]:
-    url = f"http://{host}:{port}{endpoint}"
+    url = build_http_url(host, port, endpoint, scheme=scheme)
     result = http_get_details_fn(url, timeout=timeout, retries=retries)
     status = result["status"]
-    ok = status is not None and int(status) < 400
+    ok = status is not None and 200 <= int(status) < 300
 
     record = {
         "timestamp": utc_now_iso(),
@@ -68,6 +70,9 @@ def collect_task(
         "truncated": result["truncated"],
         "body": result["body"],
     }
+    raw_body = getattr(result, "raw_body", result.get("raw_body"))
+    if isinstance(raw_body, bytes):
+        record["raw_body"] = raw_body
     return record, ok
 
 
@@ -86,20 +91,9 @@ def plan_collect_endpoints_for_target(
     adaptive_collect: bool = True,
     completed_endpoints: set[str] | None = None,
     *,
+    scheme: str = "http",
     collect_task_fn: CollectTask = collect_task,
 ) -> tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]:
-    def _is_hard_failure(result: tuple[dict[str, Any], bool]) -> bool:
-        record, ok = result
-        if ok:
-            return False
-        status = record.get("status")
-        if status is None:
-            return True
-        try:
-            return int(status) >= 400
-        except (TypeError, ValueError):
-            return True
-
     prefetched: dict[str, tuple[dict[str, Any], bool]] = {}
     prefetch_candidates: list[str] = []
     completed = completed_endpoints or set()
@@ -117,31 +111,31 @@ def plan_collect_endpoints_for_target(
             prefetch_candidates.append("/debug/vars")
 
     for endpoint in prefetch_candidates:
-        prefetched[endpoint] = collect_task_fn(
-            host,
-            exporter_name,
-            port,
-            endpoint,
-            timeout,
-            retries,
-        )
+        if collect_task_fn is collect_task:
+            prefetched[endpoint] = collect_task(
+                host,
+                exporter_name,
+                port,
+                endpoint,
+                timeout,
+                retries,
+                scheme=scheme,
+            )
+        else:
+            prefetched[endpoint] = collect_task_fn(
+                host,
+                exporter_name,
+                port,
+                endpoint,
+                timeout,
+                retries,
+            )
 
-    planned = list(endpoints)
-
-    pprof_probe = prefetched.get("/debug/pprof/")
-    if pprof_probe is not None and _is_hard_failure(pprof_probe):
-        planned = [endpoint for endpoint in planned if endpoint == "/debug/pprof/" or not is_pprof_endpoint(endpoint)]
-
-    if adaptive_collect:
-        metrics_probe = prefetched.get("/metrics")
-        vars_probe = prefetched.get("/debug/vars")
-        pprof_hard = pprof_probe is not None and _is_hard_failure(pprof_probe)
-        metrics_hard = metrics_probe is not None and _is_hard_failure(metrics_probe)
-        vars_hard = vars_probe is not None and _is_hard_failure(vars_probe)
-        if metrics_hard and vars_hard and (pprof_probe is None or pprof_hard):
-            planned = [endpoint for endpoint in planned if endpoint in prefetched]
-
-    return tuple(planned), prefetched
+    # A failed index is not proof that individual pprof handlers are absent:
+    # Go applications can register handlers without exposing the index (or
+    # protect the index independently).  Keep all requested endpoints and use
+    # preflight only to reuse responses for endpoints that were actually read.
+    return tuple(endpoints), prefetched
 
 
 def collect_exporter_debug_data(
@@ -169,6 +163,8 @@ def collect_exporter_debug_data(
     checkpoint_mode: str = "a",
     stats_sink: dict[str, int] | None = None,
     progress_owner: Any = None,
+    scheme: str = "http",
+    tls_context: ssl.SSLContext | None = None,
     *,
     collect_task_fn: CollectTask = collect_task,
     plan_collect_fn: PlanCollect | None = None,
@@ -182,6 +178,7 @@ def collect_exporter_debug_data(
     plan_collect = plan_collect_fn or plan_collect_endpoints_for_target
     total = 0
     success = 0
+    transport_errors = 0
     max_workers = max(1, workers)
     max_inflight = collect_max_inflight(max_workers, max_inflight_requests)
 
@@ -250,13 +247,15 @@ def collect_exporter_debug_data(
             *,
             pause_before_emit: Callable[[], None] | None = None,
         ) -> None:
-            nonlocal total, success
+            nonlocal total, success, transport_errors
             response_file, response_size = (None, 0)
             index_payload: dict[str, Any] | None = None
             checkpoint_payload: dict[str, Any] | None = None
             total += 1
             if ok:
                 success += 1
+            if record.get("error"):
+                transport_errors += 1
             if save_responses_dir:
                 response_file, response_size = save_collect_body(save_responses_dir, record)
                 if response_file is not None:
@@ -299,6 +298,11 @@ def collect_exporter_debug_data(
                     "status": record.get("status"),
                     "ok": bool(record.get("ok")),
                     "timestamp": record.get("timestamp"),
+                    # Preserve the exact logical record required to rebuild
+                    # cumulative validation state on a resumed run.  Binary
+                    # response bytes live in the raw artifact and are not
+                    # duplicated into JSONL checkpoints.
+                    "record": {key: value for key, value in record.items() if key != "raw_body"},
                 }
             if postprocess_worker is not None:
                 postprocess_worker.put(
@@ -329,8 +333,8 @@ def collect_exporter_debug_data(
                     output=output_path,
                 )
 
-        pool = build_exporter_http_pool(max_workers, pool_cls)
-        with activate_pool_fn(pool):
+        pool = build_exporter_http_pool(max_workers, pool_cls, tls_context=tls_context)
+        with activate_exporter_tls_context(tls_context), activate_pool_fn(pool):
             if preflight_enabled:
                 planner = BoundedScheduler[
                     tuple[str, str, int], tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]
@@ -343,7 +347,7 @@ def collect_exporter_debug_data(
                     target: tuple[str, str, int],
                 ) -> tuple[tuple[str, ...], dict[str, tuple[dict[str, Any], bool]]]:
                     host, exporter_name, port = target
-                    return plan_collect(
+                    args = (
                         host,
                         exporter_name,
                         port,
@@ -353,6 +357,9 @@ def collect_exporter_debug_data(
                         adaptive_collect,
                         completed_by_target.get((host, exporter_name, int(port))),
                     )
+                    if plan_collect_fn is None:
+                        return plan_collect_endpoints_for_target(*args, scheme=scheme)
+                    return plan_collect(*args)
 
                 for target, plan in planner.iter_completed(collect_targets, _plan_target):
                     target_plans[target] = plan
@@ -393,6 +400,16 @@ def collect_exporter_debug_data(
 
                 def _collect_job(job: tuple[str, str, int, str]) -> tuple[dict[str, Any], bool]:
                     host, exporter_name, port, endpoint = job
+                    if collect_task_fn is collect_task:
+                        return collect_task(
+                            host,
+                            exporter_name,
+                            port,
+                            endpoint,
+                            timeout,
+                            retries,
+                            scheme=scheme,
+                        )
                     return collect_task_fn(host, exporter_name, port, endpoint, timeout, retries)
 
                 for _job, (record, ok) in scheduler.iter_completed(fetch_jobs, _collect_job):
@@ -409,9 +426,14 @@ def collect_exporter_debug_data(
                 "hosts": len(hosts),
                 "requests": total,
                 "success": success,
+                "errors": transport_errors,
                 "output_path": output_path,
             }
             emit_output_line(out_fh, emit_line, format_collect_record(summary, output_format))
+        if stats_sink is not None:
+            stats_sink["requests"] = total
+            stats_sink["success"] = success
+            stats_sink["errors"] = transport_errors
     finally:
         _finalize_postprocess()
         if out_fh is not None:

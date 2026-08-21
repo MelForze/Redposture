@@ -43,6 +43,24 @@ def configure_clickhouse_parser(
         action="store_true",
         help="Use ClickHouse HTTP/HTTPS API mode. By default native protocol is used.",
     )
+    common.add_argument("--tls", action="store_true", help="Use TLS (native secure protocol or HTTPS).")
+    common.add_argument(
+        "--tls-ca", dest="tls_ca", default=None, metavar="file", help="CA bundle for ClickHouse TLS verification."
+    )
+    common.add_argument(
+        "--tls-cert", dest="tls_cert", default=None, metavar="file", help="Client certificate for ClickHouse mTLS."
+    )
+    common.add_argument(
+        "--tls-key", dest="tls_key", default=None, metavar="file", help="Client private key for ClickHouse mTLS."
+    )
+    common.add_argument(
+        "--tls-server-name",
+        dest="tls_server_name",
+        default=None,
+        metavar="name",
+        help="TLS SNI/certificate hostname override.",
+    )
+    common.add_argument("--insecure", action="store_true", help="Use TLS without server certificate verification.")
     common.add_argument(
         "-d",
         "--database",

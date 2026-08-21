@@ -1,14 +1,20 @@
 [
   {
+    "anonymous_auth_probe_results": {
+      "/": "ok"
+    },
     "auth_error": null,
     "auth_inference_source": "root_ok",
+    "auth_mechanism": "digest",
     "auth_probe_trace": [
-      "/:ok"
+      "/:ok",
+      "/redposture/app/api_key:ok"
     ],
     "auth_required": false,
-    "can_create_znode": true,
-    "can_delete_znode": true,
+    "can_create_znode": null,
+    "can_delete_znode": null,
     "connect_error": null,
+    "credential_auth_probe_results": {},
     "credential_verdict": null,
     "defcreds_enabled": false,
     "dump": true,
@@ -16,11 +22,18 @@
     "dump_limit": 3,
     "enum_error": null,
     "error": null,
+    "fingerprint_confidence": "rejected",
+    "fingerprint_errors": {},
     "host": "127.0.0.1",
+    "implementation": "apache-zookeeper",
+    "implementation_confidence": "confirmed",
+    "is_keeper": false,
     "is_zookeeper": true,
+    "is_zookeeper_compatible": true,
     "max_znodes": 5,
     "module": "zookeeper",
     "port": 2181,
+    "protocol": "zookeeper",
     "provided_credentials": false,
     "provided_credentials_ok": null,
     "provided_password": null,
@@ -30,6 +43,26 @@
     "query_znode_dump": "rp-zk-key-2026",
     "query_znode_dump_error": null,
     "query_znode_value": "/redposture/app/api_key (children:0,bytes:14)",
+    "quorum_status": "unknown",
+    "raft": {
+      "commit_lag": null,
+      "first_log_idx": null,
+      "first_log_term": null,
+      "followers": null,
+      "last_committed_idx": null,
+      "last_log_idx": null,
+      "last_log_term": null,
+      "last_snapshot_idx": null,
+      "leader_committed_log_idx": null,
+      "log_dir_size": null,
+      "peer_state": null,
+      "pending_syncs": null,
+      "snapshot_dir_size": null,
+      "synced_followers": null,
+      "target_committed_log_idx": null
+    },
+    "read_only": null,
+    "server_state": "standalone",
     "service": "zookeeper",
     "show_znodes": true,
     "stage2_error": null,
@@ -60,12 +93,17 @@
       }
     ],
     "status": "open_no_auth",
+    "transport": "plaintext",
+    "vendor": "apache",
+    "verification_capability": "available",
+    "version": "3.9.5-293c895a8d966a3ecb92872be4a1daf87d725da2, built on 2026-02-11 20:18 UTC",
     "znode_capability_error": null,
-    "znode_count": 22,
+    "znode_count": null,
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,
     "znode_count_unknown": false,
+    "znode_truncated_reason": null,
     "znode_values": null,
-    "znodes_truncated": true
+    "znodes_truncated": false
   }
 ]

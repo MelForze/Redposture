@@ -208,6 +208,8 @@ def test_unsupported_identity_endpoint_is_cached_for_public_root(
         "capability": "identity_endpoint_unavailable",
         "supported_endpoint": None,
         "unsupported_endpoints": ["/_security/_authenticate"],
+        "credential_accepted": False,
+        "identity_verified": False,
     }
 
 
@@ -549,6 +551,74 @@ def test_collected_action_diagnostics_recursively_redact_api_token(
     assert token not in serialized
     assert "<redacted>" in serialized
     assert result["api_token"] is None
+
+
+def test_cluster_action_promotes_already_fetched_node_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        actions,
+        "_fetch_cluster_data",
+        lambda *_args, **_kwargs: (
+            {"cluster_name": "protected-opensearch", "status": "green"},
+            [
+                {
+                    "id": "node-1",
+                    "name": "opensearch-1",
+                    "ip": "127.0.0.1",
+                    "host": "opensearch-1",
+                    "roles": ["cluster_manager", "data"],
+                    "version": "2.19.1",
+                }
+            ],
+            None,
+        ),
+    )
+    monkeypatch.setattr(actions, "_fetch_cluster_misconfig_findings", lambda *_args, **_kwargs: ([], None))
+    state = actions.ElasticLifecycleState()
+    record = {
+        **_detected_record(),
+        "server_version": None,
+        "vendor": "opensearch",
+    }
+
+    result = actions.collect_elastic_data(
+        _ctx(state, "unused"),
+        record,
+        {
+            "show_endpoints": False,
+            "show_plugins": False,
+            "show_cluster": True,
+            "show_users": False,
+            "discover": False,
+        },
+    )
+
+    assert result["server_version"] == "2.19.1"
+    assert result["cluster_nodes"][0]["version"] == "2.19.1"
+
+
+def test_unsupported_users_api_does_not_fail_other_actions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        actions,
+        "_fetch_security_users",
+        lambda *_args, **_kwargs: (None, "security users API unsupported"),
+    )
+    state = actions.ElasticLifecycleState()
+
+    result = actions.collect_elastic_data(
+        _ctx(state, "unused"),
+        _detected_record(),
+        {
+            "show_endpoints": False,
+            "show_plugins": False,
+            "show_cluster": False,
+            "show_users": True,
+            "discover": False,
+        },
+    )
+
+    assert result["users"] is None
+    assert result["users_error"] == "security users API unsupported"
+    assert result["error"] is None
 
 
 def test_lifecycle_reuses_one_direct_session_for_auth_candidates_and_data(

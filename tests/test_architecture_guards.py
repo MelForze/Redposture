@@ -406,7 +406,6 @@ def test_root_audit_stage_files_are_compatibility_facades_only() -> None:
         "oracle",
         "grpc",
         "clickhouse",
-        "keeper",
         "zookeeper",
     ):
         source = (_CORE / f"stage_{module}.py").read_text(encoding="utf-8")
@@ -536,7 +535,7 @@ def test_protocol_stage_modules_do_not_own_raw_socket_frame_clients() -> None:
         ".recv(",
     )
     offenders: list[str] = []
-    for module in ("grpc", "kafka", "keeper", "zookeeper"):
+    for module in ("grpc", "kafka", "zookeeper"):
         text = (_CORE / "modules" / module / "actions.py").read_text(encoding="utf-8")
         for token in forbidden_tokens:
             if token in text:

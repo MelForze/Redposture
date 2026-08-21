@@ -88,6 +88,38 @@ def test_basic_auth_and_header_precedence() -> None:
     assert basic_headers["Authorization"].startswith("Basic ")
 
 
+def test_kube_scoped_403_is_valid_only_for_bearer_token_and_exec_flags_are_paired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(kube, "_list_namespaces", lambda *_args, **_kwargs: (None, 403, "Forbidden"))
+    detect_record = {"host": "kube.local", "port": 6443, "status": "auth_required"}
+
+    token_ctx = SimpleNamespace(
+        host="kube.local",
+        port=6443,
+        args=_kube_args(),
+        credential=SimpleNamespace(token="scoped", username=None, password=None),
+        lifecycle_state=kube.KubeApiLifecycleState(use_https=True, insecure=True),
+    )
+    token_record = kube.authenticate_kubeapi(token_ctx, detect_record, {})
+    assert token_record["auth_valid"] is True
+    assert token_record["can_list_namespaces"] is False
+
+    basic_ctx = SimpleNamespace(
+        host="kube.local",
+        port=6443,
+        args=_kube_args(),
+        credential=SimpleNamespace(token=None, username="bad", password="bad"),
+        lifecycle_state=kube.KubeApiLifecycleState(use_https=True, insecure=True),
+    )
+    basic_record = kube.authenticate_kubeapi(basic_ctx, detect_record, {})
+    assert basic_record["auth_valid"] is False
+
+    console = _ConsoleCapture()
+    assert kube.validate_args(_kube_args(pod="pod-a"), console) == 2
+    assert kube.validate_args(_kube_args(exec_command="id"), console) == 2
+
+
 def test_kube_transport_helpers_cover_ws_and_json_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Sock:
         def __init__(self, payload: bytes = b"") -> None:
@@ -1217,8 +1249,8 @@ def test_http_request_and_ws_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None
         def close(self) -> None:
             self.closed = True
 
-    def _ws_frame(opcode: int, payload: bytes) -> bytes:
-        header = bytes([0x80 | opcode])
+    def _ws_frame(opcode: int, payload: bytes, *, fin: bool = True) -> bytes:
+        header = bytes([(0x80 if fin else 0) | opcode])
         size = len(payload)
         if size < 126:
             return header + bytes([size]) + payload
@@ -1233,13 +1265,17 @@ def test_http_request_and_ws_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None
         "Connection: Upgrade\r\n"
         f"Sec-WebSocket-Accept: {accept}\r\n\r\n"
     ).encode("ascii")
+    # The handshake tail and several frames may arrive in one recv(), and a
+    # Kubernetes binary channel message may itself be fragmented.
     success_sock = _Sock(
         [
-            handshake,
-            _ws_frame(0x2, b"\x01hello\n"),
-            _ws_frame(0x2, b"\x02warn\n"),
-            _ws_frame(0x2, b'\x03{"status":"Success"}'),
-            _ws_frame(0x8, b""),
+            handshake
+            + _ws_frame(0x2, b"\x01hel", fin=False)
+            + _ws_frame(0x0, b"lo\n")
+            + _ws_frame(0x2, b"\x02warn\n")
+            + _ws_frame(0x9, b"ping")
+            + _ws_frame(0x2, b'\x03{"status":"Success"}')
+            + _ws_frame(0x8, b"")
         ]
     )
     monkeypatch.setattr(kube.socket, "create_connection", lambda *_args, **_kwargs: success_sock)
@@ -1260,6 +1296,23 @@ def test_http_request_and_ws_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None
     assert result["exit_code"] == 0
     assert "GET /api/v1/namespaces/default/pods/api/exec?" in success_sock.sent[0].decode("utf-8", errors="replace")
     assert sec_key in success_sock.sent[0].decode("utf-8", errors="replace")
+    assert any(frame[0] == 0x8A for frame in success_sock.sent[1:])
+
+    no_terminal_sock = _Sock([handshake + _ws_frame(0x2, b"\x01output") + _ws_frame(0x8, b"")])
+    monkeypatch.setattr(kube.socket, "create_connection", lambda *_args, **_kwargs: no_terminal_sock)
+    no_terminal = kube._kube_exec_ws(
+        "127.0.0.1",
+        16443,
+        "default",
+        "api",
+        "id",
+        1.0,
+        use_https=False,
+        insecure=False,
+        ca_file=None,
+    )
+    assert no_terminal["ok"] is False
+    assert "terminal status" in str(no_terminal.get("error") or "")
 
     bad_handshake = _Sock([b"HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\n\r\nunauthorized"])
     monkeypatch.setattr(kube.socket, "create_connection", lambda *_args, **_kwargs: bad_handshake)
@@ -1409,7 +1462,7 @@ def test_kube_list_items_error_and_pagination_paths(monkeypatch: pytest.MonkeyPa
     assert status == 200
     assert isinstance(items, list)
     assert len(items) == 2
-    assert error == "pagination limit exceeded"
+    assert error == "partial: pagination limit exceeded"
 
     assert kube._decode_secret_data_value("Zm9v") == "foo"
     assert kube._decode_secret_data_value("AAECAw==").startswith("<binary-text:")

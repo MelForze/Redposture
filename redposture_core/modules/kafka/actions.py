@@ -12,6 +12,7 @@ from typing import Any
 from ...clients import kafka as _kafka_client
 from ...clients.kafka import (
     KAFKA_AUTH_ERROR_CODES,
+    KafkaTlsConfig,
     _build_credential_runs,
     _build_metadata_request_body,
     _build_request_header,
@@ -131,7 +132,23 @@ class KafkaLifecycleState:
     anonymous_metadata: dict[str, Any] | None = None
     auth_required: bool | None = None
     sasl_first: bool = False
+    requested_use_tls: bool | None = None
+    tls_config: KafkaTlsConfig = field(default_factory=lambda: KafkaTlsConfig(insecure=True))
     credential_metadata: dict[tuple[str | None, str | None, str], dict[str, Any]] = field(default_factory=dict)
+
+
+def _open_kafka_transport(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    use_tls: bool | None,
+    tls_config: KafkaTlsConfig | None,
+):
+    kwargs: dict[str, Any] = {"use_tls": use_tls}
+    if tls_config is not None:
+        kwargs["tls_config"] = tls_config
+    return open_kafka_socket(host, port, timeout, **kwargs)
 
 
 def _with_kafka_client_overrides(callback, *args, **kwargs):
@@ -171,10 +188,13 @@ def _authenticate_and_fetch_metadata(
     password: str,
     *,
     use_tls: bool | None = None,
+    tls_config: KafkaTlsConfig | None = None,
     known_kafka: bool = False,
     sasl_first: bool = False,
 ):
     kwargs: dict[str, Any] = {"use_tls": use_tls}
+    if tls_config is not None:
+        kwargs["tls_config"] = tls_config
     if known_kafka:
         kwargs["known_kafka"] = True
     if sasl_first:
@@ -200,6 +220,7 @@ def _read_topic_messages(
     password: str | None = None,
     *,
     use_tls: bool | None = None,
+    tls_config: KafkaTlsConfig | None = None,
     known_kafka: bool = False,
     bootstrap_metadata: dict[str, Any] | None = None,
     sasl_first: bool = False,
@@ -209,6 +230,8 @@ def _read_topic_messages(
         "password": password,
         "use_tls": use_tls,
     }
+    if tls_config is not None:
+        kwargs["tls_config"] = tls_config
     if known_kafka:
         kwargs["known_kafka"] = True
     if bootstrap_metadata is not None:
@@ -236,6 +259,7 @@ def _read_dump_topics(
     username: str | None,
     password: str | None,
     use_tls: bool | None = None,
+    tls_config: KafkaTlsConfig | None = None,
     known_kafka: bool = False,
     bootstrap_metadata: dict[str, Any] | None = None,
     sasl_first: bool = False,
@@ -250,6 +274,8 @@ def _read_dump_topics(
         "password": password,
         "use_tls": use_tls,
     }
+    if tls_config is not None:
+        kwargs["tls_config"] = tls_config
     if known_kafka:
         kwargs["known_kafka"] = True
     if bootstrap_metadata is not None:
@@ -260,6 +286,61 @@ def _read_dump_topics(
         _CLIENT_READ_DUMP_TOPICS,
         **kwargs,
     )
+
+
+def _build_dump_coverage(
+    topics: list[str],
+    results: Mapping[str, list[str] | None],
+    errors: Mapping[str, str],
+    overall_error: str | None,
+) -> dict[str, Any]:
+    """Describe every requested topic without collapsing mixed outcomes."""
+
+    requested = list(dict.fromkeys(str(topic).strip() for topic in topics if str(topic).strip()))
+    topic_entries: list[dict[str, Any]] = []
+    status_counts = {"success": 0, "partial": 0, "failed": 0, "not_attempted": 0}
+    for topic in requested:
+        read_error = str(errors.get(topic) or "").strip() or None
+        has_result = topic in results and results.get(topic) is not None
+        messages = results.get(topic) if has_result else None
+        if read_error and has_result:
+            status = "partial"
+        elif read_error:
+            status = "failed"
+        elif has_result:
+            status = "success"
+        else:
+            status = "not_attempted"
+        status_counts[status] += 1
+        topic_entries.append(
+            {
+                "topic": topic,
+                "status": status,
+                "message_count": len(messages or []),
+                "error": read_error,
+            }
+        )
+
+    clean_overall_error = str(overall_error or "").strip() or None
+    complete = clean_overall_error is None and all(entry["status"] == "success" for entry in topic_entries)
+    usable_count = status_counts["success"] + status_counts["partial"]
+    if complete:
+        status = "complete"
+    elif usable_count:
+        status = "partial"
+    else:
+        status = "failed"
+    return {
+        "status": status,
+        "complete": complete,
+        "requested_count": len(requested),
+        "successful_count": status_counts["success"],
+        "partial_count": status_counts["partial"],
+        "failed_count": status_counts["failed"],
+        "not_attempted_count": status_counts["not_attempted"],
+        "topics": topic_entries,
+        "error": clean_overall_error,
+    }
 
 
 def _probe_kafka_acl_state(
@@ -280,6 +361,7 @@ def _probe_kafka_acl_state(
     probe_write: bool,
     debug_emit: Callable[[str], None] | None,
     known_kafka: bool = False,
+    tls_config: KafkaTlsConfig | None = None,
 ) -> tuple[dict[str, dict[str, bool | None]], dict[str, bool | None]]:
     """Collect topic and cluster ACL markers for either Kafka auth path."""
 
@@ -312,6 +394,8 @@ def _probe_kafka_acl_state(
     }
     if known_kafka:
         acl_kwargs["known_kafka"] = True
+    if tls_config is not None:
+        acl_kwargs["tls_config"] = tls_config
     acl_state = _kafka_client._probe_kafka_acls(
         host,
         port,
@@ -339,6 +423,7 @@ def _audit_kafka_via_sasl_fallback(
     *,
     credential_source: str = "provided",
     use_tls: bool | None = None,
+    tls_config: KafkaTlsConfig | None = None,
     probe_write: bool = False,
     debug_emit: Callable[[str], None] | None = None,
 ) -> dict[str, Any] | None:
@@ -346,7 +431,13 @@ def _audit_kafka_via_sasl_fallback(
     started = time.monotonic()
 
     try:
-        sock, transport_mode = open_kafka_socket(host, port, timeout, use_tls=use_tls)
+        sock, transport_mode = _open_kafka_transport(
+            host,
+            port,
+            timeout,
+            use_tls=use_tls,
+            tls_config=tls_config,
+        )
         with sock:
             correlation = 1
             hs_ok, correlation, hs_error = _sasl_handshake_plain(sock, correlation)
@@ -416,6 +507,7 @@ def _audit_kafka_via_sasl_fallback(
                         username=username if provided_credentials_ok else None,
                         password=password if provided_credentials_ok else None,
                         use_tls=(transport_mode == "tls") or None,
+                        tls_config=tls_config,
                     )
 
             topic_messages: list[str] | None = None
@@ -423,6 +515,8 @@ def _audit_kafka_via_sasl_fallback(
             if dump and query_topic_name:
                 topic_messages = dump_results.get(query_topic_name)
                 topic_read_error = dump_errors.get(query_topic_name) or dump_error
+            dump_coverage = _build_dump_coverage(dump_topics, dump_results, dump_errors, dump_error) if dump else None
+            dump_partial = bool(dump_coverage and not dump_coverage["complete"])
 
             # Kafka E2E fix: classify successful auth as `weak_default_creds`
             # when the winning pair matches _KAFKA_DEFAULT_CREDENTIALS — parity
@@ -465,6 +559,7 @@ def _audit_kafka_via_sasl_fallback(
                 show_topics_limit=show_topics_limit,
                 probe_write=probe_write,
                 debug_emit=debug_emit,
+                tls_config=tls_config,
             )
 
             return {
@@ -497,6 +592,9 @@ def _audit_kafka_via_sasl_fallback(
                 "dump_results": dump_results if dump else None,
                 "dump_errors": dump_errors if dump else None,
                 "dump_error": dump_error,
+                "dump_coverage": dump_coverage,
+                "dump_partial": dump_partial,
+                "partial": dump_partial,
                 "topic_messages": topic_messages,
                 "topic_read_error": topic_read_error,
                 "elapsed_ms": int((time.monotonic() - started) * 1000),
@@ -520,11 +618,30 @@ def _audit_kafka_via_sasl_fallback(
             show_topics_limit=show_topics_limit,
             credential_source=credential_source,
             use_tls=True,
+            tls_config=tls_config,
             probe_write=probe_write,
             debug_emit=debug_emit,
         )
     except (TimeoutError, ConnectionError, OSError, ValueError):
         return None
+
+
+def _should_retry_kafka_tls(exc: BaseException) -> bool:
+    """Return whether a plaintext exchange plausibly hit a TLS-only listener."""
+
+    if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)):
+        return True
+    text = str(exc or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "connection reset",
+            "broken pipe",
+            "connection aborted",
+            "unexpected eof",
+            "connection closed",
+        )
+    )
 
 
 def _audit_kafka_host(
@@ -543,6 +660,8 @@ def _audit_kafka_host(
     debug_emit: Callable[[str], None] | None = None,
     lifecycle_state: KafkaLifecycleState | None = None,
     credential_source: str = "provided",
+    use_tls: bool | None = None,
+    tls_config: KafkaTlsConfig | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     provided_credentials = username is not None and password is not None
@@ -555,15 +674,22 @@ def _audit_kafka_host(
         # socket and re-enter with `use_tls=True`. For 9093 (SASL_SSL), the
         # `open_kafka_socket` helper picks TLS on the first pass, so this
         # loop still runs but the "initial" attempt already opens TLS.
-        transport_use_tls: bool | None = None
+        transport_use_tls: bool | None = use_tls
         for _transport_attempt in ("initial", "tls_fallback"):
             try:
-                sock, transport_mode = open_kafka_socket(host, port, timeout, use_tls=transport_use_tls)
+                sock, transport_mode = _open_kafka_transport(
+                    host,
+                    port,
+                    timeout,
+                    use_tls=transport_use_tls,
+                    tls_config=tls_config,
+                )
                 if lifecycle_state is not None:
                     lifecycle_state.transport_mode = transport_mode
                 with sock:
                     correlation = 1
-                    is_kafka, api_error_code, api_error = _probe_apiversions(sock, correlation)
+                    api_probe = _probe_apiversions(sock, correlation)
+                    is_kafka, api_error_code, api_error = api_probe
                     correlation += 1
                     if lifecycle_state is not None:
                         lifecycle_state.is_kafka = bool(is_kafka)
@@ -582,6 +708,7 @@ def _audit_kafka_host(
                                 max_messages=max_messages,
                                 credential_source=credential_source,
                                 use_tls=(transport_mode == "tls") or None,
+                                tls_config=tls_config,
                                 probe_write=probe_write,
                                 debug_emit=debug_emit,
                             )
@@ -623,6 +750,9 @@ def _audit_kafka_host(
                         }
 
                     metadata, metadata_error = _fetch_metadata(sock, correlation, topics=None)
+                    negotiated_versions = dict(getattr(api_probe, "versions", {}) or {})
+                    if metadata is not None and negotiated_versions:
+                        metadata["api_versions"] = negotiated_versions
                     if lifecycle_state is not None and metadata is not None:
                         lifecycle_state.anonymous_metadata = dict(metadata)
 
@@ -665,6 +795,7 @@ def _audit_kafka_host(
                         username,
                         password,
                         use_tls=(transport_mode == "tls") or None,
+                        tls_config=tls_config,
                     )
                     provided_credentials_ok = auth_ok
                     if auth_ok and auth_metadata is not None:
@@ -722,6 +853,7 @@ def _audit_kafka_host(
                             username=username if bool(provided_credentials_ok) else None,
                             password=password if bool(provided_credentials_ok) else None,
                             use_tls=(transport_mode == "tls") or None,
+                            tls_config=tls_config,
                         )
 
                 topic_messages: list[str] | None = None
@@ -729,6 +861,10 @@ def _audit_kafka_host(
                 if dump and query_topic_name:
                     topic_messages = dump_results.get(query_topic_name)
                     topic_read_error = dump_errors.get(query_topic_name) or dump_error
+                dump_coverage = (
+                    _build_dump_coverage(dump_topics, dump_results, dump_errors, dump_error) if dump else None
+                )
+                dump_partial = bool(dump_coverage and not dump_coverage["complete"])
 
                 # Kafka E2E fix (SASL fallback path): mirror the classification
                 # logic from the main SASL path so the record shape is uniform.
@@ -777,6 +913,7 @@ def _audit_kafka_host(
                     show_topics_limit=show_topics_limit,
                     probe_write=probe_write,
                     debug_emit=debug_emit,
+                    tls_config=tls_config,
                 )
 
                 return {
@@ -809,6 +946,9 @@ def _audit_kafka_host(
                     "dump_results": dump_results if dump else None,
                     "dump_errors": dump_errors if dump else None,
                     "dump_error": dump_error,
+                    "dump_coverage": dump_coverage,
+                    "dump_partial": dump_partial,
+                    "partial": dump_partial,
                     "topic_messages": topic_messages,
                     "topic_read_error": topic_read_error,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
@@ -820,13 +960,16 @@ def _audit_kafka_host(
                 # TLS on the second transport_attempt. If we're already on
                 # `tls_fallback`, treat as a hard failure and fall through
                 # to the outer retry loop.
-                if transport_use_tls is not True:
+                if use_tls is not False and transport_use_tls is not True:
                     transport_use_tls = True
                     continue
                 last_error = "plaintext read returned TLS record prelude"
                 break
             except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
                 last_error = _friendly_error_from_exception(exc)
+                if use_tls is None and transport_use_tls is not True and _should_retry_kafka_tls(exc):
+                    transport_use_tls = True
+                    continue
                 if _is_sasl_probe_candidate(last_error):
                     fallback_record = _audit_kafka_via_sasl_fallback(
                         host=host,
@@ -841,6 +984,7 @@ def _audit_kafka_host(
                         max_messages=max_messages,
                         credential_source=credential_source,
                         use_tls=(transport_use_tls is True) or None,
+                        tls_config=tls_config,
                         probe_write=probe_write,
                         debug_emit=debug_emit,
                     )
@@ -908,6 +1052,8 @@ def detect_kafka(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
         probe_write=False,
         debug_emit=ctx.debug_emit if bool(getattr(ctx.args, "debug", False)) else None,
         lifecycle_state=state,
+        use_tls=state.requested_use_tls,
+        tls_config=state.tls_config,
     )
     state.is_kafka = bool(record.get("is_kafka"))
     state.auth_required = record.get("auth_required") if isinstance(record.get("auth_required"), bool) else None
@@ -938,6 +1084,7 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
         username,
         password,
         use_tls=(state.transport_mode == "tls") or None,
+        tls_config=state.tls_config,
         known_kafka=True,
         sasl_first=state.sasl_first,
     )
@@ -1043,6 +1190,7 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
                 username=username,
                 password=password,
                 use_tls=(transport_mode == "tls") or None,
+                tls_config=state.tls_config,
                 known_kafka=True,
                 bootstrap_metadata=metadata,
                 sasl_first=state.sasl_first,
@@ -1053,6 +1201,8 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
     if dump and query_topic_name:
         topic_messages = dump_results.get(query_topic_name)
         topic_read_error = dump_errors.get(query_topic_name) or dump_error
+    dump_coverage = _build_dump_coverage(dump_topics, dump_results, dump_errors, dump_error) if dump else None
+    dump_partial = bool(dump_coverage and not dump_coverage["complete"])
 
     topic_permissions, cluster_permissions = _probe_kafka_acl_state(
         host=str(ctx.host),
@@ -1071,6 +1221,7 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
         probe_write=probe_write,
         debug_emit=ctx.debug_emit if bool(getattr(ctx.args, "debug", False)) else None,
         known_kafka=True,
+        tls_config=state.tls_config,
     )
 
     errors: list[str] = []
@@ -1098,6 +1249,9 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
             "dump_results": dump_results if dump else None,
             "dump_errors": dump_errors if dump else None,
             "dump_error": dump_error,
+            "dump_coverage": dump_coverage,
+            "dump_partial": dump_partial,
+            "partial": bool(payload.get("partial")) or dump_partial,
             "topic_messages": topic_messages,
             "topic_read_error": topic_read_error,
             "error": "; ".join(errors) if errors else None,
@@ -1347,6 +1501,40 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
             dump_errors[key] = str(value or "").strip()
 
     dump_error = str(record.get("dump_error") or "").strip()
+    raw_dump_coverage = record.get("dump_coverage")
+    dump_coverage: dict[str, Any] = raw_dump_coverage if isinstance(raw_dump_coverage, dict) else {}
+    coverage_entries = dump_coverage.get("topics")
+    coverage_by_topic = (
+        {
+            str(item.get("topic")): item
+            for item in coverage_entries
+            if isinstance(item, dict) and str(item.get("topic") or "").strip()
+        }
+        if isinstance(coverage_entries, list)
+        else {}
+    )
+    dump_partial = bool(record.get("dump_partial") or (dump_coverage and not dump_coverage.get("complete")))
+
+    def _topic_coverage_status(topic_name: str) -> str | None:
+        entry = coverage_by_topic.get(topic_name)
+        if not isinstance(entry, dict):
+            return None
+        value = str(entry.get("status") or "").strip()
+        return value or None
+
+    def _coverage_suffix(*, topic_name: str | None = None) -> str:
+        if topic_name is not None:
+            status = _topic_coverage_status(topic_name)
+            return f" (coverage:{status})" if status else ""
+        requested = dump_coverage.get("requested_count")
+        successful = dump_coverage.get("successful_count")
+        partial_count = dump_coverage.get("partial_count")
+        if isinstance(requested, int) and isinstance(successful, int) and isinstance(partial_count, int):
+            suffix = f" (coverage:{successful + partial_count}/{requested})"
+            if dump_partial:
+                suffix += " (partial:true)"
+            return suffix
+        return " (partial:true)" if dump_partial else ""
 
     # Keep compatibility with older record fields for query-topic dump.
     if query_topic:
@@ -1413,6 +1601,9 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
                                 "message_count": len(topic_dump_messages),
                                 "messages": topic_dump_messages,
                                 "error": topic_dump_error,
+                                "coverage_status": _topic_coverage_status(topic_name),
+                                "partial": _topic_coverage_status(topic_name) in {"partial", "failed", "not_attempted"},
+                                "dump_coverage": dump_coverage or None,
                             },
                             ensure_ascii=False,
                         )
@@ -1431,6 +1622,9 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
                             "message_count": 0,
                             "messages": [],
                             "error": dump_error,
+                            "coverage_status": str(dump_coverage.get("status") or "failed"),
+                            "partial": dump_partial,
+                            "dump_coverage": dump_coverage or None,
                         },
                         ensure_ascii=False,
                     )
@@ -1507,6 +1701,7 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
             dump_header = f"{prefix} [*] Dump Topic {query_topic}{partitions_suffix}"
             if _max_messages_is_explicit(record):
                 dump_header += f" (max:{max_messages})"
+            dump_header += _coverage_suffix(topic_name=query_topic)
             dump_header += _topic_marker_suffix(query_topic)
             lines.append(dump_header)
             topic_dump_messages = dump_results.get(query_topic, [])
@@ -1514,6 +1709,8 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
             if topic_dump_messages:
                 for item in topic_dump_messages:
                     lines.append(f"{prefix} {item}")
+                if topic_dump_error:
+                    lines.append(f"{prefix} [!] partial: {_strip_debug_context(topic_dump_error, debug=debug)}")
             elif topic_dump_error:
                 lines.append(f"{prefix} [-] {_strip_debug_context(topic_dump_error, debug=debug)}")
             else:
@@ -1522,15 +1719,18 @@ def _format_topics_detail_records(record: dict[str, Any], output_format: str, *,
             dump_topics_header = f"{prefix} [*] Dump Topics"
             if _max_messages_is_explicit(record):
                 dump_topics_header += f" (max:{max_messages})"
+            dump_topics_header += _coverage_suffix()
             lines.append(dump_topics_header)
             if dump_topics:
                 for topic_name in dump_topics:
-                    lines.append(f"{prefix} [*] Topic {topic_name}")
+                    lines.append(f"{prefix} [*] Topic {topic_name}{_coverage_suffix(topic_name=topic_name)}")
                     topic_dump_messages = dump_results.get(topic_name, [])
                     topic_dump_error = dump_errors.get(topic_name, "")
                     if topic_dump_messages:
                         for item in topic_dump_messages:
                             lines.append(f"{prefix} {item}")
+                        if topic_dump_error:
+                            lines.append(f"{prefix} [!] partial: {topic_dump_error}")
                     elif topic_dump_error:
                         lines.append(f"{prefix} [-] {topic_dump_error}")
                     else:

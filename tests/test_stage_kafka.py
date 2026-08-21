@@ -319,41 +319,41 @@ def test_kafka_error_helpers_and_format_record_statuses() -> None:
 def test_kafka_default_credential_runs_are_exact_and_deduplicated() -> None:
     assert kafka._build_credential_runs(None, None, True) == [
         ("admin", "admin"),
-        ("kafka", "kafka"),
-        ("kafka", "password"),
-        ("admin", "password"),
-        ("admin", "kafka"),
         ("admin", "admin-secret"),
-        ("kafka", "admin"),
-        ("kafka", "changeme"),
+        ("admin", "changeme"),
+        ("admin", "kafka"),
+        ("admin", "password"),
         ("broker", "broker"),
         ("broker", "brokerpass"),
-        ("user", "user"),
-        ("user", "password"),
         ("client", "client"),
-        ("service", "service"),
-        ("admin", "changeme"),
-        ("service", "password"),
+        ("kafka", "admin"),
+        ("kafka", "changeme"),
+        ("kafka", "kafka"),
+        ("kafka", "password"),
         ("kafka", "zookeeper"),
+        ("service", "password"),
+        ("service", "service"),
+        ("user", "password"),
+        ("user", "user"),
     ]
     assert kafka._build_credential_runs("kafka", "kafka", True) == [
         ("kafka", "kafka"),
         ("admin", "admin"),
-        ("kafka", "password"),
-        ("admin", "password"),
-        ("admin", "kafka"),
         ("admin", "admin-secret"),
-        ("kafka", "admin"),
-        ("kafka", "changeme"),
+        ("admin", "changeme"),
+        ("admin", "kafka"),
+        ("admin", "password"),
         ("broker", "broker"),
         ("broker", "brokerpass"),
-        ("user", "user"),
-        ("user", "password"),
         ("client", "client"),
-        ("service", "service"),
-        ("admin", "changeme"),
-        ("service", "password"),
+        ("kafka", "admin"),
+        ("kafka", "changeme"),
+        ("kafka", "password"),
         ("kafka", "zookeeper"),
+        ("service", "password"),
+        ("service", "service"),
+        ("user", "password"),
+        ("user", "user"),
     ]
     assert kafka._build_credential_runs(None, None, False) == [(None, None)]
 
@@ -478,23 +478,7 @@ def test_run_kafka_stage_defcreds_auth_required_renders_failed_attempts(monkeypa
     assert rc == 0
     assert calls == [
         (None, None, False),
-        ("admin", "admin", False),
-        ("kafka", "kafka", False),
-        ("kafka", "password", False),
-        ("admin", "password", False),
-        ("admin", "kafka", False),
-        ("admin", "admin-secret", False),
-        ("kafka", "admin", False),
-        ("kafka", "changeme", False),
-        ("broker", "broker", False),
-        ("broker", "brokerpass", False),
-        ("user", "user", False),
-        ("user", "password", False),
-        ("client", "client", False),
-        ("service", "service", False),
-        ("admin", "changeme", False),
-        ("service", "password", False),
-        ("kafka", "zookeeper", False),
+        *((username, password, False) for username, password in kafka._KAFKA_DEFAULT_CREDENTIALS),
     ]
     plains = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "plain"]
     for username, password in kafka._KAFKA_DEFAULT_CREDENTIALS:
@@ -1224,7 +1208,7 @@ def test_run_kafka_stage_suppresses_unreachable_summary_without_debug(monkeypatc
         ),
     )
     rc = kafka.run_kafka_stage(_kafka_args(), logger=object())
-    assert rc == 0
+    assert rc == 1
     warnings = [msg for level, msg in _ConsoleCapture.instances[-1].messages if level == "warn"]
     assert not any("all kafka targets are unreachable" in msg for msg in warnings)
 
@@ -1628,7 +1612,11 @@ def test_read_topic_messages_covers_non_auth_and_loop_branches(monkeypatch: pyte
     fetches = iter([([(10, "msg")], None)])
     monkeypatch.setattr(kafka, "_parse_list_offsets_response", lambda *_args, **_kwargs: next(offsets))
     monkeypatch.setattr(kafka, "_parse_fetch_response", lambda *_args, **_kwargs: next(fetches))
-    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (["p0@10 msg"], None, "plaintext")
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (
+        ["p0@10 msg"],
+        "partial partition failures: p1: offset denied",
+        "plaintext",
+    )
 
     # Partition-aware routing walks EVERY partition even when the first
     # one fails, so per-partition errors accumulate and the first-seen
@@ -1638,7 +1626,11 @@ def test_read_topic_messages_covers_non_auth_and_loop_branches(monkeypatch: pyte
     fetches = iter([(None, "fetch failed"), (None, "fetch failed")])
     monkeypatch.setattr(kafka, "_parse_list_offsets_response", lambda *_args, **_kwargs: next(offsets))
     monkeypatch.setattr(kafka, "_parse_fetch_response", lambda *_args, **_kwargs: next(fetches))
-    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (None, "fetch failed", "plaintext")
+    assert kafka._read_topic_messages("127.0.0.1", 9092, 1.0, "orders", 2) == (
+        None,
+        "partial partition failures: p0: fetch failed; p1: fetch failed",
+        "plaintext",
+    )
 
 
 def test_read_topic_messages_with_credentials_covers_auth_failures(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2326,3 +2318,163 @@ def test_open_kafka_socket_9093_is_tls_by_default(monkeypatch: pytest.MonkeyPatc
     sock, transport_mode = kafka.open_kafka_socket("kafka.internal", 9092, 1.0)
     assert transport_mode == "plaintext"
     assert wrap_calls == []
+
+
+def test_audit_kafka_host_retries_tls_after_plaintext_reset_on_arbitrary_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    open_modes: list[bool | None] = []
+
+    def _fake_open(_host, _port, _timeout, *, use_tls=None, tls_config=None):
+        _ = tls_config
+        open_modes.append(use_tls)
+        return _KafkaContextSocket(), "tls" if use_tls else "plaintext"
+
+    probe_calls = 0
+
+    def _fake_probe(*_args, **_kwargs):
+        nonlocal probe_calls
+        probe_calls += 1
+        if probe_calls == 1:
+            raise ConnectionResetError("connection reset by peer")
+        return True, 0, None
+
+    monkeypatch.setattr(kafka, "open_kafka_socket", _fake_open)
+    monkeypatch.setattr(kafka, "_probe_apiversions", _fake_probe)
+    monkeypatch.setattr(
+        kafka,
+        "_fetch_metadata",
+        lambda *_a, **_k: ({"auth_required": False, "topic_map": {}}, None),
+    )
+    record = kafka._audit_kafka_host(
+        "127.0.0.1",
+        12345,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        show_topics=False,
+        query_topic=None,
+        dump=False,
+        max_messages=1,
+    )
+    assert open_modes == [None, True]
+    assert record["status"] == "open_no_auth"
+    assert record["transport_mode"] == "tls"
+
+
+def test_audit_kafka_host_explicit_plaintext_disables_tls_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    open_modes: list[bool | None] = []
+
+    def _fake_open(_host, _port, _timeout, *, use_tls=None, tls_config=None):
+        _ = tls_config
+        open_modes.append(use_tls)
+        return _KafkaContextSocket(), "plaintext"
+
+    def _reset_probe(*_args, **_kwargs):
+        raise ConnectionResetError("connection reset by peer")
+
+    monkeypatch.setattr(kafka, "open_kafka_socket", _fake_open)
+    monkeypatch.setattr(kafka, "_probe_apiversions", _reset_probe)
+    monkeypatch.setattr(kafka, "_is_sasl_probe_candidate", lambda _error: False)
+    record = kafka._audit_kafka_host(
+        "127.0.0.1",
+        12345,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        show_topics=False,
+        query_topic=None,
+        dump=False,
+        max_messages=1,
+        use_tls=False,
+    )
+    assert open_modes == [False]
+    assert record["status"] == "fail"
+
+
+def test_kafka_dump_reports_topic_level_coverage_and_mixed_partial_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(kafka, "open_kafka_socket", lambda *_a, **_k: (_KafkaContextSocket(), "plaintext"))
+    monkeypatch.setattr(kafka, "_probe_apiversions", lambda *_a, **_k: (True, None, None))
+    monkeypatch.setattr(
+        kafka,
+        "_fetch_metadata",
+        lambda *_a, **_k: ({"auth_required": False, "topic_map": {"orders": 1, "secret": 1}}, None),
+    )
+    monkeypatch.setattr(
+        kafka,
+        "_read_dump_topics",
+        lambda **_k: ({"orders": ["p0@1 order-1"], "secret": None}, {"secret": "topic authorization failed"}),
+    )
+    monkeypatch.setattr(kafka, "_probe_kafka_acl_state", lambda **_k: ({}, {"create": None, "delete": None}))
+
+    record = kafka._audit_kafka_host(
+        "127.0.0.1",
+        9092,
+        1.0,
+        0,
+        username=None,
+        password=None,
+        show_topics=True,
+        query_topic=None,
+        dump=True,
+        max_messages=2,
+    )
+
+    assert record["partial"] is True
+    assert record["dump_partial"] is True
+    assert record["dump_coverage"] == {
+        "status": "partial",
+        "complete": False,
+        "requested_count": 2,
+        "successful_count": 1,
+        "partial_count": 0,
+        "failed_count": 1,
+        "not_attempted_count": 0,
+        "topics": [
+            {"topic": "orders", "status": "success", "message_count": 1, "error": None},
+            {
+                "topic": "secret",
+                "status": "failed",
+                "message_count": 0,
+                "error": "topic authorization failed",
+            },
+        ],
+        "error": None,
+    }
+
+    text_lines = kafka._format_topics_detail_records(record, "txt")
+    assert any("Dump Topics (coverage:1/2) (partial:true)" in line for line in text_lines)
+    assert any("Topic secret (coverage:failed)" in line for line in text_lines)
+    json_lines = [json.loads(line) for line in kafka._format_topics_detail_records(record, "json")]
+    secret = next(item for item in json_lines if item.get("type") == "topic_dump" and item["topic"] == "secret")
+    assert secret["coverage_status"] == "failed"
+    assert secret["partial"] is True
+
+
+def test_kafka_tls_server_name_reaches_lifecycle_transport_config() -> None:
+    args = _kafka_args(
+        tls=True,
+        plaintext=False,
+        insecure=False,
+        tls_ca="ca.pem",
+        tls_cert="client.pem",
+        tls_key="client.key",
+        tls_server_name="broker.service.internal",
+    )
+    spec = kafka_stage_pkg.build_kafka_spec(args)
+    assert spec.lifecycle_state_factory is not None
+
+    state = spec.lifecycle_state_factory(argparse.Namespace(target=None))
+
+    assert state.requested_use_tls is True
+    assert state.tls_config == kafka_client.KafkaTlsConfig(
+        insecure=False,
+        ca_file="ca.pem",
+        cert_file="client.pem",
+        key_file="client.key",
+        server_name="broker.service.internal",
+    )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ...audit_config import AuditConfig
@@ -13,18 +14,25 @@ from ...stage_runtime import (
     AuditCommandRunner,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    command_result_exit_code,
     install_record_callback,
 )
 from . import actions, policy, render
 
 _DEFAULT_PORT = 8500
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS = (8500, 8501)
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_consul_host
 
 
 def build_consul_plan(args: Any) -> AuditCommandPlan:
-    return build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    if plan.target_plan is not None:
+        plan = replace(
+            plan,
+            target_plan=plan.target_plan.with_scheme_default_ports({"http": 8500, "https": 8501}),
+        )
+    return plan
 
 
 def _build_consul_host_stage_options(args: Any) -> dict[str, Any]:
@@ -83,6 +91,36 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
             service="consul",
         )
 
+    def _state_factory(ctx: Any) -> actions.ConsulLifecycleState:
+        target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
+        tls_material = any(
+            (
+                bool(getattr(args, "insecure", False)),
+                bool(getattr(args, "tls_ca", None)),
+                bool(getattr(args, "tls_cert", None)),
+            )
+        )
+        if bool(getattr(args, "plaintext", False)):
+            preferred_scheme = "http"
+            strict_scheme = True
+        elif bool(getattr(args, "tls", False)) or tls_material:
+            preferred_scheme = "https"
+            strict_scheme = True
+        elif target_scheme in {"http", "https"}:
+            preferred_scheme = target_scheme
+            strict_scheme = True
+        else:
+            preferred_scheme = None
+            strict_scheme = False
+        return actions.ConsulLifecycleState(
+            insecure=bool(getattr(args, "insecure", False)),
+            ca_file=getattr(args, "tls_ca", None),
+            client_cert=getattr(args, "tls_cert", None),
+            client_key=getattr(args, "tls_key", None),
+            preferred_scheme=preferred_scheme,
+            strict_scheme=strict_scheme,
+        )
+
     return ModuleAuditSpec(
         module="consul",
         label="CONSUL",
@@ -92,7 +130,7 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
         detect=_detect if use_lifecycle_hooks else None,
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
-        lifecycle_state_factory=(lambda _ctx: actions.ConsulLifecycleState()) if use_lifecycle_hooks else None,
+        lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_consul_line,
     )
@@ -152,7 +190,7 @@ def run_consul_stage(args: Any, logger: Any) -> int:
     if listener_info is not None:
         if not revshell_registered:
             console.warn("local listener not started: revshell check was not registered")
-    return 0
+    return command_result_exit_code(result)
 
 
 def _normalize_consul_command_args(args: Any, console: Any) -> None:

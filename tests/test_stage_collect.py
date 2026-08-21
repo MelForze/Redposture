@@ -89,6 +89,24 @@ def test_collect_helper_functions_cover_checkpoint_and_filters(tmp_path: Path) -
     assert filtered_collect == [{"name": "redis_exporter"}]
 
 
+def test_collect_stage_excludes_out_targets_before_scanning(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        collect,
+        "scan_exporter_presence",
+        lambda *_a, **_k: pytest.fail("excluded target reached scanner"),
+    )
+
+    rc = run_collect_stage(
+        _base_args(targets="10.0.0.1", out_targets=["10.0.0.0/24"]),
+        AttemptLogger(),
+    )
+
+    assert rc == 2
+    assert "all targets were excluded by --out-target" in capsys.readouterr().err
+
+
 def test_run_collect_stage_large_cidr_chunks_output_and_summary(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -122,6 +140,7 @@ def test_run_collect_stage_large_cidr_chunks_output_and_summary(
         show_progress=False,
         progress_leave=True,
         progress_owner=None,
+        stats_sink=None,
     ):
         _ = (
             timeout,
@@ -137,6 +156,7 @@ def test_run_collect_stage_large_cidr_chunks_output_and_summary(
             show_progress,
             progress_leave,
             progress_owner,
+            stats_sink,
         )
         host_list = list(hosts)
         scan_calls.append(host_list)
@@ -242,6 +262,65 @@ def test_run_collect_stage_large_cidr_chunks_output_and_summary(
     assert "success=2" in lines[-1]
 
 
+def test_run_collect_stage_large_cidr_resume_keeps_checkpoint_jobs_lazy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    checkpoint_path = tmp_path / "large.ckpt.jsonl"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "host": "10.0.0.1",
+                "exporter": "node_exporter",
+                "port": 9100,
+                "endpoint": "/debug/vars",
+                "ok": True,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    captured_completed: list[set[tuple[str, str, int, str]]] = []
+    monkeypatch.setattr(collect, "DEFAULT_MAX_NETWORK_HOSTS", 1)
+    monkeypatch.setattr(
+        collect,
+        "load_profiles",
+        lambda _path: {
+            "discovery_exporters": [{"name": "node_exporter", "port": 9100, "markers": ()}],
+            "collect_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_debug_endpoints": ["/debug/vars"],
+        },
+    )
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        hosts = list(kwargs["hosts"])
+        return len(hosts), len(hosts), {host: [{"exporter": "node_exporter", "port": 9100}] for host in hosts}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        completed = set(kwargs.get("resume_completed_jobs") or set())
+        captured_completed.append(completed)
+        stats = kwargs.get("stats_sink")
+        assert isinstance(stats, dict)
+        stats.update({"errors": 0, "skipped_jobs": 1})
+        return 1, 1
+
+    monkeypatch.setattr(collect, "scan_exporter_presence", fake_scan)
+    monkeypatch.setattr(collect, "collect_exporter_debug_data", fake_collect)
+
+    rc = run_collect_stage(
+        _base_args(
+            targets="10.0.0.0/30",
+            output=str(tmp_path / "collect.txt"),
+            resume=True,
+            checkpoint_file=str(checkpoint_path),
+        ),
+        AttemptLogger(),
+    )
+
+    assert rc == 0
+    assert captured_completed == [{("10.0.0.1", "node_exporter", 9100, "/debug/vars")}]
+    assert "resumed=1" in capsys.readouterr().out
+
+
 def test_collect_load_completed_jobs_parses_valid_rows_and_warns_on_open_error(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -249,7 +328,15 @@ def test_collect_load_completed_jobs_parses_valid_rows_and_warns_on_open_error(
     ckpt.write_text(
         "\n".join(
             [
-                json.dumps({"host": "10.0.0.1", "exporter": "redis_exporter", "port": 9121, "endpoint": "/metrics"}),
+                json.dumps(
+                    {
+                        "host": "10.0.0.1",
+                        "exporter": "redis_exporter",
+                        "port": 9121,
+                        "endpoint": "/metrics",
+                        "ok": True,
+                    }
+                ),
                 '{"host":"10.0.0.2","exporter":"node_exporter","port":"bad","endpoint":"/debug/vars"}',
                 "not-json",
                 json.dumps({"host": "", "exporter": "x", "port": 1, "endpoint": "/e"}),
@@ -271,6 +358,95 @@ def test_collect_load_completed_jobs_parses_valid_rows_and_warns_on_open_error(
     assert warn_jobs == set()
     out = capsys.readouterr().out
     assert "failed to load collect checkpoint" in out
+
+
+def test_collect_resume_retries_failed_and_latest_failed_jobs(tmp_path: Path) -> None:
+    ckpt = tmp_path / "collect.ckpt.jsonl"
+    base = {"host": "h", "exporter": "node_exporter", "port": 9100, "endpoint": "/metrics"}
+    ckpt.write_text(
+        "\n".join(
+            [
+                json.dumps(base | {"ok": True, "status": 200}),
+                json.dumps(base | {"ok": False, "status": None, "error": "timeout"}),
+                json.dumps(base | {"endpoint": "/debug/vars", "ok": False, "status": 503}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert collect._load_collect_completed_jobs(str(ckpt)) == set()
+
+
+def test_collect_resume_preserves_outputs_and_restores_validation_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "collect.jsonl"
+    output_path.write_text('{"old":true}\n', encoding="utf-8")
+    save_dir = tmp_path / "raw"
+    save_dir.mkdir()
+    index_path = save_dir / "index.jsonl"
+    index_path.write_text('{"old_index":true}\n', encoding="utf-8")
+    checkpoint_path = tmp_path / "collect.ckpt.jsonl"
+    prior_record = {
+        "host": "10.0.0.1",
+        "exporter": "node_exporter",
+        "port": 9100,
+        "endpoint": "/metrics",
+        "url": "http://10.0.0.1:9100/metrics",
+        "ok": True,
+        "status": 200,
+        "body": "Authorization: Bearer A1b2C3d4E5f6G7h8I9j0K1l2",
+    }
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "host": "10.0.0.1",
+                "exporter": "node_exporter",
+                "port": 9100,
+                "endpoint": "/metrics",
+                "ok": True,
+                "status": 200,
+                "record": prior_record,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.load_profiles",
+        lambda _path: {
+            "discovery_exporters": [{"name": "node_exporter", "port": 9100, "markers": ["node_"]}],
+            "collect_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_debug_endpoints": ["/metrics"],
+        },
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.scan_exporter_presence",
+        lambda *_args, **_kwargs: (1, 0, {"10.0.0.1": []}),
+    )
+
+    rc = run_collect_stage(
+        _base_args(
+            output=str(output_path),
+            output_format="json",
+            save_responses_dir=str(save_dir),
+            resume=True,
+            checkpoint_file=str(checkpoint_path),
+        ),
+        AttemptLogger(),
+    )
+
+    assert rc == 0
+    output_lines = output_path.read_text(encoding="utf-8").splitlines()
+    assert json.loads(output_lines[0]) == {"old": True}
+    summary = json.loads(output_lines[-1])
+    assert summary["type"] == "summary"
+    assert summary["requests"] == summary["success"] == summary["resumed"] == 1
+    assert json.loads(index_path.read_text(encoding="utf-8").splitlines()[0]) == {"old_index": True}
+    vulnerable_urls = (tmp_path / "vulnerable_urls.txt").read_text(encoding="utf-8")
+    assert "http://10.0.0.1:9100/metrics" in vulnerable_urls
 
 
 def test_collect_stage_runs_scan_before_collect(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -580,6 +756,94 @@ def test_collect_stage_writes_json_summary_when_scan_finds_nothing(
     assert summary["output_path"] == str(output_path)
 
 
+def test_collect_stage_writes_json_summary_after_normal_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output_path = tmp_path / "collect.jsonl"
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.load_profiles",
+        lambda _path: {
+            "discovery_exporters": [],
+            "collect_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_debug_endpoints": ["/metrics"],
+        },
+    )
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.scan_exporter_presence",
+        lambda *_args, **_kwargs: (1, 1, {"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]}),
+    )
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        Path(str(kwargs["output_path"])).write_text('{"type":"record"}\n', encoding="utf-8")
+        return 1, 1
+
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+    rc = run_collect_stage(_base_args(output=str(output_path), output_format="json"), AttemptLogger())
+
+    assert rc == 0
+    rows = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["type"] == "record"
+    assert rows[-1]["type"] == "summary"
+    assert rows[-1]["requests"] == rows[-1]["success"] == 1
+
+
+def test_collect_stage_is_inconclusive_when_no_exporter_and_any_discovery_failed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.load_profiles",
+        lambda _path: {
+            "discovery_exporters": [],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/metrics"],
+        },
+    )
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        stats = kwargs.get("stats_sink")
+        assert isinstance(stats, dict)
+        stats.update({"checks": 2, "found": 0, "errors": 1})
+        return 2, 0, {"10.0.0.1": []}
+
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    rc = run_collect_stage(_base_args(), AttemptLogger())
+
+    assert rc == 1
+    assert "no exporter confirmed; 1/2 discovery requests failed" in capsys.readouterr().err
+
+
+def test_collect_stage_is_inconclusive_when_every_data_request_failed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.load_profiles",
+        lambda _path: {
+            "discovery_exporters": [],
+            "collect_exporters": [{"name": "node_exporter", "port": 9100}],
+            "collect_debug_endpoints": ["/metrics", "/debug/vars"],
+        },
+    )
+
+    def fake_scan(*_args: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        stats = kwargs.get("stats_sink")
+        assert isinstance(stats, dict)
+        stats.update({"checks": 1, "found": 1, "errors": 0})
+        return 1, 1, {"10.0.0.1": [{"exporter": "node_exporter", "port": 9100}]}
+
+    def fake_collect(*_args: object, **kwargs: object) -> tuple[int, int]:
+        stats = kwargs.get("stats_sink")
+        assert isinstance(stats, dict)
+        stats.update({"requests": 2, "success": 0, "errors": 2})
+        return 2, 0
+
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", fake_collect)
+    rc = run_collect_stage(_base_args(), AttemptLogger())
+
+    assert rc == 1
+    assert "collect inconclusive: every data request failed" in capsys.readouterr().err
+
+
 def test_collect_stage_runs_validation_always(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     captured: dict[str, object] = {}
@@ -856,6 +1120,7 @@ def test_collect_stage_resume_passes_checkpoint_options(tmp_path: Path, monkeypa
                 "exporter": "node_exporter",
                 "port": 9100,
                 "endpoint": "/debug/vars",
+                "ok": True,
             }
         )
         + "\n",

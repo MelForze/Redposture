@@ -7,6 +7,7 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.http_api import http_target_context
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -15,7 +16,9 @@ from ...stage_runtime import (
     AuditHookContext,
     ModuleAuditSpec,
     build_basic_audit_plan,
+    command_result_exit_code,
     merge_audit_credential_runs,
+    sort_default_audit_credential_runs,
 )
 from ...utils import parse_username_password_credential_file
 from . import actions, policy, render
@@ -57,7 +60,7 @@ def _build_elastic_credential_runs(args: Any) -> tuple[AuditCredentialRun, ...]:
         basic_runs = ()
 
     default_runs = (
-        tuple(
+        sort_default_audit_credential_runs(
             AuditCredentialRun(
                 username=default_username,
                 password=default_password,
@@ -157,6 +160,9 @@ def _apply_elastic_mass_profile(args: Any, plan: AuditCommandPlan) -> AuditComma
 def build_elastic_plan(args: Any) -> AuditCommandPlan:
     args._audit_credential_runs = _build_elastic_credential_runs(args)
     plan = build_basic_audit_plan(args, default_port=_DEFAULT_PORT, default_ports=_DEFAULT_PORTS)
+    explicit_port = getattr(args, "port", None) is not None or bool(str(getattr(args, "ports", "") or "").strip())
+    if not explicit_port and plan.target_plan is not None:
+        plan = replace(plan, target_plan=plan.target_plan.with_scheme_default_ports({"http": 80, "https": 443}))
     return _apply_elastic_mass_profile(args, plan)
 
 
@@ -178,10 +184,10 @@ def _elastic_credential_gate(
         status = str(record.status or "")
         return status == "open_no_auth", f"status={status}"
     auth_valid = record.extra.get("auth_valid")
-    verified = auth_valid is True
+    accepted = auth_valid is True
     return (
-        verified,
-        "credential identity verified" if verified else "credential identity unverified",
+        accepted,
+        "credential accepted" if accepted else "credential rejected or unverified",
     )
 
 
@@ -198,25 +204,28 @@ def build_elastic_spec(args: Any) -> ModuleAuditSpec:
         return actions.ElasticLifecycleState()
 
     def _detect(ctx: AuditHookContext) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.detect_elastic(ctx, options),
-            module="elastic",
-            service="elastic",
-        )
+        with http_target_context(
+            ctx.target,
+            api_prefixes=("/_security", "/_plugins", "/_cluster", "/_cat", "/_nodes"),
+        ):
+            result = actions.detect_elastic(ctx, options)
+        return AuditRecord.from_mapping(result, module="elastic", service="elastic")
 
     def _auth(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.authenticate_elastic(ctx, record, options),
-            module="elastic",
-            service="elastic",
-        )
+        with http_target_context(
+            ctx.target,
+            api_prefixes=("/_security", "/_plugins", "/_cluster", "/_cat", "/_nodes"),
+        ):
+            result = actions.authenticate_elastic(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="elastic", service="elastic")
 
     def _data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
-        return AuditRecord.from_mapping(
-            actions.collect_elastic_data(ctx, record, options),
-            module="elastic",
-            service="elastic",
-        )
+        with http_target_context(
+            ctx.target,
+            api_prefixes=("/_security", "/_plugins", "/_cluster", "/_cat", "/_nodes"),
+        ):
+            result = actions.collect_elastic_data(ctx, record, options)
+        return AuditRecord.from_mapping(result, module="elastic", service="elastic")
 
     return ModuleAuditSpec(
         module="elastic",
@@ -300,7 +309,7 @@ def run_elastic_stage(args: Any, logger: Any) -> int:
         return 2
     if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all elastic targets are unreachable")
-    return 0
+    return command_result_exit_code(result)
 
 
 __all__ = [

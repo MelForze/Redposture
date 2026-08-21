@@ -10,11 +10,12 @@ import subprocess
 import time
 import urllib.error
 import urllib.parse
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig
+from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, format_http_authority
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...scheduler import BoundedScheduler
@@ -42,6 +43,7 @@ _PUBLIC_ENDPOINT_PATHS: tuple[str, ...] = (
 )
 _DEFAULT_CLONE_DIR = "./gitlab_clones"
 _MAX_PER_PAGE = 100
+_MAX_PROJECT_PAGES = 100
 _GIT_CLONE_TIMEOUT_SECONDS = 300
 
 
@@ -50,6 +52,7 @@ class GitLabLifecycleState:
     token_valid: bool | None = None
     token_user: dict[str, Any] | None = None
     token_error: str | None = None
+    token_capability: str | None = None
     deep_record: dict[str, Any] | None = None
 
 
@@ -99,7 +102,7 @@ def _normalize_path(path: str) -> str:
 
 def _build_base_url(host: str, port: int, use_https: bool) -> str:
     scheme = "https" if use_https else "http"
-    return f"{scheme}://{host}:{port}"
+    return f"{scheme}://{format_http_authority(host, port)}"
 
 
 def _http_request(
@@ -116,7 +119,12 @@ def _http_request(
     if path.startswith("http://") or path.startswith("https://"):
         url = path
     else:
-        url = _build_base_url(host, port, use_https) + _normalize_path(path)
+        url = build_http_target_url(
+            host,
+            port,
+            _normalize_path(path),
+            default_scheme="https" if use_https else "http",
+        )
     request_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         request_headers.update(headers)
@@ -140,6 +148,19 @@ def _gitlab_api_headers(token: str | None) -> dict[str, str]:
     if not token:
         return {}
     return {"PRIVATE-TOKEN": token}
+
+
+def _looks_like_gitlab_user(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    user_id = payload.get("id")
+    username = payload.get("username")
+    return (
+        isinstance(user_id, int)
+        and not isinstance(user_id, bool)
+        and isinstance(username, str)
+        and bool(username.strip())
+    )
 
 
 def _api_get_json(
@@ -324,7 +345,11 @@ def _paginate_projects(
 ) -> tuple[list[dict[str, Any]] | None, str | None]:
     page = 1
     projects: list[dict[str, Any]] = []
-    while True:
+    visited_pages: set[int] = set()
+    while len(visited_pages) < _MAX_PROJECT_PAGES:
+        if page in visited_pages:
+            return projects, "partial: GitLab pagination loop detected"
+        visited_pages.add(page)
         query: list[tuple[str, str]] = [
             ("per_page", str(_MAX_PER_PAGE)),
             ("page", str(page)),
@@ -344,15 +369,19 @@ def _paginate_projects(
             token=token,
         )
         if error:
-            return None, error
+            return (projects if projects else None), f"partial: {error}" if projects else error
         if status == 401 or status == 403:
-            return None, "authentication required"
+            message = "authentication required"
+            return (projects if projects else None), f"partial: {message}" if projects else message
         if status == 404:
-            return None, "GitLab API v4 not available"
+            message = "GitLab API v4 not available"
+            return (projects if projects else None), f"partial: {message}" if projects else message
         if status != 200:
-            return None, f"unexpected API status={status}"
+            message = f"unexpected API status={status}"
+            return (projects if projects else None), f"partial: {message}" if projects else message
         if not isinstance(payload, list):
-            return None, "unexpected API payload"
+            message = "unexpected API payload"
+            return (projects if projects else None), f"partial: {message}" if projects else message
 
         page_items: list[dict[str, Any]] = [item for item in payload if isinstance(item, dict)]
         projects.extend(page_items)
@@ -364,8 +393,8 @@ def _paginate_projects(
         if len(page_items) >= _MAX_PER_PAGE:
             page += 1
             continue
-        break
-    return projects, None
+        return projects, None
+    return projects, "partial: GitLab pagination limit exceeded"
 
 
 def _fetch_project_by_ref(
@@ -434,6 +463,49 @@ def _clone_url_with_token(clone_url: str, token: str | None) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, new_netloc, parsed.path, parsed.query, parsed.fragment))
 
 
+def _probe_repository_token(
+    host: str,
+    port: int,
+    *,
+    use_https: bool,
+    token: str,
+    project_ref: str,
+) -> tuple[bool | None, str | None]:
+    """Check a read_repository-only token without cloning repository data."""
+
+    project_path = str(project_ref or "").strip().strip("/")
+    if not project_path or project_path.isdigit():
+        return None, "repository path is required to validate a repository-scoped token"
+    git_path = shutil.which("git")
+    if not git_path:
+        return None, "git binary not found in PATH"
+    clone_url = build_http_target_url(
+        host,
+        port,
+        f"/{project_path}.git",
+        default_scheme="https" if use_https else "http",
+    )
+    authenticated_url = _clone_url_with_token(clone_url, token)
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        completed = subprocess.run(
+            [git_path, "ls-remote", authenticated_url, "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=min(_GIT_CLONE_TIMEOUT_SECONDS, 30),
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "git repository capability probe timed out"
+    except OSError as exc:
+        return None, f"git repository capability probe failed: {exc}"
+    if completed.returncode == 0:
+        return True, None
+    return False, _clip((completed.stderr or completed.stdout or "repository access denied").strip(), 160)
+
+
 def _clone_project(
     project: dict[str, Any],
     host: str,
@@ -449,15 +521,17 @@ def _clone_project(
     if http_url and "://" in http_url:
         try:
             parsed = urllib.parse.urlsplit(http_url)
-            repo_path = parsed.path or f"/{path_with_namespace}.git"
-            repo_query = parsed.query
-            scheme = "https" if use_https else "http"
-            http_url = urllib.parse.urlunsplit((scheme, f"{host}:{port}", repo_path, repo_query, ""))
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                http_url = ""
         except ValueError:
             http_url = ""
     if not http_url or "://" not in http_url:
-        scheme = "https" if use_https else "http"
-        http_url = f"{scheme}://{host}:{port}/{path_with_namespace}.git"
+        http_url = build_http_target_url(
+            host,
+            port,
+            f"/{path_with_namespace}.git",
+            default_scheme="https" if use_https else "http",
+        )
 
     final_url = _clone_url_with_token(http_url, token)
     dest_root = os.path.join(clone_dir, _safe_slug(f"{host}_{port}"))
@@ -471,13 +545,21 @@ def _clone_project(
     dest_path = candidate_dest_path if in_root else os.path.join(dest_root_abs, _safe_slug(path_with_namespace))
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
-    if os.path.isdir(dest_path):
+    if os.path.isdir(os.path.join(dest_path, ".git")):
         return {
             "project": path_with_namespace,
             "project_id": project_id,
             "status": "exists",
             "dest": dest_path,
             "error": None,
+        }
+    if os.path.exists(dest_path):
+        return {
+            "project": path_with_namespace,
+            "project_id": project_id,
+            "status": "failed",
+            "dest": dest_path,
+            "error": "destination exists but is not a complete git repository",
         }
 
     git_path = shutil.which("git")
@@ -490,7 +572,8 @@ def _clone_project(
             "error": "git binary not found in PATH",
         }
 
-    command = [git_path, "clone", "--depth", "1", final_url, dest_path]
+    temporary_path = f"{dest_path}.redposture-{uuid.uuid4().hex}.tmp"
+    command = [git_path, "clone", "--depth", "1", final_url, temporary_path]
 
     def _run_clone(cmd: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -504,6 +587,7 @@ def _clone_project(
     try:
         completed = _run_clone(command)
     except subprocess.TimeoutExpired:
+        shutil.rmtree(temporary_path, ignore_errors=True)
         return {
             "project": path_with_namespace,
             "project_id": project_id,
@@ -512,6 +596,7 @@ def _clone_project(
             "error": "git clone timeout",
         }
     except OSError as exc:
+        shutil.rmtree(temporary_path, ignore_errors=True)
         return {
             "project": path_with_namespace,
             "project_id": project_id,
@@ -527,10 +612,12 @@ def _clone_project(
         and "dumb http transport does not support shallow capabilities" in (stderr or stdout).lower()
     )
     if shallow_unsupported:
-        fallback_command = [git_path, "clone", final_url, dest_path]
+        shutil.rmtree(temporary_path, ignore_errors=True)
+        fallback_command = [git_path, "clone", final_url, temporary_path]
         try:
             completed = _run_clone(fallback_command)
         except subprocess.TimeoutExpired:
+            shutil.rmtree(temporary_path, ignore_errors=True)
             return {
                 "project": path_with_namespace,
                 "project_id": project_id,
@@ -539,6 +626,7 @@ def _clone_project(
                 "error": "git clone timeout",
             }
         except OSError as exc:
+            shutil.rmtree(temporary_path, ignore_errors=True)
             return {
                 "project": path_with_namespace,
                 "project_id": project_id,
@@ -550,6 +638,17 @@ def _clone_project(
         stdout = (completed.stdout or "").strip()
 
     if completed.returncode == 0:
+        try:
+            os.replace(temporary_path, dest_path)
+        except OSError as exc:
+            shutil.rmtree(temporary_path, ignore_errors=True)
+            return {
+                "project": path_with_namespace,
+                "project_id": project_id,
+                "status": "failed",
+                "dest": dest_path,
+                "error": f"failed to publish cloned repository: {exc}",
+            }
         return {
             "project": path_with_namespace,
             "project_id": project_id,
@@ -559,6 +658,7 @@ def _clone_project(
         }
 
     error = stderr or stdout or f"git clone exit={completed.returncode}"
+    shutil.rmtree(temporary_path, ignore_errors=True)
     return {
         "project": path_with_namespace,
         "project_id": project_id,
@@ -666,7 +766,7 @@ def _audit_gitlab_host(
                 if user_error:
                     token_valid = False
                     token_projects_error = user_error
-                elif user_status == 200 and isinstance(user_payload, dict):
+                elif user_status == 200 and _looks_like_gitlab_user(user_payload):
                     token_valid = True
                     token_user = user_payload
                 elif user_status in {401, 403}:
@@ -1227,7 +1327,7 @@ def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def authenticate_gitlab(ctx: Any, detect_record: Any, _options: dict[str, Any]) -> dict[str, Any]:
+def authenticate_gitlab(ctx: Any, detect_record: Any, options: dict[str, Any]) -> dict[str, Any]:
     state = ctx.lifecycle_state
     if not isinstance(state, GitLabLifecycleState):
         raise TypeError("gitlab lifecycle state is unavailable")
@@ -1243,9 +1343,33 @@ def authenticate_gitlab(ctx: Any, detect_record: Any, _options: dict[str, Any]) 
         use_https=bool(record.get("https")),
         token=token,
     )
-    state.token_valid = error is None and status == 200 and isinstance(payload, dict)
+    state.token_valid = error is None and status == 200 and _looks_like_gitlab_user(payload)
     state.token_user = payload if state.token_valid and isinstance(payload, dict) else None
+    state.token_capability = "identity" if state.token_valid else None
     state.token_error = error or (None if state.token_valid else "invalid token or insufficient API access")
+    if error is None and status == 403:
+        state.token_valid = True
+        state.token_capability = "authenticated_forbidden"
+        state.token_error = "token accepted but /api/v4/user is outside its scope"
+    elif error is None and status == 401:
+        probe_errors: list[str] = []
+        for project_ref in options["project_filters"]:
+            repository_ok, repository_error = _probe_repository_token(
+                str(ctx.host),
+                int(ctx.port),
+                use_https=bool(record.get("https")),
+                token=token,
+                project_ref=str(project_ref),
+            )
+            if repository_ok is True:
+                state.token_valid = True
+                state.token_capability = "repository"
+                state.token_error = "token accepted for repository access; identity API is outside its scope"
+                break
+            if repository_error:
+                probe_errors.append(repository_error)
+        if state.token_valid is not True and probe_errors:
+            state.token_error = "; ".join(dict.fromkeys(probe_errors))
     record.update(
         {
             "timestamp": utc_now_iso(),
@@ -1253,6 +1377,7 @@ def authenticate_gitlab(ctx: Any, detect_record: Any, _options: dict[str, Any]) 
             "token_provided": True,
             "token_valid": state.token_valid,
             "token_user": state.token_user,
+            "token_capability": state.token_capability,
             "token_projects_error": state.token_error if not state.token_valid else None,
         }
     )
@@ -1326,6 +1451,21 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
             ):
                 token_access.append(access)
             token_access.sort(key=lambda item: str(item.get("path_with_namespace") or ""))
+        if state.token_capability == "repository" and not token_projects:
+            token_projects = [
+                {
+                    "id": None,
+                    "path_with_namespace": str(project_ref),
+                    "http_url_to_repo": build_http_target_url(
+                        host,
+                        port,
+                        f"/{str(project_ref).strip('/')}.git",
+                        default_scheme="https" if use_https else "http",
+                    ),
+                }
+                for project_ref in project_filters
+                if str(project_ref).strip() and not str(project_ref).strip().isdigit()
+            ]
 
     clone_results: list[dict[str, Any]] = []
     clone_scope: str | None = None

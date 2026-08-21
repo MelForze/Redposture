@@ -1116,3 +1116,227 @@ def test_grpc_web_error_and_invoke_branches(monkeypatch) -> None:
     )
     assert invalid["status"] == "error"
     assert "missing.Service" in str(invalid["error"])
+
+
+def test_grpc_h2_chunks_large_request_at_frame_and_flow_control_limits(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _FakeConnection:
+        max_outbound_frame_size = 1024
+
+        def __init__(self) -> None:
+            self.window = 4096
+            self.sent_data: list[tuple[bytes, bool]] = []
+            self.window_updates = 0
+
+        def get_next_available_stream_id(self) -> int:
+            return 1
+
+        def send_headers(self, *_args, **_kwargs) -> None:
+            return None
+
+        def local_flow_control_window(self, _stream_id: int) -> int:
+            return self.window
+
+        def send_data(self, _stream_id: int, data: bytes, *, end_stream: bool) -> None:
+            assert len(data) <= self.max_outbound_frame_size
+            assert len(data) <= self.window
+            self.sent_data.append((bytes(data), end_stream))
+            self.window -= len(data)
+
+        def data_to_send(self) -> bytes:
+            return b"pending"
+
+        def receive_data(self, data: bytes):
+            if data == b"window":
+                self.window = 4096
+                self.window_updates += 1
+                return []
+            event = grpc_client.StreamEnded(stream_id=1)
+            return [event]
+
+        def acknowledge_received_data(self, *_args) -> None:
+            return None
+
+    class _FakeSocket:
+        def __init__(self, conn: _FakeConnection) -> None:
+            self.conn = conn
+            self.sent: list[bytes] = []
+
+        def settimeout(self, _timeout: float) -> None:
+            return None
+
+        def sendall(self, data: bytes) -> None:
+            self.sent.append(bytes(data))
+
+        def recv(self, _size: int) -> bytes:
+            return b"window" if self.conn.window == 0 else b"end"
+
+        def close(self) -> None:
+            return None
+
+    conn = _FakeConnection()
+    sock = _FakeSocket(conn)
+    session = grpc_client._GrpcH2Session("127.0.0.1", 50051, timeout=1.0, use_tls=False)
+    monkeypatch.setattr(session, "_ensure_connection", lambda _timeout: (sock, conn))
+    payload = b"x" * 70_000
+    session.call(path="/demo.Service/Call", payload=payload, authorization=None)
+    framed = grpc_client._encode_grpc_frame(payload)
+    assert b"".join(chunk for chunk, _end in conn.sent_data) == framed
+    assert max(len(chunk) for chunk, _end in conn.sent_data) <= 1024
+    assert conn.sent_data[-1][1] is True
+    assert conn.window_updates > 0
+
+
+def test_grpc_web_decodes_chunked_http_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    message_frame = b"\x00" + (3).to_bytes(4, "big") + b"abc"
+    trailer = b"grpc-status: 0\r\n"
+    trailer_frame = b"\x80" + len(trailer).to_bytes(4, "big") + trailer
+    grpc_body = message_frame + trailer_frame
+    chunks = b"".join(
+        f"{len(part):x};test=yes\r\n".encode() + part + b"\r\n" for part in (grpc_body[:7], grpc_body[7:])
+    )
+    raw_response = (
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: application/grpc-web+proto\r\n"
+        b"Transfer-Encoding: chunked\r\n\r\n" + chunks + b"0\r\nX-Trailer: ignored\r\n\r\n"
+    )
+
+    class _FakeSocket:
+        def __init__(self) -> None:
+            self.response = raw_response
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, _size: int) -> bytes:
+            response, self.response = self.response, b""
+            return response
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(grpc_client, "_open_http_socket", lambda *_a, **_k: _FakeSocket())
+    result = grpc_client._grpc_web_call(
+        "127.0.0.1",
+        8080,
+        path="/demo.Service/Call",
+        payload=b"",
+        timeout=1.0,
+        use_tls=False,
+        authorization=None,
+    )
+    assert result["messages"] == [b"abc"]
+    assert result["grpc_status"] == 0
+    assert result["error"] is None
+
+
+def test_grpc_tls_context_loads_ca_and_client_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: dict[str, object] = {}
+
+    class _FakeContext:
+        check_hostname = True
+        verify_mode = grpc_client.ssl.CERT_REQUIRED
+
+        def load_cert_chain(self, *, certfile: str, keyfile: str) -> None:
+            calls["cert_chain"] = (certfile, keyfile)
+
+        def set_alpn_protocols(self, protocols: list[str]) -> None:
+            calls["alpn"] = protocols
+
+    def _fake_default_context(*, cafile: str | None = None):
+        calls["cafile"] = cafile
+        return _FakeContext()
+
+    monkeypatch.setattr(grpc_client.ssl, "create_default_context", _fake_default_context)
+    context = grpc_client._grpc_ssl_context(
+        grpc_client.GrpcTlsConfig(ca_file="ca.pem", cert_file="client.pem", key_file="client.key"),
+        alpn_h2=True,
+    )
+    assert context is not None
+    assert calls == {
+        "cafile": "ca.pem",
+        "cert_chain": ("client.pem", "client.key"),
+        "alpn": ["h2"],
+    }
+
+
+def test_grpc_tls_server_name_override_reaches_native_and_web_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
+    server_names: list[str] = []
+
+    class _FakeSocket:
+        def settimeout(self, _timeout: float) -> None:
+            return None
+
+        def selected_alpn_protocol(self) -> str:
+            return "h2"
+
+        def close(self) -> None:
+            return None
+
+    class _FakeContext:
+        def wrap_socket(self, sock: _FakeSocket, *, server_hostname: str) -> _FakeSocket:
+            server_names.append(server_hostname)
+            return sock
+
+    monkeypatch.setattr(grpc_client.socket, "create_connection", lambda *_a, **_k: _FakeSocket())
+    monkeypatch.setattr(grpc_client, "_grpc_ssl_context", lambda *_a, **_k: _FakeContext())
+    tls_config = grpc_client.GrpcTlsConfig(server_name="grpc.service.internal")
+
+    grpc_client._open_grpc_socket("192.0.2.10", 50051, 1.0, use_tls=True, tls_config=tls_config)
+    grpc_client._open_http_socket("192.0.2.10", 8443, 1.0, use_tls=True, tls_config=tls_config)
+
+    assert server_names == ["grpc.service.internal", "grpc.service.internal"]
+
+
+@pytest.mark.parametrize("framing", ["content-length", "chunked"])
+def test_grpc_web_stops_reading_when_http_body_is_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    framing: str,
+) -> None:
+    trailer = b"grpc-status: 0\r\n"
+    grpc_body = b"\x00" + (3).to_bytes(4, "big") + b"abc" + b"\x80" + len(trailer).to_bytes(4, "big") + trailer
+    if framing == "content-length":
+        raw_response = (
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web+proto\r\n"
+            + f"Content-Length: {len(grpc_body)}\r\n\r\n".encode("ascii")
+            + grpc_body
+        )
+    else:
+        raw_response = (
+            b"HTTP/1.1 200 OK\r\nContent-Type: application/grpc-web+proto\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n"
+            + f"{len(grpc_body):x}\r\n".encode("ascii")
+            + grpc_body
+            + b"\r\n0\r\n\r\n"
+        )
+
+    class _KeepAliveSocket:
+        recv_calls = 0
+
+        def sendall(self, _data: bytes) -> None:
+            return None
+
+        def recv(self, _size: int) -> bytes:
+            self.recv_calls += 1
+            if self.recv_calls > 1:
+                raise TimeoutError("reader incorrectly waited for EOF")
+            return raw_response
+
+        def close(self) -> None:
+            return None
+
+    fake_socket = _KeepAliveSocket()
+    monkeypatch.setattr(grpc_client, "_open_http_socket", lambda *_a, **_k: fake_socket)
+    result = grpc_client._grpc_web_call(
+        "127.0.0.1",
+        8080,
+        path="/demo.Service/Call",
+        payload=b"",
+        timeout=1.0,
+        use_tls=False,
+        authorization=None,
+    )
+
+    assert fake_socket.recv_calls == 1
+    assert result["messages"] == [b"abc"]
+    assert result["grpc_status"] == 0
+    assert result["error"] is None

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import socket
+import ssl
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -39,23 +41,23 @@ _is_connection_timeout_fail_record = transport.is_connection_timeout_fail_record
 _recv_exact = transport.recv_exact
 
 _REDIS_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
-    ("redis", "redis"),
-    ("default", "redis"),
-    ("default", "password"),
-    ("redis", "password"),
-    ("default", "changeme"),
-    ("redis", "changeme"),
     ("admin", "admin"),
-    ("default", "default"),
-    ("admin", "password"),
     ("admin", "changeme"),
-    ("root", "root"),
+    ("admin", "password"),
+    ("default", "changeme"),
+    ("default", "default"),
+    ("default", "password"),
+    ("default", "redis"),
+    ("dev", "dev"),
+    ("redis", "changeme"),
+    ("redis", "password"),
+    ("redis", "redis"),
     ("root", "password"),
-    ("user", "user"),
-    ("user", "password"),
+    ("root", "root"),
     ("service", "service"),
     ("test", "test"),
-    ("dev", "dev"),
+    ("user", "password"),
+    ("user", "user"),
 )
 
 
@@ -71,10 +73,10 @@ def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
 
 
-def _encode_resp_array(parts: list[str]) -> bytes:
+def _encode_resp_array(parts: list[str | bytes]) -> bytes:
     payload = [f"*{len(parts)}\r\n".encode("ascii")]
     for item in parts:
-        raw = item.encode("utf-8")
+        raw = item if isinstance(item, bytes) else item.encode("utf-8")
         payload.append(f"${len(raw)}\r\n".encode("ascii"))
         payload.append(raw + b"\r\n")
     return b"".join(payload)
@@ -109,7 +111,9 @@ def _read_resp(sock: socket.socket) -> tuple[str, Any]:
         body = _recv_exact(sock, size + 2)
         if not body.endswith(b"\r\n"):
             raise ValueError("invalid RESP bulk")
-        return "bulk", body[:-2].decode("utf-8", errors="replace")
+        # Bulk strings are arbitrary octets. Keep them as bytes until the
+        # presentation boundary so invalid UTF-8 is never silently replaced.
+        return "bulk", body[:-2]
     if prefix == b"*":
         raw_len = _recv_line(sock).decode("ascii", errors="replace")
         count = int(raw_len)
@@ -123,14 +127,50 @@ def _read_resp(sock: socket.socket) -> tuple[str, Any]:
     raise ValueError(f"unsupported RESP prefix: {prefix!r}")
 
 
-def _send_cmd(sock: socket.socket, *parts: str) -> tuple[str, Any]:
+def _send_cmd(sock: socket.socket, *parts: str | bytes) -> tuple[str, Any]:
     sock.sendall(_encode_resp_array(list(parts)))
     return _read_resp(sock)
 
 
 def _is_noauth_error(message: str) -> bool:
     upper = message.upper()
-    return "NOAUTH" in upper or "AUTHENTICATION REQUIRED" in upper
+    # ACLs may deny PING with NOPERM even though AUTH itself is available.
+    # Treat that as an authentication/capability gate so supplied credentials
+    # are still attempted instead of stopping after detection.
+    return "NOAUTH" in upper or "NOPERM" in upper or "AUTHENTICATION REQUIRED" in upper
+
+
+def _open_redis_socket(
+    host: str,
+    port: int,
+    timeout: float,
+    *,
+    use_tls: bool,
+    insecure: bool = False,
+    ca_file: str | None = None,
+    cert_file: str | None = None,
+    key_file: str | None = None,
+) -> socket.socket:
+    sock = socket.create_connection((host, port), timeout=timeout)
+    sock.settimeout(timeout)
+    if not use_tls:
+        return sock
+    context = ssl.create_default_context(cafile=ca_file or None)
+    if insecure:
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    if cert_file or key_file:
+        if not cert_file or not key_file:
+            sock.close()
+            raise ValueError("TLS client certificate and key must be provided together")
+        context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+    try:
+        wrapped = context.wrap_socket(sock, server_hostname=host)
+        wrapped.settimeout(timeout)
+        return wrapped
+    except BaseException:
+        sock.close()
+        raise
 
 
 def _auth_with_password(sock: socket.socket, password: str) -> tuple[bool, str | None]:
@@ -231,13 +271,13 @@ def _scan_redis_keys(
         if resp_type != "array" or not isinstance(resp_value, list) or len(resp_value) != 2:
             return keys if keys else None, f"unexpected SCAN response: {resp_type} {resp_value}"
 
-        next_cursor = str(resp_value[0] if resp_value[0] is not None else "0")
+        next_cursor = _format_redis_text(resp_value[0] if resp_value[0] is not None else "0")
         batch = resp_value[1]
         if not isinstance(batch, list):
             return keys if keys else None, f"unexpected SCAN keys payload: {type(batch).__name__}"
 
         for item in batch:
-            key = str(item)
+            key = _format_redis_text(item)
             if key in seen:
                 continue
             seen.add(key)
@@ -279,17 +319,18 @@ def _stream_dump_redis_keys(
     page_size = max(1, batch)
     delay_seconds = max(0, delay_ms) / 1000.0
     entries: list[dict[str, str | None]] = []
-    pending: list[str] = []
+    pending: list[str | bytes] = []
     cursor = "0"
     rounds = 0
 
-    def _flush_page(keys_page: list[str]) -> bool:  # returns True when the total cap is reached
-        for key_name in sorted(keys_page):
+    def _flush_page(keys_page: list[str | bytes]) -> bool:  # returns True when the total cap is reached
+        for key_name in sorted(keys_page, key=_format_redis_text):
             value_text, value_error = _dump_redis_key_value(sock, key_name)
+            display_name = _format_redis_text(key_name)
             if value_error:
-                entries.append(_redis_kv_entry(key_name, error=_format_redis_text(value_error)))
+                entries.append(_redis_kv_entry(display_name, error=_format_redis_text(value_error)))
             else:
-                entries.append(_redis_kv_entry(key_name, value_text))
+                entries.append(_redis_kv_entry(display_name, value_text))
             if limit is not None and len(entries) >= limit:
                 return True
         return False
@@ -303,12 +344,12 @@ def _stream_dump_redis_keys(
         if resp_type != "array" or not isinstance(resp_value, list) or len(resp_value) != 2:
             return entries, f"unexpected SCAN response: {resp_type} {resp_value}"
 
-        next_cursor = str(resp_value[0] if resp_value[0] is not None else "0")
+        next_cursor = _format_redis_text(resp_value[0] if resp_value[0] is not None else "0")
         scan_batch = resp_value[1]
         if not isinstance(scan_batch, list):
             return entries, f"unexpected SCAN keys payload: {type(scan_batch).__name__}"
 
-        pending.extend(str(item) for item in scan_batch)
+        pending.extend(item if isinstance(item, bytes) else str(item) for item in scan_batch)
         cursor = next_cursor
 
         while len(pending) >= page_size:
@@ -328,7 +369,13 @@ def _stream_dump_redis_keys(
 
 
 def _format_redis_text(value: Any) -> str:
-    text = str(value if value is not None else "")
+    if isinstance(value, bytes):
+        try:
+            text = value.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            text = "base64:" + base64.b64encode(value).decode("ascii")
+    else:
+        text = str(value if value is not None else "")
     return text.replace("\n", "\\n")
 
 
@@ -355,11 +402,11 @@ def _pairwise(items: list[Any]) -> list[tuple[str, str]]:
     return pairs
 
 
-def _dump_redis_key_value(sock: socket.socket, key: str) -> tuple[str, str | None]:
+def _dump_redis_key_value(sock: socket.socket, key: str | bytes) -> tuple[str, str | None]:
     key_type_type, key_type_value = _send_cmd(sock, "TYPE", key)
     if key_type_type == "error":
         return "<error>", str(key_type_value)
-    key_type = str(key_type_value or "").strip().lower()
+    key_type = _format_redis_text(key_type_value).strip().lower()
     if not key_type:
         return "<unknown>", None
     if key_type == "none":
@@ -462,6 +509,12 @@ class RedisAuditLifecycleState:
     auth_attempts_used: int = 0
     data_attempts_used: int = 0
     legacy_auth_passwords_attempted: set[str] = field(default_factory=set)
+    use_tls: bool = False
+    insecure: bool = False
+    tls_ca: str | None = None
+    tls_cert: str | None = None
+    tls_key: str | None = None
+    transport_mode: str = "plaintext"
 
 
 class _RedisAuthenticationRejected(Exception):
@@ -480,12 +533,30 @@ def _close_redis_lifecycle_socket(state: RedisAuditLifecycleState) -> None:
 
 
 def _open_redis_lifecycle_socket(state: RedisAuditLifecycleState) -> None:
-    state.sock = socket.create_connection((state.host, state.port), timeout=state.timeout)
-    state.sock.settimeout(state.timeout)
+    state.sock = _open_redis_socket(
+        state.host,
+        state.port,
+        state.timeout,
+        use_tls=state.use_tls,
+        insecure=state.insecure,
+        ca_file=state.tls_ca,
+        cert_file=state.tls_cert,
+        key_file=state.tls_key,
+    )
+    state.transport_mode = "tls" if state.use_tls else "plaintext"
 
 
 def redis_lifecycle_state_factory(ctx: Any) -> RedisAuditLifecycleState:
     cfg = AuditConfig.from_namespace(ctx.args)
+    target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
+    use_tls = bool(
+        getattr(ctx.args, "tls", False)
+        or getattr(ctx.args, "insecure", False)
+        or getattr(ctx.args, "tls_ca", None)
+        or getattr(ctx.args, "tls_cert", None)
+        or getattr(ctx.args, "tls_key", None)
+        or target_scheme in {"rediss", "tls"}
+    )
     return RedisAuditLifecycleState(
         host=str(ctx.host),
         port=int(ctx.port),
@@ -495,6 +566,12 @@ def redis_lifecycle_state_factory(ctx: Any) -> RedisAuditLifecycleState:
         debug_emit=ctx.debug_emit,
         started=time.monotonic(),
         defcreds_enabled=bool(getattr(ctx.args, "defcreds", False)),
+        use_tls=use_tls,
+        insecure=bool(getattr(ctx.args, "insecure", False)),
+        tls_ca=str(getattr(ctx.args, "tls_ca", "") or "").strip() or None,
+        tls_cert=str(getattr(ctx.args, "tls_cert", "") or "").strip() or None,
+        tls_key=str(getattr(ctx.args, "tls_key", "") or "").strip() or None,
+        transport_mode="tls" if use_tls else "plaintext",
     )
 
 
@@ -543,6 +620,8 @@ def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bo
         "query_key_entry": state.query_key_entry if include_data else None,
         "elapsed_ms": elapsed_ms,
         "error": state.error,
+        "transport_mode": state.transport_mode,
+        "tls_client_cert_used": bool(state.use_tls and state.tls_cert and state.tls_key),
     }
     attempts = max(1, state.retries + 1)
     telemetry = StageTelemetryBuilder(
@@ -873,6 +952,12 @@ def _audit_redis_host(
     dump_batch: int = 10000,
     dump_delay: int = 20,
     credential_candidates: list[dict[str, Any]] | None = None,
+    *,
+    use_tls: bool = False,
+    insecure: bool = False,
+    tls_ca: str | None = None,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
 ) -> dict[str, Any]:
     attempts = max(1, retries + 1)
     last_error: str | None = None
@@ -918,9 +1003,16 @@ def _audit_redis_host(
     for attempt in range(attempts):
         started = time.monotonic()
         try:
-            with socket.create_connection((host, port), timeout=timeout) as sock:
-                sock.settimeout(timeout)
-
+            with _open_redis_socket(
+                host,
+                port,
+                timeout,
+                use_tls=use_tls,
+                insecure=insecure,
+                ca_file=tls_ca,
+                cert_file=tls_cert,
+                key_file=tls_key,
+            ) as sock:
                 ping_type, ping_value = _send_cmd(sock, "PING")
                 auth_required = False
                 if ping_type == "simple" and str(ping_value).upper() == "PONG":
@@ -1091,6 +1183,8 @@ def _audit_redis_host(
                     "query_key_entry": query_key_entry,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": auth_error,
+                    "transport_mode": "tls" if use_tls else "plaintext",
+                    "tls_client_cert_used": bool(use_tls and tls_cert and tls_key),
                 }
         except (OSError, ValueError, ConnectionError) as exc:
             last_error = str(exc)
@@ -1386,6 +1480,11 @@ def _call_audit_redis_host_with_stage_debug(
     dump_delay: int = 20,
     credential_candidates: list[dict[str, Any]] | None = None,
     *,
+    tls: bool = False,
+    insecure: bool = False,
+    tls_ca: str | None = None,
+    tls_cert: str | None = None,
+    tls_key: str | None = None,
     run_deep_checks: bool,
     debug: bool,
     debug_emit: Callable[[str], None] | None,
@@ -1407,6 +1506,11 @@ def _call_audit_redis_host_with_stage_debug(
         dump_batch=dump_batch,
         dump_delay=dump_delay,
         credential_candidates=credential_candidates,
+        use_tls=bool(tls or insecure or tls_ca or tls_cert or tls_key),
+        insecure=insecure,
+        tls_ca=tls_ca,
+        tls_cert=tls_cert,
+        tls_key=tls_key,
     )
 
     result: dict[str, Any] = dict(record)

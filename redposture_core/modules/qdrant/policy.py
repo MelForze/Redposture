@@ -8,7 +8,7 @@ from ...stage_runtime import validate_basic_module_args
 
 
 def validate_args(args: Any, console: Any) -> int | None:
-    common_rc = validate_basic_module_args(args, console, module="qdrant", pure_http=True)
+    common_rc = validate_basic_module_args(args, console, module="qdrant")
     if common_rc is not None:
         return common_rc
     if bool(getattr(args, "ssrf_listen", False)) and not getattr(args, "ssrf_target", None):

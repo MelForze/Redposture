@@ -15,6 +15,7 @@ from google.protobuf import descriptor_pb2
 
 from ...clients import transport
 from ...clients.grpc import (
+    GrpcTlsConfig,
     _build_auth_header,
     _build_basic_auth_header,
     _compile_proto_files,
@@ -88,12 +89,20 @@ class GrpcLifecycleState:
     first_success_key: tuple[str | None, str | None, str | None, str] | None = None
     first_health_auth_used: dict[str, Any] | None = None
     first_reflection_auth_used: dict[str, Any] | None = None
+    requested_use_tls: bool | None = None
+    tls_config: GrpcTlsConfig = field(default_factory=lambda: GrpcTlsConfig(insecure=True))
 
     def session_for(self, host: str, port: int, *, timeout: float, use_tls: bool) -> _GrpcH2Session:
         key = (str(host), int(port), bool(use_tls))
         session = self.sessions.get(key)
         if session is None:
-            session = _GrpcH2Session(key[0], key[1], timeout=timeout, use_tls=key[2])
+            session = _GrpcH2Session(
+                key[0],
+                key[1],
+                timeout=timeout,
+                use_tls=key[2],
+                tls_config=self.tls_config,
+            )
             self.sessions[key] = session
         return session
 
@@ -173,29 +182,29 @@ _THREAD_LOCAL_DEBUG_EMIT = threading.local()
 
 _DEFAULT_BASIC_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("admin", "admin"),
+    ("admin", "changeme"),
     ("admin", "password"),
-    ("root", "root"),
-    ("root", "admin"),
+    ("dev", "dev"),
+    ("grpc", "admin"),
     ("grpc", "grpc"),
+    ("grpc", "password"),
+    ("guest", "guest"),
+    ("root", "admin"),
+    ("root", "password"),
+    ("root", "root"),
+    ("service", "password"),
     ("service", "service"),
     ("test", "test"),
     ("user", "password"),
-    ("admin", "changeme"),
-    ("root", "password"),
-    ("grpc", "password"),
-    ("grpc", "admin"),
-    ("service", "password"),
     ("user", "user"),
-    ("guest", "guest"),
-    ("dev", "dev"),
 )
 _DEFAULT_BEARER_TOKENS: tuple[str, ...] = (
     "admin",
-    "token",
-    "secret",
     "changeme",
-    "grpc",
     "default-token",
+    "grpc",
+    "secret",
+    "token",
 )
 
 _GRPC_AUTH_CODES = {7, 16}
@@ -375,7 +384,10 @@ def _detect_grpc_target(
     _session_state: GrpcLifecycleState | None = None,
 ) -> dict[str, Any]:
     scheme_hint = str(preferred_scheme or "").strip().lower()
-    if scheme_hint == "http":
+    requested_use_tls = _session_state.requested_use_tls if _session_state is not None else None
+    if requested_use_tls is not None:
+        transport_order = [requested_use_tls]
+    elif scheme_hint == "http":
         transport_order = [False, True]
     elif scheme_hint == "https":
         transport_order = [True, False]
@@ -530,6 +542,7 @@ def _detect_grpc_target(
             use_tls=use_tls,
             authorization=None,
             service_name="",
+            tls_config=_session_state.tls_config if _session_state is not None else None,
         )
         calls.append(web_health)
         web_call = web_health["call"]
@@ -750,6 +763,7 @@ def _try_credentials(
     reflection_access: str = _ACCESS_AUTH_REQUIRED,
     required_capability: str = "any",
     session: _GrpcH2Session | None = None,
+    tls_config: GrpcTlsConfig | None = None,
     continue_after_success: bool = False,
 ) -> tuple[bool, dict[str, Any] | None, dict[str, Any] | None]:
     last_attempt: dict[str, Any] | None = None
@@ -767,6 +781,7 @@ def _try_credentials(
                 use_tls=use_tls,
                 authorization=auth_header,
                 service_name="",
+                tls_config=tls_config,
             )
         else:
             health = _health_check_call(
@@ -1093,6 +1108,7 @@ def _audit_grpc_host(
             reflection_access=reflection_access,
             required_capability=required_credential_capability,
             session=native_session,
+            tls_config=_session_state.tls_config,
             continue_after_success=bool(defcreds),
         )
         if defcreds:
@@ -1221,6 +1237,7 @@ def _audit_grpc_host(
                 use_tls=use_tls,
                 authorization=health_auth_header,
                 service_name="",
+                tls_config=_session_state.tls_config,
             )
         else:
             primary_health = _health_check_call(
@@ -1310,6 +1327,7 @@ def _audit_grpc_host(
                         use_tls=use_tls,
                         authorization=health_auth_header,
                         service_name=service_name,
+                        tls_config=_session_state.tls_config,
                     )
                 else:
                     health_entry = _health_check_call(
@@ -1384,6 +1402,7 @@ def _audit_grpc_host(
                 invoke_path=invoke_path,
                 request_json=dict(invoke_request_json or {}),
                 session=native_session,
+                tls_config=_session_state.tls_config,
             )
             if str(invoke_result.get("status") or "") == "unsupported":
                 invoke_access = _ACCESS_UNSUPPORTED

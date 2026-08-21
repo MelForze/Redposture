@@ -1,0 +1,75 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "index.routing.allocation.exclude.password": "CorpusIndexSettingPassword!2026"
+  },
+  "mappings": {
+    "_meta": {
+      "client_secret": "CorpusMappingMetaSecret!2026",
+      "description": "Deterministic RedPosture discover-v2 E2E corpus"
+    },
+    "dynamic_templates": [
+      {
+        "corpus_secret_strings": {
+          "path_match": "dynamic_secret_*",
+          "mapping": {
+            "type": "keyword",
+            "meta": {
+              "api_token": "CorpusDynamicTemplateToken!2026"
+            }
+          }
+        }
+      }
+    ],
+    "properties": {
+      "case": {
+        "type": "keyword"
+      },
+      "message": {
+        "type": "text",
+        "meta": {
+          "client_secret": "CorpusFieldMetaSecret!2026"
+        }
+      },
+      "databasePassword": {
+        "type": "keyword"
+      },
+      "clientSecret": {
+        "type": "keyword"
+      },
+      "authorization": {
+        "type": "keyword",
+        "index": false
+      },
+      "credentials": {
+        "type": "keyword",
+        "index": false
+      },
+      "connectionString": {
+        "type": "keyword",
+        "index": false
+      },
+      "private_key": {
+        "type": "text",
+        "index": false
+      },
+      "unindexedPassword": {
+        "type": "keyword",
+        "index": false,
+        "store": true
+      },
+      "payload": {
+        "type": "object",
+        "enabled": true
+      },
+      "negative": {
+        "type": "object",
+        "enabled": true
+      },
+      "dynamic_secret_value": {
+        "type": "keyword"
+      }
+    }
+  }
+}

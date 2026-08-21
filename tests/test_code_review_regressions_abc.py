@@ -191,7 +191,7 @@ def test_zk_124_is_server_policy_auth_required(monkeypatch: pytest.MonkeyPatch) 
 def test_zk_digest_frame_followed_by_124_is_not_valid_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A successful digest frame cannot override a protected operation failure."""
+    """A successful digest frame cannot prove access when policy requires SASL."""
 
     # First call is the anon root read: fine. Second call is post-auth root: -124.
     state = {"n": 0}
@@ -219,7 +219,10 @@ def test_zk_digest_frame_followed_by_124_is_not_valid_credentials(
         show_znodes=True,
     )
     assert record["status"] == "auth_required"
-    assert record["provided_credentials_ok"] is False
+    assert record["provided_credentials_ok"] is None
+    assert record["credential_verdict"] == "unsupported_sasl"
+    assert record["auth_mechanism"] == "sasl"
+    assert record["verification_capability"] == "unsupported"
     assert record["znode_count"] is None
 
 
@@ -257,6 +260,13 @@ def test_zk_query_znode_124_is_not_retried_as_transient(
             return b"", 0, {"data_length": 0, "num_children": 0}
 
     monkeypatch.setattr("redposture_core.stage_zookeeper._ZkClient", _Client)
+    # Auth inference normally uses a separate short-lived session for this
+    # path. Isolate the data-stage request so that a probe on another session
+    # is not mistaken for a retry of the direct --znode read.
+    monkeypatch.setattr(
+        "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
+        lambda *_a, **_kw: (True, "query_auth_required", ["/target:sessionclosedrequiresaslauth"]),
+    )
     monkeypatch.setattr(
         "redposture_core.stage_zookeeper._enumerate_znodes",
         lambda *_a, **_kw: (["/target"], 1, False, {}, None),
@@ -265,7 +275,7 @@ def test_zk_query_znode_124_is_not_retried_as_transient(
         host="127.0.0.1",
         port=2181,
         timeout=0.1,
-        retries=0,
+        retries=2,
         username=None,
         password=None,
         show_znodes=False,

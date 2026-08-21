@@ -335,8 +335,7 @@ def test_help_documents_implicit_target_file_precedence() -> None:
         ("elastic", ["Common", "Auth", "Actions"]),
         ("grpc", ["Common", "Auth", "Invoke / Metadata", "Schema", "Export"]),
         ("kafka", ["Common", "Auth", "Actions"]),
-        ("keeper", ["Common", "TLS (transport auto-detected)", "Auth", "Actions"]),
-        ("zookeeper", ["Common", "Auth", "Actions"]),
+        ("zookeeper", ["Common", "TLS (transport auto-detected)", "Auth", "Actions"]),
     ],
 )
 def test_module_help_has_grouped_sections_in_stable_order(command: str, sections: list[str]) -> None:
@@ -518,6 +517,22 @@ def test_docker_help_sections_and_parse_flags() -> None:
     assert args.exec_cmd == "id"
 
 
+def test_scan_host_flags_parse_repeatable_out_target_values() -> None:
+    args = parse_args(
+        [
+            "redis",
+            "-t",
+            "10.0.0.0/24",
+            "-ot",
+            "10.0.0.1,blocked.example",
+            "--out-target",
+            "exclude.txt",
+        ]
+    )
+
+    assert args.out_targets == ["10.0.0.1,blocked.example", "exclude.txt"]
+
+
 def test_oracle_help_sections_and_parse_flags() -> None:
     help_text = _command_help(COMMAND_ORACLE)
     assert "\nCommon:\n" in help_text
@@ -650,6 +665,34 @@ def test_grpc_username_password_pair_validation() -> None:
     args = parse_args(["grpc", "-t", "127.0.0.1", "-u", "admin"])
     assert args.username == "admin"
     assert args.password is None
+
+
+def test_kafka_and_grpc_transport_overrides_are_parsed() -> None:
+    kafka_args = parse_args(
+        [
+            "kafka",
+            "-t",
+            "192.0.2.10",
+            "--tls",
+            "--tls-server-name",
+            "broker.service.internal",
+        ]
+    )
+    assert kafka_args.tls is True
+    assert kafka_args.plaintext is False
+    assert kafka_args.tls_server_name == "broker.service.internal"
+
+    grpc_args = parse_args(
+        [
+            "grpc",
+            "-t",
+            "192.0.2.10",
+            "--plaintext",
+        ]
+    )
+    assert grpc_args.tls is False
+    assert grpc_args.plaintext is True
+    assert grpc_args.tls_server_name is None
 
 
 def test_clickhouse_help_shows_defaults_only_for_selected_flags() -> None:
@@ -1836,6 +1879,11 @@ def test_zookeeper_flags_are_parsed() -> None:
             "500",
             "--enum-workers",
             "7",
+            "--insecure",
+            "--tls-cert",
+            "client.pem",
+            "--tls-key",
+            "client.key",
             "-f",
             "json",
             "-o",
@@ -1857,35 +1905,42 @@ def test_zookeeper_flags_are_parsed() -> None:
     assert args.znode == "/brokers/ids/1"
     assert args.max_znodes == 500
     assert args.enum_workers == 7
+    assert args.insecure is True
+    assert args.tls_cert == "client.pem"
+    assert args.tls_key == "client.key"
     assert args.output_format == "json"
     assert args.output == "zookeeper_audit.jsonl"
 
 
-def test_zookeeper_defcreds_is_not_added_to_keeper() -> None:
+def test_zookeeper_defcreds_documents_online_attempt_risk() -> None:
     zookeeper_help = _command_help("zookeeper")
     assert "--defcreds" in zookeeper_help
     assert "network auth attempt" in zookeeper_help
     assert "lockout" in zookeeper_help
-    assert "--defcreds" not in _command_help("keeper")
+
+
+def test_keeper_command_is_removed_from_cli() -> None:
+    parser = build_parser()
+    root_action = parser._subparsers._group_actions[0]
+    assert "keeper" not in root_action.choices
 
     with pytest.raises(SystemExit) as exc:
-        parse_args(["keeper", "-t", "10.0.0.9", "--defcreds"])
+        parse_args(["keeper", "-t", "10.0.0.9"])
 
     assert exc.value.code == 2
 
 
-@pytest.mark.parametrize("command", ["zookeeper", "keeper"])
-def test_znode_flag_uses_long_option_only(command: str) -> None:
-    args = parse_args([command, "-t", "10.0.0.9", "--znode", "/clickhouse/tables"])
+def test_znode_flag_uses_long_option_only() -> None:
+    args = parse_args(["zookeeper", "-t", "10.0.0.9", "--znode", "/clickhouse/tables"])
     assert args.znode == "/clickhouse/tables"
 
-    help_text = _command_help(command)
+    help_text = _command_help("zookeeper")
     assert "\n  --znode path" in help_text
     assert "\n  -znode" not in help_text
     assert "[-znode path]" not in help_text
 
     with pytest.raises(SystemExit) as exc:
-        parse_args([command, "-t", "10.0.0.9", "-znode", "/clickhouse/tables"])
+        parse_args(["zookeeper", "-t", "10.0.0.9", "-znode", "/clickhouse/tables"])
     assert exc.value.code == 2
 
 
@@ -1895,44 +1950,9 @@ def test_zookeeper_rejects_profiles_file_flag() -> None:
     assert exc.value.code == 2
 
 
-def test_keeper_flags_and_auto_tls_defaults_are_parsed() -> None:
-    args = parse_args(
-        [
-            "keeper",
-            "-t",
-            "10.0.0.41",
-            "--port",
-            "19181,29181",
-            "--insecure",
-            "--tls-cert",
-            "client.pem",
-            "--tls-key",
-            "client.key",
-            "--show-znodes",
-            "20",
-            "--dump",
-            "10",
-            "--enum-workers",
-            "4",
-        ]
-    )
-    assert args.command == "keeper"
-    assert args.port == 19181
-    assert args.ports == "19181,29181"
-    assert not hasattr(args, "tls")
-    assert not hasattr(args, "no_tls")
-    assert args.insecure is True
-    assert args.tls_cert == "client.pem"
-    assert args.tls_key == "client.key"
-    assert args.show_znodes == 20
-    assert args.dump == 10
-    assert args.enum_workers == 4
-    assert args.timeout == 5.0
-
-
 @pytest.mark.parametrize("removed_flag", ["--tls", "--no-tls"])
-def test_keeper_transport_is_auto_detected_without_manual_mode_flags(removed_flag: str) -> None:
-    help_text = _command_help("keeper")
+def test_zookeeper_transport_is_auto_detected_without_manual_mode_flags(removed_flag: str) -> None:
+    help_text = _command_help("zookeeper")
     assert "\nTLS (transport auto-detected):\n" in help_text
     assert re.search(r"(?m)^  --tls\s", help_text) is None
     assert re.search(r"(?m)^  --no-tls\s", help_text) is None
@@ -1942,7 +1962,7 @@ def test_keeper_transport_is_auto_detected_without_manual_mode_flags(removed_fla
     assert "--tls-key file" in help_text
 
     with pytest.raises(SystemExit) as exc:
-        parse_args(["keeper", "-t", "10.0.0.41", removed_flag])
+        parse_args(["zookeeper", "-t", "10.0.0.41", removed_flag])
     assert exc.value.code == 2
 
 
