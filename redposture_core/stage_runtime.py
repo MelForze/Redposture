@@ -2839,7 +2839,7 @@ class AuditCommandRunner:
                 import dataclasses as _dc
 
                 last_attempt = auth_records[-1][1]
-                diagnostic_fields = {
+                diagnostic_fields: dict[str, Any] = {
                     key: last_attempt.extra.get(key)
                     for key in (
                         "auth_valid",

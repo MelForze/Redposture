@@ -1312,8 +1312,18 @@ def test_run_registry_stage_validation_errors(
 def test_run_registry_stage_accepts_https_target(monkeypatch: pytest.MonkeyPatch) -> None:
     _RegistryConsoleCapture.instances.clear()
     monkeypatch.setattr(registry, "Console", _RegistryConsoleCapture)
+
+    captured_kwargs: list[dict[str, object]] = []
+
+    def fake_host_stage(**kwargs):
+        captured_kwargs.append(dict(kwargs))
+        return _registry_host_record(kwargs, status="fail", detected=False, error="connection refused")
+
+    patch_module_host_stage_for_test(monkeypatch, "registry", fake_host_stage)
     rc = registry.run_registry_stage(_registry_args(targets="https://registry.local:5000/v2/_catalog"), logger=object())
+
     assert rc == 1
+    assert [(call["host"], call["port"]) for call in captured_kwargs] == [("registry.local", 5000)]
     errors = [msg for level, msg in _RegistryConsoleCapture.instances[-1].messages if level == "error"]
     assert not any("accepts only http:// URL targets" in msg for msg in errors)
 

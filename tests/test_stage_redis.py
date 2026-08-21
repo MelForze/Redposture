@@ -9,9 +9,33 @@ from redposture_core import stage_redis as redis_stage
 from redposture_core.audit_models import AuditRecord
 from redposture_core.cli_args import parse_args
 from redposture_core.modules.redis import actions as redis_actions
+from redposture_core.modules.redis import policy as redis_policy
 from redposture_core.modules.redis import stage as redis_module_stage
 from redposture_core.stage_runtime import AuditCommandRunner
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_error"),
+    [
+        ({"tls_cert": "client.pem", "tls_key": None}, "--tls-cert and --tls-key must be used together"),
+        ({"tls_cert": None, "tls_key": None, "tls_ca": "ca.pem", "insecure": True}, "--tls-ca cannot be combined"),
+    ],
+)
+def test_redis_policy_rejects_invalid_tls_options(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object], expected_error: str
+) -> None:
+    monkeypatch.setattr(redis_policy, "validate_basic_module_args", lambda *_args, **_kwargs: None)
+    errors: list[str] = []
+
+    assert redis_policy.validate_args(SimpleNamespace(**overrides), SimpleNamespace(error=errors.append)) == 2
+    assert expected_error in errors[0]
+
+
+def test_redis_policy_propagates_common_validation_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(redis_policy, "validate_basic_module_args", lambda *_args, **_kwargs: 2)
+
+    assert redis_policy.validate_args(SimpleNamespace(), SimpleNamespace()) == 2
 
 
 class _DummySocket:
