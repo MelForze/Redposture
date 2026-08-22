@@ -288,8 +288,8 @@ def test_kubeapi_credential_file_reuses_anonymous_classification_and_selected_na
     def fake_api(_host, _port, path, _timeout, **_kwargs):
         classification.append(path)
         if path == "/version":
-            return 200, {"gitVersion": "v1.30.0"}, {}, None
-        return 200, {"versions": ["v1"]}, {}, None
+            return 200, {"major": "1", "minor": "30", "gitVersion": "v1.30.0"}, {}, None
+        return 200, {"kind": "APIVersions", "apiVersion": "v1", "versions": ["v1"]}, {}, None
 
     def fake_namespaces(
         _host,
@@ -324,8 +324,13 @@ def test_kubeapi_credential_file_reuses_anonymous_classification_and_selected_na
     )
     result = _run(kubeapi, "kubeapi", args)
 
-    assert classification == ["/version", "/api"]
-    assert namespace_auth == [(None, None, None), (None, "bad", "bad"), (None, "good", "good")]
+    assert classification == ["/version"]
+    assert namespace_auth == [
+        (None, None, None),
+        (None, "bad", "bad"),
+        (None, "good", "good"),
+        (None, "good", "good"),
+    ]
     assert result.records[0]["status"] == "auth_valid"
     assert result.records[0]["namespaces"] == ["default"]
 

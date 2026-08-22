@@ -1073,6 +1073,11 @@ def test_show_flags_accept_optional_count(argv: list[str], dest: str, expected: 
     assert getattr(args, dest) == expected
 
 
+def test_zookeeper_probe_write_is_explicit() -> None:
+    assert parse_args(["zookeeper", "-t", "127.0.0.1"]).probe_write is False
+    assert parse_args(["zookeeper", "-t", "127.0.0.1", "--probe-write"]).probe_write is True
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [

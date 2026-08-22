@@ -67,6 +67,11 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
             result = actions.collect_kubeapi_data(ctx, record, options)
         return AuditRecord.from_mapping(result, module="kubeapi", service="kubeapi")
 
+    def _deep_gate(record: AuditRecord) -> tuple[bool, str]:
+        status = str(record.status or "unknown")
+        allowed = {"open_no_auth", "auth_valid", "invalid_credentials_anonymous"}
+        return status in allowed, f"status={status}"
+
     return ModuleAuditSpec(
         module="kubeapi",
         label="KUBEAPI",
@@ -79,9 +84,11 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_factory=(lambda _ctx: actions.KubeApiLifecycleState()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_kubeapi_line,
+        deep_gate=_deep_gate,
         # E3 opt-in: kubeapi anon-open (system:anonymous binding, common on
         # dev/testing clusters) is confirmed by the detect probe.
         keep_anonymous_open_no_auth=True,
+        progress_refresh_interval_s=0.1,
     )
 
 

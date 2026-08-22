@@ -125,6 +125,14 @@ def configure_zookeeper_parser(
         help="Show one znode detail by path (example: /brokers/ids).",
     )
     actions.add_argument(
+        "--probe-write",
+        action="store_true",
+        help=(
+            "Explicitly create and delete a unique ephemeral znode under / to test the selected identity's "
+            "root-scoped create/delete permissions. Without this flag the audit is read-only."
+        ),
+    )
+    actions.add_argument(
         "--max-znodes",
         dest="max_znodes",
         type=positive_int,

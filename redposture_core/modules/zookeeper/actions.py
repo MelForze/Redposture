@@ -129,6 +129,9 @@ class ZooKeeperLifecycleState:
     anonymous_auth_probe_results: dict[str, int | None] = dataclass_field(default_factory=dict)
     anonymous_auth_probe_errors: dict[str, str] = dataclass_field(default_factory=dict)
     digest_auth_unsupported: bool = False
+    credential_verification_path: str | None = None
+    credential_verification_status: str = "not_requested"
+    credential_verification_reason: str | None = None
     credential_clients: dict[tuple[str | None, str | None, str], _ZkClient] = dataclass_field(default_factory=dict)
 
     def close(self) -> None:
@@ -320,6 +323,30 @@ def _credential_verification_paths(
     return tuple(paths)
 
 
+def _credential_verifier_candidates(
+    root_children: list[str] | None,
+    query_znode: str | None,
+    auth_probe_trace: tuple[str, ...] | list[str] = (),
+    *,
+    child_limit: int = 32,
+) -> tuple[str, ...]:
+    """Return a bounded, deterministic read-only verifier search order."""
+
+    paths = list(_credential_verification_paths(query_znode, auth_probe_trace))
+    for child in sorted(str(item).strip("/") for item in (root_children or []) if str(item).strip("/"))[
+        : max(0, int(child_limit))
+    ]:
+        path = f"/{child}"
+        if path not in paths:
+            paths.append(path)
+    return tuple(paths)
+
+
+def _protected_credential_verification_path(results: Mapping[str, int | None]) -> str | None:
+    protected = {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH}
+    return next((path for path, code in results.items() if code in protected), None)
+
+
 def _is_sasl_required_error(value: Any) -> bool:
     return "SESSIONCLOSEDREQUIRESASLAUTH" in str(value or "").upper().replace("_", "")
 
@@ -378,6 +405,7 @@ def _credential_probe_verdict(
     saw_unchanged_denial = False
     saw_anonymous_readable = False
     saw_authenticated_readable = False
+    saw_authenticated_denial_after_public = False
     for path, anonymous_code in anonymous_results.items():
         authenticated_code = authenticated_results.get(path)
         if anonymous_code in protected:
@@ -390,10 +418,14 @@ def _credential_probe_verdict(
             saw_anonymous_readable = True
             if authenticated_code == _ZK_ERR_OK:
                 saw_authenticated_readable = True
+            elif authenticated_code in protected or authenticated_code == _ZK_ERR_AUTHFAILED:
+                saw_authenticated_denial_after_public = True
 
     if saw_confirmed_transition:
         return "valid"
     if saw_protected and saw_unchanged_denial:
+        return "rejected"
+    if saw_authenticated_denial_after_public:
         return "rejected"
     if saw_anonymous_readable and saw_authenticated_readable:
         return "unverified_anonymous"
@@ -831,6 +863,16 @@ def _audit_zookeeper_host(
                 )
 
             if provided_credentials and normalized_username is not None and normalized_password is not None:
+                verification_paths = _credential_verifier_candidates(
+                    list(root_children or []),
+                    query_znode,
+                    auth_probe_trace,
+                )
+                anonymous_verification_results, _anonymous_verification_errors = _collect_session_auth_probes(
+                    client,
+                    verification_paths,
+                    known_root_err=int(anonymous_root_err),
+                )
                 auth_started = time.monotonic()
                 authenticated_client = _new_client(selected_transport_config)
                 clients_to_close.append(authenticated_client)
@@ -839,25 +881,26 @@ def _audit_zookeeper_host(
                 auth_ms = int((time.monotonic() - auth_started) * 1000)
                 last_auth_ms = auth_ms
                 if auth_applied_ok:
-                    _authenticated_children, authenticated_root_err, _ = authenticated_client.get_children2("/")
-                    if (
-                        anonymous_root_err in {_ZK_ERR_NOAUTH, _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH}
-                        and authenticated_root_err == _ZK_ERR_OK
-                    ):
+                    authenticated_verification_results, _authenticated_verification_errors = (
+                        _collect_session_auth_probes(authenticated_client, verification_paths)
+                    )
+                    authenticated_root_err = authenticated_verification_results.get("/")
+                    probe_verdict = _credential_probe_verdict(
+                        anonymous_verification_results,
+                        authenticated_verification_results,
+                    )
+                    if probe_verdict == "valid":
                         provided_credentials_ok = True
                         credential_verdict = "valid"
                         client = authenticated_client
-                        root_err = authenticated_root_err
-                    elif anonymous_root_err == _ZK_ERR_OK and authenticated_root_err == _ZK_ERR_OK:
+                        if authenticated_root_err is not None:
+                            root_err = authenticated_root_err
+                    elif probe_verdict == "unverified_anonymous":
                         # A successful digest frame only adds an identity to the session.
                         # It does not prove that the supplied secret grants any protected access.
                         provided_credentials_ok = None
                         credential_verdict = "unverified_anonymous"
-                    elif authenticated_root_err in {
-                        _ZK_ERR_NOAUTH,
-                        _ZK_ERR_AUTHFAILED,
-                        _ZK_ERR_SESSION_CLOSED_REQUIRES_AUTH,
-                    }:
+                    elif probe_verdict == "rejected":
                         provided_credentials_ok = False
                         credential_verdict = "rejected"
                     else:
@@ -1635,6 +1678,10 @@ def _zookeeper_lifecycle_payload(
         "provided_password": credential.password if provided and credential.source != "default" else None,
         "provided_credentials_ok": provided_credentials_ok,
         "credential_verdict": credential_verdict,
+        "credential_verification_requested": state.credential_verification_status != "not_requested",
+        "credential_verification_status": state.credential_verification_status,
+        "credential_verification_path": state.credential_verification_path,
+        "credential_verification_reason": state.credential_verification_reason,
         "defcreds_enabled": credential.source == "default",
         "show_znodes": bool(options["show_znodes"]),
         "dump": bool(options["dump"]),
@@ -1652,6 +1699,9 @@ def _zookeeper_lifecycle_payload(
         "can_create_znode": None,
         "can_delete_znode": None,
         "znode_capability_error": None,
+        "probe_write_requested": bool(options.get("probe_write", False)),
+        "znode_capability_scope": "/" if bool(options.get("probe_write", False)) else None,
+        "znode_capability_identity": None,
         "auth_inference_source": state.auth_inference_source,
         "auth_probe_trace": list(state.auth_probe_trace),
         "anonymous_auth_probe_results": _serialized_auth_probe_results(
@@ -1660,7 +1710,7 @@ def _zookeeper_lifecycle_payload(
         ),
         "credential_auth_probe_results": {},
         "auth_mechanism": "digest",
-        "verification_capability": "available",
+        "verification_capability": state.credential_verification_status,
         "connect_ms": None,
         "auth_ms": None,
         "enumerate_ms": None,
@@ -1831,7 +1881,8 @@ def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
                 or getattr(ctx.args, "password", None) is not None
             )
             if auth_requested:
-                probe_paths = _credential_verification_paths(
+                probe_paths = _credential_verifier_candidates(
+                    list(root_children or []),
                     options.get("query_znode"),
                     trace,
                 )
@@ -1842,9 +1893,19 @@ def detect_zookeeper(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
                 )
                 state.anonymous_auth_probe_results = probe_results
                 state.anonymous_auth_probe_errors = probe_errors
+                state.credential_verification_path = _protected_credential_verification_path(probe_results)
+                if state.credential_verification_path is not None:
+                    state.credential_verification_status = "available"
+                    state.credential_verification_reason = None
+                else:
+                    state.credential_verification_status = "unavailable"
+                    state.credential_verification_reason = "no protected znode found"
             else:
                 state.anonymous_auth_probe_results = {"/": int(root_err)}
                 state.anonymous_auth_probe_errors = {}
+                state.credential_verification_path = None
+                state.credential_verification_status = "not_requested"
+                state.credential_verification_reason = None
             if root_err == _ZK_ERR_OK:
                 status = "auth_required" if auth_required is True else "open_no_auth"
                 error = None
@@ -1911,6 +1972,22 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
     if credential.username is None and credential.password is None:
         return payload
 
+    if state.credential_verification_status == "unavailable":
+        _zookeeper_update_lifecycle_payload(
+            payload,
+            _zookeeper_lifecycle_payload(
+                ctx,
+                options,
+                state,
+                status="open_no_auth" if state.auth_required is False else "auth_required",
+                is_zookeeper=True,
+                provided_credentials_ok=None,
+                credential_verdict="verification_unavailable",
+                error=None,
+            ),
+        )
+        return payload
+
     username = credential.username or ""
     password = credential.password or ""
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
@@ -1961,9 +2038,10 @@ def authenticate_zookeeper(ctx: Any, detect_record: Any, options: Mapping[str, A
     ):
         return _unsupported_sasl()
 
-    probe_paths = tuple(anonymous_probe_results) or _credential_verification_paths(
-        options.get("query_znode"),
-        state.auth_probe_trace,
+    probe_paths = (
+        (state.credential_verification_path,)
+        if state.credential_verification_path is not None
+        else tuple(anonymous_probe_results)
     )
     for attempt in range(attempts):
         client = _zookeeper_lifecycle_client(ctx, state.selected_transport_config)
@@ -2134,6 +2212,66 @@ def _reopen_zookeeper_lifecycle_client(
     if previous is not None and previous is not client:
         previous.close()
     return client
+
+
+def probe_zookeeper_capabilities(ctx: Any, record: Any, options: Mapping[str, Any]) -> dict[str, Any]:
+    """Run the explicitly requested root-scoped ephemeral write probe."""
+
+    state = ctx.lifecycle_state
+    if not isinstance(state, ZooKeeperLifecycleState):
+        raise TypeError("zookeeper lifecycle state is unavailable")
+    payload = dict(record.to_dict() if hasattr(record, "to_dict") else record)
+    requested = bool(options.get("probe_write", False))
+    payload.update(
+        {
+            "probe_write_requested": requested,
+            "znode_capability_scope": "/" if requested else None,
+            "znode_capability_identity": None,
+            "can_create_znode": None,
+            "can_delete_znode": None,
+            "znode_capability_error": None,
+        }
+    )
+    if not requested:
+        return payload
+
+    status = str(payload.get("status") or "")
+    credential = ctx.credential
+    authenticated = status in {"valid_credentials", "weak_default_creds"}
+    anonymous = status in {"open_no_auth", "invalid_credentials_anonymous"}
+    if not authenticated and not anonymous:
+        payload["znode_capability_error"] = "no verified identity available"
+        return payload
+
+    identity = credential.username if authenticated else "anonymous"
+    payload["znode_capability_identity"] = identity or "authenticated"
+    client = _zookeeper_lifecycle_client(ctx, state.selected_transport_config)
+    try:
+        client.connect()
+        if authenticated:
+            auth_ok, auth_error = client.auth_digest(credential.username or "", credential.password or "")
+            if not auth_ok:
+                raise ConnectionError(auth_error or "authentication failed during write probe")
+        create_ok, delete_ok, capability_error = _probe_znode_create_delete(
+            client,
+            str(ctx.host),
+            int(ctx.port),
+        )
+        payload.update(
+            {
+                "can_create_znode": create_ok,
+                "can_delete_znode": delete_ok,
+                "znode_capability_error": capability_error,
+            }
+        )
+    except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+        payload["znode_capability_error"] = _friendly_error_from_exception(exc)
+    finally:
+        # The probe node is ephemeral. Closing this dedicated session is the
+        # final cleanup boundary even when the explicit delete was denied or
+        # its response was lost.
+        client.close()
+    return payload
 
 
 def _refresh_zookeeper_lifecycle_client(
@@ -2307,6 +2445,12 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
     if not isinstance(state, ZooKeeperLifecycleState):
         raise TypeError("zookeeper lifecycle state is unavailable")
     payload = dict(record.to_dict() if hasattr(record, "to_dict") else record)
+    payload.setdefault("can_create_znode", None)
+    payload.setdefault("can_delete_znode", None)
+    payload.setdefault("znode_capability_error", None)
+    payload.setdefault("probe_write_requested", bool(options.get("probe_write", False)))
+    payload.setdefault("znode_capability_scope", "/" if bool(options.get("probe_write", False)) else None)
+    payload.setdefault("znode_capability_identity", None)
     status = str(payload.get("status") or "")
     client = state.credential_clients.get(_zookeeper_lifecycle_key(ctx))
     authenticated = client is not None and status in {"valid_credentials", "weak_default_creds"}
@@ -2332,9 +2476,6 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
                 "znode_values": None,
                 "znodes_truncated": False,
                 "znode_count_partial": False,
-                "can_create_znode": None,
-                "can_delete_znode": None,
-                "znode_capability_error": None,
                 "enumerate_ms": None,
                 "dump_ms": None,
                 "elapsed_ms": 0,
@@ -2594,9 +2735,6 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
             "query_znode_value": query_value,
             "query_znode_dump": query_dump,
             "query_znode_dump_error": query_dump_error,
-            "can_create_znode": None,
-            "can_delete_znode": None,
-            "znode_capability_error": None,
             "enumerate_ms": enumerate_ms if collect_paths else None,
             "dump_ms": dump_ms,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
@@ -2788,6 +2926,22 @@ def _znode_caps_suffix(record: dict[str, Any]) -> str:
     return f"(create:{create_text}) (delete:{delete_text})"
 
 
+def _credential_znode_caps_suffix(record: dict[str, Any], *, username: str | None = None) -> str:
+    """Return root write capabilities only for the verified credential line."""
+
+    if not bool(record.get("probe_write_requested")):
+        return ""
+    identity = str(record.get("znode_capability_identity") or "").strip()
+    if not identity or identity == "anonymous":
+        return ""
+    selected_username = str(record.get("provided_username") or "").strip()
+    if username is not None and selected_username and username != selected_username:
+        return ""
+    suffix = f" {_znode_caps_suffix(record)}"
+    error = str(record.get("znode_capability_error") or "").strip()
+    return f"{suffix} err={_clip(error, 72)}" if error else suffix
+
+
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required_value = record.get("auth_required")
     auth_required_text = (
@@ -2858,10 +3012,6 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     has_attempt_details = isinstance(attempted_credentials, list) and len(attempted_credentials) > 1
 
     if status == "open_no_auth":
-        if record.get("provided_credentials"):
-            credential_verdict = str(record.get("credential_verdict") or "").strip().lower()
-            if credential_verdict.startswith("unverified") or record.get("provided_credentials_ok") is None:
-                return f"{prefix} [!] {_credentials_label(record)} (unverified)"
         return ""
 
     if status == "invalid_credentials_anonymous":
@@ -2872,7 +3022,11 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if status in {"valid_credentials", "weak_default_creds"}:
         if has_attempt_details:
             return ""
-        return _with_optional_znodes(record, f"{prefix} [+] {_credentials_label(record)} {_znode_caps_suffix(record)}")
+        caps = _credential_znode_caps_suffix(
+            record,
+            username=str(record.get("provided_username") or "").strip() or None,
+        )
+        return _with_optional_znodes(record, f"{prefix} [+] {_credentials_label(record)}{caps}")
 
     if status == "auth_required":
         if has_attempt_details:
@@ -2901,8 +3055,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         return []
 
     prefix = _nxc_prefix(record)
-    selected_success_rendered = False
     lines: list[str] = []
+    credential_caps_rendered = False
     for attempt in attempts:
         if not isinstance(attempt, dict):
             continue
@@ -2926,18 +3080,51 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
             lines.append(f"{prefix} [-] {username}:{password_text}")
             continue
         if not accepted:
+            if credential_verdict in {"verification_unavailable", "unverified", "unverified_anonymous"}:
+                continue
             detail = "unsupported:SASL" if credential_verdict == "unsupported_sasl" else "unverified"
             lines.append(f"{prefix} [!] {username}:{password_text} ({detail})")
             continue
-        suffix = ""
-        if not selected_success_rendered:
-            suffix = f" {_znode_caps_suffix(record)}"
-            selected_success_rendered = True
-        lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
+        caps = "" if credential_caps_rendered else _credential_znode_caps_suffix(record, username=username)
+        if caps:
+            credential_caps_rendered = True
+        lines.append(f"{prefix} [+] {username}:{password_text}{caps}")
     return lines
 
 
-def _format_znodes_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+def _format_credential_verification_records(
+    record: dict[str, Any], output_format: str, *, debug: bool = False
+) -> list[str]:
+    if output_format == "json" or record.get("credential_verification_status") != "unavailable":
+        return []
+    if not bool(record.get("credential_verification_requested")):
+        return []
+    prefix = _nxc_prefix(record)
+    reason = str(record.get("credential_verification_reason") or "no protected znode found")
+    line = f"{prefix} [!] credential verification unavailable: {reason}; use --znode <protected-path>"
+    return [line]
+
+
+def _format_znode_capability_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format == "json" or not bool(record.get("probe_write_requested")):
+        return []
+    prefix = _nxc_prefix(record)
+    identity = str(record.get("znode_capability_identity") or "").strip()
+    if not identity:
+        error = str(record.get("znode_capability_error") or "no verified identity available")
+        return [f"{prefix} [!] znode permissions unavailable err={_clip(error, 72)}"]
+    if identity != "anonymous":
+        # Authenticated capabilities are rendered directly beside the
+        # corresponding successful credential line.
+        return []
+    label = "Anonymous znode permissions"
+    suffix = _znode_caps_suffix(record)
+    error = str(record.get("znode_capability_error") or "").strip()
+    tail = f" err={_clip(error, 72)}" if error else ""
+    return [f"{prefix} [*] {label} {suffix}{tail}"]
+
+
+def _format_znodes_detail_records(record: dict[str, Any], output_format: str, *, debug: bool = False) -> list[str]:
     show_znodes = bool(record.get("show_znodes"))
     dump = bool(record.get("dump"))
     query_znode = str(record.get("query_znode") or "").strip()
@@ -3092,10 +3279,10 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
     prefix = _nxc_prefix(record)
     lines = []
     if show_znodes and znode_details:
-        lines.append(f"{prefix} [*] Show Znodes")
-        if unknown_note:
+        lines.append(f"{prefix} [*] Show Znodes (Count:{shown_count})")
+        if debug and unknown_note:
             lines.append(f"{prefix} [*] {unknown_note}")
-        if truncation_note:
+        if debug and truncation_note:
             lines.append(f"{prefix} [*] {truncation_note}")
         for item in znode_details:
             path = str(item.get("path") or "")
@@ -3127,16 +3314,23 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
             lines.append(f"{prefix} <no data>")
     if dump and not query_znode and (znode_values_raw is not None or dump_error):
         lines.append(f"{prefix} [*] Dump Znodes")
-        if unknown_note:
+        if debug and unknown_note:
             lines.append(f"{prefix} [*] {unknown_note}")
-        if truncation_note:
+        if debug and truncation_note:
             lines.append(f"{prefix} [*] {truncation_note}")
         for item in znode_values:
             lines.append(f"{prefix} {item}")
         if dump_error and not znode_values:
             lines.append(f"{prefix} [-] {dump_error}")
     dump_section_rendered = bool(dump and not query_znode and (znode_values_raw is not None or dump_error))
-    if unknown_note and not znode_details and not znode_values and (show_znodes or dump) and not dump_section_rendered:
+    if (
+        debug
+        and unknown_note
+        and not znode_details
+        and not znode_values
+        and (show_znodes or dump)
+        and not dump_section_rendered
+    ):
         lines.append(f"{prefix} [*] {unknown_note}")
     return lines
 

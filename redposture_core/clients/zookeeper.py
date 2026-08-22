@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import errno
 import re
+import secrets
 import socket
 import ssl
 import struct
@@ -1464,7 +1465,10 @@ def _enumerate_znodes_parallel(
 
 
 def _probe_znode_create_delete(client: _ZkClient, host: str, port: int) -> tuple[bool | None, bool | None, str | None]:
-    base_name = f"/redposture_probe_{host.replace('.', '_')}_{port}_{int(time.time() * 1000)}"
+    base_name = (
+        f"/redposture_probe_{host.replace('.', '_').replace(':', '_')}_{port}_"
+        f"{int(time.time() * 1000)}_{secrets.token_hex(6)}"
+    )
     try:
         for index in range(3):
             probe_path = base_name if index == 0 else f"{base_name}_{index}"
@@ -1472,7 +1476,7 @@ def _probe_znode_create_delete(client: _ZkClient, host: str, port: int) -> tuple
             if create_err == _ZK_ERR_NODEEXISTS:
                 continue
             if create_err != _ZK_ERR_OK:
-                return False, False, _zk_error_name(create_err)
+                return False, None, _zk_error_name(create_err)
 
             delete_err = int(client.delete(probe_path, -1))
             if delete_err == _ZK_ERR_OK:
@@ -1483,7 +1487,7 @@ def _probe_znode_create_delete(client: _ZkClient, host: str, port: int) -> tuple
     except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
         return None, None, _friendly_error_from_exception(exc)
 
-    return False, False, "NODEEXISTS"
+    return None, None, "NODEEXISTS"
 
 
 def _znode_detail_entry(path: str, meta: dict[str, Any] | None) -> dict[str, Any]:

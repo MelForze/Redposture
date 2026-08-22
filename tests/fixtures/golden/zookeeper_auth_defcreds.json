@@ -319,14 +319,17 @@
       "/:noauth"
     ],
     "auth_required": true,
-    "can_create_znode": null,
-    "can_delete_znode": null,
+    "can_create_znode": true,
+    "can_delete_znode": true,
     "connect_error": null,
     "credential_auth_probe_results": {
-      "/": "ok",
-      "/redposture-auth": "ok"
+      "/": "ok"
     },
     "credential_verdict": "valid",
+    "credential_verification_path": "/",
+    "credential_verification_reason": null,
+    "credential_verification_requested": true,
+    "credential_verification_status": "available",
     "defcreds_enabled": true,
     "dump": true,
     "dump_error": null,
@@ -344,6 +347,7 @@
     "max_znodes": 2000,
     "module": "zookeeper",
     "port": 22185,
+    "probe_write_requested": true,
     "protocol": "zookeeper",
     "provided_credentials": false,
     "provided_credentials_ok": true,
@@ -409,6 +413,8 @@
     "verification_capability": "available",
     "version": "3.9.5",
     "znode_capability_error": null,
+    "znode_capability_identity": "zk",
+    "znode_capability_scope": "/",
     "znode_count": null,
     "znode_count_attempt_timeouts": [],
     "znode_count_partial": false,

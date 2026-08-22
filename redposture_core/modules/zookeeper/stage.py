@@ -86,6 +86,7 @@ def _build_zookeeper_lifecycle_options(args: Any) -> dict[str, Any]:
         "show_znodes": show_flag_enabled(getattr(args, "show_znodes", False)),
         "dump": dump_flag_enabled(getattr(args, "dump", False)),
         "query_znode": actions._normalize_znode_path(getattr(args, "znode", None)),
+        "probe_write": bool(getattr(args, "probe_write", False)),
         "max_znodes": int(show_limit) if isinstance(show_limit, int) else configured_max,
         "enum_workers": int(getattr(args, "enum_workers", 3) or 3),
         "dump_limit": dump_flag_limit(getattr(args, "dump", False)),
@@ -138,6 +139,13 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
             service="zookeeper",
         )
 
+    def _capabilities(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            engine.probe_zookeeper_implementation_capabilities(ctx, record, options),
+            module="zookeeper",
+            service="zookeeper",
+        )
+
     def _credential_gate(credential: AuditCredentialRun, record: AuditRecord) -> tuple[bool, str]:
         supplied = credential.username is not None or credential.password is not None
         if supplied:
@@ -154,6 +162,7 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
         host_stage=actions.host_stage,
         detect=_detect if use_lifecycle_hooks else None,
         auth=_auth if use_lifecycle_hooks else None,
+        capabilities=_capabilities if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
@@ -162,6 +171,7 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
         # E3 opt-in: ZooKeeper anon-open (default ACLs, no digest ACL on /)
         # is confirmed by the anon probe listing /.
         keep_anonymous_open_no_auth=True,
+        skip_credentials_without_verifier=True,
         credential_gate=_credential_gate,
         continue_after_credential_success=exhaustive_credentials,
         continue_after_credential_error=exhaustive_credentials,
