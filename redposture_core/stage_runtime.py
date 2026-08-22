@@ -444,6 +444,11 @@ class ModuleAuditSpec:
     # `_should_keep_anonymous_detect_record`; other modules opt in via this
     # flag as their credential loop is proven safe to skip on anon-open.
     keep_anonymous_open_no_auth: bool = False
+    # Skip a credential catalog when protocol detection proved there is no
+    # read-only verifier capable of distinguishing accepted from arbitrary
+    # credentials. The detect record must expose
+    # credential_verification_status="unavailable".
+    skip_credentials_without_verifier: bool = False
     # Opt-in text-output policy for discovery-oriented modules. The runner
     # retains matching records for callbacks, debug output, and JSON.
     suppress_undetected_records_in_text: bool = False
@@ -2341,7 +2346,11 @@ class AuditCommandRunner:
         auth_records: list[tuple[AuditCredentialRun, AuditRecord]] = []
         candidates = credential_runs or (AuditCredentialRun(source="anonymous"),)
         retain_all_attempts = self.spec.record_all_credential_attempts or self.spec.continue_after_credential_success
-        if self._should_keep_anonymous_detect_record(detect_record):
+        verifier_unavailable = bool(
+            self.spec.skip_credentials_without_verifier
+            and detect_record.extra.get("credential_verification_status") == "unavailable"
+        )
+        if self._should_keep_anonymous_detect_record(detect_record) or verifier_unavailable:
             selected_credential = AuditCredentialRun(source="anonymous")
             selected_record = detect_record
             if runtime_stage_telemetry:
@@ -2353,7 +2362,7 @@ class AuditCommandRunner:
                     result="ok",
                     debug_emit=debug_emit,
                 )
-            gate_reason = "status=open_no_auth"
+            gate_reason = "credential verification unavailable" if verifier_unavailable else "status=open_no_auth"
         else:
             for credential in candidates:
                 ctx = self._ctx(

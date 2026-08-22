@@ -219,6 +219,10 @@ redposture kubeapi -t 127.0.0.1 --port 6443 --insecure --namespaces --pods
 redposture kubeapi -t 127.0.0.1 --port 6443 --insecure --token "$KUBE_TOKEN" --secrets
 ```
 
+KubeAPI detection requires a canonical Kubernetes `/version`, `/api`, or correlated 401/403 Status pair.
+Authentication inference uses one bounded `namespaces?limit=1` request; full pagination and pod/secret reads
+only run after usable anonymous or authenticated access is established and the corresponding action is requested.
+
 PostgreSQL enumeration and privilege-risk check:
 
 ```bash
@@ -284,11 +288,14 @@ redposture zookeeper -t 127.0.0.1 --port 9281 --insecure --show-znodes 20
 ZooKeeper `--defcreds` tries a fixed set of 34 digest username/password pairs. Explicit credentials or
 credential-file entries are attempted first, defaults are appended once with stable deduplication, and the
 defaults are ordered alphabetically by login and then password. The full catalog is checked even after one
-or more identities are confirmed. The first confirmed identity is retained for znode analysis. Candidates
-are also probed when znodes are anonymously readable, while data collection falls back to the anonymous
-session if none can be verified. A run therefore makes up to 34 digest authentication attempts per target
-(plus unique explicit/file entries). Use this option only with authorization and account for server-side
-lockout, throttling, and alerting policies.
+or more identities are confirmed. The first confirmed identity is retained for znode analysis. A credential
+is only accepted when the same ACL-protected path changes from anonymous `NOAUTH` to authenticated `OK`;
+a successful ZooKeeper `addAuth` frame alone does not validate a password. For an anonymously readable root,
+RedPosture checks the explicit `--znode` and at most 32 direct children for a protected verifier. If none is
+available, the default catalog is skipped and one verification-unavailable warning suggests supplying a known
+protected `--znode`. A verifiable run makes up to 34 digest authentication attempts per target (plus unique
+explicit/file entries). Use this option only with authorization and account for server-side lockout,
+throttling, and alerting policies.
 
 The focused auth-required lab protects `/` and `/redposture-auth` with a digest ACL for
 `zk:zookeeper`. In the alphabetical catalog that pair is intentionally the 31st default candidate:
@@ -306,7 +313,16 @@ docker compose -f lab/services/zookeeper-auth/docker-compose.yml down -v
 Keeper, or an unconfirmed ZooKeeper-compatible service. TLS trust and mTLS use `--ca-file`, `--insecure`,
 `--tls-cert`, and `--tls-key`; an explicit `host:port` or `--port` still takes priority. Detection is
 read-only. Znode traversal only runs with `--show-znodes` or `--dump`, while `--znode` reads that path
-directly. A disabled or ambiguous four-letter interface never forces a Keeper label.
+directly. `--show-znodes` reports the number of displayed paths as `Show Znodes (Count:N)`; partial/tree-limit
+diagnostics remain available with `--debug` and in JSON. A disabled or ambiguous four-letter interface never
+forces a Keeper label.
+
+`--probe-write` is the only write-capable ZooKeeper action. It opens a separate short-lived session, creates a
+unique empty ephemeral znode under `/`, tests deletion, and closes the session as a final cleanup boundary.
+The resulting `create`/`delete` values therefore describe the selected identity's permissions at root scope,
+not every subtree. Without `--probe-write`, credential lines never display speculative capability values and
+the module remains read-only. For a verified credential, the confirmed `(create:...) (delete:...)`
+capabilities are appended to its `[+] user:password` line; anonymous capabilities remain a separate line.
 
 Start the focused lab (three-node Keeper cluster, TLS standalone, a Keeper with diagnostic four-letter commands disabled, seeded znodes, and an Apache ZooKeeper classification control):
 
@@ -319,6 +335,7 @@ Run high-signal plaintext, TLS, unconfirmed-fallback, and Apache-classification 
 
 ```bash
 redposture zookeeper -t 127.0.0.1 --port 9181,19181,29181 --show-znodes 20 --dump 20 --enum-workers 3 -d -f json
+redposture zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --probe-write
 redposture zookeeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10 -d -f json
 redposture zookeeper -t 127.0.0.1 --port 39181 --znode /keeper/api_version --dump -f json
 redposture zookeeper -t 127.0.0.1 --port 12181 --show-znodes 5 -d -f json

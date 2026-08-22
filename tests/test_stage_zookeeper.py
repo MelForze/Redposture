@@ -990,8 +990,10 @@ def test_merge_stage2_record_marks_unknown_partial_and_timeout_note() -> None:
     assert merged["debug_events"] == ["stage1", "stage2"]
 
     detail_lines = _format_znodes_detail_records(merged, "txt")
-    assert any("znode count unknown (partial)" in line for line in detail_lines)
-    assert any("timeouts=3s,3s,3s" in line for line in detail_lines)
+    assert not any("znode count unknown (partial)" in line for line in detail_lines)
+    debug_lines = _format_znodes_detail_records(merged, "txt", debug=True)
+    assert any("znode count unknown (partial)" in line for line in debug_lines)
+    assert any("timeouts=3s,3s,3s" in line for line in debug_lines)
 
 
 def test_audit_host_show_action_enumerates_without_write_capability_probe(
@@ -1259,12 +1261,12 @@ def test_audit_zookeeper_digest_on_open_target_is_unverified(monkeypatch) -> Non
     )
 
     assert calls["auth"] == 1
-    assert record["status"] == "open_no_auth"
-    assert record["provided_credentials_ok"] is None
-    assert record["credential_verdict"] == "unverified_anonymous"
+    assert record["status"] == "invalid_credentials_anonymous"
+    assert record["provided_credentials_ok"] is False
+    assert record["credential_verdict"] == "rejected"
     assert record["auth_required"] is False
     rendered = _format_record(record, "txt")
-    assert "[!] admin:admin (unverified)" in rendered
+    assert "[-] admin:admin" in rendered
     assert "(auth required:False)" in zookeeper_stage._format_detect_record(record, "txt")
     assert any("/clickhouse:<Access Denied>" in line for line in _format_znodes_detail_records(record, "txt"))
 
@@ -1748,6 +1750,28 @@ def test_format_record_shows_zookeeper_password_for_valid_credentials() -> None:
     assert "[+] admin:admin" in line
 
 
+def test_format_record_places_authenticated_write_capabilities_after_credentials() -> None:
+    record = {
+        "status": "valid_credentials",
+        "host": "127.0.0.1",
+        "port": 22185,
+        "provided_username": "zk",
+        "provided_password": "zookeeper",
+        "probe_write_requested": True,
+        "znode_capability_scope": "/",
+        "znode_capability_identity": "zk",
+        "can_create_znode": True,
+        "can_delete_znode": True,
+        "znode_count": 1,
+    }
+
+    line = _format_record(record, "txt")
+
+    assert "[+] zk:zookeeper (create:True) (delete:True)" in line
+    assert "scope:" not in line
+    assert lifecycle_actions._format_znode_capability_records(record, "txt") == []
+
+
 def test_format_record_renders_confirmed_default_credentials_as_success() -> None:
     line = _format_record(
         {
@@ -1985,7 +2009,7 @@ def test_format_record_shows_single_unverified_explicit_credential() -> None:
         "credential_verdict": "unverified_anonymous",
     }
 
-    assert "[!] admin:secret (unverified)" in _format_record(record, "txt")
+    assert _format_record(record, "txt") == ""
 
 
 def test_format_record_does_not_repeat_auth_required_without_credentials() -> None:
@@ -2018,7 +2042,10 @@ def test_format_znodes_detail_records_shows_truncation_note() -> None:
         ],
     }
     txt_lines = _format_znodes_detail_records(record, "txt")
-    assert any("showing first 2 of 3000 znodes (max_znodes=2000)" in line for line in txt_lines)
+    assert any("Show Znodes (Count:2)" in line for line in txt_lines)
+    assert not any("showing first" in line for line in txt_lines)
+    debug_lines = _format_znodes_detail_records(record, "txt", debug=True)
+    assert any("showing first 2 of 3000 znodes (max_znodes=2000)" in line for line in debug_lines)
     assert any("/a:<empty>" in line for line in txt_lines)
     assert any("/b:<Access Denied>" in line for line in txt_lines)
 
@@ -2504,7 +2531,7 @@ def test_probe_znode_create_delete_nodeexists_and_exceptions() -> None:
 
     nodeexists_client = _NodeExistsClient()
     create_ok, delete_ok, err = zookeeper_stage._probe_znode_create_delete(nodeexists_client, "127.0.0.1", 2181)
-    assert (create_ok, delete_ok, err) == (False, False, "NODEEXISTS")
+    assert (create_ok, delete_ok, err) == (None, None, "NODEEXISTS")
     assert nodeexists_client.calls == 3
 
     class _NoCreateClient:
@@ -2522,6 +2549,167 @@ def test_probe_znode_create_delete_nodeexists_and_exceptions() -> None:
 
     create_ok, delete_ok, err = zookeeper_stage._probe_znode_create_delete(_TimeoutClient(), "127.0.0.1", 2181)
     assert (create_ok, delete_ok, err) == (None, None, "connection timeout")
+
+    class _CreateDeniedClient:
+        def create(self, _path: str) -> int:
+            return _ZK_ERR_NOAUTH
+
+    assert zookeeper_stage._probe_znode_create_delete(_CreateDeniedClient(), "127.0.0.1", 2181) == (
+        False,
+        None,
+        "NOAUTH",
+    )
+
+    class _DeleteDeniedClient:
+        def create(self, _path: str) -> int:
+            return _ZK_ERR_OK
+
+        def delete(self, _path: str, _version: int = -1) -> int:
+            return _ZK_ERR_NOAUTH
+
+    assert zookeeper_stage._probe_znode_create_delete(_DeleteDeniedClient(), "127.0.0.1", 2181) == (
+        True,
+        False,
+        "NOAUTH",
+    )
+
+
+def test_zookeeper_explicit_write_probe_and_capability_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[object] = []
+
+    class FakeClient:
+        def connect(self) -> None:
+            calls.append("connect")
+
+        def create(self, path: str) -> int:
+            calls.append(("create", path))
+            return _ZK_ERR_OK
+
+        def delete(self, path: str, version: int = -1) -> int:
+            calls.append(("delete", path, version))
+            return _ZK_ERR_OK
+
+        def close(self) -> None:
+            calls.append("close")
+
+    state = lifecycle_actions.ZooKeeperLifecycleState()
+    monkeypatch.setattr(lifecycle_actions, "_zookeeper_lifecycle_client", lambda *_args, **_kwargs: FakeClient())
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+    )
+    options = {**_lifecycle_options(), "probe_write": True}
+
+    record = lifecycle_actions.probe_zookeeper_capabilities(ctx, {"status": "open_no_auth"}, options)
+
+    assert record["can_create_znode"] is True
+    assert record["can_delete_znode"] is True
+    assert record["znode_capability_scope"] == "/"
+    assert record["znode_capability_identity"] == "anonymous"
+    create_path = next(value[1] for value in calls if isinstance(value, tuple) and value[0] == "create")
+    assert create_path.startswith("/redposture_probe_127_0_0_1_2181_")
+    assert ("delete", create_path, -1) in calls
+    assert calls[-1] == "close"
+    capability_lines = lifecycle_actions._format_znode_capability_records(record, "txt")
+    assert len(capability_lines) == 1
+    assert capability_lines[0].endswith("[*] Anonymous znode permissions (create:True) (delete:True)")
+    assert "scope:" not in capability_lines[0]
+
+
+def test_zookeeper_write_probe_absent_is_read_only_and_verifier_search_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = lifecycle_actions.ZooKeeperLifecycleState()
+    monkeypatch.setattr(
+        lifecycle_actions,
+        "_zookeeper_lifecycle_client",
+        lambda *_args, **_kwargs: pytest.fail("write client must not open without --probe-write"),
+    )
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(timeout=0.1),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+    )
+    record = lifecycle_actions.probe_zookeeper_capabilities(
+        ctx,
+        {"status": "open_no_auth"},
+        {**_lifecycle_options(), "probe_write": False},
+    )
+    assert record["probe_write_requested"] is False
+    assert lifecycle_actions._format_znode_capability_records(record, "txt") == []
+
+    candidates = lifecycle_actions._credential_verifier_candidates(
+        [f"child-{index:02d}" for index in range(40)],
+        "/explicit",
+    )
+    assert candidates[:2] == ("/", "/explicit")
+    assert len(candidates) == 34
+    assert candidates[-1] == "/child-31"
+    assert (
+        lifecycle_actions._protected_credential_verification_path(
+            {"/": _ZK_ERR_OK, "/public": _ZK_ERR_OK, "/protected": _ZK_ERR_NOAUTH}
+        )
+        == "/protected"
+    )
+
+
+def test_zookeeper_verification_unavailable_is_one_aggregate_line() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 2181,
+        "credential_verification_requested": True,
+        "credential_verification_status": "unavailable",
+        "credential_verification_reason": "no protected znode found",
+    }
+    lines = lifecycle_actions._format_credential_verification_records(record, "txt")
+    assert len(lines) == 1
+    assert lines[0].endswith(
+        "[!] credential verification unavailable: no protected znode found; use --znode <protected-path>"
+    )
+    assert lifecycle_actions._format_credential_verification_records(record, "json") == []
+
+
+def test_zookeeper_detect_finds_protected_direct_child_as_exact_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeClient:
+        selected_transport = "plaintext"
+
+        def connect(self) -> None:
+            return
+
+        def get_children2(self, path: str):
+            if path == "/":
+                return ["public", "protected"], _ZK_ERR_OK, {"data_length": 0, "num_children": 2}
+            if path == "/protected":
+                return None, _ZK_ERR_NOAUTH, None
+            return [], _ZK_ERR_OK, {"data_length": 0, "num_children": 0}
+
+        def close(self) -> None:
+            return
+
+    state = lifecycle_actions.ZooKeeperLifecycleState()
+    monkeypatch.setattr(lifecycle_actions, "_zookeeper_lifecycle_client", lambda *_args, **_kwargs: FakeClient())
+    ctx = SimpleNamespace(
+        lifecycle_state=state,
+        args=SimpleNamespace(timeout=0.1, retries=0, defcreds=True, username=None, password=None),
+        host="127.0.0.1",
+        port=2181,
+        credential=SimpleNamespace(username=None, password=None, source="anonymous"),
+    )
+
+    record = lifecycle_actions.detect_zookeeper(ctx, _lifecycle_options())
+
+    assert record["status"] == "open_no_auth"
+    assert record["auth_required"] is False
+    assert record["credential_verification_status"] == "available"
+    assert record["credential_verification_path"] == "/protected"
+    assert record["anonymous_auth_probe_results"]["/protected"] == "noauth"
 
 
 def test_detail_entry_and_auth_probe_helpers() -> None:
@@ -2845,6 +3033,7 @@ def test_audit_targets_writes_output_file_and_append(monkeypatch: pytest.MonkeyP
         max_znodes=2000,
         output_path=str(out_path),
         output_format="txt",
+        debug=True,
         append_output=False,
     )
     assert totals == (1, 0, 1, 0, 0)
@@ -3663,6 +3852,7 @@ def test_formatting_remaining_text_branches() -> None:
             "znodes_truncated": True,
         },
         output_format="txt",
+        debug=True,
     )
     assert any("[*] Dump Znodes" in line for line in dump_lines)
     assert any("showing first" in line for line in dump_lines)
@@ -4817,7 +5007,7 @@ def test_lifecycle_refresh_failure_marks_tree_scan_unknown_and_visible(
     assert "enum_error" in lifecycle_actions._format_record(record, "json")
     assert any(
         "znode count unknown (partial) reason=session refresh failed: connection reset by peer" in line
-        for line in lifecycle_actions._format_znodes_detail_records(record, "txt")
+        for line in lifecycle_actions._format_znodes_detail_records(record, "txt", debug=True)
     )
 
     merged = lifecycle_actions._merge_stage2_record(
@@ -4988,7 +5178,7 @@ def test_lifecycle_show_znodes_reports_hard_limit_as_partial(
     assert record["znode_count_partial"] is True
     assert record["znode_count_unknown"] is True
     assert record["znode_truncated_reason"] == "max_znodes"
-    detail_lines = lifecycle_actions._format_znodes_detail_records(record, "txt")
+    detail_lines = lifecycle_actions._format_znodes_detail_records(record, "txt", debug=True)
     assert any("scanned first 2 znodes; more may exist" in line for line in detail_lines)
 
 
@@ -5040,7 +5230,7 @@ def test_lifecycle_noauth_subtree_reports_partial_coverage(
     assert record["znode_count_partial"] is True
     assert record["znode_count_unknown"] is True
     assert record["znode_truncated_reason"] == "noauth"
-    detail_lines = lifecycle_actions._format_znodes_detail_records(record, "txt")
+    detail_lines = lifecycle_actions._format_znodes_detail_records(record, "txt", debug=True)
     assert any("scan partial: one or more znode subtrees are access denied" in line for line in detail_lines)
     assert not any("max_znodes=" in line for line in detail_lines)
 
@@ -5454,15 +5644,19 @@ def test_zookeeper_credential_file_preserves_password_bytes_into_digest_auth(
     class _ExactCredentialClient:
         selected_transport = "plaintext"
 
+        def __init__(self) -> None:
+            self.authenticated = False
+
         def connect(self) -> None:
             return None
 
         def auth_digest(self, username: str, password: str):
             observed.append((username, password))
+            self.authenticated = True
             return True, None
 
         def get_children2(self, _path: str):
-            return [], _ZK_ERR_OK, {}
+            return [], _ZK_ERR_OK if self.authenticated else _ZK_ERR_NOAUTH, {}
 
         def close(self) -> None:
             return None
@@ -5630,6 +5824,7 @@ def test_zookeeper_defcreds_checks_full_catalog_after_late_digest_success(
     attempted_credentials = record["attempted_credentials"]
     assert isinstance(attempted_credentials, list)
     assert len(attempted_credentials) == len(lifecycle_stage._DEFAULT_CREDENTIALS)
+    assert record["credential_verification_status"] == "available"
     rendered = lifecycle_actions._format_credential_attempts_records(record, "txt")
     assert len(rendered) == len(lifecycle_stage._DEFAULT_CREDENTIALS)
     assert any("[+] zk:zookeeper" in line for line in rendered)
@@ -5670,7 +5865,43 @@ def test_zookeeper_credential_attempt_renderer_distinguishes_rejected_and_unveri
 
     assert any("[-] bad:secret" in line for line in rendered)
     assert any("[!] sasl:secret (unsupported:SASL)" in line for line in rendered)
-    assert any("[!] network:secret (unverified)" in line for line in rendered)
+    assert not any("network:secret" in line for line in rendered)
+
+
+def test_zookeeper_credential_attempt_renderer_attaches_capabilities_only_to_selected_success() -> None:
+    record = {
+        "module": "zookeeper",
+        "host": "127.0.0.1",
+        "port": 22185,
+        "provided_username": "zk",
+        "probe_write_requested": True,
+        "znode_capability_scope": "/",
+        "znode_capability_identity": "zk",
+        "can_create_znode": True,
+        "can_delete_znode": True,
+        "attempted_credentials": [
+            {
+                "username": "admin",
+                "password": "admin",
+                "status": "auth_required",
+                "provided_credentials_ok": False,
+                "credential_verdict": "rejected",
+            },
+            {
+                "username": "zk",
+                "password": "zookeeper",
+                "status": "weak_default_creds",
+                "provided_credentials_ok": True,
+                "credential_verdict": "valid",
+            },
+        ],
+    }
+
+    rendered = lifecycle_actions._format_credential_attempts_records(record, "txt")
+
+    assert rendered[1].endswith("[+] zk:zookeeper (create:True) (delete:True)")
+    assert all("scope:" not in line for line in rendered)
+    assert lifecycle_actions._format_znode_capability_records(record, "txt") == []
 
 
 def test_zookeeper_explicit_pair_matching_default_is_not_classified_as_weak(
@@ -5702,9 +5933,8 @@ def test_zookeeper_anonymous_access_checks_defcreds_then_uses_anonymous_data(
         anonymous_open=True,
     )
 
-    assert tuple(auth_attempts) == lifecycle_stage._DEFAULT_CREDENTIALS
+    assert auth_attempts == []
     assert data_calls == 1
     assert record["status"] == "open_no_auth"
-    attempted_credentials = record["attempted_credentials"]
-    assert isinstance(attempted_credentials, list)
-    assert len(attempted_credentials) == len(lifecycle_stage._DEFAULT_CREDENTIALS)
+    assert record["attempted_credentials"] == []
+    assert record["credential_verification_status"] == "unavailable"

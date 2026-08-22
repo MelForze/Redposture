@@ -185,9 +185,19 @@ def test_kube_status_message_resolution() -> None:
 
 
 def test_kube_payload_and_version_helpers() -> None:
-    assert kube._looks_like_kube_api_payload({"gitVersion": "v1.31.0"}) is True
-    assert kube._looks_like_kube_api_payload({"kind": "NamespaceList"}) is True
+    assert kube._looks_like_kube_api_payload({"gitVersion": "v1.31.0"}) is False
+    assert kube._looks_like_kube_api_payload({"kind": "NamespaceList"}) is False
+    assert kube._looks_like_kube_api_payload({"major": "1", "minor": "31+", "gitVersion": "v1.31.0"}) is True
+    assert kube._looks_like_kube_api_payload({"kind": "APIVersions", "apiVersion": "v1", "versions": ["v1"]}) is True
     assert kube._looks_like_kube_api_payload({"hello": "world"}) is False
+    assert (
+        kube._looks_like_kube_auth_status(
+            401,
+            {"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "Unauthorized", "code": 401},
+        )
+        is True
+    )
+    assert kube._looks_like_kube_auth_status(404, {"kind": "Status", "apiVersion": "v1", "code": 404}) is False
 
     assert kube._kube_version_text({"gitVersion": "v1.30.2"}) == "v1.30.2"
     assert kube._kube_version_text({"major": "1", "minor": "31"}) == "v1.31"
@@ -277,7 +287,9 @@ def test_kubeapi_auth_required_skips_requested_anonymous_resource_probes(
         "_api_get_json",
         lambda _host, _port, path, _timeout, **_kwargs: (
             200,
-            {"gitVersion": "v1.31.0"} if path == "/version" else {"versions": ["v1"]},
+            {"major": "1", "minor": "31", "gitVersion": "v1.31.0"}
+            if path == "/version"
+            else {"kind": "APIVersions", "apiVersion": "v1", "versions": ["v1"]},
             {},
             None,
         ),
@@ -335,7 +347,7 @@ def test_kubeapi_auth_required_skips_requested_anonymous_resource_probes(
     assert secret_calls == []
     assert exec_calls == []
     assert any("auth required:True" in line for line in lines)
-    assert any("authentication required" in line for line in lines)
+    assert not any("authentication required" in line for line in lines)
     assert all("Namespaces" not in line and "Pods" not in line and "Secrets" not in line for line in lines)
     assert all("<no pods>" not in line for line in lines)
 
@@ -442,8 +454,8 @@ def test_audit_kubeapi_host_open_no_auth_with_tls_fallback_and_exec(monkeypatch:
         if not insecure:
             return 0, None, {}, "tls verification failed"
         if path == "/version":
-            return 200, {"gitVersion": "v1.31.6+k3s1"}, {}, None
-        return 200, {"versions": ["v1"]}, {}, None
+            return 200, {"major": "1", "minor": "31", "gitVersion": "v1.31.6+k3s1"}, {}, None
+        return 200, {"kind": "APIVersions", "apiVersion": "v1", "versions": ["v1"]}, {}, None
 
     monkeypatch.setattr(kube, "_api_get_json", fake_api_get_json)
     monkeypatch.setattr(kube, "_list_namespaces", lambda *_args, **_kwargs: (["default"], 200, None))
@@ -513,7 +525,9 @@ def test_audit_kubeapi_host_uses_token_when_anonymous_is_denied(monkeypatch: pyt
         "_api_get_json",
         lambda _host, _port, path, _timeout, **_kwargs: (
             200,
-            {"gitVersion": "v1.31.6+k3s1"} if path == "/version" else {"versions": ["v1"]},
+            {"major": "1", "minor": "31", "gitVersion": "v1.31.6+k3s1"}
+            if path == "/version"
+            else {"kind": "APIVersions", "apiVersion": "v1", "versions": ["v1"]},
             {},
             None,
         ),
@@ -614,7 +628,9 @@ def test_audit_kubeapi_host_basic_auth_failure_and_exec_argument_errors(monkeypa
         "_api_get_json",
         lambda _host, _port, path, _timeout, **_kwargs: (
             200,
-            {"gitVersion": "v1.31.6"} if path == "/version" else {"versions": ["v1"]},
+            {"major": "1", "minor": "31", "gitVersion": "v1.31.6"}
+            if path == "/version"
+            else {"kind": "APIVersions", "apiVersion": "v1", "versions": ["v1"]},
             {},
             None,
         ),
@@ -1103,7 +1119,9 @@ def test_audit_kubeapi_host_debug_stage_telemetry_and_passive_capabilities(monke
         "_api_get_json",
         lambda _host, _port, path, _timeout, **_kwargs: (
             200,
-            {"gitVersion": "v1.31.6"} if path == "/version" else {"versions": ["v1"]},
+            {"major": "1", "minor": "31", "gitVersion": "v1.31.6"}
+            if path == "/version"
+            else {"kind": "APIVersions", "apiVersion": "v1", "versions": ["v1"]},
             {},
             None,
         ),
@@ -1630,8 +1648,9 @@ def test_kube_list_pods_and_secrets_namespace_branches(monkeypatch: pytest.Monke
         token: str | None = None,
         username: str | None = None,
         password: str | None = None,
+        client: object | None = None,
     ) -> tuple[list[dict[str, object]] | None, int, str | None]:
-        _ = (use_https, insecure, ca_file, token, username, password)
+        _ = (use_https, insecure, ca_file, token, username, password, client)
         state["calls"] += 1
         if "/pods" in path:
             namespace = "finance" if "finance" in path else "ops"
@@ -1697,9 +1716,7 @@ def test_kube_list_pods_and_secrets_namespace_branches(monkeypatch: pytest.Monke
 def test_kube_status_summary_detail_and_renderer_branches() -> None:
     assert kube._status_summary_line({"status": "fail"}) is None
     assert kube._status_summary_line({"status": "not_kubeapi"}) is None
-    assert kube._status_summary_line({"status": "open_no_auth", "auth_mode": "none", "auth_required": True}) == (
-        "[-] authentication required"
-    )
+    assert kube._status_summary_line({"status": "open_no_auth", "auth_mode": "none", "auth_required": True}) is None
     assert (
         kube._status_summary_line(
             {

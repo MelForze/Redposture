@@ -320,7 +320,7 @@ run_case kafka kafka_tls_explicit_user 0 kafka -t 127.0.0.1 --port 29093 --tls -
 
 run_case zookeeper zookeeper_default 0 zookeeper -t 127.0.0.1 --show-znodes --dump
 run_case zookeeper zookeeper_multi_ports 0 zookeeper -t 127.0.0.1 --ports "2181,22181,22182,22183,22184" --show-znodes --dump
-run_case zookeeper zookeeper_auth_defcreds 0 zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --dump
+run_case zookeeper zookeeper_auth_defcreds 0 zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --dump --probe-write
 
 run_case proxmox proxmox_audit 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "audit@pve!redposture=pve-redposture-token-2026" --nodes --users
 run_case proxmox proxmox_admin 0 proxmox -t 127.0.0.1 --port 18006 --insecure --pveapitoken "admin@pve!root=pve-redposture-admin-2026" --discover-creds --nodes --users

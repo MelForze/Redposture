@@ -128,6 +128,10 @@ def _implementation_detection_payload(
         "provided_password": None,
         "provided_credentials_ok": None,
         "credential_verdict": None,
+        "credential_verification_requested": False,
+        "credential_verification_status": "not_requested",
+        "credential_verification_path": None,
+        "credential_verification_reason": None,
         "show_znodes": bool(options["show_znodes"]),
         "dump": bool(options["dump"]),
         "dump_limit": options["dump_limit"],
@@ -144,6 +148,9 @@ def _implementation_detection_payload(
         "can_create_znode": None,
         "can_delete_znode": None,
         "znode_capability_error": None,
+        "probe_write_requested": bool(options.get("probe_write", False)),
+        "znode_capability_scope": "/" if bool(options.get("probe_write", False)) else None,
+        "znode_capability_identity": None,
         "auth_inference_source": "anonymous_root",
         "auth_probe_trace": [],
         "transport": transport,
@@ -248,10 +255,26 @@ def collect_zookeeper_implementation_data(
     return _decorate_implementation_record(result, fingerprint)
 
 
+def probe_zookeeper_implementation_capabilities(
+    ctx: Any,
+    record: Any,
+    options: Mapping[str, Any],
+) -> dict[str, Any]:
+    state = ctx.lifecycle_state
+    if not isinstance(state, ZooKeeperImplementationLifecycleState):
+        raise TypeError("ZooKeeper implementation lifecycle state is unavailable")
+    zookeeper_ctx = replace(ctx, lifecycle_state=state.zookeeper_state)
+    result = zookeeper_actions.probe_zookeeper_capabilities(zookeeper_ctx, record, options)
+    if state.fingerprint is None:
+        return result
+    return _decorate_implementation_record(result, state.fingerprint)
+
+
 __all__ = [
     "ZooKeeperImplementationLifecycleState",
     "_transport_config",
     "detect_zookeeper_implementation",
     "authenticate_zookeeper_implementation",
     "collect_zookeeper_implementation_data",
+    "probe_zookeeper_implementation_capabilities",
 ]

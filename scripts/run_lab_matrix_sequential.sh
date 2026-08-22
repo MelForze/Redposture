@@ -841,7 +841,7 @@ run_zookeeper_cases() {
 }
 
 run_zookeeper_auth_cases() {
-  run_case zookeeper zookeeper_auth_defcreds 0 zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --dump
+  run_case zookeeper zookeeper_auth_defcreds 0 zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --dump --probe-write
 }
 
 run_keeper_cases() {

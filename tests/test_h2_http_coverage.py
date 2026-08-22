@@ -557,8 +557,8 @@ def test_kubeapi_detect_retries_with_insecure_tls_after_verify_failure(
         if not insecure:
             return 0, None, {}, "certificate verify failed: self signed certificate"
         if path == "/version":
-            return 200, {"gitVersion": "v1.31.0"}, {}, None
-        return 200, {"kind": "APIVersions", "versions": ["v1"]}, {}, None
+            return 200, {"major": "1", "minor": "31", "gitVersion": "v1.31.0"}, {}, None
+        return 200, {"kind": "APIVersions", "apiVersion": "v1", "versions": ["v1"]}, {}, None
 
     monkeypatch.setattr(kubeapi, "_api_get_json", fake_api)
     monkeypatch.setattr(kubeapi, "_list_namespaces", lambda *_args, **_kwargs: (None, 403, "Forbidden"))
@@ -569,12 +569,7 @@ def test_kubeapi_detect_retries_with_insecure_tls_after_verify_failure(
         _kube_options(show_namespaces=True),
     )
 
-    assert calls == [
-        ("/version", False),
-        ("/api", False),
-        ("/version", True),
-        ("/api", True),
-    ]
+    assert calls == [("/version", False), ("/version", True)]
     assert record["status"] == "auth_required"
     assert record["version"] == "v1.31.0"
     assert record["tls_auto_insecure"] is True
@@ -603,10 +598,155 @@ def test_kubeapi_transient_failure_retries_then_classifies_non_service(
         _kube_options(),
     )
 
-    assert calls == 4
+    assert calls == 2
     assert len(sleeps) == 1
+    assert record["status"] == "fail"
+    assert record["error"] == "connection refused"
+
+
+@pytest.mark.parametrize(
+    ("version_status", "version_payload", "api_payload"),
+    [
+        (
+            404,
+            {"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "NotFound", "code": 404},
+            {"versions": ["2024-01"]},
+        ),
+        (200, {"gitVersion": "v1.31.0"}, {"kind": "APIGroupList", "apiVersion": "v1"}),
+        (200, {"apiVersion": "v1beta1"}, {"kind": "NamespaceList", "apiVersion": "v1"}),
+    ],
+)
+def test_kubeapi_rejects_generic_kubernetes_looking_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+    version_status: int,
+    version_payload: dict[str, Any],
+    api_payload: dict[str, Any],
+) -> None:
+    calls: list[str] = []
+
+    def fake_api(_host: str, _port: int, path: str, _timeout: float, **_kwargs: Any):
+        calls.append(path)
+        return (version_status, version_payload, {}, None) if path == "/version" else (200, api_payload, {}, None)
+
+    monkeypatch.setattr(kubeapi, "_api_get_json", fake_api)
+    monkeypatch.setattr(
+        kubeapi,
+        "_probe_namespace_access",
+        lambda *_args, **_kwargs: pytest.fail("false positive must not reach auth probe"),
+    )
+
+    record = kubeapi.detect_kubeapi(
+        _ctx(kubeapi.KubeApiLifecycleState(), port=8080, target_scheme="http"),
+        _kube_options(),
+    )
+
+    assert calls == ["/version", "/api"]
     assert record["status"] == "not_kubeapi"
-    assert record["error"] is None
+    assert record["is_kubeapi"] is False
+
+
+def test_kubeapi_correlated_auth_status_confirms_service_without_deep_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_api(_host: str, _port: int, path: str, _timeout: float, **_kwargs: Any):
+        calls.append(path)
+        status = 401
+        reason = "Unauthorized"
+        return (
+            status,
+            {
+                "kind": "Status",
+                "apiVersion": "v1",
+                "status": "Failure",
+                "reason": reason,
+                "code": status,
+            },
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(kubeapi, "_api_get_json", fake_api)
+    monkeypatch.setattr(
+        kubeapi,
+        "_probe_namespace_access",
+        lambda *_args, **_kwargs: pytest.fail("correlated auth status already classified access"),
+    )
+
+    record = kubeapi.detect_kubeapi(
+        _ctx(kubeapi.KubeApiLifecycleState(), port=6443, target_scheme="https", insecure=True),
+        _kube_options(show_namespaces=True, show_pods=True),
+    )
+
+    assert calls == ["/version", "/api"]
+    assert record["status"] == "auth_required"
+    assert record["auth_required"] is True
+
+
+def test_kubeapi_mismatched_auth_status_pair_is_not_a_service_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_api(_host: str, _port: int, path: str, _timeout: float, **_kwargs: Any):
+        status = 401 if path == "/version" else 403
+        reason = "Unauthorized" if status == 401 else "Forbidden"
+        return (
+            status,
+            {
+                "kind": "Status",
+                "apiVersion": "v1",
+                "status": "Failure",
+                "reason": reason,
+                "code": status,
+            },
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(kubeapi, "_api_get_json", fake_api)
+    record = kubeapi.detect_kubeapi(
+        _ctx(kubeapi.KubeApiLifecycleState(), port=6443, target_scheme="https", insecure=True),
+        _kube_options(),
+    )
+
+    assert record["is_kubeapi"] is False
+    assert record["status"] == "not_kubeapi"
+
+
+def test_kubeapi_namespace_probe_is_one_bounded_page_and_clients_are_reused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    def fake_api(_host: str, _port: int, path: str, _timeout: float, **_kwargs: Any):
+        paths.append(path)
+        return (
+            200,
+            {
+                "items": [{"metadata": {"name": "default"}}],
+                "metadata": {"continue": "next-page"},
+            },
+            {},
+            None,
+        )
+
+    monkeypatch.setattr(kubeapi, "_api_get_json", fake_api)
+    access, status, error = kubeapi._probe_namespace_access(
+        "127.0.0.1",
+        6443,
+        0.1,
+        use_https=True,
+        insecure=True,
+        ca_file=None,
+    )
+    assert access is True
+    assert status == 200
+    assert error is None
+    assert paths == ["/api/v1/namespaces?limit=1"]
+
+    state = kubeapi.KubeApiLifecycleState(use_https=False)
+    assert state.http_client(response_size_cap=1024) is state.http_client(response_size_cap=1024)
+    assert state.http_client(response_size_cap=1024) is not state.http_client(response_size_cap=2048)
 
 
 def test_kubeapi_invalid_token_falls_back_to_anonymous_data_and_caches(
@@ -624,7 +764,12 @@ def test_kubeapi_invalid_token_falls_back_to_anonymous_data_and_caches(
     )
     auth_seen: list[tuple[str | None, str | None, str | None]] = []
 
-    monkeypatch.setattr(kubeapi, "_list_namespaces", lambda *_args, **_kwargs: (None, 403, "Forbidden"))
+    def fake_namespaces(*_args: Any, token=None, **_kwargs: Any):
+        if token:
+            return None, 403, "Forbidden"
+        return ["public"], 200, None
+
+    monkeypatch.setattr(kubeapi, "_list_namespaces", fake_namespaces)
 
     def fake_pods(*_args: Any, token=None, username=None, password=None, **_kwargs: Any):
         auth_seen.append((token, username, password))
