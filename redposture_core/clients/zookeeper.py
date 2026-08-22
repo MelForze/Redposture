@@ -77,6 +77,16 @@ class ZkFourLetterResult:
     error: str | None = None
 
 
+def _normalize_zookeeper_version(value: str | None) -> str | None:
+    """Keep only the human-relevant version prefix before build metadata."""
+
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    version, _separator, _suffix = normalized.partition("-")
+    return version.strip() or None
+
+
 @dataclass(frozen=True)
 class ZkImplementationFingerprint:
     implementation: str
@@ -90,6 +100,9 @@ class ZkImplementationFingerprint:
     raft: dict[str, int | str | None] = field(default_factory=dict)
     quorum_status: str = "unknown"
     responses: dict[str, ZkFourLetterResult] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "version", _normalize_zookeeper_version(self.version))
 
 
 def _friendly_error_text(value: str) -> str:
@@ -584,12 +597,12 @@ def _version_from_four_letter(response: str | None) -> tuple[str | None, bool | 
     text = str(response or "")
     keeper_match = re.search(r"(?im)^\s*clickhouse\s+keeper\s+version\s*:\s*(.+?)\s*$", text)
     if keeper_match:
-        return keeper_match.group(1).strip(), True
+        return _normalize_zookeeper_version(keeper_match.group(1)), True
     apache_match = re.search(r"(?im)^\s*zookeeper\s+version\s*:\s*(.+?)\s*$", text)
     if apache_match:
-        return apache_match.group(1).strip(), False
+        return _normalize_zookeeper_version(apache_match.group(1)), False
     values = _parse_four_letter_key_values(text)
-    version = str(values.get("zk_version") or "").strip() or None
+    version = _normalize_zookeeper_version(values.get("zk_version"))
     return version, None
 
 

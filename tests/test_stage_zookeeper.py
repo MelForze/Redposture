@@ -15,7 +15,13 @@ from redposture_core.modules.zookeeper import actions as lifecycle_actions
 from redposture_core.modules.zookeeper import engine as implementation_engine
 from redposture_core.modules.zookeeper import stage as lifecycle_stage
 from redposture_core.modules.zookeeper.types import ZooKeeperFingerprintCache
-from redposture_core.stage_runtime import AuditCommandRunner, AuditCredentialRun, AuditHookContext
+from redposture_core.stage_runtime import (
+    AuditCommandRunner,
+    AuditCredentialRun,
+    AuditHookContext,
+    LineOutputSink,
+    _build_colored_emit,
+)
 from redposture_core.stage_zookeeper import (
     _ZK_ERR_NOAUTH,
     _ZK_ERR_NONODE,
@@ -2671,6 +2677,18 @@ def test_format_detect_record_and_record_json_branches() -> None:
         "txt",
     )
     assert "[*] ClickHouse Keeper" in keeper_line
+    assert keeper_line.startswith("KEEPER")
+    assert apache_line.startswith("ZOOKEEPER")
+    unconfirmed_keeper_line = zookeeper_stage._format_detect_record(
+        {
+            **record,
+            "implementation": "clickhouse-keeper",
+            "is_keeper": None,
+            "version": "v25.1",
+        },
+        "txt",
+    )
+    assert unconfirmed_keeper_line.startswith("ZOOKEEPER")
 
     record_json = zookeeper_stage._format_record(
         {
@@ -2738,6 +2756,13 @@ def test_render_colored_zookeeper_line_and_emit_line(tmp_path) -> None:
 
     assert zookeeper_stage._render_colored_zookeeper_line(
         console,
+        "KEEPER      127.0.0.1 9181 [*] ClickHouse Keeper (transport:plaintext)",
+    )
+    assert any("<blue>KEEPER</blue>" in line for line in console.lines)
+    assert ("transport:plaintext", "yellow") in console.paint_calls
+
+    assert zookeeper_stage._render_colored_zookeeper_line(
+        console,
         "ZOOKEEPER   127.0.0.1 2181 [+] anonymous access (create:True) (delete:False) (znodes:12)",
     )
     assert len(console.lines) >= 2
@@ -2754,6 +2779,18 @@ def test_render_colored_zookeeper_line_and_emit_line(tmp_path) -> None:
         zookeeper_stage._emit_line(out_fh, emitted.append, "line-a")
     assert output_path.read_text(encoding="utf-8").strip() == "line-a"
     assert emitted == ["line-a"]
+
+    plaintext_line = "KEEPER      127.0.0.1 9181 [*] ClickHouse Keeper (transport:plaintext)"
+    colored_output_path = tmp_path / "colored-out.txt"
+    sink = LineOutputSink(
+        str(colored_output_path),
+        _build_colored_emit(console, zookeeper_stage._render_colored_zookeeper_line),
+    )
+    sink.prepare()
+    sink.emit_many((plaintext_line,))
+    sink.close()
+    assert colored_output_path.read_text(encoding="utf-8") == f"{plaintext_line}\n"
+    assert "\x1b[" not in colored_output_path.read_text(encoding="utf-8")
 
 
 def test_audit_targets_writes_output_file_and_append(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

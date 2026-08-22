@@ -24,10 +24,10 @@ usage() {
 Usage: scripts/check_ci_matrix.sh [--allow-missing] [--skip-install] [--worktree] [--allow-dirty]
 
 Runs the local pre-push CI gate:
-  - install project + dev deps into per-version venvs
+  - install exact locked project + dev deps into per-version venvs
   - by default, test a clean tracked HEAD archive, matching GitHub checkout
-  - ruff check/format on Python 3.12 when available
-  - py_compile/compileall + pytest + CLI version smoke on Python 3.10-3.13
+  - run the same blocking lint job as GitHub on Python 3.12
+  - run the same syntax, pytest/coverage, per-file floor and CLI smoke on Python 3.10-3.13
 
 Options:
   --allow-missing   Skip missing Python interpreters instead of failing.
@@ -121,6 +121,12 @@ run_in_venv() {
   "$venv/bin/$1" "${@:2}"
 }
 
+lock_for() {
+  local py="$1"
+  local minor="${py#python3.}"
+  echo "$PWD/requirements/ci-py3${minor}.txt"
+}
+
 for py in "${AVAILABLE[@]}"; do
   venv="$(venv_for "$py")"
   echo "== prepare ${py} =="
@@ -128,8 +134,9 @@ for py in "${AVAILABLE[@]}"; do
     "$py" -m venv "$venv"
   fi
   if [[ "$SKIP_INSTALL" -ne 1 ]]; then
-    "$venv/bin/python" -m pip install --upgrade pip
-    "$venv/bin/python" -m pip install -e ".[dev]"
+    lock_file="$(lock_for "$py")"
+    "$venv/bin/python" -m pip install --upgrade --requirement "$lock_file"
+    "$venv/bin/python" -m pip install --no-deps --no-build-isolation -e .
   fi
 done
 
@@ -142,24 +149,12 @@ fi
 QUALITY_VENV="$(venv_for "$QUALITY_PY")"
 
 echo "== lint (${QUALITY_PY}) =="
-"$QUALITY_VENV/bin/ruff" check .
-"$QUALITY_VENV/bin/ruff" format --check .
-
-echo "== mypy advisory (${QUALITY_PY}) =="
-if ! "$QUALITY_VENV/bin/mypy"; then
-  echo "[!] mypy failed, matching GitHub CI advisory behavior; continuing" >&2
-fi
-
-echo "== CLI help smoke (${QUALITY_PY}) =="
-"$QUALITY_VENV/bin/python" redposture.py --help >/dev/null
+PATH="$QUALITY_VENV/bin:$PATH" bash scripts/run_ci_job.sh lint
 
 for py in "${AVAILABLE[@]}"; do
   venv="$(venv_for "$py")"
   echo "== tests ${py} =="
-  "$venv/bin/python" -m py_compile redposture.py
-  "$venv/bin/python" -m compileall -q redposture_core tests
-  "$venv/bin/pytest" -q
-  "$venv/bin/redposture" --version
+  PATH="$venv/bin:$PATH" bash scripts/run_ci_job.sh test
 done
 
 if [[ ${#MISSING[@]} -gt 0 ]]; then

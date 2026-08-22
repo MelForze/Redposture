@@ -95,7 +95,7 @@
     "transport": "plaintext",
     "vendor": "apache",
     "verification_capability": "available",
-    "version": "3.9.5-293c895a8d966a3ecb92872be4a1daf87d725da2, built on 2026-02-11 20:18 UTC",
+    "version": "3.9.5",
     "znode_capability_error": null,
     "znode_count": 25,
     "znode_count_attempt_timeouts": [],

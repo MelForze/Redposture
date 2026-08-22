@@ -244,7 +244,6 @@ def test_format_detect_record_and_status_summary() -> None:
         }
     )
     assert summary_anon is None
-
     summary_token_fail = kube._status_summary_line(
         {
             "status": "auth_failed",
@@ -259,6 +258,112 @@ def test_format_detect_record_and_status_summary() -> None:
     assert summary_token_fail is not None
     assert summary_token_fail.startswith("[-] token auth failed")
     assert "err=denied" in summary_token_fail
+
+
+@pytest.mark.parametrize(
+    ("namespace_status", "namespace_error"),
+    [
+        (401, "Unauthorized"),
+        (403, 'namespaces is forbidden: User "system:anonymous" cannot list resource "namespaces"'),
+    ],
+)
+def test_kubeapi_auth_required_skips_requested_anonymous_resource_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    namespace_status: int,
+    namespace_error: str,
+) -> None:
+    monkeypatch.setattr(
+        kube,
+        "_api_get_json",
+        lambda _host, _port, path, _timeout, **_kwargs: (
+            200,
+            {"gitVersion": "v1.31.0"} if path == "/version" else {"versions": ["v1"]},
+            {},
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        kube,
+        "_list_namespaces",
+        lambda *_args, **_kwargs: (None, namespace_status, namespace_error),
+    )
+    pod_calls: list[bool] = []
+    monkeypatch.setattr(
+        kube,
+        "_list_pods",
+        lambda *_args, **_kwargs: (pod_calls.append(True), ([], None))[1],
+    )
+    secret_calls: list[bool] = []
+    monkeypatch.setattr(
+        kube,
+        "_list_secrets",
+        lambda *_args, **_kwargs: (secret_calls.append(True), ([], None))[1],
+    )
+    exec_calls: list[bool] = []
+    monkeypatch.setattr(
+        kube,
+        "_kube_exec_ws",
+        lambda *_args, **_kwargs: exec_calls.append(True),
+    )
+
+    lines: list[str] = []
+    totals = run_module_targets_for_test(
+        "kubeapi",
+        hosts=["127.0.0.1"],
+        port=6443,
+        timeout=1.0,
+        retries=0,
+        workers=1,
+        https=True,
+        insecure=True,
+        ca_file=None,
+        token=None,
+        username=None,
+        password=None,
+        namespaces=True,
+        pods=True,
+        secrets=True,
+        namespace=None,
+        pod="toolbox",
+        exec_command="id",
+        output_format="txt",
+        emit_line=lines.append,
+    )
+
+    assert totals == (1, 1, 0)
+    assert pod_calls == []
+    assert secret_calls == []
+    assert exec_calls == []
+    assert any("auth required:True" in line for line in lines)
+    assert any("authentication required" in line for line in lines)
+    assert all("Namespaces" not in line and "Pods" not in line and "Secrets" not in line for line in lines)
+    assert all("<no pods>" not in line for line in lines)
+
+
+def test_auth_required_details_are_hidden_normally_and_probe_error_is_debug_only() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 6443,
+        "status": "auth_required",
+        "auth_mode": "none",
+        "auth_required": True,
+        "show_namespaces": True,
+        "namespaces": [],
+        "namespaces_error": 'namespaces is forbidden: User "system:anonymous"',
+        "show_pods": True,
+        "pods": [],
+        "pods_error": None,
+        "show_secrets": True,
+        "secrets": [],
+        "secrets_error": None,
+        "namespace_filters": [],
+    }
+
+    assert kube._format_detail_records(record, "txt") == []
+    debug_lines = kube._format_detail_records(record, "txt", debug=True)
+    assert any("namespaces unavailable" in line for line in debug_lines)
+    assert all("Pods" not in line and "<no pods>" not in line for line in debug_lines)
+    assert all("Secrets" not in line and "<no secrets>" not in line for line in debug_lines)
 
 
 def test_audit_kubeapi_targets_json_output_is_machine_readable(monkeypatch, tmp_path) -> None:

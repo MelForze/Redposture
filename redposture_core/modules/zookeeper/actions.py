@@ -2632,7 +2632,8 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
 def _nxc_prefix(record: dict[str, Any]) -> str:
     host = _clip(str(record.get("host") or "-"), 64)
     port = str(record.get("port") or "-")
-    return f"{'ZOOKEEPER':<12}\t{host}\t{port}\t"
+    tag = "KEEPER" if record.get("is_keeper") is True else "ZOOKEEPER"
+    return f"{tag:<12}\t{host}\t{port}\t"
 
 
 def _record_service(record: dict[str, Any]) -> str:
@@ -3141,23 +3142,25 @@ def _format_znodes_detail_records(record: dict[str, Any], output_format: str) ->
 
 
 def _render_colored_zookeeper_line(console: Console, line: str) -> bool:
-    if render_colored_marker_line(
-        console,
-        line,
-        tag="ZOOKEEPER",
-        booleans=(BooleanColorRule("create"), BooleanColorRule("delete")),
-        counts=(CountColorRule("znodes", "red"),),
-    ):
-        return True
-    if line.startswith("ZOOKEEPER") and "\t" in line:
-        return render_tagged_detail_line(
+    for tag in ("ZOOKEEPER", "KEEPER"):
+        if render_colored_marker_line(
             console,
             line,
-            tag="ZOOKEEPER",
-            default_color="orange",
-            count_pattern_color="white",
-            strip_paren_wrappers=False,
-        )
+            tag=tag,
+            literals=(("(transport:plaintext)", "yellow"),),
+            booleans=(BooleanColorRule("create"), BooleanColorRule("delete")),
+            counts=(CountColorRule("znodes", "red"),),
+        ):
+            return True
+        if line.startswith(tag) and "\t" in line:
+            return render_tagged_detail_line(
+                console,
+                line,
+                tag=tag,
+                default_color="orange",
+                count_pattern_color="white",
+                strip_paren_wrappers=False,
+            )
     return False
 
 

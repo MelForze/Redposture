@@ -526,7 +526,7 @@ def run_postgres_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process postgres output: {exc}")
         return 2
-    if cfg.debug and command_result_exit_code(result) != 0 and hasattr(console, "warn"):
+    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn("all postgres targets are unreachable")
     return command_result_exit_code(result)
 

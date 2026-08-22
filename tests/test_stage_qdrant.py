@@ -984,6 +984,7 @@ def test_audit_qdrant_targets_and_run_stage_paths(
     assert totals == (2, 1, 0, 0, 1)
     assert any("Qdrant API" in line for line in emitted)
     assert not any("connection failed" in line for line in emitted)
+    assert not any("audit partial" in line or "audit inconclusive" in line for line in emitted)
     assert output_path.read_text(encoding="utf-8")
     assert len(logged) == 2
 

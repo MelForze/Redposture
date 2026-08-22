@@ -98,6 +98,7 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
         else None,
         render_module=render,
         colorize=render._render_colored_gitlab_line,
+        suppress_undetected_records_in_text=True,
     )
 
 

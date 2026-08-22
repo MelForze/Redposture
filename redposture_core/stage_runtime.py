@@ -1984,16 +1984,7 @@ class AuditCommandRunner:
             )
             emitted_lines += len(fallback_lines)
             sink.emit_many(fallback_lines)
-        elif partial and plan.output_format != "json":
-            total = fallback_target_count
-            target_word = "target" if total == 1 else "targets"
-            fallback_lines = (
-                f"[!] {self.spec.label} audit partial: confirmed={detected_count}; "
-                f"{operational_failure_count}/{total} {target_word} unreachable or failed before detection",
-            )
-            emitted_lines += len(fallback_lines)
-            sink.emit_many(fallback_lines)
-        elif emitted_lines == 0 and fallback_target_count > 0 and plan.output_format != "json":
+        elif detected_count == 0 and emitted_lines == 0 and fallback_target_count > 0 and plan.output_format != "json":
             if fallback_target_count > 1:
                 fallback_lines = (f"[*] No {self.spec.label} service detected on {fallback_target_count} target(s)",)
             else:
@@ -3004,7 +2995,7 @@ def run_basic_host_audit(
     except OSError as exc:
         console.error(f"failed to process {name} output: {exc}")
         return 2
-    if cfg.debug and command_result_exit_code(result) != 0 and hasattr(console, "warn"):
+    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
         console.warn(f"all {name} targets are unreachable")
     return command_result_exit_code(result)
 

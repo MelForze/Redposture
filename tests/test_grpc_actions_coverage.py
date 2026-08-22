@@ -304,6 +304,11 @@ def test_audit_grpc_host_detect_fail(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_try_credentials_success_via_health(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(grpc, "_health_check_call", lambda *_a, **_k: {"grpc_status": 0, "call": {"is_grpc": True}})
+    monkeypatch.setattr(
+        grpc,
+        "_reflection_capability_call",
+        lambda *_a, **_k: {"grpc_status": 0, "call": {"is_grpc": True}},
+    )
     ok, cand, _attempt = grpc._try_credentials(
         "h",
         50051,

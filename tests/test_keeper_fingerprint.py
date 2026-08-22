@@ -30,7 +30,10 @@ def test_fingerprint_confirms_clickhouse_keeper_and_extracts_raft_health(
     _patch_four_letter(
         monkeypatch,
         {
-            "srvr": "ClickHouse Keeper version: v26.4.1\nMode: leader\nConnections: 4\nLatency min/avg/max: 0/1/9",
+            "srvr": (
+                "ClickHouse Keeper version: v26.4.1-stable-abcdef\n"
+                "Mode: leader\nConnections: 4\nLatency min/avg/max: 0/1/9"
+            ),
             "isro": "rw",
             "mntr": (
                 "zk_version\tv26.4.1\n"
@@ -88,6 +91,7 @@ def test_fingerprint_classifies_apache_and_keeps_disabled_diagnostics_unconfirme
     assert apache.implementation == "apache-zookeeper"
     assert apache.is_keeper is False
     assert apache.confidence == "rejected"
+    assert apache.version == "3.9.3"
 
     disabled = "This command is not executed because it is not in the whitelist."
     _patch_four_letter(monkeypatch, {command: disabled for command in ("srvr", "stat", "mntr", "isro")})
@@ -101,6 +105,27 @@ def test_fingerprint_classifies_apache_and_keeps_disabled_diagnostics_unconfirme
     assert unknown.implementation == "zookeeper-compatible"
     assert unknown.is_keeper is None
     assert unknown.confidence == "unconfirmed"
+
+
+@pytest.mark.parametrize(
+    ("raw_version", "expected"),
+    [
+        ("3.7.2-c06c7c8a", "3.7.2"),
+        ("v25.3.3.42-stable-c4bfe68b", "v25.3.3.42"),
+        ("3.9.3", "3.9.3"),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_fingerprint_normalizes_version_invariant(raw_version: str | None, expected: str | None) -> None:
+    fingerprint = ZkImplementationFingerprint(
+        implementation="zookeeper-compatible",
+        is_keeper=None,
+        confidence="unconfirmed",
+        version=raw_version,
+    )
+
+    assert fingerprint.version == expected
 
 
 def test_fingerprint_uses_sequential_strong_first_request_budget(monkeypatch: pytest.MonkeyPatch) -> None:
