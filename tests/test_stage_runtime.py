@@ -2718,6 +2718,40 @@ def test_mixed_detected_and_operational_failure_emits_partial_summary_and_nonzer
     assert command_result_exit_code(result) == 1
 
 
+def test_mixed_detected_and_operational_failure_hides_txt_aggregate_and_keeps_nonzero() -> None:
+    emitted: list[str] = []
+
+    def detect(ctx) -> AuditRecord:
+        if ctx.host == "down":
+            raise OSError("connection refused")
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="open_no_auth",
+            extra={"is_demo": True},
+        )
+
+    result = AuditCommandRunner(
+        args=SimpleNamespace(),
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            render=lambda record: [f"DEMO {record.host} detected"],
+        ),
+        emit_line=emitted.append,
+    ).run_plan(AuditCommandPlan(targets_by_port={1234: ("up", "down")}, output_format="txt"))
+
+    assert result.detected_count == 1
+    assert result.operational_failure_count == 1
+    assert command_result_exit_code(result) == 1
+    assert emitted == ["DEMO up detected"]
+    assert all("audit partial" not in line and "No DEMO service" not in line for line in emitted)
+
+
 def test_run_basic_host_audit_returns_nonzero_for_inconclusive_result() -> None:
     class ConsoleRecorder:
         def __init__(self) -> None:
@@ -2758,3 +2792,60 @@ def test_run_basic_host_audit_returns_nonzero_for_inconclusive_result() -> None:
     assert console.lines == [
         "[!] DEMO audit inconclusive: no service confirmed; 1/1 target unreachable or failed before detection"
     ]
+
+
+def test_run_basic_host_audit_does_not_claim_all_unreachable_after_detection() -> None:
+    class ConsoleRecorder:
+        def __init__(self) -> None:
+            self.lines: list[str] = []
+
+        def set_structured_output(self, _enabled: bool) -> None:
+            return None
+
+        def plain(self, message: str) -> None:
+            self.lines.append(message)
+
+        def info(self, message: str) -> None:
+            self.lines.append(message)
+
+        def warn(self, message: str) -> None:
+            self.lines.append(message)
+
+        def error(self, message: str) -> None:
+            self.lines.append(message)
+
+    def detect(ctx) -> AuditRecord:
+        if ctx.host == "down":
+            raise TimeoutError("connection timeout")
+        return AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="open_no_auth",
+            extra={"is_demo": True},
+        )
+
+    console = ConsoleRecorder()
+    args = SimpleNamespace(output_format="txt", output=None, debug=True, workers=1)
+    rc = run_basic_host_audit(
+        args,
+        logger=None,
+        console=console,
+        label="DEMO",
+        validate=lambda _args, _console: None,
+        build_plan=lambda _args: AuditCommandPlan(
+            targets_by_port={1234: ("up", "down")},
+            output_format="txt",
+        ),
+        build_spec=lambda _args: ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=detect,
+            render=lambda record: [f"DEMO {record.host} status={record.status}"],
+        ),
+    )
+
+    assert rc == 1
+    assert all("all demo targets are unreachable" not in line for line in console.lines)

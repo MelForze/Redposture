@@ -1,11 +1,33 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import socket
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import pytest
+
+
+class ExternalDnsBlockedError(RuntimeError):
+    """Raised when a unit test attempts real non-loopback DNS resolution."""
+
+
+@pytest.fixture(autouse=True)
+def _block_external_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_getaddrinfo = socket.getaddrinfo
+
+    def guarded_getaddrinfo(host: object, *args: object, **kwargs: object) -> object:
+        host_text = str(host or "").strip().strip("[]")
+        if host_text and host_text.lower() != "localhost":
+            try:
+                ipaddress.ip_address(host_text)
+            except ValueError:
+                raise ExternalDnsBlockedError(f"external DNS resolution blocked in unit test: {host_text}") from None
+        return original_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", guarded_getaddrinfo)
 
 
 @pytest.fixture(autouse=True, scope="session")

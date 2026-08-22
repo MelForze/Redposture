@@ -128,7 +128,14 @@ def _http_request(
     request_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         request_headers.update(headers)
-    response = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024)).request(
+    response = HttpApiClient(
+        HttpClientConfig(
+            timeout=timeout,
+            insecure=True,
+            response_size_cap=10 * 1024 * 1024,
+            allow_cross_origin_redirects=True,
+        )
+    ).request(
         method,
         url,
         headers=request_headers,
@@ -463,6 +470,13 @@ def _clone_url_with_token(clone_url: str, token: str | None) -> str:
     return urllib.parse.urlunsplit((parsed.scheme, new_netloc, parsed.path, parsed.query, parsed.fragment))
 
 
+def _git_subprocess_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_SSL_NO_VERIFY"] = "true"
+    return env
+
+
 def _probe_repository_token(
     host: str,
     port: int,
@@ -486,8 +500,6 @@ def _probe_repository_token(
         default_scheme="https" if use_https else "http",
     )
     authenticated_url = _clone_url_with_token(clone_url, token)
-    env = dict(os.environ)
-    env["GIT_TERMINAL_PROMPT"] = "0"
     try:
         completed = subprocess.run(
             [git_path, "ls-remote", authenticated_url, "HEAD"],
@@ -495,7 +507,7 @@ def _probe_repository_token(
             capture_output=True,
             text=True,
             timeout=min(_GIT_CLONE_TIMEOUT_SECONDS, 30),
-            env=env,
+            env=_git_subprocess_env(),
         )
     except subprocess.TimeoutExpired:
         return None, "git repository capability probe timed out"
@@ -582,6 +594,7 @@ def _clone_project(
             capture_output=True,
             text=True,
             timeout=_GIT_CLONE_TIMEOUT_SECONDS,
+            env=_git_subprocess_env(),
         )
 
     try:

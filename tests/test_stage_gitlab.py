@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import pathlib
 import subprocess
 import urllib.error
@@ -19,6 +20,59 @@ def test_normalize_path_and_base_url_helpers() -> None:
     assert gitlab._normalize_path("http://example.com/x") == "http://example.com/x"
     assert gitlab._build_base_url("127.0.0.1", 8080, use_https=False) == "http://127.0.0.1:8080"
     assert gitlab._build_base_url("127.0.0.1", 443, use_https=True) == "https://127.0.0.1:443"
+
+
+def test_gitlab_spec_hides_undetected_records_only_from_normal_text() -> None:
+    spec = gitlab.build_gitlab_spec(SimpleNamespace())
+
+    assert spec.suppress_undetected_records_in_text is True
+
+
+def test_gitlab_undetected_record_is_normal_text_suppressed_but_debug_and_json_visible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_audit(host: str, _port: int, *_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "host": host,
+            "port": 8080,
+            "service": "gitlab",
+            "status": "not_gitlab",
+            "is_gitlab": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(gitlab, "_audit_gitlab_host", fake_audit)
+    common = {
+        "hosts": ["127.0.0.1"],
+        "port": 8080,
+        "timeout": 1.0,
+        "retries": 0,
+        "workers": 1,
+        "use_https": False,
+        "token": None,
+        "project_filters": [],
+        "clone": False,
+        "clone_dir": "/tmp/gitlab",
+    }
+
+    normal_lines: list[str] = []
+    run_module_targets_for_test("gitlab", emit_line=normal_lines.append, output_format="txt", **common)
+    assert all("not a GitLab service" not in line for line in normal_lines)
+
+    debug_lines: list[str] = []
+    run_module_targets_for_test(
+        "gitlab",
+        emit_line=debug_lines.append,
+        output_format="txt",
+        debug=True,
+        **common,
+    )
+    assert any("not a GitLab service" in line for line in debug_lines)
+
+    json_lines: list[str] = []
+    run_module_targets_for_test("gitlab", emit_line=json_lines.append, output_format="json", **common)
+    payloads = [json.loads(line) for line in json_lines]
+    assert any(payload.get("status") == "not_gitlab" for payload in payloads)
 
 
 def test_detect_login_page() -> None:
@@ -82,9 +136,11 @@ def test_clone_project_sanitizes_path_traversal_destination(monkeypatch: pytest.
         text: bool,
         timeout: float,
         check: bool,
+        env: dict[str, str],
     ) -> subprocess.CompletedProcess[str]:
         _ = (capture_output, text, timeout, check)
         captured["cmd"] = list(cmd)
+        captured["env"] = dict(env)
         pathlib.Path(cmd[-1]).mkdir(parents=True)
         return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
 
@@ -110,6 +166,7 @@ def test_clone_project_sanitizes_path_traversal_destination(monkeypatch: pytest.
     dest_path = str(command[-1])
     assert dest_path.startswith(str(clone_root))
     assert ".." not in dest_path
+    assert captured["env"] == {**dict(gitlab.os.environ), "GIT_TERMINAL_PROMPT": "0", "GIT_SSL_NO_VERIFY": "true"}
 
 
 def test_format_record_for_statuses() -> None:
@@ -498,6 +555,43 @@ def test_http_and_api_helpers_cover_success_error_and_invalid_json(monkeypatch: 
     assert (status, payload, headers, error) == (200, None, {}, None)
 
 
+def test_http_request_uses_insecure_tls_and_allows_cross_origin_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _Client:
+        def __init__(self, config: object) -> None:
+            captured["config"] = config
+
+        def request(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+            captured["headers"] = dict(_kwargs.get("headers") or {})
+            return SimpleNamespace(
+                status=200,
+                body=b'{"version":"17.0"}',
+                headers={"X-GitLab-Meta": "ok"},
+                error=None,
+            )
+
+    monkeypatch.setattr(gitlab, "HttpApiClient", _Client)
+    status, payload, headers, error = gitlab._http_request(
+        "proxy.local",
+        443,
+        "GET",
+        "/api/v4/version",
+        1.0,
+        use_https=True,
+        headers={"PRIVATE-TOKEN": "secret"},
+    )
+
+    config = captured["config"]
+    assert isinstance(config, gitlab.HttpClientConfig)
+    assert config.insecure is True
+    assert config.allow_cross_origin_redirects is True
+    assert captured["headers"] == {"User-Agent": "RedPosture/1.0", "PRIVATE-TOKEN": "secret"}
+    assert (status, payload, headers, error) == (200, b'{"version":"17.0"}', {"x-gitlab-meta": "ok"}, None)
+
+
 def test_paginate_project_lookup_and_capability_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
@@ -618,8 +712,11 @@ def test_clone_project_handles_missing_git_existing_dir_and_fallback(
         capture_output: bool,
         text: bool,
         timeout: int,
+        env: dict[str, str],
     ) -> subprocess.CompletedProcess[str]:
         _ = (check, capture_output, text, timeout)
+        assert env["GIT_TERMINAL_PROMPT"] == "0"
+        assert env["GIT_SSL_NO_VERIFY"] == "true"
         run_calls.append(cmd)
         if len(run_calls) == 1:
             return subprocess.CompletedProcess(
@@ -641,6 +738,24 @@ def test_clone_project_handles_missing_git_existing_dir_and_fallback(
     assert len(run_calls) == 2
     assert run_calls[0][2] == "--depth"
     assert "oauth2:tok@" in run_calls[0][4]
+
+    probe_calls: list[dict[str, str]] = []
+
+    def fake_probe_run(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        probe_calls.append(dict(kwargs["env"]))
+        return subprocess.CompletedProcess(["git"], 0, "", "")
+
+    monkeypatch.setattr(gitlab.subprocess, "run", fake_probe_run)
+    ok, error = gitlab._probe_repository_token(
+        "gitlab.local",
+        443,
+        use_https=True,
+        token="tok",
+        project_ref="group/app",
+    )
+    assert (ok, error) == (True, None)
+    assert probe_calls[0]["GIT_TERMINAL_PROMPT"] == "0"
+    assert probe_calls[0]["GIT_SSL_NO_VERIFY"] == "true"
 
     monkeypatch.setattr(
         gitlab.subprocess,

@@ -1528,6 +1528,7 @@ def test_trigger_stage_argument_and_validation_paths(monkeypatch: pytest.MonkeyP
         lambda *_a, **_k: [argparse.Namespace(host="10.0.0.1", scheme="https", explicit_port=9121)],
     )
     monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", lambda *_a, **_k: {"trigger_exporters": []})
+    monkeypatch.setattr("redposture_core.exporters.http_client.http_get_text", lambda *_a, **_k: (404, ""))
     rc = run_trigger_stage(_base_args(), AttemptLogger())
     assert rc == 0
 

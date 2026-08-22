@@ -53,8 +53,12 @@ cd Redposture
 python -m venv .venv && source .venv/bin/activate
 pip install -e .[dev]
 pre-commit install   # one-time: wires ruff lint + format into `git commit`
-pytest               # run the full test suite
+pytest               # unit tests block external network; loopback remains available
+scripts/check_ci_matrix.sh --worktree  # same locked Python 3.10-3.13 gate as GitHub CI
 ```
+
+CI dependency versions are committed under `requirements/`. Regenerate the complete locks with
+`scripts/update_ci_locks.sh` when intentionally upgrading the toolchain.
 
 ## CLI Overview
 

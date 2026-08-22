@@ -1769,8 +1769,8 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     if status == "not_kubeapi":
         return f"{prefix} [-] not a Kubernetes API"
 
-    auth_required_text = _bool_text(record.get("auth_required"))
     version_text = str(record.get("version") or "-")
+    auth_required_text = _bool_text(record.get("auth_required"))
     return f"{prefix} [*] Kubernetes API (auth required:{auth_required_text}) (version:{version_text})"
 
 
@@ -1825,11 +1825,14 @@ def _status_summary_line(record: dict[str, Any]) -> str | None:
     return body
 
 
-def _format_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+def _format_detail_records(record: dict[str, Any], output_format: str, *, debug: bool = False) -> list[str]:
     if output_format == "json":
         return []
     status = str(record.get("status") or "fail")
     if status in {"fail", "not_kubeapi"}:
+        return []
+    access_blocked = status in {"auth_required", "auth_failed"}
+    if access_blocked and not debug:
         return []
 
     prefix = _kxc_prefix(record)
@@ -1847,7 +1850,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         else:
             lines.append(f"{prefix} <no namespaces>")
 
-    if bool(record.get("show_pods")):
+    if bool(record.get("show_pods")) and not access_blocked:
         pods = record.get("pods")
         err = str(record.get("pods_error") or "").strip()
         filters = record.get("namespace_filters")
@@ -1867,7 +1870,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         else:
             lines.append(f"{prefix} <no pods>")
 
-    if bool(record.get("show_secrets")):
+    if bool(record.get("show_secrets")) and not access_blocked:
         secrets = record.get("secrets")
         err = str(record.get("secrets_error") or "").strip()
         filters = record.get("namespace_filters")
@@ -1891,7 +1894,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str) -> list[s
         else:
             lines.append(f"{prefix} <no secrets>")
 
-    exec_result = record.get("exec_result")
+    exec_result = record.get("exec_result") if not access_blocked else None
     if isinstance(exec_result, dict):
         exec_ns = str(exec_result.get("namespace") or "").strip()
         exec_pod = str(exec_result.get("pod") or "").strip() or str(record.get("exec_pod") or "").strip() or "-"
@@ -2165,6 +2168,8 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
             username=username,
             password=password,
         )
+        if pods is None and not pods_error:
+            pods_error = "pods request failed"
         pods_out = list(pods or [])
     if options["show_secrets"]:
         secrets, secrets_error = _list_secrets(
@@ -2179,6 +2184,8 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
             username=username,
             password=password,
         )
+        if secrets is None and not secrets_error:
+            secrets_error = "secrets request failed"
         secrets_out = list(secrets or [])
     exec_result: dict[str, Any] | None = None
     if options["exec_pod"] and options["exec_command"]:
