@@ -9,6 +9,8 @@ import urllib.parse
 from contextlib import contextmanager
 from typing import Any
 
+from ..clients.tls_cache import shared_client_ssl_context
+
 HTTP_POOL_MAX_IDLE_TOTAL = 512
 HTTP_POOL_MAX_IDLE_PER_HOST = 4
 
@@ -23,7 +25,7 @@ class HTTPConnectionPool:
     ) -> None:
         self._max_idle_total = max(1, int(max_idle_total))
         self._max_idle_per_host = max(1, int(max_idle_per_host))
-        self._tls_context = tls_context
+        self._tls_context = tls_context or shared_client_ssl_context(insecure=False)
         self._idle: dict[tuple[str, str, int], list[http.client.HTTPConnection]] = {}
         self._idle_total = 0
         self._lock = threading.Lock()

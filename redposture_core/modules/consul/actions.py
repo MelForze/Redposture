@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, format_http_authority
+from ...clients.http_session import HttpSessionPool
+from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
@@ -67,6 +69,12 @@ class ConsulLifecycleState:
     client_key: str | None = None
     preferred_scheme: str | None = None
     strict_scheme: bool = False
+    http: HttpSessionPool | None = None
+
+    def close(self) -> None:
+        if self.http is not None:
+            self.http.close()
+            self.http = None
 
 
 class _ConsulLifecycleReplay:
@@ -137,9 +145,7 @@ def _is_tls_verify_error_text(value: str | None) -> bool:
 def _ssl_context(*, use_https: bool, insecure: bool) -> ssl.SSLContext | None:
     if not use_https:
         return None
-    if insecure:
-        return ssl._create_unverified_context()
-    return ssl.create_default_context()
+    return shared_client_ssl_context(insecure=insecure)
 
 
 def _consul_headers(token: str | None, username: str | None, password: str | None) -> dict[str, str]:
@@ -179,16 +185,28 @@ def _http_request(
     ca_file = replay.ca_file if use_https and isinstance(replay, ConsulLifecycleState) else None
     client_cert = replay.client_cert if use_https and isinstance(replay, ConsulLifecycleState) else None
     client_key = replay.client_key if use_https and isinstance(replay, ConsulLifecycleState) else None
-    response = HttpApiClient(
-        HttpClientConfig(
+    response_cap = 256 * 1024 if parsed_path.path in {"/v1/status/leader", "/v1/agent/self"} else 10 * 1024 * 1024
+    if isinstance(replay, ConsulLifecycleState) and replay.http is not None:
+        response = replay.http.request(
+            method,
+            url,
+            headers=request_headers,
+            body=body,
             timeout=timeout,
-            insecure=bool(use_https and insecure),
-            ca_file=ca_file,
-            client_cert=client_cert,
-            client_key=client_key,
-            response_size_cap=10 * 1024 * 1024,
+            response_size_cap=response_cap,
+            replay_safe=method.upper() in {"GET", "HEAD"},
         )
-    ).request(method, url, headers=request_headers, body=body, timeout=timeout)
+    else:
+        response = HttpApiClient(
+            HttpClientConfig(
+                timeout=timeout,
+                insecure=bool(use_https and insecure),
+                ca_file=ca_file,
+                client_cert=client_cert,
+                client_key=client_key,
+                response_size_cap=response_cap,
+            )
+        ).request(method, url, headers=request_headers, body=body, timeout=timeout)
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
     return int(response.status), response.body, {str(k).lower(): str(v) for k, v in response.headers.items()}, None

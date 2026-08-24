@@ -632,7 +632,7 @@ def test_open_kafka_socket_port_9093_prefers_tls(monkeypatch: pytest.MonkeyPatch
         return _FakeBaseSocket(host, port)
 
     monkeypatch.setattr(kafka.socket, "create_connection", _fake_create_connection)
-    monkeypatch.setattr(kafka.ssl, "create_default_context", lambda: _FakeContext())
+    monkeypatch.setattr(kafka.ssl, "_create_unverified_context", lambda: _FakeContext())
 
     # 9093 with use_tls=None -> TLS wrap is attempted.
     sock, transport_mode = kafka.open_kafka_socket("kafka.example.com", 9093, 1.0)
@@ -939,7 +939,7 @@ def test_open_kafka_socket_falls_back_to_plaintext_on_inferred_tls(monkeypatch: 
         return sock
 
     monkeypatch.setattr(kafka.socket, "create_connection", _fake_connect)
-    monkeypatch.setattr(kafka.ssl, "create_default_context", lambda: _FakeCtx())
+    monkeypatch.setattr(kafka.ssl, "_create_unverified_context", lambda: _FakeCtx())
 
     # Inferred TLS via port 9093 — handshake fails, fallback opens plaintext.
     sock, transport = kafka.open_kafka_socket("kafka.example.com", 9093, 1.0)
@@ -984,7 +984,7 @@ def test_open_kafka_socket_reraises_ssl_error_when_use_tls_explicit(monkeypatch:
         return _FakeSocket()
 
     monkeypatch.setattr(kafka.socket, "create_connection", _fake_connect)
-    monkeypatch.setattr(kafka.ssl, "create_default_context", lambda: _FakeCtx())
+    monkeypatch.setattr(kafka.ssl, "_create_unverified_context", lambda: _FakeCtx())
 
     with pytest.raises(ValueError) as exc:
         kafka.open_kafka_socket("kafka.example.com", 9092, 1.0, use_tls=True)
@@ -1021,7 +1021,7 @@ def test_open_kafka_socket_extended_tls_first_ports(monkeypatch: pytest.MonkeyPa
             pass
 
     monkeypatch.setattr(kafka.socket, "create_connection", lambda *_a, **_kw: _FakeSocket())
-    monkeypatch.setattr(kafka.ssl, "create_default_context", lambda: _FakeCtx())
+    monkeypatch.setattr(kafka.ssl, "_create_unverified_context", lambda: _FakeCtx())
 
     _, transport = kafka.open_kafka_socket("kafka.internal", 19093, 1.0)
     assert transport == "tls"

@@ -570,7 +570,8 @@ def test_kubeapi_detect_retries_with_insecure_tls_after_verify_failure(
     )
 
     assert calls == [("/version", False), ("/version", True)]
-    assert record["status"] == "auth_required"
+    assert record["status"] == "anonymous_limited"
+    assert record["anonymous_access"] == "limited"
     assert record["version"] == "v1.31.0"
     assert record["tls_auto_insecure"] is True
     assert record["insecure_effective"] is True
@@ -598,7 +599,9 @@ def test_kubeapi_transient_failure_retries_then_classifies_non_service(
         _kube_options(),
     )
 
-    assert calls == 2
+    # /version consumes its two transport attempts, then /api is still
+    # checked once because an endpoint-local failure is not a service verdict.
+    assert calls == 3
     assert len(sleeps) == 1
     assert record["status"] == "fail"
     assert record["error"] == "connection refused"
@@ -684,7 +687,7 @@ def test_kubeapi_correlated_auth_status_confirms_service_without_deep_probe(
     assert record["auth_required"] is True
 
 
-def test_kubeapi_mismatched_auth_status_pair_is_not_a_service_signature(
+def test_kubeapi_mixed_auth_status_pair_is_a_service_signature(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_api(_host: str, _port: int, path: str, _timeout: float, **_kwargs: Any):
@@ -709,8 +712,8 @@ def test_kubeapi_mismatched_auth_status_pair_is_not_a_service_signature(
         _kube_options(),
     )
 
-    assert record["is_kubeapi"] is False
-    assert record["status"] == "not_kubeapi"
+    assert record["is_kubeapi"] is True
+    assert record["status"] == "anonymous_limited"
 
 
 def test_kubeapi_namespace_probe_is_one_bounded_page_and_clients_are_reused(
@@ -745,8 +748,9 @@ def test_kubeapi_namespace_probe_is_one_bounded_page_and_clients_are_reused(
     assert paths == ["/api/v1/namespaces?limit=1"]
 
     state = kubeapi.KubeApiLifecycleState(use_https=False)
+    state.configure_transport("127.0.0.1", 6443, 0.1)
     assert state.http_client(response_size_cap=1024) is state.http_client(response_size_cap=1024)
-    assert state.http_client(response_size_cap=1024) is not state.http_client(response_size_cap=2048)
+    assert state.http_client(response_size_cap=1024) is state.http_client(response_size_cap=2048)
 
 
 def test_kubeapi_invalid_token_falls_back_to_anonymous_data_and_caches(
@@ -770,6 +774,11 @@ def test_kubeapi_invalid_token_falls_back_to_anonymous_data_and_caches(
         return ["public"], 200, None
 
     monkeypatch.setattr(kubeapi, "_list_namespaces", fake_namespaces)
+    monkeypatch.setattr(
+        kubeapi,
+        "_verify_self_subject_review",
+        lambda *_args, **_kwargs: (None, None, "verification unavailable"),
+    )
 
     def fake_pods(*_args: Any, token=None, username=None, password=None, **_kwargs: Any):
         auth_seen.append((token, username, password))
@@ -802,7 +811,7 @@ def test_kubeapi_invalid_token_falls_back_to_anonymous_data_and_caches(
     first = kubeapi.collect_kubeapi_data(ctx, auth_record, options)
     second = kubeapi.collect_kubeapi_data(ctx, auth_record, options)
 
-    assert auth_record["status"] == "invalid_credentials_anonymous"
+    assert auth_record["status"] == "auth_unverified_anonymous"
     assert auth_seen == [(None, None, None), (None, None, None)]
     assert first is second
     assert first["namespaces"] == ["public"]
@@ -855,6 +864,7 @@ def test_kubeapi_exec_uses_selected_authenticated_transport(
         "token": "valid",
         "username": None,
         "password": None,
+        "retries": 0,
     }
 
 

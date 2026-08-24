@@ -9,6 +9,7 @@ from typing import Any
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...clients.http_api import http_target_context
+from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...stage_runtime import (
     AuditCommandPlan,
@@ -37,6 +38,12 @@ class _ProxmoxLifecycleState:
     auth_attempts: list[dict[str, str]] = field(default_factory=list)
     resolved_auth: tuple[dict[str, str], str, str | None, str | None, list[dict[str, str]]] | None = None
     deep_record: AuditRecord | None = None
+    http: HttpSessionPool | None = None
+
+    def close(self) -> None:
+        if self.http is not None:
+            self.http.close()
+            self.http = None
 
 
 def build_proxmox_plan(args: Any) -> AuditCommandPlan:
@@ -47,8 +54,19 @@ def build_proxmox_plan(args: Any) -> AuditCommandPlan:
     return plan
 
 
-def _proxmox_lifecycle_state_factory(_ctx: AuditHookContext) -> _ProxmoxLifecycleState:
-    return _ProxmoxLifecycleState()
+def _proxmox_lifecycle_state_factory(ctx: AuditHookContext) -> _ProxmoxLifecycleState:
+    return _ProxmoxLifecycleState(
+        http=HttpSessionPool(
+            timeout=float(getattr(ctx.args, "timeout", 1.0)),
+            insecure=bool(getattr(ctx.args, "insecure", False)),
+            proxy=_proxmox_proxy(ctx.args),
+        )
+    )
+
+
+def _activate_transport(ctx: AuditHookContext) -> None:
+    state = ctx.lifecycle_state if isinstance(ctx.lifecycle_state, _ProxmoxLifecycleState) else None
+    actions.activate_proxmox_transport(state.http if state is not None else None)
 
 
 def _proxmox_record(payload: AuditRecord | dict[str, Any]) -> AuditRecord:
@@ -118,6 +136,7 @@ def _proxmox_with_action_contract(record: AuditRecord, args: Any) -> AuditRecord
 def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
     """Classify the API anonymously before any token/password is applied."""
 
+    _activate_transport(ctx)
     cfg = AuditConfig.from_namespace(ctx.args)
     use_https = _proxmox_use_https(ctx)
     if _proxmox_host_stage_is_replaced():
@@ -207,6 +226,7 @@ def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
 
 
 def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRecord:
+    _activate_transport(ctx)
     cfg = AuditConfig.from_namespace(ctx.args)
     state = ctx.lifecycle_state if isinstance(ctx.lifecycle_state, _ProxmoxLifecycleState) else None
     credential = ctx.credential
@@ -429,6 +449,7 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
 
 
 def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
+    _activate_transport(ctx)
     state = ctx.lifecycle_state if isinstance(ctx.lifecycle_state, _ProxmoxLifecycleState) else None
     if state is not None and state.deep_record is not None:
         return state.deep_record
@@ -559,6 +580,7 @@ def build_proxmox_spec(args: Any) -> ModuleAuditSpec:
         auth=_auth_with_target,
         data=_data_with_target,
         lifecycle_state_factory=_proxmox_lifecycle_state_factory,
+        lifecycle_state_close=lambda state: state.close(),
         record_all_credential_attempts=full_credential_sweep,
         continue_after_credential_success=full_credential_sweep,
         continue_after_credential_error=full_credential_sweep,

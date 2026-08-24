@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, resolve_http_scheme
+from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...rendering import (
     CountColorRule,
@@ -61,6 +62,33 @@ class QdrantLifecycleState:
     action_headers: dict[str, str] | None = None
     action_source: str | None = None
     deep_record: dict[str, Any] | None = None
+    http: HttpSessionPool | None = None
+    scheme: str | None = None
+
+    def close(self) -> None:
+        if self.http is not None:
+            self.http.close()
+            self.http = None
+
+
+_THREAD_LOCAL_TRANSPORT = threading.local()
+_DETECT_RESPONSE_CAP = 256 * 1024
+
+
+def qdrant_lifecycle_state_factory(ctx: Any) -> QdrantLifecycleState:
+    target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
+    return QdrantLifecycleState(
+        http=HttpSessionPool(
+            timeout=float(getattr(ctx.args, "timeout", 1.0)),
+            insecure=True,
+            proxy=getattr(ctx.args, "_proxy_config", None),
+        ),
+        scheme=target_scheme if target_scheme in {"http", "https"} else None,
+    )
+
+
+def _activate_qdrant_transport(state: QdrantLifecycleState) -> None:
+    _THREAD_LOCAL_TRANSPORT.state = state
 
 
 def _clip(text: str, width: int = 80) -> str:
@@ -117,8 +145,6 @@ def _http_json_request(
     headers: dict[str, str] | None = None,
     payload: dict[str, Any] | None = None,
 ) -> tuple[int, Any, str | None]:
-    scheme = resolve_http_scheme(host, port, timeout, probe_path="/collections")
-    url = build_http_target_url(host, port, path, default_scheme=scheme)
     body_bytes: bytes | None = None
     req_headers = {
         "User-Agent": "RedPosture/1.0",
@@ -130,15 +156,39 @@ def _http_json_request(
         body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req_headers["Content-Type"] = "application/json"
 
-    response = HttpApiClient(
-        HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True)
-    ).request(
-        method,
-        url,
-        headers=req_headers,
-        body=body_bytes,
-        timeout=timeout,
-    )
+    state = getattr(_THREAD_LOCAL_TRANSPORT, "state", None)
+    cap = _DETECT_RESPONSE_CAP if path.partition("?")[0] in {"/", "/collections"} else 10 * 1024 * 1024
+    if isinstance(state, QdrantLifecycleState) and state.http is not None:
+        schemes = (
+            (state.scheme,)
+            if state.scheme in {"http", "https"}
+            else (("https", "http") if int(port) in {443, 6334} else ("http", "https"))
+        )
+        response = None
+        for scheme in schemes:
+            url = build_http_target_url(host, port, path, default_scheme=str(scheme))
+            response = state.http.request(
+                method,
+                url,
+                headers=req_headers,
+                body=body_bytes,
+                timeout=timeout,
+                response_size_cap=cap,
+            )
+            if response.error is None:
+                state.scheme = str(scheme)
+                break
+        assert response is not None
+    else:
+        scheme = resolve_http_scheme(host, port, timeout, probe_path="/collections")
+        url = build_http_target_url(host, port, path, default_scheme=scheme)
+        response = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True)).request(
+            method,
+            url,
+            headers=req_headers,
+            body=body_bytes,
+            timeout=timeout,
+        )
     if response.error:
         return 0, None, _friendly_error_text(response.error)
     status = int(response.status)
@@ -1543,6 +1593,7 @@ def detect_qdrant(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     state = ctx.lifecycle_state
     if not isinstance(state, QdrantLifecycleState):
         raise TypeError("qdrant lifecycle state is unavailable")
+    _activate_qdrant_transport(state)
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
     last_error: str | None = None
     record = _empty_qdrant_record(
@@ -1613,6 +1664,7 @@ def authenticate_qdrant(ctx: Any, detect_record: Any, _options: dict[str, Any]) 
     state = ctx.lifecycle_state
     if not isinstance(state, QdrantLifecycleState):
         raise TypeError("qdrant lifecycle state is unavailable")
+    _activate_qdrant_transport(state)
     record = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
     api_key = str(ctx.credential.token or "").strip()
     if not api_key:
@@ -1660,6 +1712,7 @@ def collect_qdrant_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
     state = ctx.lifecycle_state
     if not isinstance(state, QdrantLifecycleState):
         raise TypeError("qdrant lifecycle state is unavailable")
+    _activate_qdrant_transport(state)
     if state.deep_record is not None:
         return state.deep_record
     record = dict(source_record.to_dict() if hasattr(source_record, "to_dict") else source_record)

@@ -206,7 +206,7 @@ def test_tns_listener_command_tcps_and_recv_timeout(monkeypatch) -> None:
             return wrapped_sock
 
     context = FakeContext()
-    monkeypatch.setattr("redposture_core.clients.oracle.ssl.create_default_context", lambda: context)
+    monkeypatch.setattr("redposture_core.clients.oracle.ssl._create_unverified_context", lambda: context)
     monkeypatch.setattr("redposture_core.clients.oracle.ssl.CERT_NONE", "CERT_NONE")
 
     result = tns_listener_command("db.local", 2484, "services", timeout=1.0, protocol="tcps", insecure=True)

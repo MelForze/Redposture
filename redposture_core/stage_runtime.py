@@ -17,8 +17,9 @@ from typing import Any, Literal
 from . import audit_models as _audit_models
 from .audit_config import AuditConfig
 from .audit_models import StageTrace
+from .clients.tls_cache import tls_context_cache_stats
 from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
-from .scheduler import BoundedScheduler
+from .scheduler import BoundedScheduler, SharedNestedScheduler
 from .show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from .targeting import (
     DEFAULT_STREAM_TARGET_WINDOW_SIZE,
@@ -399,6 +400,7 @@ class AuditHookContext:
     phase: AuditPhase = "data"
     credential_runs: tuple[AuditCredentialRun, ...] = ()
     lifecycle_state: Any = None
+    nested_scheduler: SharedNestedScheduler | None = None
 
 
 @dataclass(frozen=True)
@@ -1771,6 +1773,12 @@ class AuditCommandRunner:
         )
         self._lifecycle_states: dict[int, Any] = {}
         self._lifecycle_states_lock = threading.Lock()
+        self._transport_stats_lock = threading.Lock()
+        self._transport_pool_ids: set[int] = set()
+        self._transport_stats = {"connections": 0, "reused": 0, "requests": 0, "retries": 0}
+        self._nested_scheduler = SharedNestedScheduler(
+            max_workers=min(max(1, int(getattr(args, "workers", 50) or 50)), 20)
+        )
         if emit_line is not None:
             self.emit_line = emit_line
         elif console is not None:
@@ -1804,7 +1812,20 @@ class AuditCommandRunner:
             return self._run_prepared_plan(plan, sink)
         finally:
             self._close_all_lifecycle_states()
+            self._nested_scheduler.close()
             sink.close()
+            if self.console is not None and bool(getattr(self.args, "debug", False)):
+                tls_stats = tls_context_cache_stats()
+                debug_method = getattr(self.console, "debug", None)
+                if callable(debug_method):
+                    debug_method(
+                        "transport summary: "
+                        f"requests={self._transport_stats['requests']} "
+                        f"connections={self._transport_stats['connections']} "
+                        f"reused={self._transport_stats['reused']} "
+                        f"retries={self._transport_stats['retries']} "
+                        f"tls_contexts={tls_stats['size']} tls_cache_hits={tls_stats['hits']}"
+                    )
 
     def _run_prepared_plan(self, plan: AuditCommandPlan, sink: LineOutputSink) -> AuditCommandResult:
         target_count = plan.target_count
@@ -2034,6 +2055,7 @@ class AuditCommandRunner:
             phase=phase,
             credential_runs=credential_runs,
             lifecycle_state=lifecycle_state,
+            nested_scheduler=self._nested_scheduler,
         )
 
     def _register_lifecycle_state(self, state: Any) -> None:
@@ -2049,6 +2071,7 @@ class AuditCommandRunner:
             registered = self._lifecycle_states.pop(id(state), None)
         if registered is None:
             return
+        self._capture_transport_stats(registered)
         close = getattr(self.spec, "lifecycle_state_close", None)
         if close is None:
             return
@@ -2065,10 +2088,31 @@ class AuditCommandRunner:
         if close is None:
             return
         for state in states:
+            self._capture_transport_stats(state)
             try:
                 close(state)
             except Exception:  # noqa: BLE001 - best-effort outer cleanup
                 continue
+
+    def _capture_transport_stats(self, state: Any) -> None:
+        for candidate in (
+            state,
+            getattr(state, "http", None),
+            getattr(state, "pool", None),
+            getattr(state, "http_session", None),
+            getattr(state, "http_pool", None),
+        ):
+            stats_fn = getattr(candidate, "stats", None)
+            if candidate is None or not callable(stats_fn):
+                continue
+            with self._transport_stats_lock:
+                if id(candidate) in self._transport_pool_ids:
+                    continue
+                self._transport_pool_ids.add(id(candidate))
+            stats = stats_fn()
+            with self._transport_stats_lock:
+                for name in self._transport_stats:
+                    self._transport_stats[name] += int(stats.get(name, 0) or 0)
 
     def _run_detect_with_state(
         self,

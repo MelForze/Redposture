@@ -15,6 +15,14 @@ def validate_args(args: Any, console: Any) -> int | None:
     common_rc = validate_basic_module_args(args, console, module="clickhouse", pure_http=False)
     if common_rc is not None:
         return common_rc
+    explicit_protocol = getattr(args, "protocol", None)
+    if (
+        bool(getattr(args, "http", False))
+        and bool(getattr(args, "_clickhouse_protocol_explicit", False))
+        and explicit_protocol != "http"
+    ):
+        console.error("--http conflicts with --protocol native/auto")
+        return 2
     if getattr(args, "tls_key", None) and not getattr(args, "tls_cert", None):
         console.error("--tls-key requires --tls-cert")
         return 2
@@ -25,7 +33,8 @@ def validate_args(args: Any, console: Any) -> int | None:
         return 2
     proxy = str(getattr(args, "proxy", "") or "").strip()
     if proxy:
-        if not bool(getattr(args, "http", False)):
+        protocol = "http" if bool(getattr(args, "http", False)) else str(explicit_protocol or "native")
+        if protocol != "http":
             console.error("ClickHouse native driver cannot guarantee --proxy routing; use --http or a tunnel")
             return 2
         if urlsplit(proxy).scheme.lower() not in {"http", "https"}:

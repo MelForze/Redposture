@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
-import gzip
+import gzip as gzip
 import importlib
 import inspect
 import secrets
 import socket
 import ssl
 import struct
+import zlib
+from collections import OrderedDict
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
 from . import transport
+from .tls_cache import shared_client_ssl_context
+
+KAFKA_MAX_DECOMPRESSED_BYTES = 16 * 1024 * 1024
+KAFKA_MAX_COMPRESSION_DEPTH = 4
+KAFKA_MAX_PARSE_STEPS = 100_000
 
 KAFKA_CLIENT_ID = "redposture"
 KAFKA_API_VERSIONS = 18
@@ -84,6 +92,149 @@ class KafkaApiVersionsResult:
         yield self.ok
         yield self.error_code
         yield self.error
+
+
+@dataclass
+class KafkaSession:
+    """One thread-confined Kafka connection and its negotiated state."""
+
+    sock: socket.socket
+    transport_mode: str
+    identity: tuple[str | None, str | None]
+    correlation_id: int = 1
+    api_versions: dict[int, tuple[int, int]] | None = None
+    metadata: dict[str, Any] | None = None
+    closed: bool = False
+
+    @classmethod
+    def open(
+        cls,
+        host: str,
+        port: int,
+        timeout: float,
+        *,
+        username: str | None = None,
+        password: str | None = None,
+        use_tls: bool | None = None,
+        tls_config: KafkaTlsConfig | None = None,
+    ) -> KafkaSession:
+        sock, transport_mode = _open_kafka_socket_configured(
+            host,
+            port,
+            timeout,
+            use_tls=use_tls,
+            tls_config=tls_config,
+        )
+        return cls(
+            sock=sock,
+            transport_mode=transport_mode,
+            identity=(username, password),
+            api_versions={},
+        )
+
+    def detect(self) -> KafkaApiVersionsResult:
+        result = _probe_apiversions(self.sock, self.correlation_id)
+        self.correlation_id += 1
+        if result.versions:
+            assert self.api_versions is not None
+            self.api_versions.update(result.versions)
+        return result
+
+    def bootstrap(self, *, known_kafka: bool, sasl_first: bool = False) -> tuple[bool, str | None]:
+        username, password = self.identity
+        versions = self.api_versions if self.api_versions is not None else {}
+        ok, correlation, error = _authenticate_or_probe(
+            self.sock,
+            self.correlation_id,
+            username,
+            password,
+            known_kafka=known_kafka and not sasl_first,
+            sasl_first=sasl_first,
+            api_versions_out=versions,
+        )
+        self.api_versions = versions
+        self.correlation_id = correlation
+        return ok, error
+
+    def fetch_metadata(self, *, topics: list[str] | None = None) -> tuple[dict[str, Any] | None, str | None]:
+        metadata, error = _fetch_metadata(self.sock, self.correlation_id, topics=topics)
+        self.correlation_id += 1
+        if metadata is not None:
+            if self.api_versions:
+                metadata["api_versions"] = dict(self.api_versions)
+            self.metadata = metadata
+        return metadata, error
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+class KafkaLeaderPool:
+    """Small identity-aware pool of live Kafka leader sessions."""
+
+    def __init__(self, *, max_sessions: int = 16) -> None:
+        self._max_sessions = max(1, int(max_sessions))
+        self._sessions: OrderedDict[tuple[str, int, str, str | None, str | None], KafkaSession] = OrderedDict()
+        self._connections = 0
+        self._reused = 0
+
+    def get_or_open(
+        self,
+        host: str,
+        port: int,
+        timeout: float,
+        *,
+        username: str | None,
+        password: str | None,
+        use_tls: bool | None,
+        tls_config: KafkaTlsConfig | None,
+        sasl_first: bool,
+        known_kafka: bool,
+    ) -> tuple[KafkaSession | None, str | None]:
+        mode = "tls" if use_tls is True else "plaintext"
+        key = (str(host), int(port), mode, username, password)
+        existing = self._sessions.get(key)
+        if existing is not None and not existing.closed:
+            self._sessions.move_to_end(key)
+            self._reused += 1
+            return existing, None
+        try:
+            session = KafkaSession.open(
+                host,
+                port,
+                timeout,
+                username=username,
+                password=password,
+                use_tls=use_tls,
+                tls_config=tls_config,
+            )
+            ok, error = session.bootstrap(known_kafka=known_kafka, sasl_first=sasl_first)
+            if not ok:
+                session.close()
+                return None, error or "Kafka leader session bootstrap failed"
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            return None, _friendly_error_from_exception(exc)
+        self._sessions[key] = session
+        self._connections += 1
+        while len(self._sessions) > self._max_sessions:
+            _old_key, old_session = self._sessions.popitem(last=False)
+            old_session.close()
+        return session, None
+
+    def stats(self) -> dict[str, int]:
+        return {"connections": self._connections, "reused": self._reused, "requests": 0, "retries": 0}
+
+    def close(self) -> None:
+        sessions = list(self._sessions.values())
+        self._sessions.clear()
+        for session in sessions:
+            session.close()
 
 
 class KafkaCompressionError(ValueError):
@@ -184,15 +335,16 @@ def open_kafka_socket(
     if not resolved:
         return base, "plaintext"
     tls = tls_config or KafkaTlsConfig(insecure=True)
-    ctx = ssl.create_default_context(cafile=tls.ca_file) if tls.ca_file else ssl.create_default_context()
-    if tls.insecure:
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-    if tls.cert_file or tls.key_file:
-        if not tls.cert_file or not tls.key_file:
-            base.close()
-            raise ValueError("TLS client certificate and key must be provided together")
-        ctx.load_cert_chain(certfile=tls.cert_file, keyfile=tls.key_file)
+    try:
+        ctx = shared_client_ssl_context(
+            insecure=tls.insecure,
+            ca_file=tls.ca_file,
+            cert_file=tls.cert_file,
+            key_file=tls.key_file,
+        )
+    except ValueError:
+        base.close()
+        raise
     try:
         wrapped = ctx.wrap_socket(base, server_hostname=tls.server_name or host)
         wrapped.settimeout(timeout)
@@ -966,7 +1118,7 @@ def _read_var_bytes(reader: _KafkaReader) -> bytes | None:
 
 def _skip_record_headers(reader: _KafkaReader) -> None:
     header_count = _read_varint(reader)
-    if header_count < 0:
+    if header_count < 0 or header_count > KAFKA_MAX_PARSE_STEPS:
         raise ValueError("invalid Kafka record header count")
     for _ in range(header_count):
         key_size = _read_varint(reader)
@@ -979,7 +1131,10 @@ def _skip_record_headers(reader: _KafkaReader) -> None:
 
 def _decode_xerial_snappy(payload: bytes, snappy_module: Any) -> bytes:
     if not payload.startswith(b"\x82SNAPPY\x00"):
-        return bytes(snappy_module.decompress(payload))
+        result = bytes(snappy_module.decompress(payload))
+        if len(result) > KAFKA_MAX_DECOMPRESSED_BYTES:
+            raise KafkaCompressionError("Kafka decompressed payload exceeds 16 MiB")
+        return result
     if len(payload) < 16:
         raise KafkaCompressionError("invalid Kafka xerial-snappy header")
     output = bytearray()
@@ -992,6 +1147,8 @@ def _decode_xerial_snappy(payload: bytes, snappy_module: Any) -> bytes:
         if size < 0 or offset + size > len(payload):
             raise KafkaCompressionError("truncated Kafka xerial-snappy chunk")
         output.extend(snappy_module.decompress(payload[offset : offset + size]))
+        if len(output) > KAFKA_MAX_DECOMPRESSED_BYTES:
+            raise KafkaCompressionError("Kafka decompressed payload exceeds 16 MiB")
         offset += size
     return bytes(output)
 
@@ -1003,13 +1160,27 @@ def _decompress_kafka_records(codec: int, payload: bytes) -> bytes:
         raise KafkaCompressionError(f"unsupported Kafka compression codec {codec}")
     try:
         if codec == 1:
-            return gzip.decompress(payload)
+            stream = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            result = stream.decompress(payload, KAFKA_MAX_DECOMPRESSED_BYTES + 1)
+            if stream.unconsumed_tail or len(result) > KAFKA_MAX_DECOMPRESSED_BYTES:
+                raise KafkaCompressionError("Kafka decompressed payload exceeds 16 MiB")
+            return result
         if codec == 2:
             return _decode_xerial_snappy(payload, importlib.import_module("snappy"))
         if codec == 3:
-            return bytes(importlib.import_module("lz4.frame").decompress(payload))
+            result = bytes(importlib.import_module("lz4.frame").decompress(payload))
+            if len(result) > KAFKA_MAX_DECOMPRESSED_BYTES:
+                raise KafkaCompressionError("Kafka decompressed payload exceeds 16 MiB")
+            return result
         zstandard = importlib.import_module("zstandard")
-        return bytes(zstandard.ZstdDecompressor().decompress(payload))
+        decoder = zstandard.ZstdDecompressor()
+        try:
+            result = bytes(decoder.decompress(payload, max_output_size=KAFKA_MAX_DECOMPRESSED_BYTES))
+        except TypeError:
+            result = bytes(decoder.decompress(payload))
+        if len(result) > KAFKA_MAX_DECOMPRESSED_BYTES:
+            raise KafkaCompressionError("Kafka decompressed payload exceeds 16 MiB")
+        return result
     except ModuleNotFoundError as exc:
         package = {2: "python-snappy", 3: "lz4", 4: "zstandard"}[codec]
         raise KafkaCompressionError(f"Kafka {name} compressed batch requires optional package {package!r}") from exc
@@ -1023,6 +1194,8 @@ def _parse_record_entries(
     reader: _KafkaReader, base_offset: int, record_count: int, max_messages: int
 ) -> list[tuple[int, str]]:
     items: list[tuple[int, str]] = []
+    if record_count > KAFKA_MAX_PARSE_STEPS:
+        raise ValueError("Kafka record count exceeds parse budget")
     for _ in range(record_count):
         if len(items) >= max_messages:
             break
@@ -1074,11 +1247,17 @@ def _parse_record_batch_entries(base_offset: int, batch: bytes, max_messages: in
     return _parse_record_entries(reader, base_offset, record_count, max_messages)
 
 
-def _parse_message_set_entries(message_set: bytes, max_messages: int) -> list[tuple[int, str]]:
+def _parse_message_set_entries(message_set: bytes, max_messages: int, *, _depth: int = 0) -> list[tuple[int, str]]:
+    if _depth > KAFKA_MAX_COMPRESSION_DEPTH:
+        raise KafkaCompressionError("Kafka compression nesting exceeds 4 levels")
     items: list[tuple[int, str]] = []
     reader = _KafkaReader(message_set)
 
+    parse_steps = 0
     while reader.remaining() >= 12 and len(items) < max_messages:
+        parse_steps += 1
+        if parse_steps > KAFKA_MAX_PARSE_STEPS:
+            raise ValueError("Kafka message set exceeds parse budget")
         try:
             offset = reader.read_i64()
             message_size = reader.read_i32()
@@ -1108,7 +1287,7 @@ def _parse_message_set_entries(message_set: bytes, max_messages: int) -> list[tu
             compression = int(attributes) & 0x07
             if compression:
                 nested = _decompress_kafka_records(compression, value)
-                items.extend(_parse_message_set_entries(nested, max_messages - len(items)))
+                items.extend(_parse_message_set_entries(nested, max_messages - len(items), _depth=_depth + 1))
                 continue
 
             decoded = value.decode("utf-8", errors="replace")
@@ -1743,6 +1922,7 @@ def _probe_kafka_acls(
     probe_cluster: bool = True,
     debug_emit: Any = None,
     known_kafka: bool = False,
+    existing_session: KafkaSession | None = None,
 ) -> dict[str, Any]:
     """Probe Read (and optionally Write) ACLs per topic AND cluster-level
     Create/Delete ACLs — all on a single authenticated socket.
@@ -1779,37 +1959,48 @@ def _probe_kafka_acls(
 
     # Broad exception net around the whole probe flow. Best-effort probing
     # must never sink the parent audit — degrade to `None` markers instead.
-    def _probe_session(*, sasl_first: bool) -> dict[str, Any] | None:
+    def _probe_session(*, sasl_first: bool, borrow_existing: bool = True) -> dict[str, Any] | None:
+        borrowed = (
+            existing_session
+            if borrow_existing and not sasl_first and existing_session is not None and not existing_session.closed
+            else None
+        )
         try:
-            sock, _transport_mode = _open_kafka_socket_configured(
-                host,
-                port,
-                timeout,
-                use_tls=use_tls,
-                tls_config=tls_config,
-            )
+            if borrowed is not None:
+                sock = borrowed.sock
+            else:
+                sock, _transport_mode = _open_kafka_socket_configured(
+                    host,
+                    port,
+                    timeout,
+                    use_tls=use_tls,
+                    tls_config=tls_config,
+                )
         except BaseException as exc:  # noqa: BLE001
             _log(f"open_kafka_socket failed: {exc.__class__.__name__}: {exc}")
             return None
         try:
-            with sock:
-                correlation = 1
-                api_versions: dict[int, tuple[int, int]] = {}
-                auth_kwargs: dict[str, Any] = {"sasl_first": sasl_first}
-                if known_kafka and not sasl_first:
-                    auth_kwargs["known_kafka"] = True
-                if _accepts_keyword(_authenticate_or_probe, "api_versions_out"):
-                    auth_kwargs["api_versions_out"] = api_versions
-                ok, correlation, session_error = _authenticate_or_probe(
-                    sock,
-                    correlation,
-                    username,
-                    password,
-                    **auth_kwargs,
+            try:
+                correlation = borrowed.correlation_id if borrowed is not None else 1
+                api_versions: dict[int, tuple[int, int]] = (
+                    dict(borrowed.api_versions or {}) if borrowed is not None else {}
                 )
-                if not ok:
-                    _log(f"authenticate_or_probe rejected: {session_error!r}")
-                    return None
+                if borrowed is None:
+                    auth_kwargs: dict[str, Any] = {"sasl_first": sasl_first}
+                    if known_kafka and not sasl_first:
+                        auth_kwargs["known_kafka"] = True
+                    if _accepts_keyword(_authenticate_or_probe, "api_versions_out"):
+                        auth_kwargs["api_versions_out"] = api_versions
+                    ok, correlation, session_error = _authenticate_or_probe(
+                        sock,
+                        correlation,
+                        username,
+                        password,
+                        **auth_kwargs,
+                    )
+                    if not ok:
+                        _log(f"authenticate_or_probe rejected: {session_error!r}")
+                        return None
                 cluster_perms: dict[str, bool | None] = {"create": None, "delete": None}
                 if probe_cluster:
                     cluster_perms["create"], correlation = _probe_create_topic_permission(sock, correlation)
@@ -1825,14 +2016,30 @@ def _probe_kafka_acls(
                     if probe_write:
                         write_result, correlation = _probe_topic_write_permission(sock, correlation, topic)
                     topic_perms[topic] = {"read": read_result, "write": write_result}
+                if borrowed is not None:
+                    borrowed.correlation_id = correlation
                 return {"cluster": cluster_perms, "topics": topic_perms}
+            finally:
+                if borrowed is None:
+                    try:
+                        close_socket = getattr(sock, "close", None)
+                        if callable(close_socket):
+                            close_socket()
+                    except OSError:
+                        pass
         except BaseException as exc:  # noqa: BLE001
+            if borrowed is not None:
+                borrowed.close()
             _log(f"probe session raised: {exc.__class__.__name__}: {exc}")
             return None
 
     result = _probe_session(sasl_first=False)
     if result is not None:
         return result
+    if existing_session is not None:
+        result = _probe_session(sasl_first=False, borrow_existing=False)
+        if result is not None:
+            return result
     # A few SASL listeners reject ApiVersions until after the SASL handshake.
     # The main audit already reached this helper only after authenticating via
     # the SASL fallback, so retry on a fresh socket with that ordering.
@@ -1886,6 +2093,8 @@ def _read_topic_messages(
     known_kafka: bool = False,
     bootstrap_metadata: dict[str, Any] | None = None,
     sasl_first: bool = False,
+    existing_session: KafkaSession | None = None,
+    leader_pool: KafkaLeaderPool | None = None,
 ) -> tuple[list[str] | None, str | None, str]:
     """Read up to `max_messages` messages from `topic` across all partitions.
 
@@ -1904,28 +2113,37 @@ def _read_topic_messages(
         return [], None, "plaintext"
 
     try:
-        sock, transport_mode = _open_kafka_socket_configured(
-            host,
-            port,
-            timeout,
-            use_tls=use_tls,
-            tls_config=tls_config,
-        )
-        with sock:
-            correlation = 1
-
-            api_versions: dict[int, tuple[int, int]] = dict((bootstrap_metadata or {}).get("api_versions") or {})
-            ok, correlation, session_error = _authenticate_or_probe(
-                sock,
-                correlation,
-                username,
-                password,
-                api_versions_out=api_versions,
-                sasl_first=sasl_first,
-                known_kafka=known_kafka and not sasl_first,
+        if existing_session is not None and not existing_session.closed:
+            sock = existing_session.sock
+            transport_mode = existing_session.transport_mode
+        else:
+            sock, transport_mode = _open_kafka_socket_configured(
+                host,
+                port,
+                timeout,
+                use_tls=use_tls,
+                tls_config=tls_config,
             )
-            if not ok:
-                return None, session_error, transport_mode
+        with nullcontext(sock) if existing_session is not None else sock:
+            correlation = existing_session.correlation_id if existing_session is not None else 1
+
+            api_versions: dict[int, tuple[int, int]] = dict(
+                (existing_session.api_versions if existing_session is not None else None)
+                or (bootstrap_metadata or {}).get("api_versions")
+                or {}
+            )
+            if existing_session is None:
+                ok, correlation, session_error = _authenticate_or_probe(
+                    sock,
+                    correlation,
+                    username,
+                    password,
+                    api_versions_out=api_versions,
+                    sasl_first=sasl_first,
+                    known_kafka=known_kafka and not sasl_first,
+                )
+                if not ok:
+                    return None, session_error, transport_mode
 
             metadata = bootstrap_metadata
             metadata_error: str | None = None
@@ -1996,15 +2214,32 @@ def _read_topic_messages(
                 ):
                     correlation = _handle_partitions(sock, partitions, correlation)
                     continue
+                leader_session: KafkaSession | None = None
                 try:
-                    leader_sock, _leader_transport = _open_kafka_socket_configured(
-                        leader_host,
-                        leader_port,
-                        timeout,
-                        use_tls=(transport_mode == "tls") or None,
-                        tls_config=tls_config,
-                    )
-                except (TimeoutError, ConnectionError, OSError):
+                    if leader_pool is not None:
+                        leader_session, leader_error = leader_pool.get_or_open(
+                            leader_host,
+                            leader_port,
+                            timeout,
+                            username=username,
+                            password=password,
+                            use_tls=(transport_mode == "tls") or None,
+                            tls_config=tls_config,
+                            sasl_first=sasl_first,
+                            known_kafka=known_kafka,
+                        )
+                        if leader_session is None:
+                            raise OSError(leader_error or "Kafka leader session unavailable")
+                        leader_sock = leader_session.sock
+                    else:
+                        leader_sock, _leader_transport = _open_kafka_socket_configured(
+                            leader_host,
+                            leader_port,
+                            timeout,
+                            use_tls=(transport_mode == "tls") or None,
+                            tls_config=tls_config,
+                        )
+                except (TimeoutError, ConnectionError, OSError, ValueError):
                     # Leader broker unreachable from the auditor's network
                     # (common for advertised-DNS-only clusters). Fall back
                     # to attempting on the bootstrap socket so we at least
@@ -2013,31 +2248,37 @@ def _read_topic_messages(
                     correlation = _handle_partitions(sock, partitions, correlation)
                     continue
                 try:
-                    leader_corr = 1
+                    leader_corr = leader_session.correlation_id if leader_session is not None else 1
                     leader_api_versions: dict[int, tuple[int, int]] = {}
-                    ok, leader_corr, leader_session_error = _authenticate_or_probe(
-                        leader_sock,
-                        leader_corr,
-                        username,
-                        password,
-                        api_versions_out=leader_api_versions,
-                        sasl_first=sasl_first,
-                        known_kafka=known_kafka and not sasl_first,
-                    )
-                    if not ok:
-                        affected = ",".join(f"p{partition}" for partition in partitions)
-                        partition_errors.append(
-                            f"{affected}: leader {leader_host}:{leader_port} auth failed: {leader_session_error}"
+                    if leader_session is None:
+                        ok, leader_corr, leader_session_error = _authenticate_or_probe(
+                            leader_sock,
+                            leader_corr,
+                            username,
+                            password,
+                            api_versions_out=leader_api_versions,
+                            sasl_first=sasl_first,
+                            known_kafka=known_kafka and not sasl_first,
                         )
-                        continue
+                        if not ok:
+                            affected = ",".join(f"p{partition}" for partition in partitions)
+                            partition_errors.append(
+                                f"{affected}: leader {leader_host}:{leader_port} auth failed: {leader_session_error}"
+                            )
+                            continue
+                    else:
+                        leader_api_versions.update(leader_session.api_versions or {})
                     if leader_api_versions:
                         fetch_api_version = _select_fetch_api_version(leader_api_versions)
-                    _handle_partitions(leader_sock, partitions, leader_corr)
+                    leader_corr = _handle_partitions(leader_sock, partitions, leader_corr)
+                    if leader_session is not None:
+                        leader_session.correlation_id = leader_corr
                 finally:
-                    try:
-                        leader_sock.close()
-                    except OSError:
-                        pass
+                    if leader_session is None:
+                        try:
+                            leader_sock.close()
+                        except OSError:
+                            pass
 
             # 2) Partitions without a known leader / broker_map miss:
             #    fall back to the bootstrap socket (best-effort).
@@ -2269,6 +2510,8 @@ def _read_dump_topics(
     known_kafka: bool = False,
     bootstrap_metadata: dict[str, Any] | None = None,
     sasl_first: bool = False,
+    existing_session: KafkaSession | None = None,
+    leader_pool: KafkaLeaderPool | None = None,
 ) -> tuple[dict[str, list[str] | None], dict[str, str]]:
     dump_results: dict[str, list[str] | None] = {}
     dump_errors: dict[str, str] = {}
@@ -2286,6 +2529,8 @@ def _read_dump_topics(
             known_kafka=known_kafka,
             bootstrap_metadata=bootstrap_metadata,
             sasl_first=sasl_first,
+            existing_session=existing_session,
+            leader_pool=leader_pool,
         )
         dump_results[topic_name] = read_items
         if read_error:

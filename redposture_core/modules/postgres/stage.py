@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import ipaddress
+import random
+import threading
 import time
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,6 +42,99 @@ _POSTGRES_AUDIT_HOST_IMPL = actions._audit_postgres_host
 class _PostgresLifecycleState:
     detect_record: AuditRecord | None = None
     deep_records: dict[tuple[str | None, str | None, str], AuditRecord] = field(default_factory=dict)
+
+
+@dataclass
+class _PostgresHostCredentialState:
+    lock: Any = field(default_factory=threading.Lock)
+    last_finished_at: float | None = None
+    cooldown_until: float = 0.0
+    overload_streak: int = 0
+
+
+class _PostgresCredentialCoordinator:
+    """Serialize and pace credential handshakes for each target host."""
+
+    def __init__(
+        self,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+        uniform: Callable[[float, float], float] = random.uniform,
+    ) -> None:
+        self._monotonic = monotonic
+        self._sleep = sleep
+        self._uniform = uniform
+        self._states: dict[str, _PostgresHostCredentialState] = {}
+        self._states_lock = threading.Lock()
+
+    @staticmethod
+    def _host_key(host: str) -> str:
+        value = str(host or "").strip()
+        try:
+            return ipaddress.ip_address(value).compressed
+        except ValueError:
+            return value.rstrip(".").casefold()
+
+    def _state(self, host: str) -> _PostgresHostCredentialState:
+        key = self._host_key(host)
+        with self._states_lock:
+            state = self._states.get(key)
+            if state is None:
+                state = _PostgresHostCredentialState()
+                self._states[key] = state
+            return state
+
+    @contextmanager
+    def slot(self, host: str) -> Iterator[float]:
+        """Yield after the host's previous credential attempt and cooldown."""
+
+        state = self._state(host)
+        with state.lock:
+            now = self._monotonic()
+            paced_start = now
+            if state.last_finished_at is not None:
+                paced_start = state.last_finished_at + float(self._uniform(0.10, 0.25))
+            wait_seconds = max(0.0, max(paced_start, state.cooldown_until) - now)
+            if wait_seconds > 0:
+                self._sleep(wait_seconds)
+            try:
+                yield wait_seconds
+            finally:
+                state.last_finished_at = self._monotonic()
+
+    def observe(self, host: str, record: AuditRecord) -> float:
+        """Apply a bounded host cooldown after an explicit overload response."""
+
+        state = self._state(host)
+        if not _postgres_is_transient_overload(record):
+            state.overload_streak = 0
+            return 0.0
+        state.overload_streak += 1
+        cooldown = min(2.0, 0.50 * (2 ** (state.overload_streak - 1)))
+        state.cooldown_until = max(state.cooldown_until, self._monotonic() + cooldown)
+        return cooldown
+
+
+_POSTGRES_OVERLOAD_SQLSTATES = {"53300", "53400", "57P03"}
+_POSTGRES_OVERLOAD_MARKERS = (
+    "too many connections",
+    "remaining connection slots are reserved",
+    "max_client_conn",
+    "no more connections allowed",
+    "connection pool exhausted",
+    "pooler is paused",
+    "server login has been failing",
+    "query_wait_timeout",
+)
+
+
+def _postgres_is_transient_overload(record: AuditRecord) -> bool:
+    sqlstate = str(record.extra.get("sqlstate") or "").upper()
+    if sqlstate in _POSTGRES_OVERLOAD_SQLSTATES:
+        return True
+    error = str(record.extra.get("error") or "").casefold()
+    return any(marker in error for marker in _POSTGRES_OVERLOAD_MARKERS)
 
 
 def build_postgres_plan(args: Any) -> AuditCommandPlan:
@@ -264,21 +362,34 @@ def _postgres_auth_probe_record(
 
     payload = record.to_dict()
     status = str(record.status or "")
-    verified = status in {"valid_credentials", "weak_default_creds"} and record.auth_required is not False
+    verified: bool | None = status in {"valid_credentials", "weak_default_creds"} and record.auth_required is not False
     if _postgres_host_stage_is_replaced() and status in {"valid_credentials", "weak_default_creds"}:
         # Test/embedding replacements often omit a truthful auth_required
         # value. Their accepted status remains the compatibility contract.
         verified = True
+    verification: str
     if status == "open_no_auth" or (record.auth_required is False and not verified):
         status = "invalid_credentials_anonymous"
         verified = False
+        verification = "unverified"
     elif verified and ctx.credential.source == "default":
         status = "weak_default_creds"
+        verification = "verified"
+    elif verified:
+        verification = "verified"
+    elif status == "unknown_auth":
+        verification = "unavailable"
+        verified = None
+    elif status == "fail":
+        verification = "error"
+        verified = None
+    else:
+        verification = "rejected"
     payload.update(
         {
             "status": status,
             "credential_verified": verified,
-            "credential_verification": "verified" if verified else "unverified",
+            "credential_verification": verification,
         }
     )
     return _postgres_record(payload)
@@ -356,6 +467,9 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
                 if exc.detected and exc.auth_required is True
                 else ("unknown_auth" if exc.detected else "fail")
             )
+            verification = (
+                "rejected" if status == "auth_required" else "unavailable" if status == "unknown_auth" else "error"
+            )
             return _postgres_record(
                 {
                     "timestamp": actions.utc_now_iso(),
@@ -377,8 +491,8 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
                     "provided_password": password if provided_credentials else None,
                     "defcreds_enabled": is_default,
                     "effective_username": username,
-                    "credential_verified": False,
-                    "credential_verification": "rejected",
+                    "credential_verified": False if verification == "rejected" else None,
+                    "credential_verification": verification,
                     "elapsed_ms": int((time.monotonic() - started) * 1000),
                     "error": str(exc),
                 }
@@ -405,7 +519,7 @@ def _postgres_probe_credential(ctx: AuditHookContext) -> AuditRecord:
             "provided_password": password if provided_credentials else None,
             "defcreds_enabled": is_default,
             "effective_username": username,
-            "credential_verified": False,
+            "credential_verified": None,
             "credential_verification": "error",
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": last_error or "connection failed",
@@ -422,16 +536,30 @@ def _postgres_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRe
                 "credential_verification": "anonymous",
             }
         )
-    if _postgres_host_stage_is_replaced():
-        record = _postgres_run_host_stage(
-            ctx,
-            run_deep_checks=False,
-            username=ctx.credential.username,
-            password=ctx.credential.password,
-            source=ctx.credential.source,
-        )
-        return _postgres_auth_probe_record(ctx, record)
-    return _postgres_probe_credential(ctx)
+
+    def _probe() -> AuditRecord:
+        if _postgres_host_stage_is_replaced():
+            record = _postgres_run_host_stage(
+                ctx,
+                run_deep_checks=False,
+                username=ctx.credential.username,
+                password=ctx.credential.password,
+                source=ctx.credential.source,
+            )
+            return _postgres_auth_probe_record(ctx, record)
+        return _postgres_probe_credential(ctx)
+
+    coordinator = getattr(ctx.args, "_postgres_credential_coordinator", None)
+    if not isinstance(coordinator, _PostgresCredentialCoordinator):
+        return _probe()
+    with coordinator.slot(ctx.host) as wait_seconds:
+        if wait_seconds > 0 and ctx.debug_emit is not None:
+            ctx.debug_emit(f"postgres credential pacing host={ctx.host} wait={wait_seconds:.3f}s")
+        record = _probe()
+        cooldown = coordinator.observe(ctx.host, record)
+        if cooldown > 0 and ctx.debug_emit is not None:
+            ctx.debug_emit(f"postgres credential cooldown host={ctx.host} wait={cooldown:.3f}s")
+        return record
 
 
 def _postgres_credential_gate(
@@ -475,7 +603,8 @@ def build_postgres_spec(args: Any) -> ModuleAuditSpec:
         credential_gate=_postgres_credential_gate,
         fallback_to_anonymous_detect_record=True,
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
-        continue_after_credential_success=bool(getattr(args, "defcreds", False)),
+        continue_after_credential_success=bool(getattr(args, "defcreds", False))
+        and not bool(getattr(args, "stop_on_success", False)),
         record_all_credential_attempts=bool(getattr(args, "defcreds", False)),
         credential_attempt_detail_fields=("credential_verified", "credential_verification"),
     )
@@ -506,6 +635,7 @@ def run_postgres_stage(args: Any, logger: Any) -> int:
         else ()
     )
     args._audit_credential_runs = merge_audit_credential_runs(supplied_runs, default_runs)
+    args._postgres_credential_coordinator = _PostgresCredentialCoordinator()
     if bool(getattr(args, "os_shell", False)) or bool(getattr(args, "sql_shell", False)):
         return _run_postgres_shell(args, console)
     try:
@@ -590,29 +720,42 @@ def _run_postgres_shell(args: Any, console: Any) -> int:
         credential_runs = merge_audit_credential_runs(supplied_runs, default_runs)
     record: dict[str, Any] | None = None
     winning_credential: AuditCredentialRun | None = None
+    coordinator = getattr(args, "_postgres_credential_coordinator", None)
     for credential in credential_runs:
-        candidate_record = actions._audit_postgres_host(
-            host=str(host),
-            port=int(port),
-            timeout=cfg.timeout,
-            retries=cfg.retries,
-            username=credential.username,
-            password=credential.password,
-            defcreds=False,
-            database=str(getattr(args, "database", "postgres") or "postgres"),
-            show_databases=False,
-            show_tables=False,
-            show_row_counts=False,
-            show_columns=False,
-            table_targets=[],
-            table_targets_by_database={},
-            table_columns=[],
-            dump_table_rows=False,
-            dump_row_limit=None,
-            execute_command=None,
-            sql_command=None,
-            **_postgres_tls_stage_kwargs(args),
-        )
+        credential_slot: AbstractContextManager[float]
+        if isinstance(coordinator, _PostgresCredentialCoordinator):
+            credential_slot = coordinator.slot(str(host))
+        else:
+            credential_slot = nullcontext(0.0)
+        with credential_slot as wait_seconds:
+            if wait_seconds > 0 and cfg.debug:
+                console.info(f"postgres credential pacing host={host} wait={wait_seconds:.3f}s")
+            candidate_record = actions._audit_postgres_host(
+                host=str(host),
+                port=int(port),
+                timeout=cfg.timeout,
+                retries=cfg.retries,
+                username=credential.username,
+                password=credential.password,
+                defcreds=False,
+                database=str(getattr(args, "database", "postgres") or "postgres"),
+                show_databases=False,
+                show_tables=False,
+                show_row_counts=False,
+                show_columns=False,
+                table_targets=[],
+                table_targets_by_database={},
+                table_columns=[],
+                dump_table_rows=False,
+                dump_row_limit=None,
+                execute_command=None,
+                sql_command=None,
+                **_postgres_tls_stage_kwargs(args),
+            )
+            if isinstance(coordinator, _PostgresCredentialCoordinator):
+                cooldown = coordinator.observe(str(host), _postgres_record(candidate_record))
+                if cooldown > 0 and cfg.debug:
+                    console.info(f"postgres credential cooldown host={host} wait={cooldown:.3f}s")
         if (
             credential.source == "default"
             and str(candidate_record.get("status") or "") == "valid_credentials"

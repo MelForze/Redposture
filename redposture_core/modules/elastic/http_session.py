@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from types import TracebackType
 
 from ...clients.http_api import HttpResponse, join_http_target_path, normalize_http_error
+from ...clients.tls_cache import shared_client_ssl_context
 
 _STALE_SOCKET_ERRNOS = frozenset(
     value
@@ -45,11 +46,7 @@ def _is_read_only_elastic_request(method: str, path: str) -> bool:
 
 
 def _build_ssl_context(*, insecure: bool, ca_file: str | None) -> ssl.SSLContext:
-    context = ssl.create_default_context(cafile=ca_file or None)
-    if insecure:
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-    return context
+    return shared_client_ssl_context(insecure=insecure, ca_file=ca_file)
 
 
 def _is_stale_keep_alive_error(exc: BaseException) -> bool:

@@ -12,6 +12,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
+from .tls_cache import shared_client_ssl_context
+
 
 class OracleDependencyError(RuntimeError):
     """Raised when python-oracledb is unavailable at runtime."""
@@ -261,10 +263,7 @@ def tns_listener_command(
     try:
         raw_sock = socket.create_connection((host, int(port)), timeout=max(0.1, float(timeout)))
         if str(protocol).lower() == "tcps":
-            context = ssl.create_default_context()
-            if insecure:
-                context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
+            context = shared_client_ssl_context(insecure=insecure)
             wrapped_sock = context.wrap_socket(raw_sock, server_hostname=host)
         else:
             wrapped_sock = raw_sock

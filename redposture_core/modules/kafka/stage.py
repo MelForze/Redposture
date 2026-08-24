@@ -168,6 +168,7 @@ def build_kafka_spec(args: Any) -> ModuleAuditSpec:
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
+        lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         record_all_credential_attempts=full_credential_sweep,
         continue_after_credential_success=full_credential_sweep,
         continue_after_credential_error=full_credential_sweep,

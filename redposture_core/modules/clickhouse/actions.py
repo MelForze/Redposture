@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import random
 import re
 import time
 from collections.abc import Callable, Mapping
@@ -54,10 +55,47 @@ _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _CLICKHOUSE_DEEP_STATUSES = {
     "open_no_auth",
+    "anonymous_limited",
     "weak_default_creds",
     "valid_credentials",
     "invalid_credentials_anonymous",
 }
+_CLICKHOUSE_AUTH_ERROR_CODES = {192, 193, 194, 195, 516}
+_CLICKHOUSE_ACCESS_DENIED_CODE = 497
+_CLICKHOUSE_UNKNOWN_DATABASE_CODE = 81
+_CLICKHOUSE_HTTP_EXCEPTION_MARKER = "received clickhouse exception, code:"
+_CLICKHOUSE_ERROR_CODE_RE = re.compile(r"\bcode:\s*(\d+)\b", re.IGNORECASE)
+
+
+class _ChProbeError(str):
+    """String-compatible probe error with evidence retained for detection."""
+
+    kind: str
+    confirms_service: bool
+    retryable: bool
+    auth_required: bool | None
+    access_limited: bool
+    code: int | None
+
+    def __new__(
+        cls,
+        message: str,
+        *,
+        kind: str,
+        confirms_service: bool = False,
+        retryable: bool = False,
+        auth_required: bool | None = None,
+        access_limited: bool = False,
+        code: int | None = None,
+    ) -> _ChProbeError:
+        instance = str.__new__(cls, message)
+        instance.kind = kind
+        instance.confirms_service = confirms_service
+        instance.retryable = retryable
+        instance.auth_required = auth_required
+        instance.access_limited = access_limited
+        instance.code = code
+        return instance
 
 
 @dataclass
@@ -67,6 +105,53 @@ class _ChSession:
     username: str
     password: str
     database: str
+    check_grant_supported: bool | None = None
+
+
+@dataclass
+class _ChProbeResult:
+    """Typed result of opening and validating one ClickHouse session."""
+
+    kind: str
+    code: int | None = None
+    confirms_service: bool = False
+    retryable: bool = False
+    auth_required: bool | None = None
+    access_limited: bool = False
+    session: _ChSession | None = None
+    error: _ChProbeError | None = None
+
+    def __iter__(self):
+        """Keep tuple-unpacking compatibility for older internal callers/tests."""
+
+        yield self.session
+        yield self.error
+
+
+def _probe_result(session: _ChSession | None, error: Any = None) -> _ChProbeResult:
+    """Normalize a session/error pair into the public internal probe model."""
+
+    if error is None and session is not None:
+        return _ChProbeResult(kind="success", confirms_service=True, session=session)
+    info = _probe_error_info(error)
+    return _ChProbeResult(
+        kind=info.kind,
+        code=info.code,
+        confirms_service=info.confirms_service,
+        retryable=info.retryable,
+        auth_required=info.auth_required,
+        access_limited=info.access_limited,
+        session=session,
+        error=info,
+    )
+
+
+def _coerce_probe_result(value: Any) -> _ChProbeResult:
+    if isinstance(value, _ChProbeResult):
+        return value
+    if isinstance(value, tuple) and len(value) == 2:
+        return _probe_result(value[0], value[1])
+    raise TypeError("invalid ClickHouse probe result")
 
 
 @dataclass(frozen=True)
@@ -121,6 +206,8 @@ class ClickHouseLifecycleState:
     auth_attempts: list[dict[str, Any]] = field(default_factory=list)
     selected_protocol: str | None = None
     auth_required: bool | None = None
+    anonymous_access_limited: bool = False
+    credential_limited: set[tuple[str | None, str | None, str]] = field(default_factory=set)
 
     def take_session(self, username: str | None, password: str | None, source: str) -> _ChSession | None:
         return self.credential_sessions.pop((username, password, source), None)
@@ -128,6 +215,7 @@ class ClickHouseLifecycleState:
     def close(self) -> None:
         sessions = list(self.credential_sessions.values())
         self.credential_sessions.clear()
+        self.credential_limited.clear()
         if self.anonymous_session is not None:
             sessions.append(self.anonymous_session)
             self.anonymous_session = None
@@ -171,8 +259,13 @@ def _clip(text: str, width: int = 80) -> str:
     return text[: width - 3] + "..."
 
 
-def _retry_delay(attempt_index: int) -> float:
-    return min(1.50, 0.20 * (2**attempt_index))
+def _retry_delay(
+    attempt_index: int,
+    *,
+    jitter: Callable[[float, float], float] | None = None,
+) -> float:
+    jitter_fn = jitter or random.uniform
+    return min(1.50, 0.20 * (2**attempt_index) * float(jitter_fn(0.8, 1.2)))
 
 
 def _load_readline_module() -> Any | None:
@@ -205,6 +298,11 @@ def _add_readline_history(readline_module: Any | None, line: str) -> None:
 def _friendly_error_from_exception(exc: BaseException) -> str:
     text = str(exc or "").strip() or exc.__class__.__name__
     lower = text.lower()
+    class_name = exc.__class__.__name__
+    if class_name == "SocketTimeoutError":
+        return _clip(f"connection timeout: {text}", 180)
+    if class_name == "NetworkError":
+        return _clip(f"network error: {text}", 180)
     if isinstance(exc, TimeoutError) or "timed out" in lower or "timeout" in lower:
         return "connection timeout"
     if "connection refused" in lower or "[errno 111]" in lower:
@@ -219,34 +317,112 @@ def _should_emit_status_line(record: dict[str, Any], output_format: str) -> bool
 
 
 def _is_auth_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return False
-    markers = (
-        "authentication",
-        "password",
-        "unauthorized",
-        "access denied",
-        "code: 193",
-        "code: 194",
-        "code: 516",
-        "code: 497",
+    if isinstance(value, _ChProbeError):
+        return value.auth_required is True
+    text = str(value or "").strip()
+    code = _error_code(text)
+    return bool(
+        code in _CLICKHOUSE_AUTH_ERROR_CODES
+        and any(marker in text.lower() for marker in ("authentication", "password", "user", "access denied"))
     )
-    return any(marker in text for marker in markers)
 
 
 def _looks_like_clickhouse_error(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    if not text:
-        return False
-    markers = (
-        "clickhouse",
-        "db::exception",
-        "code:",
-        "unexpected packet from server",
-        "unknown packet",
+    return _probe_error_info(value).confirms_service
+
+
+def _error_code(value: Any) -> int | None:
+    raw_code = getattr(value, "code", None)
+    if isinstance(raw_code, int):
+        return raw_code
+    match = _CLICKHOUSE_ERROR_CODE_RE.search(str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def _probe_error_info(value: Any) -> _ChProbeError:
+    if isinstance(value, _ChProbeError):
+        return value
+    text = str(value or "").strip() or "connection failed"
+    lower = text.lower()
+    code = _error_code(text)
+    if _CLICKHOUSE_HTTP_EXCEPTION_MARKER in lower:
+        access_limited = code == _CLICKHOUSE_ACCESS_DENIED_CODE
+        auth_required = True if code in _CLICKHOUSE_AUTH_ERROR_CODES else None
+        return _ChProbeError(
+            text,
+            kind="access_limited" if access_limited else "auth" if auth_required else "server_exception",
+            confirms_service=True,
+            auth_required=auth_required,
+            access_limited=access_limited,
+            code=code,
+        )
+    retryable_markers = (
+        "connection reset",
+        "connection closed",
+        "broken pipe",
+        "unexpected eof",
+        "temporarily unavailable",
+        "network unreachable",
+        "no route to host",
     )
-    return any(marker in text for marker in markers)
+    if (
+        _is_timeout_error(text)
+        or _is_connection_refused_error(text)
+        or any(marker in lower for marker in retryable_markers)
+    ):
+        return _ChProbeError(text, kind="transport", retryable=True, code=code)
+    return _ChProbeError(text, kind="client_error", code=code)
+
+
+def _classify_clickhouse_exception(exc: BaseException, protocol: str) -> _ChProbeError:
+    text = _friendly_error_from_exception(exc)
+    lower = str(exc or "").lower()
+    class_name = exc.__class__.__name__
+    module_name = exc.__class__.__module__
+    code = _error_code(exc)
+
+    if module_name.startswith("clickhouse_driver"):
+        if class_name == "ServerException":
+            access_limited = code == _CLICKHOUSE_ACCESS_DENIED_CODE
+            auth_required = True if code in _CLICKHOUSE_AUTH_ERROR_CODES else None
+            return _ChProbeError(
+                text,
+                kind="access_limited" if access_limited else "auth" if auth_required else "server_exception",
+                confirms_service=True,
+                auth_required=auth_required,
+                access_limited=access_limited,
+                code=code,
+            )
+        if class_name in {"UnexpectedPacketFromServerError", "UnknownPacketFromServerError"}:
+            return _ChProbeError(text, kind="protocol_mismatch", code=code)
+        if class_name in {"SocketTimeoutError", "NetworkError"}:
+            return _ChProbeError(text, kind="transport", retryable=True, code=code)
+
+    if protocol == "http" and _CLICKHOUSE_HTTP_EXCEPTION_MARKER in lower:
+        access_limited = code == _CLICKHOUSE_ACCESS_DENIED_CODE
+        auth_required = True if code in _CLICKHOUSE_AUTH_ERROR_CODES else None
+        return _ChProbeError(
+            text,
+            kind="access_limited" if access_limited else "auth" if auth_required else "server_exception",
+            confirms_service=True,
+            auth_required=auth_required,
+            access_limited=access_limited,
+            code=code,
+        )
+    if (
+        protocol == "http"
+        and module_name.startswith("clickhouse_connect")
+        and ("http driver received http status" in lower or class_name == "DatabaseError")
+    ):
+        return _ChProbeError(text, kind="not_clickhouse", code=code)
+    if (
+        isinstance(exc, (TimeoutError, ConnectionError, OSError))
+        or _is_timeout_error(text)
+        or _is_connection_refused_error(text)
+        or (module_name.startswith("clickhouse_connect") and class_name == "OperationalError")
+    ):
+        return _ChProbeError(text, kind="transport", retryable=True, code=code)
+    return _ChProbeError(text, kind="client_error", code=code)
 
 
 def _load_clickhouse_driver_client() -> Any:
@@ -342,6 +518,7 @@ def _open_clickhouse_client(
             "interface": "https" if tls.enabled else "http",
             "secure": tls.enabled,
             "connect_timeout": float(timeout),
+            "send_receive_timeout": float(timeout),
         }
         if tls.enabled:
             kwargs.update(
@@ -360,9 +537,10 @@ def _open_clickhouse_client(
         try:
             return clickhouse_connect.get_client(**kwargs)
         except TypeError as exc:
-            if not is_signature_compat_typeerror(exc, expected_keywords={"connect_timeout"}):
+            if not is_signature_compat_typeerror(exc, expected_keywords={"connect_timeout", "send_receive_timeout"}):
                 raise
-            kwargs.pop("connect_timeout", None)
+            unsupported = "send_receive_timeout" if "send_receive_timeout" in str(exc) else "connect_timeout"
+            kwargs.pop(unsupported, None)
             return clickhouse_connect.get_client(**kwargs)
 
     raise ValueError(f"unsupported protocol: {protocol}")
@@ -401,7 +579,7 @@ def _connect_and_probe(
     database: str = "default",
     tls_config: _ChTlsConfig | None = None,
     proxy: Any | None = None,
-) -> tuple[_ChSession | None, str | None]:
+) -> _ChProbeResult:
     client: Any | None = None
     try:
         client = _open_clickhouse_client(
@@ -421,15 +599,22 @@ def _connect_and_probe(
             password=password,
             database=database,
         )
-        _rows, query_error = _query_rows(session, "SELECT 1")
-        if query_error:
+        try:
+            if protocol == "native":
+                client.execute("SELECT 1")
+            else:
+                client.query("SELECT 1")
+        except Exception as exc:
+            error = _classify_clickhouse_exception(exc, protocol)
+            if error.access_limited:
+                return _probe_result(session, error)
             _close_client(protocol, client)
-            return None, query_error
-        return session, None
+            return _probe_result(None, error)
+        return _probe_result(session)
     except Exception as exc:
         if client is not None:
             _close_client(protocol, client)
-        return None, _friendly_error_from_exception(exc)
+        return _probe_result(None, _classify_clickhouse_exception(exc, protocol))
 
 
 def _bool_text(value: bool | None) -> str:
@@ -656,8 +841,18 @@ def _split_table_name(value: str, fallback_database: str) -> tuple[str, str] | t
     return db_name, table_name
 
 
-def _query_database_names(session: _ChSession) -> tuple[list[str] | None, str | None]:
-    rows, error = _query_rows(session, "SELECT name FROM system.databases ORDER BY name")
+def _server_limit_clause(limit: int | None) -> str:
+    return f" LIMIT {max(0, int(limit)) + 1}" if isinstance(limit, int) else ""
+
+
+def _query_database_names(
+    session: _ChSession,
+    limit: int | None = None,
+) -> tuple[list[str] | None, str | None]:
+    rows, error = _query_rows(
+        session,
+        "SELECT name FROM system.databases ORDER BY name" + _server_limit_clause(limit),
+    )
     if error:
         return None, error
     names: list[str] = []
@@ -668,13 +863,26 @@ def _query_database_names(session: _ChSession) -> tuple[list[str] | None, str | 
     return names, None
 
 
-def _query_readable_tables(session: _ChSession) -> tuple[list[str] | None, str | None]:
+def _query_database_count(session: _ChSession) -> tuple[int | None, str | None]:
+    rows, error = _query_rows(session, "SELECT count() FROM system.databases")
+    if error:
+        return None, error
+    try:
+        return int((rows or [[None]])[0][0]), None
+    except (IndexError, TypeError, ValueError):
+        return None, "invalid database count response"
+
+
+def _query_visible_tables(
+    session: _ChSession,
+    limit: int | None = None,
+) -> tuple[list[str] | None, str | None]:
     rows, error = _query_rows(
         session,
         (
             "SELECT database, name FROM system.tables "
             "WHERE database NOT IN ('system','information_schema','INFORMATION_SCHEMA') "
-            "ORDER BY database, name"
+            "ORDER BY database, name" + _server_limit_clause(limit)
         ),
     )
     if error:
@@ -686,6 +894,83 @@ def _query_readable_tables(session: _ChSession) -> tuple[list[str] | None, str |
             continue
         tables.append(f"{row[0]}.{row[1]}")
     return tables, None
+
+
+def _is_access_denied_error(error: Any) -> bool:
+    text = str(error or "").lower()
+    return _error_code(error) == _CLICKHOUSE_ACCESS_DENIED_CODE or any(
+        marker in text for marker in ("not enough privileges", "required grant", "access denied")
+    )
+
+
+def _check_table_read_access(
+    session: _ChSession,
+    db_name: str,
+    table_name: str,
+) -> tuple[bool | None, str | None]:
+    table_ref = f"{_quote_ident(db_name)}.{_quote_ident(table_name)}"
+    if session.check_grant_supported is not False:
+        rows, error = _query_rows(session, f"CHECK GRANT SELECT ON {table_ref}")
+        if error is None:
+            session.check_grant_supported = True
+            if rows and rows[0]:
+                return bool(rows[0][0]), None
+            return True, None
+        if _is_access_denied_error(error):
+            session.check_grant_supported = True
+            return False, None
+        if _error_code(error) in {48, 62}:
+            session.check_grant_supported = False
+        else:
+            return None, error
+
+    _rows, fallback_error = _query_rows(session, f"SELECT * FROM {table_ref} LIMIT 0")
+    if fallback_error is None:
+        return True, None
+    if _is_access_denied_error(fallback_error):
+        return False, None
+    return None, fallback_error
+
+
+def _query_readable_tables_result(
+    session: _ChSession,
+    limit: int | None = None,
+) -> tuple[list[str] | None, list[dict[str, Any]], bool, list[str]]:
+    visible, error = _query_visible_tables(session, limit)
+    if error:
+        return None, [], False, [error]
+    raw_visible = list(visible or [])
+    truncated = isinstance(limit, int) and len(raw_visible) > limit
+    checked = raw_visible[:limit] if isinstance(limit, int) else raw_visible
+    readable: list[str] = []
+    access: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for full_name in checked:
+        db_name, table_name = _split_table_name(full_name, session.database)
+        if db_name is None or table_name is None:
+            access.append({"table": full_name, "readable": "unknown"})
+            errors.append(f"invalid table name returned by server: {full_name}")
+            continue
+        verdict, access_error = _check_table_read_access(session, db_name, table_name)
+        access.append({"table": full_name, "readable": verdict if verdict is not None else "unknown"})
+        if verdict is True:
+            readable.append(full_name)
+        if access_error:
+            errors.append(f"{full_name}: {access_error}")
+    return readable, access, truncated, errors
+
+
+def _query_readable_tables(
+    session: _ChSession,
+    limit: int | None = None,
+    *,
+    detailed: bool = False,
+) -> Any:
+    result = _query_readable_tables_result(session, limit)
+    if detailed:
+        return result
+    readable, _access, _truncated, errors = result
+    return readable, "; ".join(errors) if errors else None
 
 
 def _query_table_columns(
@@ -808,9 +1093,15 @@ def _parse_clickhouse_grants(grants: list[str]) -> tuple[bool, bool]:
 
 def _collect_capabilities(
     session: _ChSession,
+    *,
+    include_database_names: bool = True,
 ) -> tuple[bool | None, bool | None, bool | None, int | None, list[str] | None, str | None]:
-    db_names, db_error = _query_database_names(session)
-    db_count = len(db_names) if isinstance(db_names, list) else None
+    if include_database_names:
+        db_names, db_error = _query_database_names(session)
+        db_count = len(db_names) if isinstance(db_names, list) else None
+    else:
+        db_count, db_error = _query_database_count(session)
+        db_names = None
 
     grants, grants_error = _query_show_grants(session)
     read_cap: bool | None = None
@@ -884,16 +1175,43 @@ def _collect_capabilities(
 def _run_sql_query(
     session: _ChSession, query: str, *, max_lines: int = _CH_MAX_SQL_LINES
 ) -> tuple[list[str], str | None]:
-    rows, error = _query_rows(session, query)
-    if error:
-        return [], error
     output: list[str] = []
-    for row in rows or []:
-        output.append(_row_text(row))
-        if len(output) >= max_lines:
-            output.append(f"<output truncated at {max_lines} lines>")
-            break
-    return output, None
+    stream: Any = None
+    stream_owner: Any = None
+    try:
+        if session.protocol == "native" and callable(getattr(session.client, "execute_iter", None)):
+            stream = session.client.execute_iter(query)
+        elif session.protocol == "http" and callable(getattr(session.client, "query_rows_stream", None)):
+            stream_owner = session.client.query_rows_stream(query)
+            stream = stream_owner.__enter__() if hasattr(stream_owner, "__enter__") else stream_owner
+        else:
+            rows, error = _query_rows(session, query)
+            if error:
+                return [], error
+            stream = iter(rows or [])
+
+        for row_number, row in enumerate(stream):
+            if row_number >= max_lines:
+                output.append(f"<output truncated at {max_lines} lines>")
+                break
+            values = list(row) if isinstance(row, (list, tuple)) else [row]
+            output.append(_row_text(values))
+        return output, None
+    except Exception as exc:
+        return [], _friendly_error_from_exception(exc)
+    finally:
+        if stream_owner is not None and hasattr(stream_owner, "__exit__"):
+            try:
+                stream_owner.__exit__(None, None, None)
+            except Exception:
+                pass
+        elif stream is not None:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
 
 def _normalize_execute_command(command: str) -> str:
@@ -951,54 +1269,59 @@ def _open_operational_session(
     tls_config: _ChTlsConfig | None = None,
     proxy: Any | None = None,
 ) -> tuple[_ChSession | None, str | None]:
-    session, error = _connect_and_probe(
-        protocol,
-        host,
-        port,
-        timeout,
-        username,
-        password,
-        database=database,
-        **_ch_transport_kwargs(tls_config, proxy),
-    )
-    if session is not None:
-        return session, None
-
-    if (
-        database != "default"
-        and error
-        and any(token in error.lower() for token in ("unknown database", "database does not exist"))
-    ):
-        fallback, fallback_error = _connect_and_probe(
+    result = _coerce_probe_result(
+        _connect_and_probe(
             protocol,
             host,
             port,
             timeout,
             username,
             password,
-            database="default",
+            database=database,
             **_ch_transport_kwargs(tls_config, proxy),
         )
+    )
+    session, error = result.session, result.error
+    if session is not None:
+        return session, str(error) if result.access_limited and error else None
+
+    if database != "default" and result.code == _CLICKHOUSE_UNKNOWN_DATABASE_CODE:
+        fallback_result = _coerce_probe_result(
+            _connect_and_probe(
+                protocol,
+                host,
+                port,
+                timeout,
+                username,
+                password,
+                database="default",
+                **_ch_transport_kwargs(tls_config, proxy),
+            )
+        )
+        fallback, fallback_error = fallback_result.session, fallback_result.error
         if fallback is not None:
             return fallback, f"database '{database}' unavailable; connected to default"
-        return None, fallback_error or error
+        return None, str(fallback_error or error)
 
-    return None, error
+    return None, str(error) if error else None
 
 
-def _protocol_attempt_order(protocol: str) -> tuple[str, ...]:
+def _protocol_attempt_order(protocol: str, port: int | None = None) -> tuple[str, ...]:
     normalized = str(protocol or "native").strip().lower()
     if normalized == "http":
         return ("http",)
     if normalized == "auto":
+        if int(port or 0) in {_CH_DEFAULT_HTTP_PORT, 18123, 8443}:
+            return ("http", "native")
         return ("native", "http")
-    return ("native",)
+    return ("native", "http")
 
 
 def _run_clickhouse_actions_on_session(
     operation_session: _ChSession,
     *,
     database: str,
+    show_databases: bool = False,
     show_tables: bool,
     show_columns: bool,
     table_targets: list[str],
@@ -1007,17 +1330,33 @@ def _run_clickhouse_actions_on_session(
     dump_row_limit: int | None,
     execute_command: str | None,
     sql_command: str | None,
+    show_databases_limit: int | None = None,
+    show_tables_limit: int | None = None,
+    limited_session: bool = False,
 ) -> dict[str, Any]:
-    (
-        read_capability,
-        execute_capability,
-        admin_capability,
-        database_count,
-        database_names,
-        capability_error,
-    ) = _collect_capabilities(operation_session)
+    if limited_session:
+        read_capability = execute_capability = admin_capability = None
+        database_count = None
+        capability_error = None
+    else:
+        try:
+            capability_values = _collect_capabilities(operation_session, include_database_names=False)
+        except TypeError as exc:
+            if "include_database_names" not in str(exc):
+                raise
+            capability_values = _collect_capabilities(operation_session)
+        (
+            read_capability,
+            execute_capability,
+            admin_capability,
+            database_count,
+            _unused_database_names,
+            capability_error,
+        ) = capability_values
 
+    database_names: list[str] | None = None
     table_names: list[str] | None = None
+    table_access: list[dict[str, Any]] = []
     table_columns_info: list[dict[str, Any]] = []
     table_dumps: list[dict[str, Any]] = []
     sql_attempted = False
@@ -1028,11 +1367,76 @@ def _run_clickhouse_actions_on_session(
     execute_ok: bool | None = None
     execute_output: list[str] | None = None
     execute_error: str | None = None
+    action_statuses = {
+        "databases": "not_requested",
+        "tables": "not_requested",
+        "columns": "not_requested",
+        "dump": "not_requested",
+        "sql": "not_requested",
+        "execute": "not_requested",
+    }
+    partial_reasons: list[str] = []
+
+    def _reason(message: str) -> None:
+        clean = str(message or "").strip()
+        if clean and clean not in partial_reasons:
+            partial_reasons.append(clean)
+
+    if show_databases:
+        database_names, database_error = _query_database_names(operation_session, show_databases_limit)
+        if database_error:
+            action_statuses["databases"] = "error"
+            _reason(f"databases: {database_error}")
+        else:
+            db_truncated = bool(
+                isinstance(show_databases_limit, int)
+                and isinstance(database_names, list)
+                and len(database_names) > show_databases_limit
+            )
+            if db_truncated:
+                database_names = list(database_names or [])[:show_databases_limit]
+                action_statuses["databases"] = "partial"
+                _reason("databases: result truncated by requested limit")
+            else:
+                action_statuses["databases"] = "ok"
+            if database_count is None and isinstance(database_names, list) and not db_truncated:
+                database_count = len(database_names)
 
     if show_tables or (dump_table_rows and not table_targets):
-        table_names, table_names_error = _query_readable_tables(operation_session)
-        if table_names_error and not capability_error:
-            capability_error = table_names_error
+        effective_table_limit = show_tables_limit if show_tables else None
+        table_result = _query_readable_tables(operation_session, effective_table_limit, detailed=True)
+        if len(table_result) == 2:
+            legacy_tables, legacy_error = table_result
+            table_names = legacy_tables
+            table_access = [{"table": name, "readable": True} for name in (legacy_tables or [])]
+            tables_truncated = False
+            table_errors = [str(legacy_error)] if legacy_error else []
+        else:
+            table_names, table_access, tables_truncated, table_errors = table_result
+        if show_tables:
+            if table_errors and not table_access:
+                action_statuses["tables"] = "error"
+            elif table_errors or tables_truncated:
+                action_statuses["tables"] = "partial"
+            else:
+                action_statuses["tables"] = "ok"
+            for table_error in table_errors:
+                _reason(f"tables: {table_error}")
+            if tables_truncated:
+                _reason("tables: result truncated by requested limit")
+        if table_errors and not capability_error:
+            capability_error = "; ".join(table_errors)
+        if table_names:
+            read_capability = True
+        elif (
+            table_access
+            and not tables_truncated
+            and not table_errors
+            and all(item.get("readable") is False for item in table_access)
+        ):
+            read_capability = False
+        elif table_access or table_errors or tables_truncated:
+            read_capability = None
 
     normalized_targets: list[str] = []
     normalized_target_pairs: list[tuple[str, str]] = []
@@ -1047,6 +1451,7 @@ def _run_clickhouse_actions_on_session(
                         "error": f"invalid table name: {raw_target}",
                     }
                 )
+                _reason(f"columns: invalid table name: {raw_target}")
                 continue
             normalized_target_pairs.append((db_name, table_name))
             normalized_targets.append(f"{db_name}.{table_name}")
@@ -1073,6 +1478,15 @@ def _run_clickhouse_actions_on_session(
                     "error": columns_error,
                 }
             )
+            if columns_error:
+                _reason(f"columns {db_name}.{table_name}: {columns_error}")
+        column_errors = [item for item in table_columns_info if item.get("error")]
+        if column_errors and len(column_errors) == len(table_columns_info):
+            action_statuses["columns"] = "error"
+        elif column_errors:
+            action_statuses["columns"] = "partial"
+        else:
+            action_statuses["columns"] = "ok"
 
     if dump_table_rows:
         for db_name, table_name in normalized_target_pairs:
@@ -1108,11 +1522,23 @@ def _run_clickhouse_actions_on_session(
                     "error": combined_dump_error,
                 }
             )
+            if combined_dump_error:
+                _reason(f"dump {db_name}.{table_name}: {combined_dump_error}")
+        dump_errors = [item for item in table_dumps if item.get("error")]
+        if dump_errors and len(dump_errors) == len(table_dumps):
+            action_statuses["dump"] = "error"
+        elif dump_errors:
+            action_statuses["dump"] = "partial"
+        else:
+            action_statuses["dump"] = "ok"
 
     if sql_command:
         sql_attempted = True
         sql_output, sql_error = _run_sql_query(operation_session, sql_command)
         sql_ok = sql_error is None
+        action_statuses["sql"] = "ok" if sql_ok else "error"
+        if sql_error:
+            _reason(f"sql: {sql_error}")
 
     if execute_command:
         execute_attempted = True
@@ -1123,6 +1549,9 @@ def _run_clickhouse_actions_on_session(
         else:
             execute_output, execute_error = _run_execute_command(operation_session, execute_command)
             execute_ok = execute_error is None
+        action_statuses["execute"] = "ok" if execute_ok else "error"
+        if execute_error:
+            _reason(f"execute: {execute_error}")
 
     resolved_targets = list(table_targets)
     if not resolved_targets and normalized_targets:
@@ -1132,6 +1561,7 @@ def _run_clickhouse_actions_on_session(
         "database_names": database_names,
         "database_count": database_count,
         "table_names": table_names,
+        "table_access": table_access,
         "table_targets": resolved_targets,
         "table_columns_info": table_columns_info,
         "table_dumps": table_dumps,
@@ -1147,7 +1577,50 @@ def _run_clickhouse_actions_on_session(
         "execute_capability": execute_capability,
         "admin_capability": admin_capability,
         "capability_error": capability_error,
+        "action_statuses": action_statuses,
+        "partial_reasons": partial_reasons,
+        "partial": bool(partial_reasons),
+        "requested_operation_failure": any(value in {"partial", "error"} for value in action_statuses.values()),
     }
+
+
+def _normalize_action_result(value: Mapping[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    defaults: dict[str, Any] = {
+        "database_names": None,
+        "database_count": None,
+        "table_names": None,
+        "table_access": [],
+        "table_targets": [],
+        "table_columns_info": [],
+        "table_dumps": [],
+        "sql_attempted": False,
+        "sql_ok": None,
+        "sql_output": None,
+        "sql_error": None,
+        "execute_attempted": False,
+        "execute_ok": None,
+        "execute_output": None,
+        "execute_error": None,
+        "read_capability": None,
+        "execute_capability": None,
+        "admin_capability": None,
+        "capability_error": None,
+        "partial_reasons": [],
+        "partial": False,
+        "requested_operation_failure": False,
+        "action_statuses": {
+            "databases": "not_requested",
+            "tables": "not_requested",
+            "columns": "not_requested",
+            "dump": "not_requested",
+            "sql": "not_requested",
+            "execute": "not_requested",
+        },
+    }
+    for key, default in defaults.items():
+        result.setdefault(key, default)
+    return result
 
 
 def _clickhouse_lifecycle_payload(
@@ -1158,6 +1631,10 @@ def _clickhouse_lifecycle_payload(
     status: str,
     auth_required: bool | None,
     error: str | None = None,
+    detection_error_kind: str | None = None,
+    operational_failure: bool = False,
+    attempts: int = 1,
+    max_attempts_total: int | None = None,
 ) -> dict[str, Any]:
     credential = ctx.credential
     provided = credential.username is not None or credential.password is not None
@@ -1166,25 +1643,42 @@ def _clickhouse_lifecycle_payload(
         "host": str(ctx.host),
         "port": int(ctx.port),
         "protocol": protocol,
-        "is_clickhouse": status != "fail",
+        "is_clickhouse": status not in {"fail", "not_clickhouse"},
         "status": status,
         "auth_required": auth_required,
+        "auth_status": (
+            "anonymous_open"
+            if status == "open_no_auth"
+            else "limited"
+            if status == "anonymous_limited"
+            else "not_requested"
+        ),
         "database": str(options["database"]),
         "requested_database": str(options["database"]),
         "effective_database": None,
         "database_fallback": False,
         "partial": False,
+        "partial_reasons": [],
+        "action_statuses": {
+            "databases": "not_requested",
+            "tables": "not_requested",
+            "columns": "not_requested",
+            "dump": "not_requested",
+            "sql": "not_requested",
+            "execute": "not_requested",
+        },
+        "requested_operation_failure": False,
         "provided_credentials": provided,
         "provided_username": credential.username,
         "provided_password": credential.password if provided else None,
         "provided_credentials_ok": None,
         "defcreds_enabled": credential.source == "default",
         "default_credentials": False,
-        "attempted_credentials": 0,
+        "credential_attempt_count": 0,
+        "credential_attempts": [],
         "credentials_source": None,
         "effective_username": None,
         "effective_password": None,
-        "auth_attempts": [],
         "show_databases": bool(options["show_databases"]),
         "database_names": None,
         "database_count": None,
@@ -1213,14 +1707,18 @@ def _clickhouse_lifecycle_payload(
         "show_databases_limit": options["show_databases_limit"],
         "show_tables_limit": options["show_tables_limit"],
         "show_columns_limit": options["show_columns_limit"],
-        "attempts": 1,
-        "max_attempts": max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1),
+        "attempts": attempts,
+        "max_attempts": max_attempts_total
+        if max_attempts_total is not None
+        else max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1),
         "stages": [],
         "stage_durations_ms": {},
         "stage_attempts": {},
         "stage_failed_at": None,
         "debug_events": [],
         "debug_events_streamed": False,
+        "detection_error_kind": detection_error_kind,
+        "operational_failure": operational_failure,
         "error": error,
     }
 
@@ -1239,66 +1737,91 @@ def detect_clickhouse(
     if not isinstance(state, ClickHouseLifecycleState):
         raise TypeError("clickhouse lifecycle state is unavailable")
 
-    last_error: str | None = None
     tls_config, proxy = _ch_transport_from_context(ctx)
-    protocols = _protocol_attempt_order(str(options["protocol"]))
-    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
-    for attempt in range(attempts):
-        for protocol in protocols:
-            session, error = _connect_and_probe(
-                protocol,
-                str(ctx.host),
-                int(ctx.port),
-                float(getattr(ctx.args, "timeout", 5.0)),
-                "default",
-                "",
-                database="default",
-                **_ch_transport_kwargs(tls_config, proxy),
+    max_attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+
+    def _probe_protocol(protocol: str) -> tuple[_ChProbeResult, int]:
+        last_result = _probe_result(None, _ChProbeError("connection failed", kind="client_error"))
+        for attempt in range(max_attempts):
+            result = _coerce_probe_result(
+                _connect_and_probe(
+                    protocol,
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    "default",
+                    "",
+                    database="default",
+                    **_ch_transport_kwargs(tls_config, proxy),
+                )
             )
-            if session is not None:
-                state.anonymous_session = session
-                state.selected_protocol = protocol
-                state.auth_required = False
-                return _clickhouse_lifecycle_payload(
-                    ctx,
-                    options,
-                    protocol=protocol,
-                    status="open_no_auth",
-                    auth_required=False,
-                )
-            last_error = error or last_error
-            if _is_auth_error(error):
-                state.selected_protocol = protocol
-                state.auth_required = True
-                return _clickhouse_lifecycle_payload(
-                    ctx,
-                    options,
-                    protocol=protocol,
-                    status="auth_required",
-                    auth_required=True,
-                    error=None,
-                )
-            if _looks_like_clickhouse_error(error):
-                state.selected_protocol = protocol
-                state.auth_required = None
-                return _clickhouse_lifecycle_payload(
-                    ctx,
-                    options,
-                    protocol=protocol,
-                    status="detected",
-                    auth_required=None,
-                    error=error,
-                )
-        if attempt < attempts - 1:
+            if result.session is not None or result.confirms_service:
+                return result, attempt + 1
+            last_result = result
+            if not result.retryable or attempt >= max_attempts - 1:
+                return result, attempt + 1
             time.sleep(_retry_delay(attempt))
+        return last_result, max_attempts
+
+    requested_protocol = str(options["protocol"] or "native").lower()
+    protocol_order = _protocol_attempt_order(requested_protocol, int(ctx.port))
+    primary_protocol = protocol_order[0]
+    probe, used_attempts = _probe_protocol(primary_protocol)
+    selected_protocol = primary_protocol
+    fallback_used = False
+
+    if len(protocol_order) > 1 and probe.session is None and probe.kind == "protocol_mismatch":
+        fallback_used = True
+        selected_protocol = protocol_order[1]
+        probe, fallback_attempts = _probe_protocol(selected_protocol)
+        used_attempts += fallback_attempts
+
+    state.selected_protocol = selected_protocol
+    if probe.session is not None:
+        state.anonymous_session = probe.session
+        state.anonymous_access_limited = probe.access_limited
+        state.auth_required = False
+        return _clickhouse_lifecycle_payload(
+            ctx,
+            options,
+            protocol=selected_protocol,
+            status="anonymous_limited" if probe.access_limited else "open_no_auth",
+            auth_required=False,
+            error=str(probe.error) if probe.access_limited and probe.error else None,
+            detection_error_kind=probe.kind if probe.access_limited else None,
+            attempts=used_attempts,
+            max_attempts_total=max_attempts * (2 if fallback_used else 1),
+        )
+
+    if probe.confirms_service:
+        state.auth_required = probe.auth_required
+        status = "auth_required" if probe.auth_required is True else "detected"
+        return _clickhouse_lifecycle_payload(
+            ctx,
+            options,
+            protocol=selected_protocol,
+            status=status,
+            auth_required=probe.auth_required,
+            error=None if status == "auth_required" else str(probe.error or ""),
+            detection_error_kind=probe.kind,
+            attempts=used_attempts,
+            max_attempts_total=max_attempts * (2 if fallback_used else 1),
+        )
+
+    operational_failure = probe.kind == "transport"
+    status = "fail" if operational_failure else "not_clickhouse"
 
     return _clickhouse_lifecycle_payload(
         ctx,
         options,
-        protocol=state.selected_protocol or str(options["protocol"]),
-        status="fail",
+        protocol=selected_protocol,
+        status=status,
         auth_required=None,
-        error=last_error or "connection failed",
+        error=str(probe.error or "connection failed"),
+        detection_error_kind=probe.kind,
+        operational_failure=operational_failure,
+        attempts=used_attempts,
+        max_attempts_total=max_attempts * (2 if fallback_used else 1),
     )
 
 
@@ -1324,6 +1847,7 @@ def authenticate_clickhouse(
     error: str | None = None
     transport_attempts = 0
     definitive_rejection = False
+    access_limited = False
     tls_config, proxy = _ch_transport_from_context(ctx)
     for attempt in range(attempts):
         transport_attempts += 1
@@ -1338,31 +1862,21 @@ def authenticate_clickhouse(
             **_ch_transport_kwargs(tls_config, proxy),
         )
         if session is not None:
+            access_limited = _error_code(error) == _CLICKHOUSE_ACCESS_DENIED_CODE
             break
         if _is_auth_error(error):
             definitive_rejection = True
             break
-        error_text = str(error or "").lower()
-        retryable = bool(
-            _is_timeout_error(error)
-            or _is_connection_refused_error(error)
-            or any(
-                marker in error_text
-                for marker in (
-                    "connection reset",
-                    "connection closed",
-                    "broken pipe",
-                    "unexpected eof",
-                    "temporarily unavailable",
-                )
-            )
-        )
+        retryable = _probe_error_info(error).retryable
         if not retryable or attempt >= attempts - 1:
             break
         time.sleep(_retry_delay(attempt))
     ok = session is not None
     if session is not None:
-        state.credential_sessions[(credential.username, credential.password, source)] = session
+        session_key = (credential.username, credential.password, source)
+        state.credential_sessions[session_key] = session
+        if access_limited:
+            state.credential_limited.add(session_key)
     state.auth_attempts.append(
         {
             "username": username,
@@ -1378,7 +1892,7 @@ def authenticate_clickhouse(
     elif definitive_rejection and detect_status == "open_no_auth":
         status = "invalid_credentials_anonymous"
     elif not definitive_rejection:
-        status = "fail"
+        status = detect_status or "detected"
     else:
         status = "auth_required"
 
@@ -1388,6 +1902,9 @@ def authenticate_clickhouse(
             "status": status,
             "is_clickhouse": True,
             "auth_required": state.auth_required,
+            "auth_status": (
+                "limited" if access_limited else "valid" if ok else "rejected" if definitive_rejection else "error"
+            ),
             "provided_credentials": source != "default",
             "provided_username": credential.username,
             "provided_password": credential.password if source != "default" else None,
@@ -1396,7 +1913,7 @@ def authenticate_clickhouse(
             ),
             "defcreds_enabled": source == "default",
             "default_credentials": bool(ok and source == "default"),
-            "attempted_credentials": len(state.auth_attempts),
+            "credential_attempt_count": len(state.auth_attempts),
             "auth_transport_attempts": transport_attempts,
             "credentials_source": source if ok else None,
             "effective_username": username if ok else None,
@@ -1404,11 +1921,12 @@ def authenticate_clickhouse(
             "effective_database": session.database if session is not None else None,
             "database_fallback": bool(session is not None and session.database != str(options["database"])),
             "partial": bool(session is not None and session.database != str(options["database"])),
-            "auth_attempts": list(state.auth_attempts),
+            "credential_attempts": list(state.auth_attempts),
+            "requested_operation_failure": bool(not ok and not definitive_rejection),
             "error": error if ok and error else None if status == "invalid_credentials_anonymous" else error,
         }
     )
-    return payload
+    return _normalize_clickhouse_record_schema(payload)
 
 
 def collect_clickhouse_data(
@@ -1421,7 +1939,7 @@ def collect_clickhouse_data(
         raise TypeError("clickhouse lifecycle state is unavailable")
     payload = _record_payload(record)
     tls_config, proxy = _ch_transport_from_context(ctx)
-    runtime_attempts = payload.get("attempted_credentials")
+    runtime_attempts = payload.get("attempted_credentials") or payload.get("credential_attempts")
     merged_attempts = list(state.auth_attempts)
     if isinstance(runtime_attempts, list):
         actual_by_key = {
@@ -1454,17 +1972,27 @@ def collect_clickhouse_data(
                     "error": str(runtime_attempt.get("error") or ""),
                 }
             )
-    payload["auth_attempts"] = merged_attempts
-    payload["attempted_credentials"] = len(merged_attempts)
+    payload.pop("attempted_credentials", None)
+    payload.pop("auth_attempts", None)
+    payload["credential_attempts"] = merged_attempts
+    payload["credential_attempt_count"] = len(merged_attempts)
     payload["defcreds_enabled"] = bool(payload.get("defcreds_enabled")) or any(
         str(attempt.get("source") or "") == "default" for attempt in merged_attempts
     )
     credential = ctx.credential
     source = str(credential.source or "provided")
+    session_key = (credential.username, credential.password, source)
+    limited_session = session_key in state.credential_limited
+    state.credential_limited.discard(session_key)
     session = state.take_session(credential.username, credential.password, source)
-    if session is None and str(payload.get("status") or "") in {"open_no_auth", "invalid_credentials_anonymous"}:
+    if session is None and str(payload.get("status") or "") in {
+        "open_no_auth",
+        "anonymous_limited",
+        "invalid_credentials_anonymous",
+    }:
         session = state.anonymous_session
         state.anonymous_session = None
+        limited_session = state.anonymous_access_limited
     if session is None:
         return payload
     desired_database = str(options["database"])
@@ -1483,31 +2011,34 @@ def collect_clickhouse_data(
         )
         if session is None:
             payload["error"] = database_warning or f"failed to open database {desired_database}"
+            payload["requested_operation_failure"] = True
             return payload
 
     started = time.monotonic()
     try:
-        action_result = _run_clickhouse_actions_on_session(
-            session,
-            database=session.database,
-            show_tables=bool(options["show_tables"]),
-            show_columns=bool(options["show_columns"]),
-            table_targets=list(options["table_targets"]),
-            table_columns=list(options["table_columns"]),
-            dump_table_rows=bool(options["dump_table_rows"]),
-            dump_row_limit=options["dump_row_limit"],
-            execute_command=options["execute_command"],
-            sql_command=options["sql_command"],
+        action_result = _normalize_action_result(
+            _run_clickhouse_actions_on_session(
+                session,
+                database=session.database,
+                show_databases=bool(options["show_databases"]),
+                show_tables=bool(options["show_tables"]),
+                show_columns=bool(options["show_columns"]),
+                table_targets=list(options["table_targets"]),
+                table_columns=list(options["table_columns"]),
+                dump_table_rows=bool(options["dump_table_rows"]),
+                dump_row_limit=options["dump_row_limit"],
+                execute_command=options["execute_command"],
+                sql_command=options["sql_command"],
+                show_databases_limit=options["show_databases_limit"],
+                show_tables_limit=options["show_tables_limit"],
+                limited_session=limited_session,
+            )
         )
     finally:
         _close_client(session.protocol, session.client)
 
     database_names = action_result["database_names"]
     table_names = action_result["table_names"]
-    if isinstance(options["show_databases_limit"], int) and isinstance(database_names, list):
-        database_names = limit_sequence(database_names, int(options["show_databases_limit"]))
-    if isinstance(options["show_tables_limit"], int) and isinstance(table_names, list):
-        table_names = limit_sequence(table_names, int(options["show_tables_limit"]))
     errors = [
         str(value).strip()
         for value in (
@@ -1525,9 +2056,22 @@ def collect_clickhouse_data(
             "effective_database": session.database,
             "database_fallback": session.database != desired_database,
             "partial": bool(session.database != desired_database),
+            "partial_reasons": list(
+                dict.fromkeys(
+                    (
+                        [f"database fallback: {desired_database} -> {session.database}"]
+                        if session.database != desired_database
+                        else []
+                    )
+                    + list(action_result["partial_reasons"])
+                )
+            ),
+            "action_statuses": action_result["action_statuses"],
+            "requested_operation_failure": bool(action_result["requested_operation_failure"]),
             "database_names": database_names,
             "database_count": action_result["database_count"],
             "table_names": table_names,
+            "table_access": action_result["table_access"],
             "table_targets": action_result["table_targets"],
             "table_columns_info": action_result["table_columns_info"],
             "table_dumps": action_result["table_dumps"],
@@ -1546,10 +2090,11 @@ def collect_clickhouse_data(
             "error": "; ".join(dict.fromkeys(errors)) if errors else None,
         }
     )
-    return payload
+    payload["partial"] = bool(payload["partial_reasons"])
+    return _normalize_clickhouse_record_schema(payload)
 
 
-def _audit_clickhouse_host_on_protocol(
+def _audit_clickhouse_host_on_protocol_legacy(
     host: str,
     port: int,
     timeout: float,
@@ -1593,11 +2138,13 @@ def _audit_clickhouse_host_on_protocol(
     provided_credentials_ok: bool | None = False if provided_credentials else None
 
     last_error: str | None = None
+    last_error_kind: str | None = None
 
     for attempt in range(attempts):
         started = time.monotonic()
         auth_required: bool | None = None
         anonymous_ok = False
+        anonymous_limited = False
         auth_attempts: list[dict[str, Any]] = []
         attempted_credentials = 0
         effective_username: str | None = None
@@ -1605,6 +2152,8 @@ def _audit_clickhouse_host_on_protocol(
         credentials_source: str | None = None
         default_credentials = False
         selected_credential_session: _ChSession | None = None
+        selected_credential_limited = False
+        service_confirmed_without_session = False
 
         anon_session, anon_error = _connect_and_probe(
             protocol,
@@ -1618,15 +2167,21 @@ def _audit_clickhouse_host_on_protocol(
         )
         if anon_session is not None:
             anonymous_ok = True
+            anonymous_limited = _error_code(anon_error) == _CLICKHOUSE_ACCESS_DENIED_CODE
             auth_required = False
+            last_error = None
+            last_error_kind = None
         else:
             last_error = anon_error or last_error
-            if _is_auth_error(anon_error):
+            error_info = _probe_error_info(anon_error)
+            last_error_kind = error_info.kind
+            if error_info.auth_required is True:
                 auth_required = True
-            elif _looks_like_clickhouse_error(anon_error):
-                auth_required = None
+            elif error_info.confirms_service:
+                auth_required = error_info.auth_required
+                service_confirmed_without_session = True
             else:
-                if attempt >= attempts - 1:
+                if not error_info.retryable or attempt >= attempts - 1:
                     break
                 time.sleep(_retry_delay(attempt))
                 continue
@@ -1661,6 +2216,7 @@ def _audit_clickhouse_host_on_protocol(
                 effective_password = cand_pass
                 credentials_source = source
                 selected_credential_session = cred_session
+                selected_credential_limited = _error_code(cred_error) == _CLICKHOUSE_ACCESS_DENIED_CODE
             if ok and source == "default":
                 default_credentials = True
             if source != "default" and ok:
@@ -1726,30 +2282,50 @@ def _audit_clickhouse_host_on_protocol(
             "execute_capability": None,
             "admin_capability": None,
             "capability_error": None,
+            "table_access": [],
+            "action_statuses": {
+                "databases": "not_requested",
+                "tables": "not_requested",
+                "columns": "not_requested",
+                "dump": "not_requested",
+                "sql": "not_requested",
+                "execute": "not_requested",
+            },
+            "partial_reasons": [],
+            "partial": False,
+            "requested_operation_failure": False,
         }
         if operation_session is not None:
-            action_result = _run_clickhouse_actions_on_session(
-                operation_session,
-                database=operation_session.database,
-                show_tables=show_tables,
-                show_columns=show_columns,
-                table_targets=list(table_targets),
-                table_columns=list(table_columns),
-                dump_table_rows=dump_table_rows,
-                dump_row_limit=dump_row_limit,
-                execute_command=execute_command,
-                sql_command=sql_command,
+            action_result = _normalize_action_result(
+                _run_clickhouse_actions_on_session(
+                    operation_session,
+                    database=operation_session.database,
+                    show_databases=show_databases,
+                    show_tables=show_tables,
+                    show_columns=show_columns,
+                    table_targets=list(table_targets),
+                    table_columns=list(table_columns),
+                    dump_table_rows=dump_table_rows,
+                    dump_row_limit=dump_row_limit,
+                    execute_command=execute_command,
+                    sql_command=sql_command,
+                    limited_session=selected_credential_limited or (anonymous_limited and effective_username is None),
+                )
             )
             _close_client(protocol, operation_session.client)
 
         if effective_username is not None:
             status = "weak_default_creds" if credentials_source == "default" else "valid_credentials"
+        elif anonymous_limited:
+            status = "anonymous_limited"
         elif auth_required is False and attempted_credentials > 0 and (provided_credentials or defaults_enabled):
             status = "invalid_credentials_anonymous"
         elif auth_required is False:
             status = "open_no_auth"
         elif auth_required is True:
             status = "auth_required"
+        elif service_confirmed_without_session:
+            status = "detected"
         else:
             status = "fail"
 
@@ -1775,11 +2351,29 @@ def _audit_clickhouse_host_on_protocol(
             "is_clickhouse": status != "fail",
             "status": status,
             "auth_required": auth_required,
+            "auth_status": (
+                "limited"
+                if selected_credential_limited or anonymous_limited
+                else "valid"
+                if effective_username is not None
+                else "error"
+                if any(_probe_error_info(item.get("error")).retryable for item in auth_attempts)
+                else "anonymous_open"
+                if auth_required is False
+                else "rejected"
+                if auth_required is True and attempted_credentials
+                else "not_requested"
+            ),
             "database": database,
             "requested_database": database,
             "effective_database": operation_session.database if operation_session is not None else None,
             "database_fallback": bool(operation_session is not None and operation_session.database != database),
-            "partial": bool(operation_session is not None and operation_session.database != database),
+            "partial": bool(operation_session is not None and operation_session.database != database)
+            or bool(action_result["partial"]),
+            "partial_reasons": list(action_result["partial_reasons"]),
+            "action_statuses": action_result["action_statuses"],
+            "requested_operation_failure": bool(action_result["requested_operation_failure"])
+            or any(_probe_error_info(item.get("error")).retryable for item in auth_attempts),
             "provided_credentials": provided_credentials,
             "provided_username": provided_username,
             "provided_password": provided_password,
@@ -1796,6 +2390,7 @@ def _audit_clickhouse_host_on_protocol(
             "database_count": action_result["database_count"],
             "show_tables": show_tables,
             "table_names": action_result["table_names"],
+            "table_access": action_result["table_access"],
             "show_columns": show_columns,
             "table_targets": action_result["table_targets"],
             "table_columns": list(table_columns),
@@ -1816,17 +2411,20 @@ def _audit_clickhouse_host_on_protocol(
             "read_capability": action_result["read_capability"],
             "execute_capability": action_result["execute_capability"],
             "admin_capability": action_result["admin_capability"],
+            "detection_error_kind": last_error_kind,
+            "operational_failure": False,
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": "; ".join(errors) if errors else None,
         }
 
+    operational_failure = last_error_kind == "transport"
     return {
         "timestamp": utc_now_iso(),
         "host": host,
         "port": port,
         "protocol": protocol,
         "is_clickhouse": False,
-        "status": "fail",
+        "status": "fail" if operational_failure else "not_clickhouse",
         "auth_required": None,
         "database": database,
         "provided_credentials": provided_credentials,
@@ -1865,9 +2463,59 @@ def _audit_clickhouse_host_on_protocol(
         "read_capability": None,
         "execute_capability": None,
         "admin_capability": None,
+        "detection_error_kind": last_error_kind,
+        "operational_failure": operational_failure,
         "elapsed_ms": None,
         "error": last_error or "connection failed",
     }
+
+
+def _normalize_clickhouse_record_schema(record: Mapping[str, Any]) -> dict[str, Any]:
+    payload = dict(record)
+    legacy_attempts = payload.pop("auth_attempts", None)
+    legacy_count = payload.pop("attempted_credentials", None)
+    attempts = payload.get("credential_attempts")
+    if not isinstance(attempts, list):
+        attempts = legacy_attempts if isinstance(legacy_attempts, list) else []
+    payload["credential_attempts"] = attempts
+    payload["credential_attempt_count"] = len(attempts) if attempts else int(legacy_count or 0)
+
+    status = str(payload.get("status") or "")
+    payload.setdefault(
+        "auth_status",
+        "anonymous_open"
+        if status in {"open_no_auth", "invalid_credentials_anonymous"}
+        else "limited"
+        if status == "anonymous_limited"
+        else "valid"
+        if status in {"valid_credentials", "weak_default_creds"}
+        else "rejected"
+        if status == "auth_required" and payload["credential_attempt_count"]
+        else "not_requested",
+    )
+    payload.setdefault("table_access", [])
+    payload.setdefault("partial_reasons", [])
+    payload.setdefault(
+        "action_statuses",
+        {
+            "databases": "not_requested",
+            "tables": "not_requested",
+            "columns": "not_requested",
+            "dump": "not_requested",
+            "sql": "not_requested",
+            "execute": "not_requested",
+        },
+    )
+    payload.setdefault("requested_operation_failure", False)
+    if bool(payload.get("is_clickhouse")) and status == "fail":
+        payload["status"] = "detected"
+    return payload
+
+
+def _audit_clickhouse_host_on_protocol(*args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Compatibility adapter over the normalized ClickHouse target record."""
+
+    return _normalize_clickhouse_record_schema(_audit_clickhouse_host_on_protocol_legacy(*args, **kwargs))
 
 
 def _audit_clickhouse_host(
@@ -1893,9 +2541,16 @@ def _audit_clickhouse_host(
     tls_config: _ChTlsConfig | None = None,
     proxy: Any | None = None,
 ) -> dict[str, Any]:
-    sequence = _protocol_attempt_order(protocol)
+    normalized_protocol = str(protocol or "native").strip().lower()
+    sequence = _protocol_attempt_order(normalized_protocol, port)
     last_record: dict[str, Any] | None = None
-    for proto in sequence:
+    for protocol_index, proto in enumerate(sequence):
+        if (
+            protocol_index > 0
+            and last_record is not None
+            and str(last_record.get("detection_error_kind") or "") != "protocol_mismatch"
+        ):
+            break
         optional_kwargs: dict[str, Any] = {"dump_row_limit": dump_row_limit}
         if credential_candidates is not None:
             optional_kwargs["credential_candidates"] = credential_candidates
@@ -2024,6 +2679,8 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
             },
             ensure_ascii=False,
         )
+    if str(record.get("auth_status") or "") == "limited":
+        return f"{_nxc_prefix(record)} [*] ClickHouse Database (access:limited)"
     return f"{_nxc_prefix(record)} [*] ClickHouse Database (auth required:{auth_required_text})"
 
 
@@ -2033,6 +2690,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         payload.pop("provided_password", None)
         payload.pop("effective_password", None)
         payload.pop("auth_attempts", None)
+        payload.pop("attempted_credentials", None)
         return json.dumps(payload, ensure_ascii=False)
 
     status = str(record.get("status") or "fail")
@@ -2042,8 +2700,14 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if status == "open_no_auth":
         return ""
 
+    if status == "detected":
+        return ""
+
+    if status == "not_clickhouse":
+        return f"{prefix} [-] not a ClickHouse service"
+
     if status == "weak_default_creds":
-        attempts = record.get("auth_attempts")
+        attempts = record.get("credential_attempts", record.get("auth_attempts"))
         if isinstance(attempts, list) and any(
             isinstance(attempt, dict) and bool(attempt.get("ok")) for attempt in attempts
         ):
@@ -2053,7 +2717,7 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [+] {user}:{password_text} {_caps_suffix(record)}"
 
     if status == "valid_credentials":
-        attempts = record.get("auth_attempts")
+        attempts = record.get("credential_attempts", record.get("auth_attempts"))
         if isinstance(attempts, list) and any(
             isinstance(attempt, dict) and bool(attempt.get("ok")) for attempt in attempts
         ):
@@ -2063,16 +2727,16 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [+] {user}:{password_text} {_caps_suffix(record)}"
 
     if status == "invalid_credentials_anonymous":
-        attempts = record.get("auth_attempts")
+        attempts = record.get("credential_attempts", record.get("auth_attempts"))
         if isinstance(attempts, list) and attempts:
             return ""
         return f"{prefix} [-] credentials invalid (anonymous access) {_caps_suffix(record)}"
 
     if status == "auth_required":
-        attempts = record.get("auth_attempts")
+        attempts = record.get("credential_attempts", record.get("auth_attempts"))
         if isinstance(attempts, list) and attempts:
             return ""
-        if int(record.get("attempted_credentials") or 0) > 0:
+        if int(record.get("credential_attempt_count", record.get("attempted_credentials", 0)) or 0) > 0:
             return f"{prefix} [-] authentication required (credentials invalid)"
         return f"{prefix} [-] authentication required"
 
@@ -2086,7 +2750,7 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
     if output_format != "txt":
         return []
 
-    attempts_raw = record.get("auth_attempts")
+    attempts_raw = record.get("credential_attempts", record.get("auth_attempts"))
     if not isinstance(attempts_raw, list) or not attempts_raw:
         return []
 
@@ -2101,13 +2765,18 @@ def _format_auth_attempt_detail_records(record: dict[str, Any], output_format: s
     credentials_source = str(record.get("credentials_source") or "")
     for attempt in attempts:
         user = str(attempt.get("username") or "default")
-        password = _password_text(attempt.get("password"))
+        raw_password = attempt.get("password")
+        password = _password_text("" if raw_password is None else raw_password)
         if bool(attempt.get("ok")):
             selected = (
                 effective_username is not None
                 and user == str(effective_username)
                 and attempt.get("password") == effective_password
-                and (not credentials_source or str(attempt.get("source") or "") == credentials_source)
+                and (
+                    not attempt.get("source")
+                    or not credentials_source
+                    or str(attempt.get("source")) == credentials_source
+                )
             )
             suffix = f" {_caps_suffix(record)}" if selected else ""
             lines.append(f"{prefix} [+] {user}:{password}{suffix}")
@@ -2614,6 +3283,42 @@ def _run_sql_query_once(
     return [], last_error or "query failed"
 
 
+def _open_shell_session(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    protocol: str,
+    username: str,
+    password: str,
+    database: str,
+    tls_config: _ChTlsConfig | None = None,
+    proxy: Any | None = None,
+) -> tuple[_ChSession | None, str | None]:
+    """Open/reconnect a shell session; command execution is deliberately separate."""
+
+    attempts = max(1, retries + 1)
+    last_error: str | None = None
+    for attempt in range(attempts):
+        session, error = _open_operational_session(
+            protocol,
+            host,
+            port,
+            timeout,
+            username,
+            password,
+            database,
+            **_ch_transport_kwargs(tls_config, proxy),
+        )
+        if session is not None:
+            return session, error
+        last_error = error or last_error
+        if not _probe_error_info(error).retryable or attempt >= attempts - 1:
+            break
+        time.sleep(_retry_delay(attempt))
+    return None, last_error or "connection failed"
+
+
 def _run_execute_command_once(
     host: str,
     port: int,
@@ -2691,7 +3396,7 @@ def _audit_clickhouse_host_with_port_fallback(
 ) -> dict[str, Any]:
     last_record: dict[str, Any] | None = None
     for port, protocol in port_protocols:
-        if protocol == "auto":
+        if protocol in {"auto", "native"}:
             record = _audit_clickhouse_host(
                 host=host,
                 port=port,

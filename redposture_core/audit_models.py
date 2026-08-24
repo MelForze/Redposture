@@ -95,7 +95,9 @@ class CredentialAttempt:
     def from_mapping(cls, payload: dict[str, Any]) -> CredentialAttempt:
         return cls(
             username=_optional_str(payload.get("username")),
-            password=_optional_str(payload.get("password")),
+            password=(
+                None if "password" not in payload or payload.get("password") is None else str(payload.get("password"))
+            ),
             token=_optional_str(payload.get("token")),
             ok=_optional_bool(payload.get("ok")),
             error=_optional_str(payload.get("error")),

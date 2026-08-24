@@ -33,7 +33,13 @@ def _legacy_status_tuple(module: str, records: list[dict[str, Any]]) -> tuple[An
         status_counts[status] = status_counts.get(status, 0) + 1
 
     invalid_anonymous = status_counts.get("invalid_credentials_anonymous", 0)
-    open_count = status_counts.get("open_no_auth", 0) + status_counts.get("anonymous_access", 0) + invalid_anonymous
+    open_count = (
+        status_counts.get("open_no_auth", 0)
+        + status_counts.get("anonymous_access", 0)
+        + status_counts.get("anonymous_limited", 0)
+        + status_counts.get("auth_unverified_anonymous", 0)
+        + invalid_anonymous
+    )
     valid = (
         status_counts.get("valid_credentials", 0)
         + status_counts.get("weak_default_creds", 0)

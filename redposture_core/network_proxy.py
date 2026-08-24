@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, cast
 
+from .clients.tls_cache import shared_client_ssl_context
+
 _SOCKET_DEFAULT_TIMEOUT: Any = getattr(socket, "_GLOBAL_DEFAULT_TIMEOUT", object())
 _RAW_SOCKET_CREATE_CONNECTION = socket.create_connection
 
@@ -273,7 +275,7 @@ def _http_open_tunnel(
     transport: socket.socket | ssl.SSLSocket = sock
     try:
         if proxy.scheme == "https":
-            context = ssl.create_default_context()
+            context = shared_client_ssl_context(insecure=False)
             transport = context.wrap_socket(sock, server_hostname=proxy.host)
             transport.settimeout(timeout)
 

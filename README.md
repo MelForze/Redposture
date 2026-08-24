@@ -220,18 +220,35 @@ redposture kubeapi -t 127.0.0.1 --port 6443 --insecure --token "$KUBE_TOKEN" --s
 ```
 
 KubeAPI detection requires a canonical Kubernetes `/version`, `/api`, or correlated 401/403 Status pair.
-Authentication inference uses one bounded `namespaces?limit=1` request; full pagination and pod/secret reads
-only run after usable anonymous or authenticated access is established and the corresponding action is requested.
+Authentication inference uses one bounded `namespaces?limit=1` request. Anonymous `403` is reported as
+`anonymous access:limited`, while only `401` means authentication is required. A Bearer token that receives
+`403` is verified with a non-persistent Kubernetes `SelfSubjectReview`; the forbidden response alone is never
+treated as valid authentication. Full pagination and pod/secret reads run only for explicitly requested actions.
+KubeAPI uses 12 workers by default (an explicit `-w` value is preserved), reuses one keep-alive connection per
+target, and retries only transport failures for the current endpoint or page. Secret Base64 is decoded strictly,
+and control characters are escaped in TXT/terminal output.
+
+HTTP-based modules reuse bounded per-target HTTP/1.1 connections across detection, authentication, and requested
+actions, including direct, CONNECT, and SOCKS proxy transports. TLS contexts are cached by trust and client-identity
+configuration. Nested work such as GitLab project checks and ZooKeeper enumeration shares a command-wide
+`min(workers, 20)` budget; `--enum-workers` remains the per-target ZooKeeper ceiling. With `--debug`, the final
+`transport summary` shows request, connection, reuse, retry, and TLS-context cache counters.
 
 PostgreSQL enumeration and privilege-risk check:
 
 ```bash
 redposture postgres -t 127.0.0.1 --defcreds
+redposture postgres -t 127.0.0.1 --defcreds --stop-on-success
 redposture postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables 20
 redposture postgres -t 127.0.0.1 -u postgres -p postgres --privesc-check
 redposture postgres -t 127.0.0.1 -u postgres -p postgres --table 'public."offlineStocks:city_4949:552400"' --dump 5
 redposture postgres -t db.internal --sslmode verify-full --ssl-ca ca.pem --ssl-cert client.pem --ssl-key client.key
 ```
+
+Postgres credential probes are serialized per host across all scanned ports and paced by 100–250 ms; different
+hosts remain parallel. Explicit overload responses add a bounded per-host cooldown. `--defcreds` remains
+exhaustive by default, while `--stop-on-success` stops after the first verified credential. Startup failures that
+do not prove a password rejection are reported as `verification unavailable` rather than invalid credentials.
 
 MongoDB enumeration, query, and dump:
 
@@ -264,9 +281,23 @@ ClickHouse enumeration and bounded dump:
 
 ```bash
 redposture clickhouse -t 127.0.0.1 --show-databases --show-tables 20
+redposture clickhouse -t 127.0.0.1 --protocol auto
 redposture clickhouse -t 127.0.0.1 -u default -p default --table secure.secrets_inventory --dump 5
 redposture clickhouse -t clickhouse.internal --tls --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --show-databases
 ```
+
+ClickHouse scans are native-first. If the native driver receives a deterministic incompatible-packet response,
+RedPosture immediately tries the HTTP API on the same port (HTTPS when `--tls` is enabled). `--protocol auto`
+also scans the standard native and HTTP port sets, preferring the protocol associated with each port. Transport
+failures are retried only on the current protocol and do not trigger fallback. `--http` remains an alias for
+`--protocol http`.
+Unconfirmed per-target protocol and transport errors are available in JSON and `--debug`; normal TXT output keeps
+only confirmed services and the aggregate no-service or inconclusive summary.
+
+Numeric `--show-databases` and `--show-tables` limits are applied by ClickHouse before rows are transferred.
+SQL command output is streamed and stopped after 500 rows. JSON records keep a confirmed service status when a
+requested action is partial or fails; inspect `action_statuses`, `partial_reasons`, and
+`requested_operation_failure` for the operation result.
 
 ClickHouse HTTP(S) mode can use the global HTTP proxy. Native ClickHouse mode rejects `--proxy` because the
 installed native driver cannot guarantee that traffic is routed through it.
@@ -361,9 +392,9 @@ redposture grpc -t 192.0.2.10 --port 50051 --tls --tls-server-name grpc.internal
 Elastic scans bare targets on ports `9200`, `19200`, and `29200` by default. Use `host:port` for a
 target-specific port or `--port` for an explicit port set; when both are supplied, the explicit set is
 added without removing the target-specific port. Transient transport retries are opt-in through
-`-r/--retries`. Plans with at least 10,000 expanded endpoints also automatically use up to 200 workers
-within the process file-descriptor limit (up to 64 through a proxy) and a one-second timeout. Explicit
-`-w/--workers`, `-r/--retries`, and `--timeout` values always win.
+`-r/--retries`. Worker count is never silently reduced or raised: modules default to 50 except KubeAPI, whose
+CPU-conscious default is 12; an explicit `-w/--workers` value is preserved. Explicit `-r/--retries` and
+`--timeout` values also always win.
 
 Elastic `--discover` uses mappings to target sensitive fields, then performs a bounded `_source` sweep and
 audits readable settings, templates, mappings, and ingest pipelines. Findings are deduplicated by secret

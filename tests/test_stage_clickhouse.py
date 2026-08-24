@@ -37,6 +37,15 @@ def _session(protocol: str = "native", username: str = "default", password: str 
     )
 
 
+def _auth_probe_error() -> clickhouse_stage._ChProbeError:
+    return clickhouse_stage._ChProbeError(
+        "Code: 516. Authentication failed",
+        kind="auth",
+        confirms_service=True,
+        auth_required=True,
+    )
+
+
 def test_configure_clickhouse_loggers_suppresses_warning_propagation() -> None:
     logger = logging.getLogger("clickhouse_driver.connection")
     logger.setLevel(logging.WARNING)
@@ -138,10 +147,10 @@ def test_audit_clickhouse_marks_invalid_credentials_anonymous_when_provided_fail
     )
 
     assert record["status"] == "invalid_credentials_anonymous"
-    assert int(record["attempted_credentials"]) == 1
+    assert int(record["credential_attempt_count"]) == 1
     assert record["is_clickhouse"] is True
     assert record["provided_credentials_ok"] is False
-    attempts = record.get("auth_attempts")
+    attempts = record.get("credential_attempts")
     assert isinstance(attempts, list)
     assert len(attempts) == 1
     assert bool(attempts[0].get("ok")) is False
@@ -197,8 +206,8 @@ def test_audit_clickhouse_defcreds_sweeps_all_pairs_and_keeps_first_success(
     assert record["status"] == "weak_default_creds"
     assert record["effective_username"] == "admin"
     assert record["effective_password"] == "admin"
-    assert int(record["attempted_credentials"]) == 14
-    attempts = record.get("auth_attempts")
+    assert int(record["credential_attempt_count"]) == 14
+    attempts = record.get("credential_attempts")
     assert isinstance(attempts, list)
     expected = clickhouse_stage._build_credential_candidates(None, None, True)
     assert [
@@ -221,7 +230,7 @@ def test_audit_clickhouse_auth_required_when_all_credentials_fail(monkeypatch: p
         database: str = "default",
     ):
         _ = (protocol, host, port, timeout, username, password, database)
-        return None, "Code: 516. Authentication failed"
+        return None, _auth_probe_error()
 
     monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_connect)
 
@@ -247,7 +256,7 @@ def test_audit_clickhouse_auth_required_when_all_credentials_fail(monkeypatch: p
 
     assert record["status"] == "auth_required"
     assert record["is_clickhouse"] is True
-    assert int(record["attempted_credentials"]) == 14
+    assert int(record["credential_attempt_count"]) == 14
 
 
 def test_audit_clickhouse_marks_valid_credentials_when_provided_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -263,10 +272,10 @@ def test_audit_clickhouse_marks_valid_credentials_when_provided_succeeds(monkeyp
     ):
         _ = (protocol, host, port, timeout, database)
         if username == "default" and password == "":
-            return None, "Code: 516. Authentication failed"
+            return None, _auth_probe_error()
         if username == "auditor" and password == "auditor":
             return _session(username="auditor", password="auditor"), None
-        return None, "Code: 516. Authentication failed"
+        return None, _auth_probe_error()
 
     monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_connect)
     monkeypatch.setattr(
@@ -386,7 +395,7 @@ def test_clickhouse_policy_validation_accepts_valid_os_shell() -> None:
     assert console.messages == []
 
 
-def test_audit_clickhouse_fallbacks_to_http_when_auto_is_used(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_audit_clickhouse_auto_does_not_fallback_after_transport_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     called_protocols: list[str] = []
 
     def fake_single_protocol(
@@ -475,9 +484,9 @@ def test_audit_clickhouse_fallbacks_to_http_when_auto_is_used(monkeypatch: pytes
         sql_command=None,
     )
 
-    assert called_protocols == ["native", "http"]
-    assert record["protocol"] == "http"
-    assert record["status"] == "open_no_auth"
+    assert called_protocols == ["native"]
+    assert record["protocol"] == "native"
+    assert record["status"] == "fail"
 
 
 def test_audit_clickhouse_fallbacks_when_first_protocol_fails_with_clickhouse_like_error(
@@ -567,7 +576,7 @@ def test_audit_clickhouse_fallbacks_when_first_protocol_fails_with_clickhouse_li
         sql_command=None,
     )
 
-    assert called_protocols == ["native", "http"]
+    assert called_protocols == ["http"]
     assert record["protocol"] == "http"
     assert record["status"] == "auth_required"
 
@@ -589,7 +598,7 @@ def test_format_record_status_variants() -> None:
     assert anonymous_json["read_capability"] is False
 
     line_auth = clickhouse_stage._format_record(
-        {**base, "status": "auth_required", "attempted_credentials": 2},
+        {**base, "status": "auth_required", "credential_attempt_count": 2},
         "txt",
     )
     assert "authentication required (credentials invalid)" in line_auth
@@ -617,7 +626,7 @@ def test_format_auth_attempt_detail_records_contains_two_lines() -> None:
     record = {
         "host": "127.0.0.1",
         "port": 9000,
-        "auth_attempts": [
+        "credential_attempts": [
             {"username": "default", "password": "", "ok": True},
             {"username": "default", "password": "default", "ok": False},
         ],
@@ -644,7 +653,7 @@ def test_audit_clickhouse_targets_suppresses_timeout_and_refused_failures(monkey
             "admin_capability": None,
             "database_count": None,
             "database_names": None,
-            "auth_attempts": [],
+            "credential_attempts": [],
             "show_databases": False,
             "show_tables": False,
             "show_columns": False,
@@ -708,7 +717,7 @@ def test_audit_clickhouse_targets_emits_detect_attempts_status_and_details(monke
             "admin_capability": False,
             "database_count": 1,
             "database_names": ["default"],
-            "auth_attempts": [
+            "credential_attempts": [
                 {"username": "default", "password": "", "ok": True},
                 {"username": "default", "password": "default", "ok": False},
             ],
@@ -771,8 +780,8 @@ def test_audit_clickhouse_targets_skips_auth_required_status_when_attempts_are_p
             "is_clickhouse": True,
             "status": "auth_required",
             "auth_required": True,
-            "attempted_credentials": 1,
-            "auth_attempts": [{"username": "default", "password": "bad", "ok": False}],
+            "credential_attempt_count": 1,
+            "credential_attempts": [{"username": "default", "password": "bad", "ok": False}],
             "error": None,
             "show_databases": False,
             "show_tables": False,
@@ -830,8 +839,8 @@ def test_audit_clickhouse_targets_skips_plain_auth_required_status_line(
             "is_clickhouse": True,
             "status": "auth_required",
             "auth_required": True,
-            "attempted_credentials": 0,
-            "auth_attempts": [],
+            "credential_attempt_count": 0,
+            "credential_attempts": [],
             "error": None,
             "show_databases": False,
             "show_tables": False,
@@ -1076,11 +1085,14 @@ def test_run_clickhouse_stage_os_shell_executes_command(
     monkeypatch.setattr(builtins, "input", lambda _prompt: next(inputs))
     captured: dict[str, object] = {}
 
-    def fake_execute_once(**kwargs):
-        captured.update(kwargs)
+    shell_session = _session()
+    monkeypatch.setattr(clickhouse_stage, "_open_shell_session", lambda **_kwargs: (shell_session, None))
+
+    def fake_execute_once(_session_obj, command):
+        captured.update({"command": command, "session": _session_obj})
         return ["uid=1000(redposture)"], None
 
-    monkeypatch.setattr(clickhouse_stage, "_run_execute_command_once", fake_execute_once)
+    monkeypatch.setattr(clickhouse_stage, "_run_execute_command", fake_execute_once)
 
     rc = clickhouse_stage.run_clickhouse_stage(
         _clickhouse_validation_args(os_shell=True),
@@ -1089,8 +1101,7 @@ def test_run_clickhouse_stage_os_shell_executes_command(
 
     assert rc == 0
     assert captured["command"] == "id"
-    assert captured["username"] == "default"
-    assert captured["protocol"] == "native"
+    assert captured["session"] is shell_session
     stdout = capsys.readouterr().out
     assert "clickhouse os-shell ready" in stdout
     assert "uid=1000(redposture)" in stdout
@@ -1099,8 +1110,8 @@ def test_run_clickhouse_stage_os_shell_executes_command(
 @pytest.mark.parametrize(
     ("shell_flag", "shell_input", "shell_runner"),
     [
-        ("--sql-shell", "select 1", "_run_sql_query_once"),
-        ("--os-shell", "id", "_run_execute_command_once"),
+        ("--sql-shell", "select 1", "_run_sql_query"),
+        ("--os-shell", "id", "_run_execute_command"),
     ],
 )
 def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
@@ -1118,7 +1129,7 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
         connection_attempts.append((username, password))
         if (username, password) == ("admin", "admin"):
             return _session(username=username, password=password, database=database), None
-        return None, "Code: 516. Authentication failed"
+        return None, _auth_probe_error()
 
     monkeypatch.setattr(clickhouse_stage, "_configure_clickhouse_loggers", lambda: None)
     monkeypatch.setattr(clickhouse_stage, "_load_clickhouse_driver_client", lambda: object())
@@ -1140,10 +1151,10 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
     )
     inputs = iter([shell_input, "exit"])
     monkeypatch.setattr(builtins, "input", lambda _prompt: next(inputs))
-    shell_calls: list[dict[str, Any]] = []
+    shell_calls: list[tuple[Any, str]] = []
 
-    def fake_shell_runner(**kwargs):
-        shell_calls.append(dict(kwargs))
+    def fake_shell_runner(session_obj, value):
+        shell_calls.append((session_obj, value))
         return [], None
 
     monkeypatch.setattr(clickhouse_stage, shell_runner, fake_shell_runner)
@@ -1184,11 +1195,14 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
         ("root", "root"),
         ("user", "password"),
         ("user", "user"),
+        ("admin", "admin"),
     ]
     assert emitted_records[0]["status"] == "valid_credentials"
     assert emitted_records[0]["credentials_source"] == "file"
     assert emitted_records[0]["defcreds_enabled"] is True
-    assert [(item["username"], item["password"], item["source"]) for item in emitted_records[0]["auth_attempts"]] == [
+    assert [
+        (item["username"], item["password"], item["source"]) for item in emitted_records[0]["credential_attempts"]
+    ] == [
         ("bad", "bad", "file"),
         ("admin", "admin", "file"),
         ("admin", "changeme", "default"),
@@ -1206,8 +1220,9 @@ def test_clickhouse_shell_uses_plan_batch_and_winning_file_credential(
         ("user", "user", "default"),
     ]
     assert len(shell_calls) == 1
-    assert shell_calls[0]["username"] == "admin"
-    assert shell_calls[0]["password"] == "admin"
+    assert shell_calls[0][0].username == "admin"
+    assert shell_calls[0][0].password == "admin"
+    assert shell_calls[0][1] == shell_input
 
 
 def test_call_audit_clickhouse_host_with_stage_debug_adds_stage_telemetry(
@@ -1460,7 +1475,7 @@ def test_audit_clickhouse_targets_emits_two_pass_debug_markers(monkeypatch: pyte
             "show_databases": bool(run_deep_checks),
             "database_names": ["default"] if run_deep_checks else None,
             "database_count": 1 if run_deep_checks else None,
-            "auth_attempts": [],
+            "credential_attempts": [],
             "table_columns_info": [],
             "table_dumps": [],
             "error": None,
@@ -1525,7 +1540,11 @@ def test_clickhouse_helper_predicates_and_close_client() -> None:
     assert clickhouse_stage._should_emit_status_line({"status": "auth_required"}, "txt") is False
     assert (
         clickhouse_stage._should_emit_status_line(
-            {"status": "auth_required", "attempted_credentials": 1, "auth_attempts": [{"ok": False}]},
+            {
+                "status": "auth_required",
+                "credential_attempt_count": 1,
+                "credential_attempts": [{"ok": False}],
+            },
             "txt",
         )
         is False
@@ -1533,7 +1552,8 @@ def test_clickhouse_helper_predicates_and_close_client() -> None:
     assert clickhouse_stage._should_emit_status_line({"status": "auth_required"}, "json") is True
 
     assert clickhouse_stage._is_auth_error("Code: 516. Authentication failed") is True
-    assert clickhouse_stage._looks_like_clickhouse_error("DB::Exception: Code: 102") is True
+    assert clickhouse_stage._looks_like_clickhouse_error("DB::Exception: Code: 102") is False
+    assert clickhouse_stage._looks_like_clickhouse_error("Received ClickHouse exception, code: 516") is True
 
     class _NativeClient:
         closed = False
@@ -1574,6 +1594,7 @@ def test_clickhouse_normalization_and_query_helpers(monkeypatch: pytest.MonkeyPa
         ]
     )
     monkeypatch.setattr(clickhouse_stage, "_query_rows", lambda *_args, **_kwargs: next(rows_iter))
+    monkeypatch.setattr(clickhouse_stage, "_check_table_read_access", lambda *_args, **_kwargs: (True, None))
 
     session = _session()
     assert clickhouse_stage._query_database_names(session) == (["default", "analytics"], None)
@@ -1651,7 +1672,12 @@ def test_clickhouse_capability_and_exec_sql_helpers(monkeypatch: pytest.MonkeyPa
         _ = (protocol, host, port, timeout, username, password)
         connect_calls.append(database)
         if database == "analytics":
-            return None, "unknown database analytics"
+            return None, clickhouse_stage._ChProbeError(
+                "localized database error",
+                kind="server_exception",
+                confirms_service=True,
+                code=81,
+            )
         return _session(database="default"), None
 
     monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_connect_and_probe)
@@ -1774,7 +1800,7 @@ def test_clickhouse_database_fallback_is_explicit_and_uses_effective_database(
     }
     result = clickhouse_stage.collect_clickhouse_data(
         ctx,
-        {"status": "open_no_auth", "auth_attempts": []},
+        {"status": "open_no_auth", "credential_attempts": []},
         options,
     )
     assert seen_database == ["default"]
@@ -1906,7 +1932,7 @@ def test_clickhouse_lifecycle_tries_credential_file_pairs_after_one_anonymous_de
 
     def fake_detect(_protocol, _host, _port, _timeout, username, password, *, database="default"):
         events.append(("detect", username, password))
-        return None, "Code: 516. Authentication failed"
+        return None, _auth_probe_error()
 
     def fake_auth(_protocol, _host, _port, _timeout, username, password, database):
         events.append(("auth", username, password))
@@ -1996,7 +2022,7 @@ def test_clickhouse_lifecycle_renders_every_attempt_until_first_success_without_
     monkeypatch.setattr(
         clickhouse_stage,
         "_connect_and_probe",
-        lambda *_args, **_kwargs: (None, "Code: 516. Authentication failed"),
+        lambda *_args, **_kwargs: (None, _auth_probe_error()),
     )
 
     def fake_auth(_protocol, _host, _port, _timeout, username, password, database):
@@ -2034,13 +2060,10 @@ def test_clickhouse_lifecycle_renders_every_attempt_until_first_success_without_
     assert result.records[0]["status"] == "weak_default_creds"
     assert result.records[0]["effective_username"] == "admin"
     assert result.records[0]["effective_password"] == "admin"
-    assert [
-        (item["username"], item["password"], item["source"], item["ok"]) for item in result.records[0]["auth_attempts"]
-    ] == [
+    assert [(item["username"], item["password"], item["ok"]) for item in result.records[0]["credential_attempts"]] == [
         (
             username,
             password,
-            "default",
             (username, password) in {("default", "default"), ("admin", "admin")},
         )
         for username, password in expected_pairs
@@ -2063,7 +2086,7 @@ def test_clickhouse_auth_retries_transient_failure_without_repeating_detect(
     def fake_detect(*_args, **_kwargs):
         nonlocal detect_calls
         detect_calls += 1
-        return None, "Code: 516. Authentication failed"
+        return None, _auth_probe_error()
 
     def fake_auth(_protocol, _host, _port, _timeout, username, password, database):
         nonlocal auth_calls
@@ -2119,7 +2142,7 @@ def test_clickhouse_definitive_auth_rejection_is_not_retried(
     monkeypatch.setattr(
         clickhouse_stage,
         "_connect_and_probe",
-        lambda *_args, **_kwargs: (None, "Code: 516. Authentication failed"),
+        lambda *_args, **_kwargs: (None, _auth_probe_error()),
     )
 
     def fake_auth(*_args, **_kwargs):
@@ -2163,7 +2186,7 @@ def test_clickhouse_transient_auth_exhaustion_is_not_reported_as_rejected_creden
     monkeypatch.setattr(
         clickhouse_stage,
         "_connect_and_probe",
-        lambda *_args, **_kwargs: (None, "Code: 516. Authentication failed"),
+        lambda *_args, **_kwargs: (None, _auth_probe_error()),
     )
 
     def fake_auth(*_args, **_kwargs):
@@ -2197,6 +2220,7 @@ def test_clickhouse_transient_auth_exhaustion_is_not_reported_as_rejected_creden
     result = runner.run_plan(clickhouse_stage.build_clickhouse_plan(args))
 
     assert auth_calls == 3
-    assert result.records[0]["status"] == "fail"
+    assert result.records[0]["status"] == "auth_required"
+    assert result.records[0]["auth_status"] == "error"
     assert result.records[0]["provided_credentials_ok"] is None
     assert result.records[0]["is_clickhouse"] is True

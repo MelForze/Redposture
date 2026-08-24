@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from ...clients import transport
@@ -19,6 +20,7 @@ from ...clients.http_api import (
     http_target_context,
     resolve_http_scheme,
 )
+from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
@@ -62,6 +64,13 @@ _ETCD_DEFAULT_CREDS: tuple[tuple[str, str], ...] = (
     ("user", "password"),
     ("user", "user"),
 )
+_ETCD_HTTP_LOCAL = threading.local()
+
+
+@dataclass
+class _EtcdHttpLifecycle:
+    pool: HttpSessionPool
+    scheme: str | None = None
 
 
 def _build_etcd_credential_candidates(
@@ -189,7 +198,14 @@ def _http_json_request(
     auth_token: str | None = None,
     basic_auth: tuple[str, str] | None = None,
 ) -> tuple[int, str]:
-    scheme = resolve_http_scheme(host, port, timeout, probe_path="/version")
+    lifecycle = getattr(_ETCD_HTTP_LOCAL, "state", None)
+    scheme = (
+        lifecycle.scheme
+        if isinstance(lifecycle, _EtcdHttpLifecycle) and lifecycle.scheme in {"http", "https"}
+        else resolve_http_scheme(host, port, timeout, probe_path="/version")
+        if not isinstance(lifecycle, _EtcdHttpLifecycle)
+        else None
+    )
     body_bytes: bytes | None = None
     headers = {"User-Agent": "RedPosture/1.0"}
     if payload is not None:
@@ -204,9 +220,18 @@ def _http_json_request(
         user, secret = basic_auth
         encoded = base64.b64encode(f"{user}:{secret}".encode()).decode("ascii")
         headers["Authorization"] = f"Basic {encoded}"
-    client = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True))
-
     requested_path = str(path or "/")
+    response_cap = (
+        256 * 1024
+        if requested_path.startswith(("/version", "/v3/auth/", "/v3beta/auth/", "/v3alpha/auth/"))
+        else 10 * 1024 * 1024
+    )
+    client = (
+        None
+        if isinstance(lifecycle, _EtcdHttpLifecycle)
+        else HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=response_cap, insecure=True))
+    )
+
     candidates = [requested_path]
     if requested_path.startswith("/v3/"):
         binding = current_http_target_binding()
@@ -223,8 +248,33 @@ def _http_json_request(
     last_status = 0
     last_text = ""
     for index, candidate_path in enumerate(candidates):
-        url = build_http_target_url(host, port, candidate_path, default_scheme=scheme)
-        response = client.request(method, url, headers=headers, body=body_bytes, timeout=timeout)
+        candidate_schemes = (
+            (scheme,)
+            if scheme in {"http", "https"}
+            else (("https", "http") if int(port) in {443, 8443} else ("http", "https"))
+        )
+        response = None
+        for candidate_scheme in candidate_schemes:
+            url = build_http_target_url(host, port, candidate_path, default_scheme=str(candidate_scheme))
+            if isinstance(lifecycle, _EtcdHttpLifecycle):
+                response = lifecycle.pool.request(
+                    method,
+                    url,
+                    headers=headers,
+                    body=body_bytes,
+                    timeout=timeout,
+                    response_size_cap=response_cap,
+                    replay_safe=method.upper() in {"GET", "HEAD"},
+                )
+            else:
+                assert client is not None
+                response = client.request(method, url, headers=headers, body=body_bytes, timeout=timeout)
+            if response.error is None:
+                scheme = str(candidate_scheme)
+                if isinstance(lifecycle, _EtcdHttpLifecycle):
+                    lifecycle.scheme = scheme
+                break
+        assert response is not None
         if response.error:
             raise urllib.error.URLError(response.error)
         last_status, last_text = int(response.status), response.text
@@ -1360,6 +1410,7 @@ def _call_audit_etcd_host_with_stage_debug(
     debug: bool,
     debug_emit: Callable[[str], None] | None,
     target_spec: Any | None = None,
+    proxy: Any | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     audit_limit_kwargs: dict[str, Any] = (
@@ -1378,37 +1429,53 @@ def _call_audit_etcd_host_with_stage_debug(
     audit_kwargs["defcreds"] = defcreds
     if credential_candidates:
         audit_kwargs["credential_candidates"] = credential_candidates
+    target_scheme = str(getattr(target_spec, "scheme", "") or "").lower()
+    # `_audit_etcd_host` owns the command retry budget. The reusable transport
+    # must not retry again inside every outer attempt (which would square the
+    # number of sockets and TLS handshakes).
+    transport_state = _EtcdHttpLifecycle(
+        pool=HttpSessionPool(timeout=timeout, insecure=True, proxy=proxy),
+        scheme=target_scheme if target_scheme in {"http", "https"} else None,
+    )
+    _ETCD_HTTP_LOCAL.state = transport_state
     with http_target_context(target_spec, api_prefixes=("/version", "/v2", "/v3", "/v3beta", "/v3alpha")):
         try:
-            record = _audit_etcd_host(
-                host,
-                port,
-                timeout,
-                retries,
-                show_keys if run_deep_checks else False,
-                dump_keys if run_deep_checks else False,
-                query_key if run_deep_checks else None,
-                **audit_kwargs,
-            )
-        except TypeError as exc:
-            # Backward-compat: tests patch _audit_etcd_host with a legacy signature.
-            if not is_signature_compat_typeerror(
-                exc,
-                expected_keywords={"username", "password", "defcreds", "credential_candidates"},
-            ):
-                raise
-            for legacy_key in ("username", "password", "defcreds", "credential_candidates"):
-                audit_kwargs.pop(legacy_key, None)
-            record = _audit_etcd_host(
-                host,
-                port,
-                timeout,
-                retries,
-                show_keys if run_deep_checks else False,
-                dump_keys if run_deep_checks else False,
-                query_key if run_deep_checks else None,
-                **audit_kwargs,
-            )
+            try:
+                record = _audit_etcd_host(
+                    host,
+                    port,
+                    timeout,
+                    retries,
+                    show_keys if run_deep_checks else False,
+                    dump_keys if run_deep_checks else False,
+                    query_key if run_deep_checks else None,
+                    **audit_kwargs,
+                )
+            except TypeError as exc:
+                # Backward-compat: tests patch _audit_etcd_host with a legacy signature.
+                if not is_signature_compat_typeerror(
+                    exc,
+                    expected_keywords={"username", "password", "defcreds", "credential_candidates"},
+                ):
+                    raise
+                for legacy_key in ("username", "password", "defcreds", "credential_candidates"):
+                    audit_kwargs.pop(legacy_key, None)
+                record = _audit_etcd_host(
+                    host,
+                    port,
+                    timeout,
+                    retries,
+                    show_keys if run_deep_checks else False,
+                    dump_keys if run_deep_checks else False,
+                    query_key if run_deep_checks else None,
+                    **audit_kwargs,
+                )
+        finally:
+            transport_state.pool.close()
+            try:
+                delattr(_ETCD_HTTP_LOCAL, "state")
+            except AttributeError:
+                pass
 
     result: dict[str, Any] = dict(record)
     status = str(result.get("status") or "fail")

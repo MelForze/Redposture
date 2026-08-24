@@ -23,6 +23,7 @@ def configure_kubeapi_parser(
     add_output_flags(common)
     add_log_flag(common)
     add_scan_host_flags(common, include_profiles=False)
+    parser.set_defaults(workers=12)
     common.add_argument(
         "--port",
         dest="port",

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...clients import transport
+from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...rendering import (
     BooleanColorRule,
@@ -139,15 +140,14 @@ def _pg_open_socket(
             raw.sendall((8).to_bytes(4, "big") + (80877103).to_bytes(4, "big"))
             response = _recv_exact(raw, 1)
             if response == b"S":
-                if config.sslmode in {"verify-ca", "verify-full"} or config.ca_file:
-                    context = ssl.create_default_context(cafile=config.ca_file)
-                    context.check_hostname = config.sslmode == "verify-full"
-                else:
-                    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-                    context.check_hostname = False
-                    context.verify_mode = ssl.CERT_NONE
-                if config.cert_file:
-                    context.load_cert_chain(config.cert_file, keyfile=config.key_file)
+                verify = config.sslmode in {"verify-ca", "verify-full"} or bool(config.ca_file)
+                context = shared_client_ssl_context(
+                    insecure=not verify,
+                    ca_file=config.ca_file,
+                    cert_file=config.cert_file,
+                    key_file=config.key_file,
+                    check_hostname=config.sslmode == "verify-full",
+                )
                 server_hostname = config.server_name or host
                 active = context.wrap_socket(raw, server_hostname=server_hostname)
                 active.settimeout(timeout)
@@ -2969,6 +2969,7 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         else:
             password_text = str(password)
         status = str(attempt.get("status") or "")
+        verification = str(attempt.get("credential_verification") or "")
         ok = status in {"open_no_auth", "valid_credentials", "weak_default_creds"}
         if ok:
             suffix = ""
@@ -2976,6 +2977,10 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
                 suffix = f" {_caps_suffix(record)}"
                 selected_success_rendered = True
             lines.append(f"{prefix} [+] {username}:{password_text}{suffix}")
+        elif verification == "unavailable":
+            lines.append(f"{prefix} [!] {username}:{password_text} (verification unavailable)")
+        elif verification == "error":
+            lines.append(f"{prefix} [!] {username}:{password_text} (verification error)")
         else:
             lines.append(f"{prefix} [-] {username}:{password_text}")
     return lines

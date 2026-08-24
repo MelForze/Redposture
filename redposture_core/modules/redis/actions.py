@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import socket
-import ssl
+import ssl as ssl
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -14,6 +14,7 @@ from typing import Any
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
 from ...clients import transport
+from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...show_limits import (
@@ -155,15 +156,16 @@ def _open_redis_socket(
     sock.settimeout(timeout)
     if not use_tls:
         return sock
-    context = ssl.create_default_context(cafile=ca_file or None)
-    if insecure:
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-    if cert_file or key_file:
-        if not cert_file or not key_file:
-            sock.close()
-            raise ValueError("TLS client certificate and key must be provided together")
-        context.load_cert_chain(certfile=cert_file, keyfile=key_file)
+    try:
+        context = shared_client_ssl_context(
+            insecure=insecure,
+            ca_file=ca_file,
+            cert_file=cert_file,
+            key_file=key_file,
+        )
+    except ValueError:
+        sock.close()
+        raise
     try:
         wrapped = context.wrap_socket(sock, server_hostname=host)
         wrapped.settimeout(timeout)

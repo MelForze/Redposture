@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -16,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, format_http_authority
+from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...scheduler import BoundedScheduler
@@ -54,6 +56,30 @@ class GitLabLifecycleState:
     token_error: str | None = None
     token_capability: str | None = None
     deep_record: dict[str, Any] | None = None
+    http: HttpSessionPool | None = None
+
+    def close(self) -> None:
+        if self.http is not None:
+            self.http.close()
+            self.http = None
+
+
+_THREAD_LOCAL_HTTP = threading.local()
+_DETECT_RESPONSE_CAP = 256 * 1024
+
+
+def gitlab_lifecycle_state_factory(ctx: Any) -> GitLabLifecycleState:
+    return GitLabLifecycleState(
+        http=HttpSessionPool(
+            timeout=float(getattr(ctx.args, "timeout", 1.0)),
+            insecure=True,
+            proxy=getattr(ctx.args, "_proxy_config", None),
+        )
+    )
+
+
+def _activate_gitlab_transport(state: GitLabLifecycleState) -> None:
+    _THREAD_LOCAL_HTTP.state = state
 
 
 def _clip(text: str, width: int = 72) -> str:
@@ -128,20 +154,39 @@ def _http_request(
     request_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         request_headers.update(headers)
-    response = HttpApiClient(
-        HttpClientConfig(
-            timeout=timeout,
-            insecure=True,
-            response_size_cap=10 * 1024 * 1024,
-            allow_cross_origin_redirects=True,
-        )
-    ).request(
-        method,
-        url,
-        headers=request_headers,
-        body=body,
-        timeout=timeout,
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    normalized_endpoint = _normalize_path(path).partition("?")[0]
+    cap = (
+        _DETECT_RESPONSE_CAP
+        if normalized_endpoint in {"/users/sign_in", "/api/v4/version", "/api/v4/user"}
+        else 10 * 1024 * 1024
     )
+    if isinstance(state, GitLabLifecycleState) and state.http is not None:
+        response = state.http.request(
+            method,
+            url,
+            headers=request_headers,
+            body=body,
+            timeout=timeout,
+            response_size_cap=cap,
+            allow_cross_origin_redirects=True,
+            preserve_authorization_on_cross_origin=True,
+        )
+    else:
+        response = HttpApiClient(
+            HttpClientConfig(
+                timeout=timeout,
+                insecure=True,
+                response_size_cap=cap,
+                allow_cross_origin_redirects=True,
+            )
+        ).request(
+            method,
+            url,
+            headers=request_headers,
+            body=body,
+            timeout=timeout,
+        )
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
     return int(response.status), response.body, {str(k).lower(): str(v) for k, v in response.headers.items()}, None
@@ -1248,6 +1293,8 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 
 def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(ctx.lifecycle_state, GitLabLifecycleState):
+        _activate_gitlab_transport(ctx.lifecycle_state)
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
     target_scheme = str(ctx.target.scheme or "").lower() if ctx.target is not None else ""
     use_https = (
@@ -1344,6 +1391,7 @@ def authenticate_gitlab(ctx: Any, detect_record: Any, options: dict[str, Any]) -
     state = ctx.lifecycle_state
     if not isinstance(state, GitLabLifecycleState):
         raise TypeError("gitlab lifecycle state is unavailable")
+    _activate_gitlab_transport(state)
     record = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
     token = str(ctx.credential.token or "").strip()
     if not token:
@@ -1401,6 +1449,7 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
     state = ctx.lifecycle_state
     if not isinstance(state, GitLabLifecycleState):
         raise TypeError("gitlab lifecycle state is unavailable")
+    _activate_gitlab_transport(state)
     if state.deep_record is not None:
         return state.deep_record
     record = dict(source_record.to_dict() if hasattr(source_record, "to_dict") else source_record)
@@ -1447,21 +1496,32 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
         )
         if isinstance(token_all, list):
             token_projects = [item for item in token_all if _project_matches_filters(item, project_filters)]
-            scheduler = BoundedScheduler[dict[str, Any], dict[str, Any]](
-                max_workers=max(1, min(int(getattr(ctx.args, "workers", 1) or 1), 20)),
-                max_inflight=max(1, min(int(getattr(ctx.args, "workers", 1) or 1), 20)) * 4,
-            )
-            for _project, access in scheduler.iter_completed(
-                token_projects,
-                lambda project: _probe_project_capabilities(
+
+            def _probe_lifecycle_project(project: dict[str, Any]) -> dict[str, Any]:
+                _activate_gitlab_transport(state)
+                return _probe_project_capabilities(
                     host,
                     port,
                     timeout,
                     use_https=use_https,
                     token=token,
                     project=project,
-                ),
-            ):
+                )
+
+            if ctx.nested_scheduler is not None:
+                completed_projects = ctx.nested_scheduler.iter_completed(
+                    token_projects,
+                    _probe_lifecycle_project,
+                    key=("gitlab", host, port),
+                    per_key_limit=max(1, min(int(getattr(ctx.args, "workers", 1) or 1), 20)),
+                )
+            else:
+                scheduler = BoundedScheduler[dict[str, Any], dict[str, Any]](
+                    max_workers=max(1, min(int(getattr(ctx.args, "workers", 1) or 1), 20)),
+                    max_inflight=max(1, min(int(getattr(ctx.args, "workers", 1) or 1), 20)) * 4,
+                )
+                completed_projects = scheduler.iter_completed(token_projects, _probe_lifecycle_project)
+            for _project, access in completed_projects:
                 token_access.append(access)
             token_access.sort(key=lambda item: str(item.get("path_with_namespace") or ""))
         if state.token_capability == "repository" and not token_projects:
@@ -1510,17 +1570,29 @@ def collect_gitlab_data(ctx: Any, source_record: Any, options: dict[str, Any]) -
         deduped: dict[str, dict[str, Any]] = {}
         for project in clone_candidates:
             deduped.setdefault(str(project.get("id") or _project_path(project)), project)
-        for project in sorted(deduped.values(), key=_project_path):
-            clone_results.append(
-                _clone_project(
-                    project,
-                    host,
-                    port,
-                    use_https=use_https,
-                    token=token if state.token_valid else None,
-                    clone_dir=str(options["clone_dir"]),
-                )
+        ordered_clone_candidates = sorted(deduped.values(), key=_project_path)
+
+        def _clone_lifecycle_project(project: dict[str, Any]) -> dict[str, Any]:
+            return _clone_project(
+                project,
+                host,
+                port,
+                use_https=use_https,
+                token=token if state.token_valid else None,
+                clone_dir=str(options["clone_dir"]),
             )
+
+        if ctx.nested_scheduler is not None:
+            completed_clones = ctx.nested_scheduler.iter_completed(
+                ordered_clone_candidates,
+                _clone_lifecycle_project,
+                key=("gitlab-clone", host, port),
+                per_key_limit=max(1, min(int(getattr(ctx.args, "workers", 1) or 1), 20)),
+            )
+            clone_results.extend(result for _project, result in completed_clones)
+        else:
+            clone_results.extend(_clone_lifecycle_project(project) for project in ordered_clone_candidates)
+        clone_results.sort(key=lambda item: str(item.get("project") or ""))
     record.update(
         {
             "open_endpoints": open_endpoints,

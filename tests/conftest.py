@@ -9,9 +9,20 @@ from pathlib import Path
 
 import pytest
 
+from redposture_core.clients.tls_cache import clear_tls_context_cache
+
 
 class ExternalDnsBlockedError(RuntimeError):
     """Raised when a unit test attempts real non-loopback DNS resolution."""
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shared_tls_context_cache() -> Iterable[None]:
+    clear_tls_context_cache()
+    try:
+        yield
+    finally:
+        clear_tls_context_cache()
 
 
 @pytest.fixture(autouse=True)

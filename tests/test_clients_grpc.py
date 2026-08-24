@@ -7,6 +7,7 @@ import pytest
 from google.protobuf import descriptor_pb2
 
 from redposture_core.clients import grpc as grpc_client
+from redposture_core.clients.tls_cache import clear_tls_context_cache
 from redposture_core.proto import grpc_health_pb2, grpc_reflection_pb2
 
 
@@ -100,7 +101,7 @@ def test_open_socket_tls_failure_paths(monkeypatch) -> None:
 
     base = BaseSocket()
     monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: base)
-    monkeypatch.setattr(ssl, "create_default_context", lambda: BadContext())
+    monkeypatch.setattr(ssl, "_create_unverified_context", lambda: BadContext())
     with pytest.raises(ssl.SSLError):
         grpc_client._open_grpc_socket("host", 50051, 1.0, use_tls=True)
     assert base.closed is True
@@ -117,7 +118,8 @@ def test_open_socket_tls_failure_paths(monkeypatch) -> None:
 
     base = BaseSocket()
     monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: base)
-    monkeypatch.setattr(ssl, "create_default_context", lambda: MismatchContext())
+    clear_tls_context_cache()
+    monkeypatch.setattr(ssl, "_create_unverified_context", lambda: MismatchContext())
     with pytest.raises(OSError, match="alpn negotiation"):
         grpc_client._open_grpc_socket("host", 50051, 1.0, use_tls=True)
     assert wrapped.closed is True
@@ -128,7 +130,8 @@ def test_open_socket_tls_failure_paths(monkeypatch) -> None:
 
     base = BaseSocket()
     monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: base)
-    monkeypatch.setattr(ssl, "create_default_context", lambda: HttpContext())
+    clear_tls_context_cache()
+    monkeypatch.setattr(ssl, "_create_unverified_context", lambda: HttpContext())
     with pytest.raises(OSError, match="wrap failed"):
         grpc_client._open_http_socket("host", 443, 1.0, use_tls=True)
     assert base.closed is True

@@ -2397,6 +2397,9 @@ def _enumerate_zookeeper_lifecycle(
         "auth_username": credential.username if authenticated else None,
         "auth_password": credential.password if authenticated else None,
     }
+    nested_scheduler = getattr(ctx, "nested_scheduler", None)
+    if nested_scheduler is not None:
+        enum_kwargs["nested_scheduler"] = nested_scheduler
     if state.selected_transport_config is not None:
         enum_kwargs["transport_config"] = state.selected_transport_config
     try:
@@ -2415,6 +2418,7 @@ def _enumerate_zookeeper_lifecycle(
                 "auth_username",
                 "auth_password",
                 "transport_config",
+                "nested_scheduler",
             },
         ):
             raise

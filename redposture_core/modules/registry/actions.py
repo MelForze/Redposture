@@ -17,6 +17,7 @@ from dataclasses import field as dc_field
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, resolve_http_scheme
+from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
@@ -60,6 +61,33 @@ class RegistryLifecycleState:
     credential_nexus: dict[_RegistryCredentialKey, tuple[dict[str, Any] | None, str | None]] = dc_field(
         default_factory=dict
     )
+    http: HttpSessionPool | None = None
+    scheme: str | None = None
+
+    def close(self) -> None:
+        if self.http is not None:
+            self.http.close()
+            self.http = None
+
+
+_THREAD_LOCAL_HTTP = threading.local()
+_DETECT_RESPONSE_CAP = 256 * 1024
+
+
+def registry_lifecycle_state_factory(ctx: Any) -> RegistryLifecycleState:
+    target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
+    return RegistryLifecycleState(
+        http=HttpSessionPool(
+            timeout=float(getattr(ctx.args, "timeout", 1.0)),
+            insecure=True,
+            proxy=getattr(ctx.args, "_proxy_config", None),
+        ),
+        scheme=target_scheme if target_scheme in {"http", "https"} else None,
+    )
+
+
+def _activate_registry_transport(state: RegistryLifecycleState) -> None:
+    _THREAD_LOCAL_HTTP.state = state
 
 
 def _clip(text: str, width: int = 72) -> str:
@@ -194,9 +222,19 @@ def _fetch_registry_bearer_token(
     token_headers = {"User-Agent": "RedPosture/1.0", "Accept": "application/json"}
     if basic_authorization:
         token_headers["Authorization"] = basic_authorization
-    response = HttpApiClient(
-        HttpClientConfig(timeout=timeout, response_size_cap=1024 * 1024, insecure=parsed.scheme == "https")
-    ).get(token_url, headers=token_headers, timeout=timeout)
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    if isinstance(state, RegistryLifecycleState) and state.http is not None:
+        response = state.http.request(
+            "GET",
+            token_url,
+            headers=token_headers,
+            timeout=timeout,
+            response_size_cap=_DETECT_RESPONSE_CAP,
+        )
+    else:
+        response = HttpApiClient(
+            HttpClientConfig(timeout=timeout, response_size_cap=_DETECT_RESPONSE_CAP, insecure=parsed.scheme == "https")
+        ).get(token_url, headers=token_headers, timeout=timeout)
     if response.error:
         return None, _friendly_error_text(response.error)
     if response.status != 200:
@@ -223,20 +261,42 @@ def _http_request(
     headers: dict[str, str] | None = None,
     body: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
-    scheme = resolve_http_scheme(host, port, timeout, probe_path="/v2/")
-    url = build_http_target_url(host, port, _normalize_path(path), default_scheme=scheme)
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
-    response = HttpApiClient(
-        HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True)
-    ).request(
-        method,
-        url,
-        headers=req_headers,
-        body=body,
-        timeout=timeout,
-    )
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    cap = _DETECT_RESPONSE_CAP if _normalize_path(path).partition("?")[0] == "/v2/" else 10 * 1024 * 1024
+    if isinstance(state, RegistryLifecycleState) and state.http is not None:
+        schemes = (
+            (state.scheme,)
+            if state.scheme in {"http", "https"}
+            else (("https", "http") if int(port) in {443, 5001} else ("http", "https"))
+        )
+        response = None
+        for scheme in schemes:
+            url = build_http_target_url(host, port, _normalize_path(path), default_scheme=str(scheme))
+            response = state.http.request(
+                method,
+                url,
+                headers=req_headers,
+                body=body,
+                timeout=timeout,
+                response_size_cap=cap,
+            )
+            if response.error is None:
+                state.scheme = str(scheme)
+                break
+        assert response is not None
+    else:
+        scheme = resolve_http_scheme(host, port, timeout, probe_path="/v2/")
+        url = build_http_target_url(host, port, _normalize_path(path), default_scheme=scheme)
+        response = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True)).request(
+            method,
+            url,
+            headers=req_headers,
+            body=body,
+            timeout=timeout,
+        )
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
     response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
@@ -252,9 +312,20 @@ def _http_request(
             if bearer_token:
                 retry_headers = dict(req_headers)
                 retry_headers["Authorization"] = f"Bearer {bearer_token}"
-                retry_response = HttpApiClient(
-                    HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True)
-                ).request(method, url, headers=retry_headers, body=body, timeout=timeout)
+                retry_response = (
+                    state.http.request(
+                        method,
+                        url,
+                        headers=retry_headers,
+                        body=body,
+                        timeout=timeout,
+                        response_size_cap=cap,
+                    )
+                    if isinstance(state, RegistryLifecycleState) and state.http is not None
+                    else HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True)).request(
+                        method, url, headers=retry_headers, body=body, timeout=timeout
+                    )
+                )
                 if retry_response.error:
                     return 0, b"", {}, _friendly_error_text(retry_response.error)
                 retry_response_headers = {str(key).lower(): str(value) for key, value in retry_response.headers.items()}
@@ -276,12 +347,24 @@ def _http_request_url(
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
-    response = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024)).request(
-        method,
-        url,
-        headers=req_headers,
-        body=body,
-        timeout=timeout,
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    response = (
+        state.http.request(
+            method,
+            url,
+            headers=req_headers,
+            body=body,
+            timeout=timeout,
+            response_size_cap=10 * 1024 * 1024,
+        )
+        if isinstance(state, RegistryLifecycleState) and state.http is not None
+        else HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024)).request(
+            method,
+            url,
+            headers=req_headers,
+            body=body,
+            timeout=timeout,
+        )
     )
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
@@ -1563,6 +1646,7 @@ def detect_registry(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     state = ctx.lifecycle_state
     if not isinstance(state, RegistryLifecycleState):
         raise TypeError("registry lifecycle state is unavailable")
+    _activate_registry_transport(state)
 
     started_at = time.monotonic()
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
@@ -1631,6 +1715,7 @@ def authenticate_registry(ctx: Any, detect_record: Any, options: Mapping[str, An
     state = ctx.lifecycle_state
     if not isinstance(state, RegistryLifecycleState):
         raise TypeError("registry lifecycle state is unavailable")
+    _activate_registry_transport(state)
     payload = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
     credential = ctx.credential
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
@@ -1745,6 +1830,7 @@ def collect_registry_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> 
     state = ctx.lifecycle_state
     if not isinstance(state, RegistryLifecycleState):
         raise TypeError("registry lifecycle state is unavailable")
+    _activate_registry_transport(state)
     prior = dict(record.to_dict() if hasattr(record, "to_dict") else record)
     credential = ctx.credential
     key = (credential.username, credential.password, credential.token, str(credential.source))

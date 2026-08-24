@@ -7,6 +7,7 @@ from typing import Any
 
 from ...audit_config import AuditConfig
 from ...audit_models import AuditRecord
+from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...show_limits import dump_flag_enabled, dump_flag_limit
 from ...stage_runtime import (
@@ -119,6 +120,14 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
             client_key=getattr(args, "tls_key", None),
             preferred_scheme=preferred_scheme,
             strict_scheme=strict_scheme,
+            http=HttpSessionPool(
+                timeout=float(getattr(args, "timeout", 1.0)),
+                insecure=bool(getattr(args, "insecure", False)),
+                ca_file=getattr(args, "tls_ca", None),
+                cert_file=getattr(args, "tls_cert", None),
+                key_file=getattr(args, "tls_key", None),
+                proxy=getattr(args, "_proxy_config", None),
+            ),
         )
 
     return ModuleAuditSpec(
@@ -131,6 +140,7 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
+        lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_consul_line,
     )

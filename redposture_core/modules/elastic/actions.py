@@ -17,6 +17,7 @@ from dataclasses import field as dataclass_field
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url
+from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...rendering import BooleanColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
@@ -334,14 +335,7 @@ def _is_transient_transport_error(error_text: str) -> bool:
 
 
 def _build_ssl_context(insecure: bool, ca_file: str | None) -> ssl.SSLContext:
-    if insecure:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        return ctx
-    if ca_file:
-        return ssl.create_default_context(cafile=ca_file)
-    return ssl.create_default_context()
+    return shared_client_ssl_context(insecure=insecure, ca_file=ca_file)
 
 
 def _elastic_headers(

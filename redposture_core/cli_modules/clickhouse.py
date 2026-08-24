@@ -3,9 +3,25 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from ..show_limits import optional_dump_count_kwargs, optional_show_count_kwargs
+
+
+class _ProtocolAction(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        _ = (parser, option_string)
+        if not isinstance(values, str):
+            raise argparse.ArgumentError(self, "protocol must be a string")
+        setattr(namespace, self.dest, values)
+        namespace._clickhouse_protocol_explicit = True
 
 
 def configure_clickhouse_parser(
@@ -34,14 +50,25 @@ def configure_clickhouse_parser(
         help=(
             "ClickHouse port spec: single port, list/range, or file "
             "(examples: 9000, 8123, 9000,8123, ./ports.txt). "
-            "If omitted, scans native 9000/19000 or HTTP 8123/18123 with --http."
+            "If omitted, uses the default ports selected by --protocol."
         ),
     )
     add_multi_ports_flag(common)
     common.add_argument(
+        "--protocol",
+        choices=("native", "http", "auto"),
+        default="native",
+        action=_ProtocolAction,
+        help=(
+            "Transport selection (default: native). auto scans native and HTTP default ports and "
+            "uses a same-port fallback only after a deterministic protocol mismatch."
+        ),
+    )
+    parser.set_defaults(_clickhouse_protocol_explicit=False)
+    common.add_argument(
         "--http",
         action="store_true",
-        help="Use ClickHouse HTTP/HTTPS API mode. By default native protocol is used.",
+        help="Compatibility alias for --protocol http.",
     )
     common.add_argument("--tls", action="store_true", help="Use TLS (native secure protocol or HTTPS).")
     common.add_argument(

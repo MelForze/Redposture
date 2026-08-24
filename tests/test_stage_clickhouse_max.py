@@ -40,6 +40,15 @@ class _DummyClient:
         self.closed = True
 
 
+def _auth_probe_error() -> clickhouse_stage._ChProbeError:
+    return clickhouse_stage._ChProbeError(
+        "Code: 516. Authentication failed",
+        kind="auth",
+        confirms_service=True,
+        auth_required=True,
+    )
+
+
 class _RecordingConsole:
     def __init__(self) -> None:
         self.paint_calls: list[tuple[str, str]] = []
@@ -183,7 +192,7 @@ def test_clip_variants(text: str, width: int, expected: str) -> None:
     ],
 )
 def test_retry_delay_capped(attempt: int, expected: float) -> None:
-    assert clickhouse_stage._retry_delay(attempt) == expected
+    assert clickhouse_stage._retry_delay(attempt, jitter=lambda _low, _high: 1.0) == expected
 
 
 def test_friendly_error_timeout_refused_and_clip() -> None:
@@ -222,8 +231,8 @@ def test_fail_record_predicates() -> None:
     ("value", "expected"),
     [
         ("Code: 516. Authentication failed", True),
-        ("unauthorized", True),
-        ("access denied", True),
+        ("unauthorized", False),
+        ("access denied", False),
         ("all good", False),
     ],
 )
@@ -234,9 +243,10 @@ def test_is_auth_error_markers(value: str, expected: bool) -> None:
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("DB::Exception", True),
-        ("Unexpected packet from server", True),
-        ("Code: 210", True),
+        ("DB::Exception", False),
+        ("Unexpected packet from server", False),
+        ("Code: 210", False),
+        ("Received ClickHouse exception, code: 516", True),
         ("random text", False),
     ],
 )
@@ -333,9 +343,9 @@ def test_row_text_uses_string_fallback_for_unknown_object() -> None:
 
 def test_protocol_attempt_order_variants() -> None:
     assert clickhouse_stage._protocol_attempt_order("http") == ("http",)
-    assert clickhouse_stage._protocol_attempt_order("native") == ("native",)
+    assert clickhouse_stage._protocol_attempt_order("native") == ("native", "http")
     assert clickhouse_stage._protocol_attempt_order("auto") == ("native", "http")
-    assert clickhouse_stage._protocol_attempt_order("weird") == ("native",)
+    assert clickhouse_stage._protocol_attempt_order("weird") == ("native", "http")
 
 
 def test_query_rows_native_success() -> None:
@@ -534,7 +544,12 @@ def test_open_operational_session_fallback_to_default(monkeypatch: pytest.Monkey
         _ = (protocol, host, port, timeout, username, password)
         calls.append(database)
         if database == "analytics":
-            return None, "Unknown database analytics"
+            return None, clickhouse_stage._ChProbeError(
+                "localized database error",
+                kind="server_exception",
+                confirms_service=True,
+                code=81,
+            )
         return _session(database="default"), None
 
     monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_connect)
@@ -610,7 +625,7 @@ def test_format_detect_record_json_and_format_record_json_redacts() -> None:
                 "status": "valid_credentials",
                 "provided_password": "secret",
                 "effective_password": "secret",
-                "auth_attempts": [{"username": "u"}],
+                "credential_attempts": [{"username": "u"}],
             },
             "json",
         )
@@ -661,7 +676,7 @@ def test_format_auth_attempt_detail_records_ignores_non_txt() -> None:
     record = {
         "host": "127.0.0.1",
         "port": 9000,
-        "auth_attempts": ["bad", {"username": "a", "password": "", "ok": True}],
+        "credential_attempts": ["bad", {"username": "a", "password": "", "ok": True}],
     }
     assert clickhouse_stage._format_auth_attempt_detail_records(record, "json") == []
     lines = clickhouse_stage._format_auth_attempt_detail_records(record, "txt")
@@ -972,7 +987,7 @@ def test_run_clickhouse_stage_sql_shell_uses_first_default_port(monkeypatch: pyt
             "is_clickhouse": True,
             "status": "auth_required",
             "auth_required": True,
-            "auth_attempts": [],
+            "credential_attempts": [],
             "show_databases": False,
             "show_tables": False,
             "show_columns": False,
@@ -1030,10 +1045,10 @@ def test_audit_clickhouse_host_on_protocol_collects_details(monkeypatch: pytest.
     ):
         _ = (protocol, host, port, timeout, database)
         if username == "default" and password == "":
-            return None, "Code: 516. Authentication failed"
+            return None, _auth_probe_error()
         if username == "analyst" and password == "good":
             return _session(), None
-        return None, "Code: 516. Authentication failed"
+        return None, _auth_probe_error()
 
     monkeypatch.setattr(clickhouse_stage, "_connect_and_probe", fake_connect)
     monkeypatch.setattr(clickhouse_stage, "_open_operational_session", lambda *_args, **_kwargs: (_session(), None))
@@ -1251,7 +1266,13 @@ def test_audit_clickhouse_host_on_protocol_clickhouse_like_fail_is_not_detected(
     monkeypatch.setattr(
         clickhouse_stage,
         "_connect_and_probe",
-        lambda *_args, **_kwargs: (None, "Code: 102. Unexpected packet from server"),
+        lambda *_args, **_kwargs: (
+            None,
+            clickhouse_stage._ChProbeError(
+                "Code: 102. Unexpected packet from server",
+                kind="protocol_mismatch",
+            ),
+        ),
     )
 
     record = clickhouse_stage._audit_clickhouse_host_on_protocol(
@@ -1273,8 +1294,9 @@ def test_audit_clickhouse_host_on_protocol_clickhouse_like_fail_is_not_detected(
         execute_command=None,
         sql_command=None,
     )
-    assert record["status"] == "fail"
+    assert record["status"] == "not_clickhouse"
     assert record["is_clickhouse"] is False
+    assert record["detection_error_kind"] == "protocol_mismatch"
 
 
 def test_run_clickhouse_stage_sql_shell_flow(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1297,7 +1319,7 @@ def test_run_clickhouse_stage_sql_shell_flow(monkeypatch: pytest.MonkeyPatch) ->
             "auth_required": True,
             "effective_username": "default",
             "effective_password": "",
-            "auth_attempts": [],
+            "credential_attempts": [],
             "show_databases": False,
             "show_tables": False,
             "show_columns": False,
@@ -1336,7 +1358,7 @@ def test_run_clickhouse_stage_sql_shell_returns_1_on_auth_required(monkeypatch: 
             "is_clickhouse": True,
             "status": "auth_required",
             "auth_required": True,
-            "auth_attempts": [],
+            "credential_attempts": [],
             "show_databases": False,
             "show_tables": False,
             "show_columns": False,

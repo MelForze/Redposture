@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -14,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, resolve_http_scheme
+from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
 from ...stage_runtime import (
@@ -49,6 +51,34 @@ class GrafanaLifecycleState:
     effective_username: str | None = None
     effective_password: str | None = None
     deep_record: dict[str, Any] | None = None
+    http: HttpSessionPool | None = None
+    scheme: str | None = None
+
+    def close(self) -> None:
+        if self.http is not None:
+            self.http.close()
+            self.http = None
+
+
+_THREAD_LOCAL_HTTP = threading.local()
+_DETECT_RESPONSE_CAP = 256 * 1024
+
+
+def grafana_lifecycle_state_factory(ctx: Any) -> GrafanaLifecycleState:
+    target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
+    proxy = getattr(ctx.args, "_proxy_config", None)
+    return GrafanaLifecycleState(
+        http=HttpSessionPool(
+            timeout=float(getattr(ctx.args, "timeout", 1.0)),
+            insecure=True,
+            proxy=proxy,
+        ),
+        scheme=target_scheme if target_scheme in {"http", "https"} else None,
+    )
+
+
+def _activate_grafana_transport(state: GrafanaLifecycleState) -> None:
+    _THREAD_LOCAL_HTTP.state = state
 
 
 def _clip(text: str, width: int = 64) -> str:
@@ -94,13 +124,37 @@ def _http_request(
     headers: dict[str, str] | None = None,
     data: bytes | None = None,
 ) -> tuple[int, str, dict[str, str]]:
-    scheme = resolve_http_scheme(host, port, timeout, probe_path="/api/health")
-    url = build_http_target_url(host, port, path, default_scheme=scheme)
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
-    client = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=10 * 1024 * 1024, insecure=True))
-    response = client.request(method, url, headers=req_headers, body=data, timeout=timeout)
+    state = getattr(_THREAD_LOCAL_HTTP, "state", None)
+    cap = _DETECT_RESPONSE_CAP if path in {"/api/health", "/login", "/api/user"} else 10 * 1024 * 1024
+    if isinstance(state, GrafanaLifecycleState) and state.http is not None:
+        schemes = (
+            (state.scheme,)
+            if state.scheme in {"http", "https"}
+            else (("https", "http") if int(port) in {443, 8443} else ("http", "https"))
+        )
+        response = None
+        for scheme in schemes:
+            url = build_http_target_url(host, port, path, default_scheme=str(scheme))
+            response = state.http.request(
+                method,
+                url,
+                headers=req_headers,
+                body=data,
+                timeout=timeout,
+                response_size_cap=cap,
+            )
+            if response.error is None:
+                state.scheme = str(scheme)
+                break
+        assert response is not None
+    else:
+        scheme = resolve_http_scheme(host, port, timeout, probe_path="/api/health")
+        url = build_http_target_url(host, port, path, default_scheme=scheme)
+        client = HttpApiClient(HttpClientConfig(timeout=timeout, response_size_cap=cap, insecure=True))
+        response = client.request(method, url, headers=req_headers, body=data, timeout=timeout)
     if response.error:
         raise urllib.error.URLError(response.error)
     return int(response.status), response.text, response.headers
@@ -1309,6 +1363,8 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
 
 
 def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(ctx.lifecycle_state, GrafanaLifecycleState):
+        _activate_grafana_transport(ctx.lifecycle_state)
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
     last_error: str | None = None
     for attempt in range(attempts):
@@ -1404,6 +1460,7 @@ def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any])
     state = ctx.lifecycle_state
     if not isinstance(state, GrafanaLifecycleState):
         raise TypeError("grafana lifecycle state is unavailable")
+    _activate_grafana_transport(state)
     record = dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
     credential = ctx.credential
     token = str(credential.token or "").strip() or None
@@ -1497,6 +1554,7 @@ def collect_grafana_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
     state = ctx.lifecycle_state
     if not isinstance(state, GrafanaLifecycleState):
         raise TypeError("grafana lifecycle state is unavailable")
+    _activate_grafana_transport(state)
     if state.deep_record is not None:
         return state.deep_record
     record = dict(source_record.to_dict() if hasattr(source_record, "to_dict") else source_record)

@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from queue import Empty, Queue
 from typing import Any, Literal
 
+from .tls_cache import shared_client_ssl_context
+
 _ZK_PROTOCOL_VERSION = 0
 _ZK_PASSWD_DEFAULT = b"\x00" * 16
 _ZK_OP_CREATE = 1
@@ -363,15 +365,12 @@ def _format_znode_data(data: bytes | None) -> str:
 
 
 def _build_tls_context(config: ZkTransportConfig) -> ssl.SSLContext:
-    if config.insecure:
-        context = ssl._create_unverified_context()
-    else:
-        context = ssl.create_default_context(cafile=config.ca_file or None)
-    if config.cert_file or config.key_file:
-        if not config.cert_file or not config.key_file:
-            raise ValueError("TLS client certificate and key must be configured together")
-        context.load_cert_chain(config.cert_file, config.key_file)
-    return context
+    return shared_client_ssl_context(
+        insecure=config.insecure,
+        ca_file=config.ca_file,
+        cert_file=config.cert_file,
+        key_file=config.key_file,
+    )
 
 
 def _open_zk_socket(
@@ -1025,6 +1024,7 @@ def _enumerate_znodes(
     auth_username: str | None = None,
     auth_password: str | None = None,
     transport_config: ZkTransportConfig | None = None,
+    nested_scheduler: Any | None = None,
 ) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
     worker_count = max(1, int(enum_workers))
     parallel_capable = all(hasattr(client, attr) for attr in ("host", "port", "timeout"))
@@ -1041,6 +1041,7 @@ def _enumerate_znodes(
             auth_username=auth_username,
             auth_password=auth_password,
             transport_config=transport_config,
+            nested_scheduler=nested_scheduler,
         )
 
     node_budget = max(0, int(max_znodes))
@@ -1198,6 +1199,7 @@ def _enumerate_znodes_parallel(
     auth_username: str | None = None,
     auth_password: str | None = None,
     transport_config: ZkTransportConfig | None = None,
+    nested_scheduler: Any | None = None,
 ) -> tuple[list[str], int, bool, dict[str, dict[str, Any]], str | None]:
     worker_count = max(1, int(enum_workers))
     task_queue: Queue[str | None] = Queue()
@@ -1262,7 +1264,7 @@ def _enumerate_znodes_parallel(
         last_report_count = total_count
         last_report_processed = processed_parents
 
-    def _worker() -> None:
+    def _worker_inner() -> None:
         client: _ZkClient | None = None
         try:
             if transport_config is None:
@@ -1348,6 +1350,13 @@ def _enumerate_znodes_parallel(
                 with active_clients_lock:
                     active_clients.pop(id(client), None)
                 client.close()
+
+    def _worker() -> None:
+        if nested_scheduler is None:
+            _worker_inner()
+            return
+        with nested_scheduler.slot():
+            _worker_inner()
 
     threads = [threading.Thread(target=_worker, daemon=True) for _ in range(worker_count)]
     for thread in threads:

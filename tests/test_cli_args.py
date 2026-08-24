@@ -698,6 +698,8 @@ def test_kafka_and_grpc_transport_overrides_are_parsed() -> None:
 def test_clickhouse_help_shows_defaults_only_for_selected_flags() -> None:
     help_text = _command_help("clickhouse")
     assert "Show readable table names in output after successful access/auth. (default:" not in help_text
+    assert "--protocol {native,http,auto}" in help_text
+    assert "fallback only after a deterministic protocol mismatch" in help_text
 
 
 def test_clickhouse_help_orders_show_columns_column_dump() -> None:
@@ -1263,6 +1265,11 @@ def test_kubeapi_flags_are_parsed() -> None:
     assert args.secrets is True
     assert args.output_format == "json"
     assert args.output == "kubeapi_audit.jsonl"
+
+
+def test_kubeapi_worker_default_and_explicit_override() -> None:
+    assert parse_args(["kubeapi", "-t", "127.0.0.1"]).workers == 12
+    assert parse_args(["kubeapi", "-t", "127.0.0.1", "-w", "50"]).workers == 50
 
 
 def test_consul_flags_are_parsed() -> None:

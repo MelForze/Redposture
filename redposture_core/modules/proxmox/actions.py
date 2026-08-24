@@ -9,6 +9,7 @@ import re
 import secrets
 import ssl
 import string
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -17,6 +18,8 @@ from typing import Any
 
 from ...clients import transport
 from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url
+from ...clients.http_session import HttpSessionPool
+from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...rendering import BooleanColorRule, render_colored_marker_line
 from ...stage_runtime import (
@@ -47,6 +50,12 @@ _STAGE_AUTH_INFERENCE = "auth_inference_credentials"
 _STAGE_ACCESS_CAPABILITIES = "access_capabilities"
 _STAGE_DATA = "data"
 _PROXMOX_DEEP_STATUSES = {"token_ok", "weak_default_creds", "insufficient_privileges"}
+_THREAD_LOCAL_HTTP = threading.local()
+
+
+def activate_proxmox_transport(pool: HttpSessionPool | None) -> None:
+    _THREAD_LOCAL_HTTP.pool = pool
+
 
 _SENSITIVE_KEY_TOKENS = (
     "password",
@@ -156,9 +165,7 @@ def _is_suppressed_fail_record(record: dict[str, Any]) -> bool:
 def _ssl_context(*, use_https: bool, insecure: bool) -> ssl.SSLContext | None:
     if not use_https:
         return None
-    if insecure:
-        return ssl._create_unverified_context()
-    return ssl.create_default_context()
+    return shared_client_ssl_context(insecure=insecure)
 
 
 def _auth_header_value(pve_api_token: str) -> str:
@@ -218,20 +225,32 @@ def _proxmox_request_once(
     request_headers.update(_proxmox_auth_headers(pve_api_token, auth_headers))
     if request_body:
         request_headers["Content-Type"] = "application/x-www-form-urlencoded"
-    response = HttpApiClient(
-        HttpClientConfig(
+    pool = getattr(_THREAD_LOCAL_HTTP, "pool", None)
+    if isinstance(pool, HttpSessionPool):
+        response = pool.request(
+            request_method,
+            url,
+            headers=request_headers,
+            body=request_body,
             timeout=timeout,
-            insecure=bool(use_https and insecure),
-            proxy=proxy,
             response_size_cap=_MAX_HTTP_BODY_BYTES,
+            replay_safe=request_method in {"GET", "HEAD"},
         )
-    ).request(
-        request_method,
-        url,
-        headers=request_headers,
-        body=request_body,
-        timeout=timeout,
-    )
+    else:
+        response = HttpApiClient(
+            HttpClientConfig(
+                timeout=timeout,
+                insecure=bool(use_https and insecure),
+                proxy=proxy,
+                response_size_cap=_MAX_HTTP_BODY_BYTES,
+            )
+        ).request(
+            request_method,
+            url,
+            headers=request_headers,
+            body=request_body,
+            timeout=timeout,
+        )
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
     response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}

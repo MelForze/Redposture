@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..network_proxy import ProxyConfig, open_connection_via_proxy, parse_proxy_config
+from .tls_cache import shared_client_ssl_context
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,7 @@ class HttpClientConfig:
     response_size_cap: int = 10 * 1024 * 1024
     default_headers: Mapping[str, str] = field(default_factory=dict)
     allow_cross_origin_redirects: bool = False
+    ssl_context: ssl.SSLContext | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -199,15 +201,12 @@ def _ssl_context(
     client_cert: str | None = None,
     client_key: str | None = None,
 ) -> ssl.SSLContext:
-    context = ssl.create_default_context(cafile=ca_file or None)
-    if insecure:
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-    if client_cert or client_key:
-        if not client_cert or not client_key:
-            raise ValueError("TLS client certificate and key must be provided together")
-        context.load_cert_chain(certfile=client_cert, keyfile=client_key)
-    return context
+    return shared_client_ssl_context(
+        insecure=insecure,
+        ca_file=ca_file,
+        cert_file=client_cert,
+        key_file=client_key,
+    )
 
 
 def _flush_tls_outgoing(sock: Any, outgoing: ssl.MemoryBIO) -> None:
@@ -376,7 +375,7 @@ class HttpApiClient:
 
     def __init__(self, config: HttpClientConfig | None = None) -> None:
         self.config = config or HttpClientConfig()
-        self._context = (
+        self._context = self.config.ssl_context or (
             _ssl_context(
                 self.config.insecure,
                 self.config.ca_file,
