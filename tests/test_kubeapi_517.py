@@ -372,7 +372,7 @@ def test_late_page_failure_preserves_list_capability(monkeypatch: pytest.MonkeyP
 
 def test_secret_decode_is_strict_and_escapes_terminal_controls() -> None:
     assert kube._decode_secret_data_value("Zm9v%%%") == "<invalid-base64>"
-    raw = b"line1\r\n\t\\line2\u0001"
+    raw = b"line1\r\n\t\\line2\x01"
     rendered = kube._decode_secret_data_value(base64.b64encode(raw).decode("ascii"))
     assert rendered == "line1\\r\\n\\t\\\\line2\\u0001"
     assert all(character not in rendered for character in "\r\n\t\x01")
