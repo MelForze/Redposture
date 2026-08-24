@@ -2308,7 +2308,7 @@ def test_open_kafka_socket_9093_is_tls_by_default(monkeypatch: pytest.MonkeyPatc
             wrap_calls.append(server_hostname)
             return _DummySocket()
 
-    monkeypatch.setattr(kafka_client.ssl, "create_default_context", lambda: _FakeCtx())
+    monkeypatch.setattr(kafka_client.ssl, "_create_unverified_context", lambda: _FakeCtx())
 
     sock, transport_mode = kafka.open_kafka_socket("kafka.internal", 9093, 1.0)
     assert transport_mode == "tls"

@@ -113,15 +113,6 @@ def _apply_elastic_mass_profile(args: Any, plan: AuditCommandPlan) -> AuditComma
     endpoint_count = int(plan.target_count)
     mass_plan = endpoint_count >= _MASS_PROFILE_MIN_ENDPOINTS
     auto_fields: list[str] = []
-    effective_workers = int(plan.workers)
-
-    if mass_plan and getattr(args, "_workers_option_provided", True) is False:
-        ceiling = _MASS_PROFILE_PROXY_MAX_WORKERS if getattr(args, "proxy", None) else _MASS_PROFILE_MAX_WORKERS
-        effective_workers = _safe_mass_worker_limit(ceiling)
-        args.workers = effective_workers
-        plan = replace(plan, workers=effective_workers)
-        auto_fields.append("workers")
-
     # Elastic transport retries are opt-in even for smaller plans.  A failed
     # socket can otherwise multiply a large mostly-closed target list before
     # the mass-profile threshold is reached.  Programmatic callers without

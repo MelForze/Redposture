@@ -69,8 +69,23 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
 
     def _deep_gate(record: AuditRecord) -> tuple[bool, str]:
         status = str(record.status or "unknown")
-        allowed = {"open_no_auth", "auth_valid", "invalid_credentials_anonymous"}
+        allowed = {
+            "open_no_auth",
+            "anonymous_limited",
+            "auth_valid",
+            "invalid_credentials_anonymous",
+            "auth_unverified_anonymous",
+        }
         return status in allowed, f"status={status}"
+
+    def _credential_gate(credential: Any, record: AuditRecord) -> tuple[bool, str]:
+        has_credentials = (
+            credential.token is not None or credential.username is not None or credential.password is not None
+        )
+        status = str(record.status or "unknown")
+        if has_credentials and status != "auth_valid":
+            return False, f"status={status}"
+        return _deep_gate(record)
 
     return ModuleAuditSpec(
         module="kubeapi",
@@ -82,9 +97,11 @@ def build_kubeapi_spec(args: Any) -> ModuleAuditSpec:
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=(lambda _ctx: actions.KubeApiLifecycleState()) if use_lifecycle_hooks else None,
+        lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_kubeapi_line,
         deep_gate=_deep_gate,
+        credential_gate=_credential_gate,
         # E3 opt-in: kubeapi anon-open (system:anonymous binding, common on
         # dev/testing clusters) is confirmed by the detect probe.
         keep_anonymous_open_no_auth=True,

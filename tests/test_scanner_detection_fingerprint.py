@@ -8,7 +8,7 @@ from redposture_core.constants import DISCOVERY_EXPORTERS
 from redposture_core.scanner import scan_exporter_presence
 
 
-def test_fetch_fingerprint_bodies_runs_endpoints_in_parallel(monkeypatch) -> None:
+def test_fetch_fingerprint_bodies_avoids_per_target_nested_workers(monkeypatch) -> None:
     active = 0
     max_active = 0
     lock = threading.Lock()
@@ -33,7 +33,7 @@ def test_fetch_fingerprint_bodies_runs_endpoints_in_parallel(monkeypatch) -> Non
     vars_body, cmdline_body = scanner._fetch_fingerprint_bodies("127.0.0.1", 9100, timeout=1.0, retries=0)
     assert vars_body == '{"name":"vars"}'
     assert cmdline_body == "cmdline"
-    assert max_active >= 2
+    assert max_active == 1
 
 
 def test_scan_uses_metrics_only_for_clear_winner(monkeypatch) -> None:

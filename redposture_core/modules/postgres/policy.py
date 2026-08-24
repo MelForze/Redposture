@@ -12,6 +12,9 @@ def validate_args(args: Any, console: Any) -> int | None:
     common_rc = validate_basic_module_args(args, console, module="postgres", pure_http=False)
     if common_rc is not None:
         return common_rc
+    if bool(getattr(args, "stop_on_success", False)) and not bool(getattr(args, "defcreds", False)):
+        console.error("--stop-on-success requires --defcreds")
+        return 2
     sslmode = str(getattr(args, "sslmode", "disable") or "disable")
     ssl_ca = getattr(args, "ssl_ca", None)
     ssl_cert = getattr(args, "ssl_cert", None)

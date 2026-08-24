@@ -97,7 +97,8 @@ def build_qdrant_spec(args: Any) -> ModuleAuditSpec:
         detect=_detect if use_lifecycle_hooks else None,
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
-        lifecycle_state_factory=(lambda _ctx: actions.QdrantLifecycleState()) if use_lifecycle_hooks else None,
+        lifecycle_state_factory=actions.qdrant_lifecycle_state_factory if use_lifecycle_hooks else None,
+        lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         deep_gate=(
             lambda record: (
                 str(record.status or "") in actions._QDRANT_DEEP_STATUSES,

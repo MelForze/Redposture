@@ -74,11 +74,11 @@ def test_mass_profile_applies_only_to_implicit_cli_defaults(monkeypatch: pytest.
     plan = elastic_stage.build_elastic_plan(args)
 
     assert plan.target_count >= 10_000
-    assert plan.workers == 123
-    assert args.workers == 123
+    assert plan.workers == 50
+    assert args.workers == 50
     assert args.retries == 0
     assert args.timeout == 1.0
-    assert args._elastic_effective_profile["automatic_fields"] == ("workers", "retries", "timeout")
+    assert args._elastic_effective_profile["automatic_fields"] == ("retries", "timeout")
 
     explicit_args = parse_args(
         [
@@ -136,8 +136,8 @@ def test_mass_profile_proxy_cap_and_safe_fd_budget(monkeypatch: pytest.MonkeyPat
         ]
     )
     plan = elastic_stage.build_elastic_plan(args)
-    assert ceilings == [64]
-    assert plan.workers == 64
+    assert ceilings == []
+    assert plan.workers == 50
 
     monkeypatch.setattr(resource, "getrlimit", lambda _kind: (256, 256))
     assert real_safe_limit(200) == 96
@@ -157,7 +157,7 @@ def test_exact_90k_synthetic_plan_uses_bounded_mass_profile_without_network(
     profiled_plan = elastic_stage._apply_elastic_mass_profile(args, synthetic_plan)
 
     assert profiled_plan.target_count == 90_000
-    assert profiled_plan.workers == 200
+    assert profiled_plan.workers == 50
     assert profiled_plan.workers <= elastic_stage._MASS_PROFILE_MAX_WORKERS
     assert args.retries == 0
     assert args.timeout == 1.0
@@ -367,6 +367,6 @@ def test_debug_emits_effective_mass_profile(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(profile_lines) == 1
     assert "endpoints=" in profile_lines[0]
     assert "ports=9200,19200,29200" in profile_lines[0]
-    assert "workers=120" in profile_lines[0]
+    assert "workers=50" in profile_lines[0]
     assert "retries=0" in profile_lines[0]
-    assert "automatic=workers,retries,timeout" in profile_lines[0]
+    assert "automatic=retries,timeout" in profile_lines[0]

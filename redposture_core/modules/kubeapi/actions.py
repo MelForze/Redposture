@@ -13,9 +13,9 @@ import threading
 import time
 import urllib.error
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from dataclasses import field as dataclass_field
+from types import SimpleNamespace
 from typing import Any
 
 from ...clients.http_api import (
@@ -25,12 +25,14 @@ from ...clients.http_api import (
     format_http_authority,
     join_http_target_path,
 )
+from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
 from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
 )
+from .http_session import KubeApiHttpSession, shared_ssl_context
 
 _KUBE_TAG = "KUBEAPI"
 _KUBE_LIST_PAGE_LIMIT = 500
@@ -63,21 +65,108 @@ class KubeApiLifecycleState:
     username: str | None = None
     password: str | None = None
     deep_record: dict[str, Any] | None = None
-    http_clients: dict[tuple[bool, bool, str | None, int], HttpApiClient] = dataclass_field(default_factory=dict)
+    anonymous_access: str = "unknown"
+    anonymous_namespace_status: int = 0
+    access_namespace_status: int = 0
+    started_at: float = 0.0
+    proxy: Any = None
+    host: str | None = None
+    port: int | None = None
+    timeout: float = 5.0
+    http_session: KubeApiHttpSession | None = None
+    http_pool: HttpSessionPool | None = None
 
-    def http_client(self, *, response_size_cap: int) -> HttpApiClient:
-        key = (self.use_https, self.insecure, self.ca_file, int(response_size_cap))
-        client = self.http_clients.get(key)
-        if client is None:
-            client = HttpApiClient(
-                HttpClientConfig(
+    def configure_transport(self, host: str, port: int, timeout: float) -> None:
+        self.host = str(host)
+        self.port = int(port)
+        self.timeout = float(timeout)
+        if self.started_at <= 0:
+            self.started_at = time.monotonic()
+
+    def http_client(self, *, response_size_cap: int) -> Any:
+        if self.proxy is not None:
+            if self.http_pool is None:
+                self.http_pool = HttpSessionPool(
+                    timeout=self.timeout,
                     insecure=bool(self.use_https and self.insecure),
-                    ca_file=self.ca_file if self.use_https and self.ca_file else None,
-                    response_size_cap=int(response_size_cap),
+                    ca_file=self.ca_file if self.use_https else None,
+                    proxy=self.proxy,
                 )
+            return self.http_pool
+        if self.host is None or self.port is None:
+            raise RuntimeError("kubeapi transport is not configured")
+        if self.http_session is None:
+            self.http_session = KubeApiHttpSession(
+                self.host,
+                self.port,
+                use_https=self.use_https,
+                timeout=self.timeout,
+                insecure=bool(self.use_https and self.insecure),
+                ca_file=self.ca_file if self.use_https else None,
             )
-            self.http_clients[key] = client
-        return client
+        return self.http_session
+
+    def switch_to_insecure(self) -> None:
+        if self.insecure:
+            return
+        self.insecure = True
+        self.tls_auto_insecure = True
+        if self.http_session is not None:
+            self.http_session.close()
+            self.http_session = None
+        if self.http_pool is not None:
+            self.http_pool.close()
+            self.http_pool = None
+
+    def close(self) -> None:
+        if self.http_session is not None:
+            self.http_session.close()
+            self.http_session = None
+        if self.http_pool is not None:
+            self.http_pool.close()
+            self.http_pool = None
+
+
+@dataclass(frozen=True)
+class KubeListResult:
+    items: list[Any] | None
+    status: int
+    error: str | None
+    access_confirmed: bool = False
+    complete: bool = False
+
+    def __iter__(self) -> Iterator[Any]:
+        yield self.items
+        yield self.status
+        yield self.error
+
+
+@dataclass(frozen=True)
+class KubeResourceResult:
+    items: list[Any] | None
+    error: str | None
+    access_confirmed: bool = False
+    complete: bool = False
+
+    def __iter__(self) -> Iterator[Any]:
+        yield self.items
+        yield self.error
+
+
+def _coerce_list_result(value: Any) -> KubeListResult:
+    if isinstance(value, KubeListResult):
+        return value
+    items, status, error = value
+    confirmed = items is not None and int(status) == 200
+    return KubeListResult(items, int(status), error, confirmed, confirmed and not error)
+
+
+def _coerce_resource_result(value: Any) -> KubeResourceResult:
+    if isinstance(value, KubeResourceResult):
+        return value
+    items, error = value
+    confirmed = items is not None
+    return KubeResourceResult(items, error, confirmed, confirmed and not error)
 
 
 _THREAD_LOCAL_DEBUG_EMIT = threading.local()
@@ -131,11 +220,7 @@ def _is_tls_verify_error(value: str | None) -> bool:
 def _ssl_context(*, use_https: bool, insecure: bool, ca_file: str | None) -> ssl.SSLContext | None:
     if not use_https:
         return None
-    cafile = (ca_file or "").strip() or None
-    if insecure:
-        ctx = ssl._create_unverified_context()
-        return ctx
-    return ssl.create_default_context(cafile=cafile)
+    return shared_ssl_context(insecure=insecure, ca_file=(ca_file or "").strip() or None)
 
 
 def _basic_auth_value(username: str, password: str) -> str:
@@ -184,7 +269,14 @@ def _http_request(
             response_size_cap=int(response_size_cap),
         )
     )
-    response = request_client.request(method, url, headers=request_headers, body=body, timeout=timeout)
+    request_kwargs: dict[str, Any] = {
+        "headers": request_headers,
+        "body": body,
+        "timeout": timeout,
+    }
+    if isinstance(request_client, KubeApiHttpSession):
+        request_kwargs["response_size_cap"] = int(response_size_cap)
+    response = request_client.request(method, url, **request_kwargs)
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
     if response.truncated:
@@ -216,7 +308,7 @@ def _api_get_json(
     client: HttpApiClient | None = None,
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
 ) -> tuple[int, Any, dict[str, str], str | None]:
-    status, payload, headers, error = _http_request(
+    return _api_request_json(
         host,
         port,
         "GET",
@@ -225,7 +317,47 @@ def _api_get_json(
         use_https=use_https,
         insecure=insecure,
         ca_file=ca_file,
-        headers=_kube_api_headers(token, username, password),
+        token=token,
+        username=username,
+        password=password,
+        client=client,
+        response_size_cap=response_size_cap,
+    )
+
+
+def _api_request_json(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    client: Any = None,
+    response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
+    json_body: Any = None,
+) -> tuple[int, Any, dict[str, str], str | None]:
+    headers = _kube_api_headers(token, username, password)
+    body = None
+    if json_body is not None:
+        body = json.dumps(json_body, separators=(",", ":")).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    status, payload, headers, error = _http_request(
+        host,
+        port,
+        method,
+        path,
+        timeout,
+        use_https=use_https,
+        insecure=insecure,
+        ca_file=ca_file,
+        headers=headers,
+        body=body,
         client=client,
         response_size_cap=response_size_cap,
     )
@@ -242,6 +374,76 @@ def _api_get_json(
 _PRODUCTION_API_GET_JSON = _api_get_json
 
 
+def _is_retryable_request_error(error: str | None) -> bool:
+    """Return whether a request failed before receiving a deterministic result."""
+
+    text = str(error or "").strip().lower()
+    if not text:
+        return False
+    deterministic = (
+        "response exceeds ",
+        "cross-origin redirect blocked",
+        "too many redirects",
+        "invalid kubernetes",
+    )
+    return not text.startswith(deterministic)
+
+
+def _api_request_json_with_retries(
+    host: str,
+    port: int,
+    method: str,
+    path: str,
+    timeout: float,
+    *,
+    retries: int,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    client: Any = None,
+    response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
+    json_body: Any = None,
+) -> tuple[int, Any, dict[str, str], str | None]:
+    result: tuple[int, Any, dict[str, str], str | None] = (0, None, {}, "request failed")
+    attempts = max(1, int(retries) + 1)
+    for attempt in range(attempts):
+        kwargs: dict[str, Any] = {
+            "use_https": use_https,
+            "insecure": insecure,
+            "ca_file": ca_file,
+            "token": token,
+            "username": username,
+            "password": password,
+        }
+        if response_size_cap != _KUBE_DATA_RESPONSE_CAP:
+            kwargs["response_size_cap"] = response_size_cap
+        if client is not None:
+            kwargs["client"] = client
+        try:
+            if method.upper() == "GET" and json_body is None:
+                result = _api_get_json(host, port, path, timeout, **kwargs)
+            else:
+                result = _api_request_json(
+                    host,
+                    port,
+                    method,
+                    path,
+                    timeout,
+                    json_body=json_body,
+                    **kwargs,
+                )
+        except (OSError, ssl.SSLError, TimeoutError, ConnectionError, ValueError) as exc:
+            result = (0, None, {}, _friendly_error_from_exception(exc))
+        if not _is_retryable_request_error(result[3]):
+            return result
+        if attempt + 1 < attempts:
+            time.sleep(_retry_delay(attempt))
+    return result
+
+
 def _state_http_client_or_none(
     state: KubeApiLifecycleState,
     *,
@@ -249,7 +451,7 @@ def _state_http_client_or_none(
 ) -> HttpApiClient | None:
     # Unit adapters and compatibility integrations may replace the transport
     # hook entirely. Avoid constructing an unused SSL context in that case.
-    if _api_get_json is not _PRODUCTION_API_GET_JSON:
+    if _api_get_json is not _PRODUCTION_API_GET_JSON or state.host is None or state.port is None:
         return None
     return state.http_client(response_size_cap=response_size_cap)
 
@@ -356,6 +558,7 @@ def _kube_exec_ws(
     token: str | None = None,
     username: str | None = None,
     password: str | None = None,
+    retries: int = 0,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "namespace": namespace,
@@ -395,21 +598,44 @@ def _kube_exec_ws(
     request_headers.update(headers)
 
     sock: socket.socket | None = None
+    request_send_started = False
     try:
-        raw_sock = socket.create_connection((host, port), timeout=min(max(timeout, 0.1), _KUBE_WS_HANDSHAKE_TIMEOUT))
-        raw_sock.settimeout(min(max(timeout, 0.1), _KUBE_WS_HANDSHAKE_TIMEOUT))
-        # Track raw_sock immediately so the `finally` closes it even if TLS wrap
-        # (or ctx init) fails — otherwise the descriptor leaks on every failed
-        # handshake (fd exhaustion over a large scan).
-        sock = raw_sock
-        if use_https:
-            ctx = _ssl_context(use_https=True, insecure=insecure, ca_file=ca_file)
-            if ctx is None:
-                raise ValueError("failed to initialize TLS context")
-            sock = ctx.wrap_socket(raw_sock, server_hostname=host)
+        setup_error: BaseException | None = None
+        for attempt in range(max(1, int(retries) + 1)):
+            raw_sock: socket.socket | None = None
+            try:
+                raw_sock = socket.create_connection(
+                    (host, port),
+                    timeout=min(max(timeout, 0.1), _KUBE_WS_HANDSHAKE_TIMEOUT),
+                )
+                raw_sock.settimeout(min(max(timeout, 0.1), _KUBE_WS_HANDSHAKE_TIMEOUT))
+                sock = raw_sock
+                if use_https:
+                    context = shared_ssl_context(insecure=insecure, ca_file=ca_file)
+                    sock = context.wrap_socket(raw_sock, server_hostname=host)
+                setup_error = None
+                break
+            except (OSError, ssl.SSLError, ValueError) as exc:
+                setup_error = exc
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                elif raw_sock is not None:
+                    try:
+                        raw_sock.close()
+                    except OSError:
+                        pass
+                sock = None
+                if attempt + 1 < max(1, int(retries) + 1):
+                    time.sleep(_retry_delay(attempt))
+        if setup_error is not None or sock is None:
+            raise setup_error or ConnectionError("websocket connection setup failed")
 
         request_exec_path = join_http_target_path(exec_path)
         req_lines = [f"GET {request_exec_path} HTTP/1.1"] + [f"{k}: {v}" for k, v in request_headers.items()] + ["", ""]
+        request_send_started = True
         sock.sendall("\r\n".join(req_lines).encode("utf-8"))
 
         response_buf = bytearray()
@@ -545,6 +771,8 @@ def _kube_exec_ws(
         return result
     except (OSError, ssl.SSLError, ValueError, ConnectionError) as exc:
         result["error"] = _friendly_error_from_exception(exc)
+        if request_send_started:
+            result["error"] += "; retry suppressed after exec upgrade request send began"
         return result
     finally:
         if sock is not None:
@@ -571,8 +799,10 @@ def _kube_status_message(status: int, payload: Any) -> str | None:
             code = payload.get("code")
             if isinstance(code, int):
                 return f"kubernetes status code={code}"
-    if status in {401, 403}:
+    if status == 401:
         return "authentication required"
+    if status == 403:
+        return "request forbidden"
     if status == 404:
         return "endpoint not found"
     return None
@@ -707,6 +937,20 @@ def _kube_list_path(base_path: str, *, limit: int, continue_token: str | None) -
     return f"{base_path}?{urllib.parse.urlencode(params)}"
 
 
+def _invoke_kube_list_items(
+    host: str,
+    port: int,
+    base_path: str,
+    timeout: float,
+    *,
+    retries: int,
+    **kwargs: Any,
+) -> Any:
+    if retries:
+        kwargs["retries"] = retries
+    return _kube_list_items(host, port, base_path, timeout, **kwargs)
+
+
 def _kube_list_items(
     host: str,
     port: int,
@@ -723,10 +967,13 @@ def _kube_list_items(
     max_pages: int | None = None,
     client: HttpApiClient | None = None,
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
-) -> tuple[list[dict[str, Any]] | None, int, str | None]:
+    retries: int = 0,
+) -> KubeListResult:
     items: list[dict[str, Any]] = []
     continue_token: str | None = None
+    seen_continue_tokens: set[str] = set()
     last_status = 0
+    access_confirmed = False
     effective_max_pages = _KUBE_MAX_LIST_PAGES if max_pages is None else max_pages
     for _page in range(max(1, int(effective_max_pages))):
         path = _kube_list_path(base_path, limit=limit, continue_token=continue_token)
@@ -742,20 +989,36 @@ def _kube_list_items(
             request_kwargs["client"] = client
         if response_size_cap != _KUBE_DATA_RESPONSE_CAP:
             request_kwargs["response_size_cap"] = response_size_cap
-        status, payload, _headers, error = _api_get_json(host, port, path, timeout, **request_kwargs)
+        status, payload, _headers, error = _api_request_json_with_retries(
+            host,
+            port,
+            "GET",
+            path,
+            timeout,
+            retries=retries,
+            **request_kwargs,
+        )
         last_status = status
         if error:
-            return (items if items else None), status, f"partial: {error}" if items else error
+            error_text = f"partial: {error}" if access_confirmed else error
+            return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
         if status != 200:
             error_text = _kube_status_message(status, payload) or f"unexpected status={status}"
-            return (items if items else None), status, f"partial: {error_text}" if items else error_text
+            if access_confirmed:
+                error_text = f"partial: {error_text}"
+            return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
         if not isinstance(payload, dict):
             error_text = "invalid kubernetes list response"
-            return (items if items else None), status, f"partial: {error_text}" if items else error_text
+            if access_confirmed:
+                error_text = f"partial: {error_text}"
+            return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
         raw_items = payload.get("items")
         if not isinstance(raw_items, list):
             error_text = "invalid kubernetes list items payload"
-            return (items if items else None), status, f"partial: {error_text}" if items else error_text
+            if access_confirmed:
+                error_text = f"partial: {error_text}"
+            return KubeListResult(items if access_confirmed else None, status, error_text, access_confirmed, False)
+        access_confirmed = True
         for item in raw_items:
             if isinstance(item, dict):
                 items.append(item)
@@ -766,9 +1029,18 @@ def _kube_list_items(
             if isinstance(raw_continue, str) and raw_continue.strip():
                 next_token = raw_continue.strip()
         if not next_token:
-            return items, status, None
+            return KubeListResult(items, status, None, True, True)
+        if next_token == continue_token or next_token in seen_continue_tokens:
+            return KubeListResult(
+                items,
+                status,
+                "partial: pagination continue token repeated",
+                True,
+                False,
+            )
+        seen_continue_tokens.add(next_token)
         continue_token = next_token
-    return items, last_status, "partial: pagination limit exceeded"
+    return KubeListResult(items, last_status, "partial: pagination limit exceeded", access_confirmed, False)
 
 
 def _metadata_name(item: dict[str, Any]) -> str:
@@ -792,7 +1064,7 @@ def _decode_secret_data_value(raw_value: Any) -> str:
         return ""
     padded = raw_value + ("=" * (-len(raw_value) % 4))
     try:
-        decoded = base64.b64decode(padded, validate=False)
+        decoded = base64.b64decode(padded, validate=True)
     except Exception:
         return "<invalid-base64>"
     if not decoded:
@@ -801,10 +1073,7 @@ def _decode_secret_data_value(raw_value: Any) -> str:
         text = decoded.decode("utf-8")
     except UnicodeDecodeError:
         return f"<binary:{len(decoded)}B>"
-    safe = text.replace("\n", "\\n")
-    if any(ord(ch) < 32 and ch not in "\t\r\n" for ch in text):
-        return f"<binary-text:{len(decoded)}B>"
-    return safe
+    return json.dumps(text, ensure_ascii=False)[1:-1]
 
 
 def _list_namespaces(
@@ -822,27 +1091,32 @@ def _list_namespaces(
     limit: int = _KUBE_LIST_PAGE_LIMIT,
     max_pages: int | None = None,
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
-) -> tuple[list[str] | None, int, str | None]:
-    items, status, error = _kube_list_items(
-        host,
-        port,
-        "/api/v1/namespaces",
-        timeout,
-        use_https=use_https,
-        insecure=insecure,
-        ca_file=ca_file,
-        token=token,
-        username=username,
-        password=password,
-        client=client,
-        limit=limit,
-        max_pages=max_pages,
-        response_size_cap=response_size_cap,
+    retries: int = 0,
+) -> KubeListResult:
+    result = _coerce_list_result(
+        _invoke_kube_list_items(
+            host,
+            port,
+            "/api/v1/namespaces",
+            timeout,
+            use_https=use_https,
+            insecure=insecure,
+            ca_file=ca_file,
+            token=token,
+            username=username,
+            password=password,
+            client=client,
+            limit=limit,
+            max_pages=max_pages,
+            response_size_cap=response_size_cap,
+            retries=retries,
+        )
     )
+    items, status, error = result
     if items is None:
-        return None, status, error
+        return KubeListResult(None, status, error, result.access_confirmed, result.complete)
     out = sorted({_metadata_name(item) for item in items if _metadata_name(item) != "-"})
-    return out, status, error
+    return KubeListResult(out, status, error, result.access_confirmed, result.complete)
 
 
 def _probe_namespace_access(
@@ -857,6 +1131,7 @@ def _probe_namespace_access(
     username: str | None = None,
     password: str | None = None,
     client: HttpApiClient | None = None,
+    retries: int = 0,
 ) -> tuple[bool | None, int, str | None]:
     """Check namespace-list access with exactly one bounded response page."""
 
@@ -874,6 +1149,7 @@ def _probe_namespace_access(
         limit=1,
         max_pages=1,
         response_size_cap=_KUBE_AUTH_RESPONSE_CAP,
+        retries=retries,
     )
     if namespaces is not None:
         # A continuation token is expected here: this probe intentionally reads
@@ -897,30 +1173,39 @@ def _list_pods(
     username: str | None = None,
     password: str | None = None,
     client: HttpApiClient | None = None,
-) -> tuple[list[dict[str, Any]] | None, str | None]:
+    retries: int = 0,
+) -> KubeResourceResult:
     results: list[dict[str, Any]] = []
+    access_confirmed = False
+    complete = True
     if namespaces:
         target_namespaces = namespaces
     else:
         target_namespaces = []
 
     if not target_namespaces:
-        items, _status, error = _kube_list_items(
-            host,
-            port,
-            "/api/v1/pods",
-            timeout,
-            use_https=use_https,
-            insecure=insecure,
-            ca_file=ca_file,
-            token=token,
-            username=username,
-            password=password,
-            client=client,
+        list_result = _coerce_list_result(
+            _invoke_kube_list_items(
+                host,
+                port,
+                "/api/v1/pods",
+                timeout,
+                use_https=use_https,
+                insecure=insecure,
+                ca_file=ca_file,
+                token=token,
+                username=username,
+                password=password,
+                client=client,
+                retries=retries,
+            )
         )
+        items, _status, error = list_result
         if items is None:
-            return None, error
+            return KubeResourceResult(None, error, False, False)
         partial_errors: list[str] = [error] if error else []
+        access_confirmed = list_result.access_confirmed
+        complete = list_result.complete
         for item in items:
             spec = item.get("spec")
             status_obj = item.get("status")
@@ -946,25 +1231,32 @@ def _list_pods(
         partial_errors = []
         for namespace in target_namespaces:
             encoded_ns = urllib.parse.quote(namespace, safe="")
-            items, _status, error = _kube_list_items(
-                host,
-                port,
-                f"/api/v1/namespaces/{encoded_ns}/pods",
-                timeout,
-                use_https=use_https,
-                insecure=insecure,
-                ca_file=ca_file,
-                token=token,
-                username=username,
-                password=password,
-                client=client,
+            list_result = _coerce_list_result(
+                _invoke_kube_list_items(
+                    host,
+                    port,
+                    f"/api/v1/namespaces/{encoded_ns}/pods",
+                    timeout,
+                    use_https=use_https,
+                    insecure=insecure,
+                    ca_file=ca_file,
+                    token=token,
+                    username=username,
+                    password=password,
+                    client=client,
+                    retries=retries,
+                )
             )
+            items, _status, error = list_result
             if items is None:
                 error_text = f"{namespace}: {error}" if error else f"{namespace}: request failed"
-                if results:
+                if access_confirmed:
                     partial_errors.append(f"partial: {error_text}")
+                    complete = False
                     break
-                return None, error_text
+                return KubeResourceResult(None, error_text, False, False)
+            access_confirmed = True
+            complete = complete and list_result.complete
             if error:
                 partial_errors.append(f"{namespace}: {error}")
             for item in items:
@@ -989,7 +1281,7 @@ def _list_pods(
                     }
                 )
     results.sort(key=lambda item: (str(item.get("namespace") or ""), str(item.get("name") or "")))
-    return results, "; ".join(partial_errors) or None
+    return KubeResourceResult(results, "; ".join(partial_errors) or None, access_confirmed, complete)
 
 
 def _list_secrets(
@@ -1005,35 +1297,17 @@ def _list_secrets(
     username: str | None = None,
     password: str | None = None,
     client: HttpApiClient | None = None,
-) -> tuple[list[dict[str, Any]] | None, str | None]:
+    retries: int = 0,
+) -> KubeResourceResult:
     results: list[dict[str, Any]] = []
+    access_confirmed = False
+    complete = True
     if not namespaces:
-        items, _status, error = _kube_list_items(
-            host,
-            port,
-            "/api/v1/secrets",
-            timeout,
-            use_https=use_https,
-            insecure=insecure,
-            ca_file=ca_file,
-            token=token,
-            username=username,
-            password=password,
-            client=client,
-        )
-        if items is None:
-            return None, error
-        partial_errors: list[str] = [error] if error else []
-        iter_items: list[tuple[str | None, dict[str, Any]]] = [(None, item) for item in items]
-    else:
-        per_ns_items: list[tuple[str | None, dict[str, Any]]] = []
-        partial_errors = []
-        for namespace in namespaces:
-            encoded_ns = urllib.parse.quote(namespace, safe="")
-            items, _status, error = _kube_list_items(
+        list_result = _coerce_list_result(
+            _invoke_kube_list_items(
                 host,
                 port,
-                f"/api/v1/namespaces/{encoded_ns}/secrets",
+                "/api/v1/secrets",
                 timeout,
                 use_https=use_https,
                 insecure=insecure,
@@ -1042,13 +1316,47 @@ def _list_secrets(
                 username=username,
                 password=password,
                 client=client,
+                retries=retries,
             )
+        )
+        items, _status, error = list_result
+        if items is None:
+            return KubeResourceResult(None, error, False, False)
+        partial_errors: list[str] = [error] if error else []
+        access_confirmed = list_result.access_confirmed
+        complete = list_result.complete
+        iter_items: list[tuple[str | None, dict[str, Any]]] = [(None, item) for item in items]
+    else:
+        per_ns_items: list[tuple[str | None, dict[str, Any]]] = []
+        partial_errors = []
+        for namespace in namespaces:
+            encoded_ns = urllib.parse.quote(namespace, safe="")
+            list_result = _coerce_list_result(
+                _invoke_kube_list_items(
+                    host,
+                    port,
+                    f"/api/v1/namespaces/{encoded_ns}/secrets",
+                    timeout,
+                    use_https=use_https,
+                    insecure=insecure,
+                    ca_file=ca_file,
+                    token=token,
+                    username=username,
+                    password=password,
+                    client=client,
+                    retries=retries,
+                )
+            )
+            items, _status, error = list_result
             if items is None:
                 error_text = f"{namespace}: {error}" if error else f"{namespace}: request failed"
-                if per_ns_items:
+                if access_confirmed:
                     partial_errors.append(f"partial: {error_text}")
+                    complete = False
                     break
-                return None, error_text
+                return KubeResourceResult(None, error_text, False, False)
+            access_confirmed = True
+            complete = complete and list_result.complete
             if error:
                 partial_errors.append(f"{namespace}: {error}")
             per_ns_items.extend((namespace, item) for item in items)
@@ -1069,7 +1377,7 @@ def _list_secrets(
             }
         )
     results.sort(key=lambda item: (str(item.get("namespace") or ""), str(item.get("name") or "")))
-    return results, "; ".join(partial_errors) or None
+    return KubeResourceResult(results, "; ".join(partial_errors) or None, access_confirmed, complete)
 
 
 def _auth_label(token: str | None, username: str | None, password: str | None) -> str:
@@ -1158,7 +1466,7 @@ def _call_audit_kubeapi_host_with_thread_debug(
             pass
 
 
-def _audit_kubeapi_host(
+def _deprecated_monolithic_audit_kubeapi_host(
     host: str,
     port: int,
     timeout: float,
@@ -1178,7 +1486,7 @@ def _audit_kubeapi_host(
     exec_command: str | None,
     debug: bool = False,
     run_deep_checks: bool = True,
-) -> dict[str, Any]:
+) -> dict[str, Any]:  # pragma: no cover - superseded by the lifecycle adapter below
     attempts = max(1, retries + 1)
     last_error: str | None = None
     debug_events: list[str] = []
@@ -1828,6 +2136,147 @@ def _audit_kubeapi_host(
     )
 
 
+def _audit_kubeapi_host(
+    host: str,
+    port: int,
+    timeout: float,
+    retries: int,
+    *,
+    use_https: bool,
+    insecure: bool,
+    ca_file: str | None,
+    token: str | None,
+    username: str | None,
+    password: str | None,
+    show_namespaces: bool,
+    show_pods: bool,
+    show_secrets: bool,
+    namespace_filters: list[str],
+    exec_pod: str | None,
+    exec_command: str | None,
+    debug: bool = False,
+    run_deep_checks: bool = True,
+) -> dict[str, Any]:
+    """Compatibility adapter over the production detect/auth/data lifecycle."""
+
+    state = KubeApiLifecycleState()
+    args = SimpleNamespace(
+        timeout=float(timeout),
+        retries=int(retries),
+        https=bool(use_https),
+        insecure=bool(insecure),
+        ca_file=ca_file,
+        tls_ca=None,
+        _proxy_config=None,
+    )
+    options = {
+        "show_namespaces": bool(show_namespaces),
+        "show_pods": bool(show_pods),
+        "show_secrets": bool(show_secrets),
+        "namespace_filters": list(namespace_filters),
+        "exec_pod": exec_pod,
+        "exec_command": exec_command,
+    }
+    credential = SimpleNamespace(token=token, username=username, password=password)
+    ctx = SimpleNamespace(
+        host=str(host),
+        port=int(port),
+        target=SimpleNamespace(scheme="https" if use_https else "http", path=""),
+        args=args,
+        credential=credential,
+        lifecycle_state=state,
+    )
+    stages: list[dict[str, Any]] = []
+
+    def _run_stage(name: str, operation: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        started = time.monotonic()
+        try:
+            result = operation()
+        except Exception as exc:  # noqa: BLE001 - compatibility boundary
+            result = {
+                "timestamp": utc_now_iso(),
+                "host": str(host),
+                "port": int(port),
+                "is_kubeapi": False,
+                "status": "fail",
+                "error": _friendly_error_from_exception(exc),
+            }
+        stages.append(
+            {
+                "stage_name": name,
+                "attempt": 1,
+                "duration_ms": max(1, int((time.monotonic() - started) * 1000)),
+                "result": "error" if result.get("status") == "fail" else "ok",
+                "error": result.get("error"),
+            }
+        )
+        return result
+
+    try:
+        record = _run_stage(_STAGE_DETECT_PROTOCOL, lambda: detect_kubeapi(ctx, options))
+        if not record.get("is_kubeapi") or not run_deep_checks:
+            return {**record, "stages": stages if debug else []}
+
+        if token is not None or username is not None or password is not None:
+            record = _run_stage(
+                _STAGE_AUTH_INFERENCE,
+                lambda: authenticate_kubeapi(ctx, record, options),
+            )
+        elif debug:
+            stages.append(
+                {
+                    "stage_name": _STAGE_AUTH_INFERENCE,
+                    "attempt": 1,
+                    "duration_ms": 1,
+                    "result": "ok",
+                    "error": None,
+                }
+            )
+
+        allowed = {
+            "open_no_auth",
+            "anonymous_limited",
+            "auth_valid",
+            "invalid_credentials_anonymous",
+            "auth_unverified_anonymous",
+        }
+        if str(record.get("status") or "") in allowed:
+            record = _run_stage(_STAGE_DATA, lambda: collect_kubeapi_data(ctx, record, options))
+        if (exec_pod is None) != (exec_command is None):
+            record["exec_result"] = {
+                "namespace": None,
+                "pod": exec_pod,
+                "command": exec_command,
+                "ok": False,
+                "stdout": "",
+                "stderr": "",
+                "error": "use --pod together with -X/--exec-command",
+                "exit_code": None,
+            }
+        if debug:
+            stage_names = {str(item.get("stage_name")) for item in stages}
+            if _STAGE_ACCESS_CAPABILITIES not in stage_names:
+                stages.insert(
+                    -1 if stages else 0,
+                    {
+                        "stage_name": _STAGE_ACCESS_CAPABILITIES,
+                        "attempt": 1,
+                        "duration_ms": 1,
+                        "result": "ok",
+                        "error": None,
+                    },
+                )
+            record["debug_events"] = [
+                f"{host}:{port} stage_timing_summary "
+                + " ".join(f"{item['stage_name']}={item['duration_ms']}ms" for item in stages)
+            ]
+        record["stages"] = stages if debug else []
+        record["elapsed_ms"] = _elapsed_ms(state)
+        return record
+    finally:
+        state.close()
+
+
 def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, Any]) -> dict[str, Any]:
     merged = dict(detect_record)
 
@@ -1854,6 +2303,9 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
         "auth_mode",
         "auth_valid",
         "auth_error",
+        "anonymous_access",
+        "auth_verification_method",
+        "auth_verified_identity",
         "exec_result",
         "namespaces",
         "pods",
@@ -1867,6 +2319,9 @@ def _merge_stage2_record(detect_record: dict[str, Any], deep_record: dict[str, A
         "can_list_pods",
         "can_list_secrets",
         "can_exec_pod",
+        "namespaces_partial",
+        "pods_partial",
+        "secrets_partial",
         "attempts",
         "max_attempts",
         "stages",
@@ -1906,6 +2361,8 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [-] not a Kubernetes API"
 
     version_text = str(record.get("version") or "-")
+    if record.get("anonymous_access") == "limited":
+        return f"{prefix} [*] Kubernetes API (anonymous access:limited) (version:{version_text})"
     auth_required_text = _bool_text(record.get("auth_required"))
     return f"{prefix} [*] Kubernetes API (auth required:{auth_required_text}) (version:{version_text})"
 
@@ -1958,7 +2415,7 @@ def _status_summary_line(record: dict[str, Any]) -> str | None:
         if auth_error:
             body += f" err={_clip(auth_error, 80)}"
         return body
-    body = "[*] authentication check unavailable"
+    body = "[!] token auth verification unavailable" if auth_mode == "token" else "[!] authentication check unavailable"
     if auth_error:
         body += f" err={_clip(auth_error, 80)}"
     return body
@@ -2109,11 +2566,13 @@ def _lifecycle_get_json_with_retries(
     attempt = 0
     while attempt < attempts:
         client = _state_http_client_or_none(state, response_size_cap=response_size_cap)
-        last_result = _api_get_json(
+        last_result = _api_request_json_with_retries(
             str(ctx.host),
             int(ctx.port),
+            "GET",
             path,
             timeout,
+            retries=0,
             use_https=state.use_https,
             insecure=state.insecure,
             ca_file=state.ca_file,
@@ -2125,17 +2584,75 @@ def _lifecycle_get_json_with_retries(
         )
         error = last_result[3]
         if error and state.use_https and not state.insecure and _is_tls_verify_error(error):
-            state.insecure = True
-            state.tls_auto_insecure = True
+            state.switch_to_insecure()
             # TLS fallback retries this endpoint immediately and does not
             # consume the caller's network retry budget.
             continue
-        if not error:
+        if not _is_retryable_request_error(error):
             return last_result
         attempt += 1
         if attempt < attempts:
             time.sleep(_retry_delay(attempt - 1))
     return last_result
+
+
+def _lifecycle_request_json_with_retries(
+    ctx: Any,
+    state: KubeApiLifecycleState,
+    method: str,
+    path: str,
+    *,
+    response_size_cap: int,
+    token: str | None = None,
+    username: str | None = None,
+    password: str | None = None,
+    json_body: Any = None,
+) -> tuple[int, Any, dict[str, str], str | None]:
+    if method.upper() == "GET" and json_body is None:
+        return _lifecycle_get_json_with_retries(
+            ctx,
+            state,
+            path,
+            response_size_cap=response_size_cap,
+            token=token,
+            username=username,
+            password=password,
+        )
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    result: tuple[int, Any, dict[str, str], str | None] = (0, None, {}, "request failed")
+    attempt = 0
+    while attempt < attempts:
+        result = _api_request_json_with_retries(
+            str(ctx.host),
+            int(ctx.port),
+            method,
+            path,
+            float(getattr(ctx.args, "timeout", 5.0)),
+            retries=0,
+            use_https=state.use_https,
+            insecure=state.insecure,
+            ca_file=state.ca_file,
+            token=token,
+            username=username,
+            password=password,
+            client=_state_http_client_or_none(state, response_size_cap=response_size_cap),
+            response_size_cap=response_size_cap,
+            json_body=json_body,
+        )
+        if result[3] and state.use_https and not state.insecure and _is_tls_verify_error(result[3]):
+            state.switch_to_insecure()
+            continue
+        if not _is_retryable_request_error(result[3]):
+            return result
+        attempt += 1
+        if attempt < attempts:
+            time.sleep(_retry_delay(attempt - 1))
+    return result
+
+
+def _elapsed_ms(state: KubeApiLifecycleState) -> int:
+    started = state.started_at or time.monotonic()
+    return max(0, int((time.monotonic() - started) * 1000))
 
 
 def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
@@ -2148,7 +2665,8 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     )
     state.insecure = bool(getattr(ctx.args, "insecure", False))
     state.ca_file = getattr(ctx.args, "ca_file", None) or getattr(ctx.args, "tls_ca", None)
-    started = time.monotonic()
+    state.proxy = getattr(ctx.args, "_proxy_config", None)
+    state.configure_transport(str(ctx.host), int(ctx.port), float(getattr(ctx.args, "timeout", 5.0)))
     version_status, version_payload, _headers, version_error = _lifecycle_get_json_with_retries(
         ctx,
         state,
@@ -2161,23 +2679,6 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     api_payload: Any = None
     api_error: str | None = None
     if not version_confirmed:
-        # A transport failure on /version applies to the same authority and is
-        # retried in place. Do not double the unreachable-target budget by
-        # blindly issuing /api as well.
-        if version_error:
-            return {
-                "timestamp": utc_now_iso(),
-                "host": str(ctx.host),
-                "port": int(ctx.port),
-                "https": state.use_https,
-                "insecure_effective": state.insecure,
-                "tls_auto_insecure": state.tls_auto_insecure,
-                "is_kubeapi": False,
-                "status": "fail",
-                "version": None,
-                "auth_required": None,
-                "error": version_error,
-            }
         api_status, api_payload, _headers, api_error = _lifecycle_get_json_with_retries(
             ctx,
             state,
@@ -2186,13 +2687,13 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         )
 
     api_confirmed = api_status == 200 and _looks_like_kube_api_versions(api_payload)
-    auth_status_confirmed = (
-        version_auth_status and api_status == version_status and _looks_like_kube_auth_status(api_status, api_payload)
-    )
+    api_auth_status = _looks_like_kube_auth_status(api_status, api_payload)
+    auth_status_confirmed = version_auth_status and api_auth_status
     is_kubeapi = version_confirmed or api_confirmed or auth_status_confirmed
     version = _kube_version_text(version_payload) if version_confirmed else None
     if not is_kubeapi:
-        last_error = api_error
+        errors = [str(value) for value in (version_error, api_error) if value]
+        last_error = "; ".join(errors) or None
         return {
             "timestamp": utc_now_iso(),
             "host": str(ctx.host),
@@ -2204,6 +2705,16 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             "status": "fail" if last_error else "not_kubeapi",
             "version": version,
             "auth_required": None,
+            "anonymous_access": "unknown",
+            "auth_mode": "none",
+            "auth_valid": None,
+            "auth_error": None,
+            "auth_verification_method": None,
+            "auth_verified_identity": None,
+            "namespaces_partial": False,
+            "pods_partial": False,
+            "secrets_partial": False,
+            "elapsed_ms": _elapsed_ms(state),
             "error": last_error,
         }
 
@@ -2211,11 +2722,13 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     ns_status: int
     ns_error: str | None
     if auth_status_confirmed:
-        namespace_access, ns_status, ns_error = (
-            False,
-            version_status,
-            _kube_status_message(version_status, version_payload),
-        )
+        # Two canonical Status objects are a strong Kubernetes signature. A
+        # 403 proves that anonymous requests reach RBAC, not that auth is
+        # required; only 401 disables anonymous access.
+        ns_status = 403 if 403 in {version_status, api_status} else 401
+        namespace_access = False
+        source_payload = api_payload if api_status == ns_status else version_payload
+        ns_error = _kube_status_message(ns_status, source_payload)
     else:
         namespace_access, ns_status, ns_error = _probe_namespace_access(
             str(ctx.host),
@@ -2225,13 +2738,32 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             insecure=state.insecure,
             ca_file=state.ca_file,
             client=_state_http_client_or_none(state, response_size_cap=_KUBE_AUTH_RESPONSE_CAP),
+            retries=int(getattr(ctx.args, "retries", 0) or 0),
         )
     namespaces: list[str] | None = [] if namespace_access is True else None
     state.anonymous_namespaces = namespaces
     state.anonymous_namespaces_error = ns_error
     state.access_namespaces = namespaces
     state.access_namespaces_error = ns_error
-    auth_required = False if namespace_access is True else True if namespace_access is False else None
+    state.anonymous_namespace_status = ns_status
+    state.access_namespace_status = ns_status
+    if namespace_access is True:
+        anonymous_access = "open"
+        auth_required: bool | None = False
+        record_status = "open_no_auth"
+    elif ns_status == 403:
+        anonymous_access = "limited"
+        auth_required = False
+        record_status = "anonymous_limited"
+    elif ns_status == 401:
+        anonymous_access = "disabled"
+        auth_required = True
+        record_status = "auth_required"
+    else:
+        anonymous_access = "unknown"
+        auth_required = None
+        record_status = "detected"
+    state.anonymous_access = anonymous_access
     return {
         "timestamp": utc_now_iso(),
         "host": str(ctx.host),
@@ -2240,12 +2772,15 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         "insecure_effective": state.insecure,
         "tls_auto_insecure": state.tls_auto_insecure,
         "is_kubeapi": True,
-        "status": "open_no_auth" if auth_required is False else "auth_required" if auth_required else "detected",
+        "status": record_status,
         "version": version,
         "auth_required": auth_required,
+        "anonymous_access": anonymous_access,
         "auth_mode": "none",
         "auth_valid": None,
         "auth_error": None,
+        "auth_verification_method": None,
+        "auth_verified_identity": None,
         "namespace_filters": list(options["namespace_filters"]),
         "show_namespaces": bool(options["show_namespaces"]),
         "show_pods": bool(options["show_pods"]),
@@ -2263,9 +2798,48 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         "can_list_pods": None,
         "can_list_secrets": None,
         "can_exec_pod": None,
-        "elapsed_ms": int((time.monotonic() - started) * 1000),
+        "namespaces_partial": False,
+        "pods_partial": False,
+        "secrets_partial": False,
+        "elapsed_ms": _elapsed_ms(state),
         "error": None,
     }
+
+
+def _verify_self_subject_review(
+    ctx: Any,
+    state: KubeApiLifecycleState,
+    token: str,
+) -> tuple[bool | None, str | None, str | None]:
+    status, payload, _headers, error = _lifecycle_request_json_with_retries(
+        ctx,
+        state,
+        "POST",
+        "/apis/authentication.k8s.io/v1/selfsubjectreviews",
+        response_size_cap=_KUBE_AUTH_RESPONSE_CAP,
+        token=token,
+        json_body={"apiVersion": "authentication.k8s.io/v1", "kind": "SelfSubjectReview"},
+    )
+    if status == 401:
+        return False, None, _kube_status_message(status, payload) or "authentication rejected"
+    if error:
+        return None, None, error
+    if status not in {200, 201, 202}:
+        return None, None, _kube_status_message(status, payload) or f"verification unavailable status={status}"
+    if not isinstance(payload, dict):
+        return None, None, "invalid SelfSubjectReview response"
+    if payload.get("apiVersion") != "authentication.k8s.io/v1" or payload.get("kind") != "SelfSubjectReview":
+        return None, None, "invalid SelfSubjectReview response"
+    status_obj = payload.get("status")
+    user_info = status_obj.get("userInfo") if isinstance(status_obj, dict) else None
+    username = str(user_info.get("username") or "").strip() if isinstance(user_info, dict) else ""
+    groups = user_info.get("groups") if isinstance(user_info, dict) else None
+    group_values = {str(value) for value in groups} if isinstance(groups, list) else set()
+    if not username:
+        return None, None, "SelfSubjectReview response has no username"
+    if username in {"system:anonymous", "system:unauthenticated"} or "system:unauthenticated" in group_values:
+        return False, username, "credential resolved to an anonymous identity"
+    return True, username, None
 
 
 def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any]) -> dict[str, Any]:
@@ -2287,39 +2861,59 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
         username=credential.username,
         password=credential.password,
         client=_state_http_client_or_none(state, response_size_cap=_KUBE_AUTH_RESPONSE_CAP),
+        retries=int(getattr(ctx.args, "retries", 0) or 0),
     )
-    # Kubernetes deliberately distinguishes unauthenticated (401) from an
-    # authenticated principal that lacks this cluster-wide capability (403).
-    # Namespace-scoped service-account tokens must not be rejected solely
-    # because they cannot list every namespace.
-    # A Kubernetes bearer token can be valid while being forbidden from the
-    # cluster-wide namespaces collection.  Do not apply that inference to
-    # Basic credentials: a generic 403 does not prove that pair was accepted.
-    anonymous_open = state.anonymous_namespaces is not None
-    # A 403 can prove that a bearer token was authenticated only when the
-    # anonymous baseline itself was not usable. If anonymous access is open,
-    # the same forbidden response cannot distinguish an accepted token from an
-    # ignored/invalid one and must not be promoted to auth_valid.
-    ok = namespace_access is True or (status == 403 and credential.token is not None and not anonymous_open)
-    if ok:
+    anonymous_usable = state.anonymous_access in {"open", "limited"} or state.anonymous_namespaces is not None
+    method = "namespace_list"
+    identity: str | None = None
+    if namespace_access is True:
+        auth_valid: bool | None = True
+        auth_error = None
+    elif status == 401:
+        auth_valid = False
+        auth_error = error or "authentication rejected"
+    elif status == 403 and credential.token is not None:
+        method = "self_subject_review"
+        auth_valid, identity, auth_error = _verify_self_subject_review(ctx, state, credential.token)
+    elif status == 403:
+        auth_valid = False
+        auth_error = error or "Basic authentication rejected"
+    else:
+        auth_valid = None
+        auth_error = error or (
+            f"authentication verification unavailable status={status}"
+            if status
+            else "authentication verification unavailable"
+        )
+
+    if auth_valid is True:
         state.access_namespaces = [] if namespace_access is True else None
         state.access_namespaces_error = error
+        state.access_namespace_status = status
         state.token, state.username, state.password = credential.token, credential.username, credential.password
+    else:
+        state.token = state.username = state.password = None
+        state.access_namespaces = state.anonymous_namespaces
+        state.access_namespaces_error = state.anonymous_namespaces_error
+        state.access_namespace_status = state.anonymous_namespace_status
+    if auth_valid is True:
+        record_status = "auth_valid"
+    elif auth_valid is False:
+        record_status = "invalid_credentials_anonymous" if anonymous_usable else "auth_failed"
+    else:
+        record_status = "auth_unverified_anonymous" if anonymous_usable else "auth_unverified"
     record.update(
         {
             "timestamp": utc_now_iso(),
-            "status": "auth_valid" if ok else "invalid_credentials_anonymous" if anonymous_open else "auth_failed",
+            "status": record_status,
             "auth_mode": "token" if credential.token else "basic",
-            "auth_valid": bool(ok),
-            "auth_error": (
-                "credential accepted but cluster-wide namespace listing is forbidden"
-                if ok and namespace_access is not True and status == 403
-                else None
-                if ok
-                else error or f"authentication failed status={status}"
-            ),
-            "namespaces_error": error,
-            "can_list_namespaces": namespace_access is True,
+            "auth_valid": auth_valid,
+            "auth_error": auth_error,
+            "auth_verification_method": method,
+            "auth_verified_identity": identity,
+            "namespaces_error": state.access_namespaces_error,
+            "can_list_namespaces": True if namespace_access is True else False if status in {401, 403} else None,
+            "elapsed_ms": _elapsed_ms(state),
         }
     )
     return record
@@ -2333,64 +2927,90 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
         return state.deep_record
     record = dict(source_record.to_dict() if hasattr(source_record, "to_dict") else source_record)
     token, username, password = state.token, state.username, state.password
-    if str(record.get("status") or "") == "invalid_credentials_anonymous":
+    if str(record.get("status") or "") in {"invalid_credentials_anonymous", "auth_unverified_anonymous"}:
         token = username = password = None
         state.access_namespaces = state.anonymous_namespaces
+        state.access_namespaces_error = state.anonymous_namespaces_error
+        state.access_namespace_status = state.anonymous_namespace_status
     needs_http_data = bool(options["show_namespaces"] or options["show_pods"] or options["show_secrets"])
     data_client = (
         _state_http_client_or_none(state, response_size_cap=_KUBE_DATA_RESPONSE_CAP) if needs_http_data else None
     )
     namespaces_out: list[str] = []
     namespaces_error = state.access_namespaces_error
+    namespaces_partial = False
+    namespace_access_confirmed = state.access_namespaces is not None
     if options["show_namespaces"]:
-        full_namespaces, _namespace_status, namespaces_error = _list_namespaces(
-            str(ctx.host),
-            int(ctx.port),
-            float(getattr(ctx.args, "timeout", 5.0)),
-            use_https=state.use_https,
-            insecure=state.insecure,
-            ca_file=state.ca_file,
-            token=token,
-            username=username,
-            password=password,
-            client=data_client,
+        # Detection already performed this exact anonymous probe. Preserve a
+        # known denial instead of issuing a duplicate request.
+        reuse_denial = (
+            token is None and username is None and password is None and state.anonymous_namespace_status == 403
         )
-        namespaces_out = list(full_namespaces or [])
+        if not reuse_denial:
+            namespace_result = _coerce_list_result(
+                _list_namespaces(
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    use_https=state.use_https,
+                    insecure=state.insecure,
+                    ca_file=state.ca_file,
+                    token=token,
+                    username=username,
+                    password=password,
+                    client=data_client,
+                    retries=int(getattr(ctx.args, "retries", 0) or 0),
+                )
+            )
+            full_namespaces, _namespace_status, namespaces_error = namespace_result
+            namespaces_out = list(full_namespaces or [])
+            namespace_access_confirmed = namespace_result.access_confirmed
+            namespaces_partial = namespace_result.access_confirmed and not namespace_result.complete
     pods_out: list[dict[str, Any]] = []
     secrets_out: list[dict[str, Any]] = []
     pods_error: str | None = None
     secrets_error: str | None = None
+    pods_result = KubeResourceResult(None, None, False, False)
+    secrets_result = KubeResourceResult(None, None, False, False)
     if options["show_pods"] or (options["exec_pod"] and not options["namespace_filters"]):
-        pods, pods_error = _list_pods(
-            str(ctx.host),
-            int(ctx.port),
-            float(getattr(ctx.args, "timeout", 5.0)),
-            use_https=state.use_https,
-            insecure=state.insecure,
-            ca_file=state.ca_file,
-            namespaces=list(options["namespace_filters"]),
-            token=token,
-            username=username,
-            password=password,
-            client=data_client,
+        pods_result = _coerce_resource_result(
+            _list_pods(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                use_https=state.use_https,
+                insecure=state.insecure,
+                ca_file=state.ca_file,
+                namespaces=list(options["namespace_filters"]),
+                token=token,
+                username=username,
+                password=password,
+                client=data_client,
+                retries=int(getattr(ctx.args, "retries", 0) or 0),
+            )
         )
+        pods, pods_error = pods_result
         if pods is None and not pods_error:
             pods_error = "pods request failed"
         pods_out = list(pods or [])
     if options["show_secrets"]:
-        secrets, secrets_error = _list_secrets(
-            str(ctx.host),
-            int(ctx.port),
-            float(getattr(ctx.args, "timeout", 5.0)),
-            use_https=state.use_https,
-            insecure=state.insecure,
-            ca_file=state.ca_file,
-            namespaces=list(options["namespace_filters"]),
-            token=token,
-            username=username,
-            password=password,
-            client=data_client,
+        secrets_result = _coerce_resource_result(
+            _list_secrets(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                use_https=state.use_https,
+                insecure=state.insecure,
+                ca_file=state.ca_file,
+                namespaces=list(options["namespace_filters"]),
+                token=token,
+                username=username,
+                password=password,
+                client=data_client,
+                retries=int(getattr(ctx.args, "retries", 0) or 0),
+            )
         )
+        secrets, secrets_error = secrets_result
         if secrets is None and not secrets_error:
             secrets_error = "secrets request failed"
         secrets_out = list(secrets or [])
@@ -2426,6 +3046,7 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
                 token=token,
                 username=username,
                 password=password,
+                retries=int(getattr(ctx.args, "retries", 0) or 0),
             )
     record.update(
         {
@@ -2436,9 +3057,16 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
             "namespaces_error": namespaces_error,
             "pods_error": pods_error,
             "secrets_error": secrets_error,
-            "can_list_pods": None if not options["show_pods"] else pods_error is None,
-            "can_list_secrets": None if not options["show_secrets"] else secrets_error is None,
+            "can_list_namespaces": namespace_access_confirmed
+            if options["show_namespaces"]
+            else record.get("can_list_namespaces"),
+            "can_list_pods": None if not options["show_pods"] else pods_result.access_confirmed,
+            "can_list_secrets": None if not options["show_secrets"] else secrets_result.access_confirmed,
             "can_exec_pod": None if exec_result is None else bool(exec_result.get("ok")),
+            "namespaces_partial": namespaces_partial,
+            "pods_partial": bool(options["show_pods"] and not pods_result.complete),
+            "secrets_partial": bool(options["show_secrets"] and not secrets_result.complete),
+            "elapsed_ms": _elapsed_ms(state),
         }
     )
     state.deep_record = record

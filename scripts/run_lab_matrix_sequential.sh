@@ -549,6 +549,7 @@ run_postgres_cases() {
   run_text_case postgres postgres_debug_smoke 0 postgres -t 127.0.0.1 -u postgres -p postgres --debug
   if is_extended_matrix; then
     run_case postgres postgres_extended_defcreds 0 postgres -t 127.0.0.1 --port 5432 --defcreds --show-databases
+    run_case postgres postgres_extended_stop_on_success 0 postgres -t 127.0.0.1 --port 5432 --defcreds --stop-on-success
     run_case postgres postgres_extended_query_privs 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --database postgres --table redposture.demo_accounts --show-columns 5 --column username,password --rows --dump 5 --sql-cmd "select username, role from redposture.demo_accounts order by id limit 2" --privesc-check
     run_case postgres postgres_extended_execute 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --execute "id"
     run_case postgres postgres_extended_os_read 0 postgres -t 127.0.0.1 --port 5432 -u postgres -p postgres --os-read /etc/hostname
@@ -642,6 +643,7 @@ run_docker_cases() {
 run_clickhouse_cases() {
   run_case clickhouse clickhouse_native_open 0 clickhouse -t 127.0.0.1 --show-databases --show-tables --dump
   run_case clickhouse clickhouse_http_open 0 clickhouse -t 127.0.0.1 --http --port 8123 --show-databases --show-tables --dump
+  run_case clickhouse clickhouse_protocol_auto 0 clickhouse -t 127.0.0.1 --protocol auto --show-databases
   run_case clickhouse clickhouse_native_auth 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --show-databases --show-tables --dump
   run_case clickhouse clickhouse_http_auth 0 clickhouse -t 127.0.0.1 --http --port 18123 -u default -p default --show-databases --show-tables --dump
   run_case clickhouse clickhouse_multi_ports 0 clickhouse -t 127.0.0.1 --ports "9000,29001,29002,29003,29004" --show-databases

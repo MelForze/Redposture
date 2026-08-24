@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -12,6 +14,8 @@ from typing import Any
 from ...clients import kafka as _kafka_client
 from ...clients.kafka import (
     KAFKA_AUTH_ERROR_CODES,
+    KafkaLeaderPool,
+    KafkaSession,
     KafkaTlsConfig,
     _build_credential_runs,
     _build_metadata_request_body,
@@ -121,6 +125,7 @@ _CLIENT_READ_DUMP_TOPICS = _kafka_client._read_dump_topics
 _CLIENT_READ_TOPIC_MESSAGES = _kafka_client._read_topic_messages
 _CLIENT_SASL_AUTHENTICATE_PLAIN = _kafka_client._sasl_authenticate_plain
 _CLIENT_SASL_HANDSHAKE_PLAIN = _kafka_client._sasl_handshake_plain
+_KAFKA_OVERRIDE_LOCK = threading.RLock()
 
 
 @dataclass
@@ -135,6 +140,33 @@ class KafkaLifecycleState:
     requested_use_tls: bool | None = None
     tls_config: KafkaTlsConfig = field(default_factory=lambda: KafkaTlsConfig(insecure=True))
     credential_metadata: dict[tuple[str | None, str | None, str], dict[str, Any]] = field(default_factory=dict)
+    anonymous_session: KafkaSession | None = None
+    authenticated_session: KafkaSession | None = None
+    authenticated_session_key: tuple[str | None, str | None, str] | None = None
+    leader_pool: KafkaLeaderPool = field(default_factory=KafkaLeaderPool)
+    connections_opened: int = 0
+    sessions_reused: int = 0
+    transport_retries: int = 0
+    protocol_requests: int = 0
+
+    def stats(self) -> dict[str, int]:
+        leader = self.leader_pool.stats()
+        return {
+            "connections": self.connections_opened + leader["connections"],
+            "reused": self.sessions_reused + leader["reused"],
+            "requests": self.protocol_requests,
+            "retries": self.transport_retries,
+        }
+
+    def close(self) -> None:
+        sessions = (self.anonymous_session, self.authenticated_session)
+        self.anonymous_session = None
+        self.authenticated_session = None
+        self.authenticated_session_key = None
+        for session in sessions:
+            if session is not None:
+                session.close()
+        self.leader_pool.close()
 
 
 def _open_kafka_transport(
@@ -162,14 +194,21 @@ def _with_kafka_client_overrides(callback, *args, **kwargs):
         "_sasl_authenticate_plain": _sasl_authenticate_plain,
         "_read_topic_messages": _read_topic_messages,
     }
-    saved = {name: getattr(_kafka_client, name) for name in overrides}
-    try:
-        for name, value in overrides.items():
-            setattr(_kafka_client, name, value)
+    # Production uses the client functions unchanged. Avoid mutating module
+    # globals on every request; apart from needless CPU work that was a race
+    # when multiple Kafka targets ran concurrently. The compatibility path is
+    # retained solely for tests/extensions which replace a local helper.
+    if all(_KAFKA_PRODUCTION_OVERRIDES.get(name) is value for name, value in overrides.items()):
         return callback(*args, **kwargs)
-    finally:
-        for name, value in saved.items():
-            setattr(_kafka_client, name, value)
+    with _KAFKA_OVERRIDE_LOCK:
+        saved = {name: getattr(_kafka_client, name) for name in overrides}
+        try:
+            for name, value in overrides.items():
+                setattr(_kafka_client, name, value)
+            return callback(*args, **kwargs)
+        finally:
+            for name, value in saved.items():
+                setattr(_kafka_client, name, value)
 
 
 def _sasl_handshake_plain(sock, correlation_id: int):
@@ -224,6 +263,8 @@ def _read_topic_messages(
     known_kafka: bool = False,
     bootstrap_metadata: dict[str, Any] | None = None,
     sasl_first: bool = False,
+    existing_session: KafkaSession | None = None,
+    leader_pool: KafkaLeaderPool | None = None,
 ):
     kwargs: dict[str, Any] = {
         "username": username,
@@ -238,8 +279,14 @@ def _read_topic_messages(
         kwargs["bootstrap_metadata"] = bootstrap_metadata
     if sasl_first:
         kwargs["sasl_first"] = True
+    callback = _CLIENT_READ_TOPIC_MESSAGES
+    parameters = inspect.signature(callback).parameters
+    if existing_session is not None and "existing_session" in parameters:
+        kwargs["existing_session"] = existing_session
+    if leader_pool is not None and "leader_pool" in parameters:
+        kwargs["leader_pool"] = leader_pool
     return _with_kafka_client_overrides(
-        _CLIENT_READ_TOPIC_MESSAGES,
+        callback,
         host,
         port,
         timeout,
@@ -263,6 +310,8 @@ def _read_dump_topics(
     known_kafka: bool = False,
     bootstrap_metadata: dict[str, Any] | None = None,
     sasl_first: bool = False,
+    existing_session: KafkaSession | None = None,
+    leader_pool: KafkaLeaderPool | None = None,
 ):
     kwargs: dict[str, Any] = {
         "host": host,
@@ -282,10 +331,29 @@ def _read_dump_topics(
         kwargs["bootstrap_metadata"] = bootstrap_metadata
     if sasl_first:
         kwargs["sasl_first"] = True
+    callback = _CLIENT_READ_DUMP_TOPICS
+    parameters = inspect.signature(callback).parameters
+    if existing_session is not None and "existing_session" in parameters:
+        kwargs["existing_session"] = existing_session
+    if leader_pool is not None and "leader_pool" in parameters:
+        kwargs["leader_pool"] = leader_pool
     return _with_kafka_client_overrides(
-        _CLIENT_READ_DUMP_TOPICS,
+        callback,
         **kwargs,
     )
+
+
+_KAFKA_PRODUCTION_OVERRIDES = {
+    "_send_kafka_request": _send_kafka_request,
+    "_probe_apiversions": _probe_apiversions,
+    "_fetch_metadata": _fetch_metadata,
+    "_parse_list_offsets_response": _parse_list_offsets_response,
+    "_parse_fetch_response": _parse_fetch_response,
+    "_sasl_handshake_plain": _sasl_handshake_plain,
+    "_sasl_authenticate_plain": _sasl_authenticate_plain,
+    "_read_topic_messages": _read_topic_messages,
+}
+_KAFKA_PRODUCTION_AUTH_FETCH = _authenticate_and_fetch_metadata
 
 
 def _build_dump_coverage(
@@ -362,6 +430,7 @@ def _probe_kafka_acl_state(
     debug_emit: Callable[[str], None] | None,
     known_kafka: bool = False,
     tls_config: KafkaTlsConfig | None = None,
+    existing_session: KafkaSession | None = None,
 ) -> tuple[dict[str, dict[str, bool | None]], dict[str, bool | None]]:
     """Collect topic and cluster ACL markers for either Kafka auth path."""
 
@@ -396,6 +465,12 @@ def _probe_kafka_acl_state(
         acl_kwargs["known_kafka"] = True
     if tls_config is not None:
         acl_kwargs["tls_config"] = tls_config
+    try:
+        accepts_existing = "existing_session" in inspect.signature(_kafka_client._probe_kafka_acls).parameters
+    except (TypeError, ValueError):
+        accepts_existing = False
+    if existing_session is not None and accepts_existing:
+        acl_kwargs["existing_session"] = existing_session
     acl_state = _kafka_client._probe_kafka_acls(
         host,
         port,
@@ -1026,9 +1101,134 @@ def _audit_kafka_host(
     }
 
 
+_KAFKA_PRODUCTION_AUDIT_HOST = _audit_kafka_host
+
+
 def _kafka_lifecycle_key(ctx: Any) -> tuple[str | None, str | None, str]:
     credential = ctx.credential
     return credential.username, credential.password, str(credential.source or "provided")
+
+
+def _kafka_lifecycle_detection_record(
+    ctx: Any,
+    state: KafkaLifecycleState,
+) -> dict[str, Any]:
+    """Detect Kafka while retaining the exact anonymous protocol session."""
+
+    host = str(ctx.host)
+    port = int(ctx.port)
+    timeout = float(getattr(ctx.args, "timeout", 5.0))
+    attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+    started = time.monotonic()
+    last_error: str | None = None
+
+    def _record(*, detected: bool, status: str, auth_required: bool | None, error: str | None) -> dict[str, Any]:
+        metadata = state.anonymous_metadata
+        topic_map = dict(metadata.get("topic_map") or {}) if isinstance(metadata, dict) else None
+        topics = sorted(topic_map) if topic_map is not None and auth_required is False else None
+        return {
+            "timestamp": utc_now_iso(),
+            "host": host,
+            "port": port,
+            "is_kafka": detected,
+            "status": status,
+            "auth_required": auth_required,
+            "provided_credentials": False,
+            "provided_username": None,
+            "provided_password": None,
+            "provided_credentials_ok": None,
+            "defcreds_enabled": False,
+            "credential_attempts": [],
+            "effective_username": None,
+            "show_topics": False,
+            "show_topics_limit": None,
+            "query_topic": None,
+            "dump": False,
+            "max_messages": None,
+            "topic_count": len(topics) if topics is not None else None,
+            "topics": topics,
+            "topic_permissions": None,
+            "cluster_permissions": None,
+            "query_topic_value": None,
+            "dump_topics": None,
+            "dump_results": None,
+            "dump_errors": None,
+            "dump_error": None,
+            "dump_coverage": None,
+            "dump_partial": False,
+            "partial": False,
+            "topic_messages": None,
+            "topic_read_error": None,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "error": error,
+            "transport_mode": state.transport_mode,
+        }
+
+    for attempt in range(attempts):
+        transport_use_tls = state.requested_use_tls
+        for _transport_attempt in range(2):
+            session: KafkaSession | None = None
+            try:
+                session = KafkaSession.open(
+                    host,
+                    port,
+                    timeout,
+                    use_tls=transport_use_tls,
+                    tls_config=state.tls_config,
+                )
+                state.connections_opened += 1
+                state.transport_mode = session.transport_mode
+                state.protocol_requests += 1
+                api_probe = session.detect()
+                if not api_probe.ok:
+                    session.close()
+                    state.is_kafka = False
+                    error = api_probe.error or (
+                        f"ApiVersions failed ({_kafka_error_name(int(api_probe.error_code))})"
+                        if api_probe.error_code is not None
+                        else "service is not kafka"
+                    )
+                    return _record(detected=False, status="fail", auth_required=None, error=error)
+
+                state.protocol_requests += 1
+                metadata, metadata_error = session.fetch_metadata(topics=None)
+                state.is_kafka = True
+                state.anonymous_metadata = dict(metadata) if metadata is not None else None
+                if metadata is not None:
+                    auth_required: bool | None = bool(metadata.get("auth_required"))
+                elif _is_probable_auth_error(metadata_error):
+                    auth_required = True
+                else:
+                    auth_required = None
+                state.auth_required = auth_required
+                if state.anonymous_session is not None:
+                    state.anonymous_session.close()
+                state.anonymous_session = session
+                status = (
+                    "open_no_auth" if auth_required is False else "auth_required" if auth_required else "unknown_auth"
+                )
+                return _record(detected=True, status=status, auth_required=auth_required, error=metadata_error)
+            except _kafka_client._TlsProbeError:
+                if session is not None:
+                    session.close()
+                if state.requested_use_tls is not False and transport_use_tls is not True:
+                    transport_use_tls = True
+                    continue
+                last_error = "plaintext read returned TLS record prelude"
+                break
+            except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+                if session is not None:
+                    session.close()
+                last_error = _friendly_error_from_exception(exc)
+                if state.requested_use_tls is None and transport_use_tls is not True and _should_retry_kafka_tls(exc):
+                    transport_use_tls = True
+                    continue
+                break
+        if attempt < attempts - 1:
+            state.transport_retries += 1
+            time.sleep(_retry_delay(attempt))
+    state.is_kafka = False
+    return _record(detected=False, status="fail", auth_required=None, error=last_error or "connection failed")
 
 
 def detect_kafka(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
@@ -1037,24 +1237,40 @@ def detect_kafka(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     state = ctx.lifecycle_state
     if not isinstance(state, KafkaLifecycleState):
         raise TypeError("kafka lifecycle state is unavailable")
-    record = _audit_kafka_host(
-        str(ctx.host),
-        int(ctx.port),
-        float(getattr(ctx.args, "timeout", 5.0)),
-        int(getattr(ctx.args, "retries", 0) or 0),
-        None,
-        None,
-        False,
-        None,
-        False,
-        int(options["max_messages"]),
-        show_topics_limit=None,
-        probe_write=False,
-        debug_emit=ctx.debug_emit if bool(getattr(ctx.args, "debug", False)) else None,
-        lifecycle_state=state,
-        use_tls=state.requested_use_tls,
-        tls_config=state.tls_config,
+    production_helpers = all(
+        _KAFKA_PRODUCTION_OVERRIDES.get(name) is value
+        for name, value in {
+            "_send_kafka_request": _send_kafka_request,
+            "_probe_apiversions": _probe_apiversions,
+            "_fetch_metadata": _fetch_metadata,
+            "_parse_list_offsets_response": _parse_list_offsets_response,
+            "_parse_fetch_response": _parse_fetch_response,
+            "_sasl_handshake_plain": _sasl_handshake_plain,
+            "_sasl_authenticate_plain": _sasl_authenticate_plain,
+            "_read_topic_messages": _read_topic_messages,
+        }.items()
     )
+    if _audit_kafka_host is _KAFKA_PRODUCTION_AUDIT_HOST and production_helpers:
+        record = _kafka_lifecycle_detection_record(ctx, state)
+    else:
+        record = _audit_kafka_host(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            int(getattr(ctx.args, "retries", 0) or 0),
+            None,
+            None,
+            False,
+            None,
+            False,
+            int(options["max_messages"]),
+            show_topics_limit=None,
+            probe_write=False,
+            debug_emit=ctx.debug_emit if bool(getattr(ctx.args, "debug", False)) else None,
+            lifecycle_state=state,
+            use_tls=state.requested_use_tls,
+            tls_config=state.tls_config,
+        )
     state.is_kafka = bool(record.get("is_kafka"))
     state.auth_required = record.get("auth_required") if isinstance(record.get("auth_required"), bool) else None
     transport = record.get("transport_mode")
@@ -1077,19 +1293,72 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
 
     username = credential.username or ""
     password = credential.password or ""
-    ok, metadata, error, transport_mode = _authenticate_and_fetch_metadata(
-        str(ctx.host),
-        int(ctx.port),
-        float(getattr(ctx.args, "timeout", 5.0)),
-        username,
-        password,
-        use_tls=(state.transport_mode == "tls") or None,
-        tls_config=state.tls_config,
-        known_kafka=True,
-        sasl_first=state.sasl_first,
-    )
+    retained_session: KafkaSession | None = None
+    if _authenticate_and_fetch_metadata is _KAFKA_PRODUCTION_AUTH_FETCH:
+        attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
+        error = None
+        metadata = None
+        transport_mode = state.transport_mode or "plaintext"
+        ok = False
+        for attempt in range(attempts):
+            candidate: KafkaSession | None = None
+            try:
+                candidate = KafkaSession.open(
+                    str(ctx.host),
+                    int(ctx.port),
+                    float(getattr(ctx.args, "timeout", 5.0)),
+                    username=username,
+                    password=password,
+                    use_tls=(state.transport_mode == "tls") or None,
+                    tls_config=state.tls_config,
+                )
+                state.connections_opened += 1
+                transport_mode = candidate.transport_mode
+                state.protocol_requests += 1
+                ok, error = candidate.bootstrap(known_kafka=True, sasl_first=state.sasl_first)
+                if ok:
+                    state.protocol_requests += 1
+                    metadata, error = candidate.fetch_metadata(topics=None)
+                    ok = metadata is not None and not bool(metadata.get("auth_required"))
+                if ok:
+                    retained_session = candidate
+                    break
+                candidate.close()
+                # Authentication and Kafka protocol verdicts are deterministic.
+                break
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                if candidate is not None:
+                    candidate.close()
+                error = _friendly_error_from_exception(exc)
+                if attempt < attempts - 1:
+                    state.transport_retries += 1
+                    time.sleep(_retry_delay(attempt))
+            except ValueError as exc:
+                if candidate is not None:
+                    candidate.close()
+                error = _friendly_error_from_exception(exc)
+                break
+    else:
+        ok, metadata, error, transport_mode = _authenticate_and_fetch_metadata(
+            str(ctx.host),
+            int(ctx.port),
+            float(getattr(ctx.args, "timeout", 5.0)),
+            username,
+            password,
+            use_tls=(state.transport_mode == "tls") or None,
+            tls_config=state.tls_config,
+            known_kafka=True,
+            sasl_first=state.sasl_first,
+        )
     if ok and metadata is not None:
-        state.credential_metadata[_kafka_lifecycle_key(ctx)] = dict(metadata)
+        key = _kafka_lifecycle_key(ctx)
+        state.credential_metadata[key] = dict(metadata)
+        if retained_session is not None:
+            if state.authenticated_session is None:
+                state.authenticated_session = retained_session
+                state.authenticated_session_key = key
+            else:
+                retained_session.close()
     anonymous_open = state.auth_required is False or str(payload.get("status") or "") == "open_no_auth"
     is_default = credential.source == "default"
     if ok:
@@ -1156,6 +1425,15 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
     username = credential.username if use_authenticated else None
     password = credential.password if use_authenticated else None
     transport_mode = str(payload.get("transport_mode") or state.transport_mode or "plaintext")
+    selected_session = (
+        state.authenticated_session
+        if use_authenticated and state.authenticated_session_key == _kafka_lifecycle_key(ctx)
+        else state.anonymous_session
+        if not use_authenticated
+        else None
+    )
+    if selected_session is not None:
+        state.sessions_reused += 1
 
     query_topic_value: str | None = None
     if query_topic_name:
@@ -1194,6 +1472,8 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
                 known_kafka=True,
                 bootstrap_metadata=metadata,
                 sasl_first=state.sasl_first,
+                existing_session=selected_session,
+                leader_pool=state.leader_pool,
             )
 
     topic_messages: list[str] | None = None
@@ -1222,6 +1502,7 @@ def collect_kafka_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> dic
         debug_emit=ctx.debug_emit if bool(getattr(ctx.args, "debug", False)) else None,
         known_kafka=True,
         tls_config=state.tls_config,
+        existing_session=selected_session,
     )
 
     errors: list[str] = []

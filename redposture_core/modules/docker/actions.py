@@ -106,6 +106,12 @@ def _docker_client(
     )
 
 
+def _close_docker_client(client: Any) -> None:
+    close = getattr(client, "close", None)
+    if callable(close):
+        close()
+
+
 def _probe_docker(
     host: str,
     port: int,
@@ -168,6 +174,7 @@ def _probe_docker(
             # from a Docker-fingerprinted HTTP response above.
         except (DockerEngineError, ValueError, json.JSONDecodeError) as exc:
             last_error = normalize_docker_error(exc)
+        _close_docker_client(client)
     return None, None, None, last_error, auth_required
 
 
@@ -286,6 +293,8 @@ def _audit_docker_host(
                 "error": last_error or "authentication required",
             }
         )
+        if client is not None:
+            _close_docker_client(client)
         return record
 
     if client is None or version is None:
@@ -311,6 +320,7 @@ def _audit_docker_host(
     )
 
     if not run_deep_checks:
+        _close_docker_client(client)
         return record
 
     capabilities: dict[str, Any] = {}
@@ -409,6 +419,7 @@ def _audit_docker_host(
     record["partial_errors"] = partial_errors
     record["partial"] = bool(partial_errors)
     record["data_complete"] = (not partial_errors) if requested_data else None
+    _close_docker_client(client)
     return record
 
 

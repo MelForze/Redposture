@@ -89,6 +89,11 @@ def configure_postgres_parser(
             "and pgbouncer:pgbouncer, after provided or file credentials."
         ),
     )
+    auth.add_argument(
+        "--stop-on-success",
+        action="store_true",
+        help="Stop --defcreds after the first verified credential instead of checking the full catalog.",
+    )
     tls = postgres_parser.add_argument_group("TLS")
     tls.add_argument(
         "--sslmode",

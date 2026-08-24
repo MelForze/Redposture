@@ -56,8 +56,8 @@ def build_registry_spec(args: Any) -> ModuleAuditSpec:
         and actions._audit_registry_host is _PRODUCTION_AUDIT_HOST
     )
 
-    def _state_factory(_ctx: Any) -> actions.RegistryLifecycleState:
-        return actions.RegistryLifecycleState()
+    def _state_factory(ctx: Any) -> actions.RegistryLifecycleState:
+        return actions.registry_lifecycle_state_factory(ctx)
 
     def _detect(ctx: Any) -> AuditRecord:
         with http_target_context(ctx.target, api_prefixes=("/v2", "/service/rest", "/api/v2.0", "/jwt/auth")):
@@ -83,6 +83,7 @@ def build_registry_spec(args: Any) -> ModuleAuditSpec:
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
+        lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_registry_line,
         # E3 opt-in: Docker Registry anon-open (public registries, no auth

@@ -88,7 +88,7 @@ def test_basic_auth_and_header_precedence() -> None:
     assert basic_headers["Authorization"].startswith("Basic ")
 
 
-def test_kube_scoped_403_is_valid_only_for_bearer_token_and_exec_flags_are_paired(
+def test_kube_scoped_403_requires_self_subject_review_and_exec_flags_are_paired(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(kube, "_list_namespaces", lambda *_args, **_kwargs: (None, 403, "Forbidden"))
@@ -101,9 +101,16 @@ def test_kube_scoped_403_is_valid_only_for_bearer_token_and_exec_flags_are_paire
         credential=SimpleNamespace(token="scoped", username=None, password=None),
         lifecycle_state=kube.KubeApiLifecycleState(use_https=True, insecure=True),
     )
+    monkeypatch.setattr(
+        kube,
+        "_verify_self_subject_review",
+        lambda *_args, **_kwargs: (True, "system:serviceaccount:default:scanner", None),
+    )
     token_record = kube.authenticate_kubeapi(token_ctx, detect_record, {})
     assert token_record["auth_valid"] is True
     assert token_record["can_list_namespaces"] is False
+    assert token_record["auth_verification_method"] == "self_subject_review"
+    assert token_record["auth_verified_identity"] == "system:serviceaccount:default:scanner"
 
     basic_ctx = SimpleNamespace(
         host="kube.local",
@@ -178,7 +185,7 @@ def test_kube_exec_status_from_error_channel() -> None:
 
 
 def test_kube_status_message_resolution() -> None:
-    assert kube._kube_status_message(403, {}) == "authentication required"
+    assert kube._kube_status_message(403, {}) == "request forbidden"
     assert kube._kube_status_message(404, {}) == "endpoint not found"
     assert kube._kube_status_message(500, {"message": "oops"}) == "oops"
     assert kube._kube_status_message(500, {"kind": "Status", "code": 500}) == "kubernetes status code=500"
@@ -303,7 +310,10 @@ def test_kubeapi_auth_required_skips_requested_anonymous_resource_probes(
     monkeypatch.setattr(
         kube,
         "_list_pods",
-        lambda *_args, **_kwargs: (pod_calls.append(True), ([], None))[1],
+        lambda *_args, **_kwargs: (
+            pod_calls.append(True),
+            ([{"namespace": "default", "name": "toolbox", "phase": "Running", "containers": 1}], None),
+        )[1],
     )
     secret_calls: list[bool] = []
     monkeypatch.setattr(
@@ -315,7 +325,10 @@ def test_kubeapi_auth_required_skips_requested_anonymous_resource_probes(
     monkeypatch.setattr(
         kube,
         "_kube_exec_ws",
-        lambda *_args, **_kwargs: exec_calls.append(True),
+        lambda *_args, **_kwargs: (
+            exec_calls.append(True),
+            {"ok": False, "error": "blocked", "stdout": "", "stderr": "", "exit_code": None},
+        )[1],
     )
 
     lines: list[str] = []
@@ -343,13 +356,19 @@ def test_kubeapi_auth_required_skips_requested_anonymous_resource_probes(
     )
 
     assert totals == (1, 1, 0)
-    assert pod_calls == []
-    assert secret_calls == []
-    assert exec_calls == []
-    assert any("auth required:True" in line for line in lines)
-    assert not any("authentication required" in line for line in lines)
-    assert all("Namespaces" not in line and "Pods" not in line and "Secrets" not in line for line in lines)
-    assert all("<no pods>" not in line for line in lines)
+    if namespace_status == 401:
+        assert pod_calls == []
+        assert secret_calls == []
+        assert exec_calls == []
+        assert any("auth required:True" in line for line in lines)
+        assert not any("authentication required" in line for line in lines)
+        assert all("Namespaces" not in line and "Pods" not in line and "Secrets" not in line for line in lines)
+    else:
+        assert pod_calls == [True]
+        assert secret_calls == [True]
+        assert exec_calls == [True]
+        assert any("anonymous access:limited" in line for line in lines)
+        assert any("Namespaces" in line for line in lines)
 
 
 def test_auth_required_details_are_hidden_normally_and_probe_error_is_debug_only() -> None:
@@ -449,6 +468,7 @@ def test_audit_kubeapi_host_open_no_auth_with_tls_fallback_and_exec(monkeypatch:
         token: str | None = None,
         username: str | None = None,
         password: str | None = None,
+        **_kwargs,
     ):
         _ = (use_https, ca_file, token, username, password)
         if not insecure:
@@ -563,7 +583,8 @@ def test_audit_kubeapi_host_uses_token_when_anonymous_is_denied(monkeypatch: pyt
     assert record["status"] == "auth_valid"
     assert record["auth_mode"] == "token"
     assert record["auth_valid"] is True
-    assert record["auth_required"] is True
+    assert record["auth_required"] is False
+    assert record["anonymous_access"] == "limited"
     assert record["namespaces"] == ["default", "kube-system"]
 
 
@@ -660,7 +681,7 @@ def test_audit_kubeapi_host_basic_auth_failure_and_exec_argument_errors(monkeypa
         exec_pod=None,
         exec_command=None,
     )
-    assert record["status"] == "auth_failed"
+    assert record["status"] == "invalid_credentials_anonymous"
     assert record["auth_mode"] == "basic"
     assert record["auth_valid"] is False
 
@@ -764,7 +785,7 @@ def test_kube_list_helpers_and_secret_decoding(monkeypatch: pytest.MonkeyPatch) 
     assert kube._metadata_namespace({"metadata": {"namespace": "default"}}) == "default"
     assert kube._decode_secret_data_value("c2VjcmV0") == "secret"
     assert kube._decode_secret_data_value("") == "<empty>"
-    assert kube._decode_secret_data_value("%%%") == "<empty>"
+    assert kube._decode_secret_data_value("%%%") == "<invalid-base64>"
     assert kube._auth_label("tok", None, None) == "token auth"
     assert kube._auth_label(None, "alice", "secret") == "alice:secret"
     assert kube._auth_label(None, None, None) == "anonymous access"
@@ -1588,9 +1609,9 @@ def test_kube_list_items_error_and_pagination_paths(monkeypatch: pytest.MonkeyPa
     assert error == "partial: pagination limit exceeded"
 
     assert kube._decode_secret_data_value("Zm9v") == "foo"
-    assert kube._decode_secret_data_value("AAECAw==").startswith("<binary-text:")
-    assert kube._decode_secret_data_value("AA==") == "<binary-text:1B>"
-    assert kube._decode_secret_data_value("%%%") == "<empty>"
+    assert kube._decode_secret_data_value("AAECAw==") == "\\u0000\\u0001\\u0002\\u0003"
+    assert kube._decode_secret_data_value("AA==") == "\\u0000"
+    assert kube._decode_secret_data_value("%%%") == "<invalid-base64>"
 
 
 def test_kube_list_pods_and_secrets_namespace_branches(monkeypatch: pytest.MonkeyPatch) -> None:

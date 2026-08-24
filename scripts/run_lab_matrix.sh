@@ -275,6 +275,7 @@ run_text_case docker docker_debug_smoke 0 docker -t 127.0.0.1 --port 2375 --debu
 
 run_case clickhouse clickhouse_native_open 0 clickhouse -t 127.0.0.1 --show-databases --show-tables --dump
 run_case clickhouse clickhouse_http_open 0 clickhouse -t 127.0.0.1 --http --port 8123 --show-databases --show-tables --dump
+run_case clickhouse clickhouse_protocol_auto 0 clickhouse -t 127.0.0.1 --protocol auto --show-databases
 run_case clickhouse clickhouse_native_auth 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --show-databases --show-tables --dump
 run_case clickhouse clickhouse_http_auth 0 clickhouse -t 127.0.0.1 --http --port 18123 -u default -p default --show-databases --show-tables --dump
 run_case clickhouse clickhouse_multi_ports 0 clickhouse -t 127.0.0.1 --ports "9000,29001,29002,29003,29004" --show-databases

@@ -112,7 +112,7 @@ class _CloseTrackingClient:
             raise OSError("disconnect failed")
 
 
-def test_clickhouse_detect_retries_protocols_then_accepts_signature(
+def test_clickhouse_detect_retries_current_protocol_then_accepts_server_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = clickhouse.ClickHouseLifecycleState()
@@ -120,8 +120,14 @@ def test_clickhouse_detect_retries_protocols_then_accepts_signature(
     answers = iter(
         [
             (None, "connection timeout"),
-            (None, "connection refused"),
-            (None, "DB::Exception: Code: 210"),
+            (
+                None,
+                clickhouse._ChProbeError(
+                    "Code: 62. Syntax error",
+                    kind="server_exception",
+                    confirms_service=True,
+                ),
+            ),
         ]
     )
 
@@ -129,13 +135,12 @@ def test_clickhouse_detect_retries_protocols_then_accepts_signature(
         calls.append(protocol)
         return next(answers)
 
-    monkeypatch.setattr(clickhouse, "_protocol_attempt_order", lambda _protocol: ["native", "http"])
     monkeypatch.setattr(clickhouse, "_connect_and_probe", fake_probe)
     monkeypatch.setattr(clickhouse.time, "sleep", lambda _delay: None)
 
     record = clickhouse.detect_clickhouse(_ctx(state, retries=1), _clickhouse_options())
 
-    assert calls == ["native", "http", "native"]
+    assert calls == ["native", "native"]
     assert record["status"] == "detected"
     assert record["is_clickhouse"] is True
     assert state.selected_protocol == "native"

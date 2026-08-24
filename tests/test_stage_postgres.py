@@ -532,6 +532,32 @@ def test_postgres_defcreds_sweep_continues_after_success_and_deep_uses_first(
     assert "[-] bad-after:bad" in attempt_lines[3]
 
 
+def test_postgres_stop_on_success_ends_defcreds_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    _install_postgres_lifecycle_spy(monkeypatch, valid_password="good", events=events)
+    records = _run_postgres_lifecycle(
+        _postgres_args(defcreds=True, stop_on_success=True, show_databases=True),
+        (
+            AuditCredentialRun(username="bad-before", password="bad", source="default"),
+            AuditCredentialRun(username="first-success", password="good", source="default"),
+            AuditCredentialRun(username="must-not-run", password="bad", source="default"),
+        ),
+    )
+
+    assert [value for name, value in events if name == "startup"] == [
+        ("postgres", None, "postgres"),
+        ("bad-before", "bad", "postgres"),
+        ("first-success", "good", "postgres"),
+        ("first-success", "good", "postgres"),
+    ]
+    assert [attempt["username"] for attempt in records[0]["attempted_credentials"]] == [
+        "bad-before",
+        "first-success",
+    ]
+
+
 def test_postgres_lifecycle_preserves_positive_detection_when_deep_work_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

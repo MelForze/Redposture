@@ -87,7 +87,8 @@ def build_gitlab_spec(args: Any) -> ModuleAuditSpec:
         detect=_detect if use_lifecycle_hooks else None,
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
-        lifecycle_state_factory=(lambda _ctx: actions.GitLabLifecycleState()) if use_lifecycle_hooks else None,
+        lifecycle_state_factory=actions.gitlab_lifecycle_state_factory if use_lifecycle_hooks else None,
+        lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         deep_gate=(
             lambda record: (
                 str(record.status or "") in {"detected", "valid_credentials", "invalid_credentials"},

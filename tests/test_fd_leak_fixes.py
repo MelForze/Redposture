@@ -45,7 +45,7 @@ class _Ctx:
 def test_open_grpc_socket_closes_base_on_wrap_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     base = _FakeSock()
     monkeypatch.setattr(grpc.socket, "create_connection", lambda *_a, **_k: base)
-    monkeypatch.setattr(grpc.ssl, "create_default_context", lambda: _Ctx(None, wrap_raises=True))
+    monkeypatch.setattr(grpc.ssl, "_create_unverified_context", lambda: _Ctx(None, wrap_raises=True))
     with pytest.raises(ssl.SSLError):
         grpc._open_grpc_socket("h", 443, 2.0, use_tls=True)
     assert base.closed is True  # base socket must be closed on handshake failure
@@ -55,7 +55,7 @@ def test_open_grpc_socket_closes_wrapped_on_alpn_mismatch(monkeypatch: pytest.Mo
     base = _FakeSock()
     wrapped = _FakeSock(alpn="http/1.1")  # not h2 -> must raise and close wrapped
     monkeypatch.setattr(grpc.socket, "create_connection", lambda *_a, **_k: base)
-    monkeypatch.setattr(grpc.ssl, "create_default_context", lambda: _Ctx(wrapped))
+    monkeypatch.setattr(grpc.ssl, "_create_unverified_context", lambda: _Ctx(wrapped))
     with pytest.raises(OSError):
         grpc._open_grpc_socket("h", 443, 2.0, use_tls=True)
     assert wrapped.closed is True
@@ -64,7 +64,7 @@ def test_open_grpc_socket_closes_wrapped_on_alpn_mismatch(monkeypatch: pytest.Mo
 def test_open_http_socket_closes_base_on_wrap_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     base = _FakeSock()
     monkeypatch.setattr(grpc.socket, "create_connection", lambda *_a, **_k: base)
-    monkeypatch.setattr(grpc.ssl, "create_default_context", lambda: _Ctx(None, wrap_raises=True))
+    monkeypatch.setattr(grpc.ssl, "_create_unverified_context", lambda: _Ctx(None, wrap_raises=True))
     with pytest.raises(ssl.SSLError):
         grpc._open_http_socket("h", 443, 2.0, use_tls=True)
     assert base.closed is True

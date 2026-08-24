@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
+from ..clients.tls_cache import shared_client_ssl_context
 from .http_pool import get_active_http_pool, pool_get_compat
 
 
@@ -55,13 +56,12 @@ def build_exporter_tls_context(
         raise ValueError("--tls-cert and --tls-key must be provided together")
     if not any((insecure, ca_file, cert_file, key_file)):
         return None
-    context = ssl.create_default_context(cafile=ca_file or None)
-    if insecure:
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-    if cert_file and key_file:
-        context.load_cert_chain(certfile=cert_file, keyfile=key_file)
-    return context
+    return shared_client_ssl_context(
+        insecure=insecure,
+        ca_file=ca_file,
+        cert_file=cert_file,
+        key_file=key_file,
+    )
 
 
 @contextmanager

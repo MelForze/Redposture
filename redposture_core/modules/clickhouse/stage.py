@@ -27,13 +27,32 @@ _DEFAULT_HTTP_PORT = 8123
 _DEFAULT_HTTP_PORTS: tuple[int, ...] | None = (8123, 18123)
 _DEFAULT_TLS_PORT = 9440
 _DEFAULT_HTTPS_PORT = 8443
+_AUTO_PORT_PROTOCOLS = {
+    9000: "native",
+    19000: "native",
+    8123: "http",
+    18123: "http",
+    9440: "native",
+    8443: "http",
+}
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_clickhouse_host
 
 
 def build_clickhouse_plan(args: Any) -> AuditCommandPlan:
     tls_enabled = bool(getattr(args, "tls", False))
-    if _raw_protocol(args) == "http":
+    protocol = _raw_protocol(args)
+    default_port: int
+    default_ports: tuple[int, ...] | None
+    if protocol == "auto":
+        default_port = _DEFAULT_TLS_PORT if tls_enabled else _DEFAULT_PORT
+        default_ports = (
+            (_DEFAULT_TLS_PORT, _DEFAULT_HTTPS_PORT)
+            if tls_enabled
+            else (_DEFAULT_PORT, 19000, _DEFAULT_HTTP_PORT, 18123)
+        )
+        plan = build_basic_audit_plan(args, default_port=default_port, default_ports=default_ports)
+    elif protocol == "http":
         default_port = _DEFAULT_HTTPS_PORT if tls_enabled else _DEFAULT_HTTP_PORT
         default_ports = (_DEFAULT_HTTPS_PORT,) if tls_enabled else _DEFAULT_HTTP_PORTS
         plan = build_basic_audit_plan(args, default_port=default_port, default_ports=default_ports)
@@ -82,7 +101,9 @@ def _build_clickhouse_host_stage_options(args: Any) -> dict[str, Any]:
         "show_databases_limit": show_flag_limit(getattr(args, "show_databases", False)),
         "show_tables_limit": show_flag_limit(getattr(args, "show_tables", False)),
         "show_columns_limit": show_flag_limit(getattr(args, "show_columns", False)),
-        "port_protocols": None,
+        "port_protocols": {int(port): _AUTO_PORT_PROTOCOLS.get(int(port), "native") for port in _AUTO_PORT_PROTOCOLS}
+        if _raw_protocol(args) == "auto"
+        else None,
         "dump_row_limit": dump_flag_limit(getattr(args, "dump", False)),
     }
 
@@ -120,6 +141,11 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
             service="clickhouse",
         )
 
+    def _deep_gate(record: AuditRecord) -> tuple[bool, str]:
+        status = str(record.status or "unknown")
+        allowed = status in actions._CLICKHOUSE_DEEP_STATUSES
+        return allowed, f"status={status}"
+
     return ModuleAuditSpec(
         module="clickhouse",
         label="CLICKHOUSE",
@@ -131,11 +157,13 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
         data=_data if use_lifecycle_hooks else None,
         lifecycle_state_factory=_state_factory if use_lifecycle_hooks else None,
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
+        deep_gate=_deep_gate,
         render_module=render,
         colorize=render._render_colored_clickhouse_line,
         # E3 opt-in: ClickHouse anon-open (default_user w/ empty password) is
         # already confirmed by the detect probe.
         keep_anonymous_open_no_auth=True,
+        suppress_undetected_records_in_text=True,
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
     )
@@ -151,9 +179,9 @@ def run_clickhouse_stage(args: Any, logger: Any) -> int:
     if validation_rc is not None:
         return int(validation_rc)
     try:
-        if _raw_protocol(args) == "http":
+        if _raw_protocol(args) in {"http", "auto"}:
             actions._load_clickhouse_connect_module()
-        else:
+        if _raw_protocol(args) in {"native", "auto"}:
             actions._load_clickhouse_driver_client()
     except RuntimeError as exc:
         console.error(str(exc))
@@ -177,6 +205,8 @@ def run_clickhouse_stage(args: Any, logger: Any) -> int:
     except OSError as exc:
         console.error(f"failed to process clickhouse output: {exc}")
         return 2
+    if any(bool(record.get("requested_operation_failure")) for record in result.records):
+        return 1
     return command_result_exit_code(result)
 
 
@@ -303,51 +333,64 @@ def _run_clickhouse_sql_shell(args: Any, logger: Any, console: Any) -> int:
     shell_protocol = str(record.get("protocol") or protocol)
     readline_module = actions._load_readline_module()
     console.success("clickhouse sql-shell ready; type 'exit' or 'quit' to stop")
-    while True:
-        try:
-            raw_query = input("ch-sql> ")
-        except (EOFError, KeyboardInterrupt):
-            console.plain("")
-            break
-        query = raw_query.strip()
-        if not query:
-            continue
-        if query.lower() in {"exit", "quit"}:
-            break
-        actions._add_readline_history(readline_module, query)
-        output, error = actions._run_sql_query_once(
-            host=str(host),
-            port=int(port),
-            timeout=cfg.timeout,
-            retries=cfg.retries,
-            protocol=shell_protocol,
-            username=shell_user,
-            password=shell_password,
-            database=str(getattr(args, "database", "default") or "default"),
-            query=query,
-            **_clickhouse_transport_kwargs(args),
-        )
-        shell_record = dict(record)
-        shell_record.update(
-            {
-                "sql_command": query,
-                "sql_attempted": True,
-                "sql_ok": error is None,
-                "sql_output": output,
-                "sql_error": error,
-            }
-        )
-        for line in render._format_sql_detail_records(shell_record, "txt"):
-            print(line)
-        if cfg.debug and hasattr(logger, "log"):
-            logger.log(
-                "clickhouse",
-                (str(host), int(port)),
-                phase="sql_shell",
-                query=query,
-                sql_ok=error is None,
-                sql_error=error,
+    shell_session: actions._ChSession | None = None
+    try:
+        while True:
+            try:
+                raw_query = input("ch-sql> ")
+            except (EOFError, KeyboardInterrupt):
+                console.plain("")
+                break
+            query = raw_query.strip()
+            if not query:
+                continue
+            if query.lower() in {"exit", "quit"}:
+                break
+            actions._add_readline_history(readline_module, query)
+            if shell_session is None:
+                shell_session, connect_error = actions._open_shell_session(
+                    host=str(host),
+                    port=int(port),
+                    timeout=cfg.timeout,
+                    retries=cfg.retries,
+                    protocol=shell_protocol,
+                    username=shell_user,
+                    password=shell_password,
+                    database=str(record.get("effective_database") or getattr(args, "database", "default") or "default"),
+                    **_clickhouse_transport_kwargs(args),
+                )
+                if shell_session is None:
+                    console.error(connect_error or "failed to open ClickHouse shell session")
+                    continue
+            output, error = actions._run_sql_query(shell_session, query)
+            if error and actions._probe_error_info(error).retryable:
+                actions._close_client(shell_session.protocol, shell_session.client)
+                shell_session = None
+                error = f"{error}; connection will be restored before the next command"
+            shell_record = dict(record)
+            shell_record.update(
+                {
+                    "sql_command": query,
+                    "sql_attempted": True,
+                    "sql_ok": error is None,
+                    "sql_output": output,
+                    "sql_error": error,
+                }
             )
+            for line in render._format_sql_detail_records(shell_record, "txt"):
+                print(line)
+            if cfg.debug and hasattr(logger, "log"):
+                logger.log(
+                    "clickhouse",
+                    (str(host), int(port)),
+                    phase="sql_shell",
+                    query=query,
+                    sql_ok=error is None,
+                    sql_error=error,
+                )
+    finally:
+        if shell_session is not None:
+            actions._close_client(shell_session.protocol, shell_session.client)
     return 0
 
 
@@ -389,51 +432,64 @@ def _run_clickhouse_os_shell(args: Any, logger: Any, console: Any) -> int:
     shell_protocol = str(record.get("protocol") or protocol)
     readline_module = actions._load_readline_module()
     console.success("clickhouse os-shell ready; type 'exit' or 'quit' to stop")
-    while True:
-        try:
-            raw_command = input("ch-os> ")
-        except (EOFError, KeyboardInterrupt):
-            console.plain("")
-            break
-        command = raw_command.strip()
-        if not command:
-            continue
-        if command.lower() in {"exit", "quit"}:
-            break
-        actions._add_readline_history(readline_module, command)
-        output, error = actions._run_execute_command_once(
-            host=str(host),
-            port=int(port),
-            timeout=cfg.timeout,
-            retries=cfg.retries,
-            protocol=shell_protocol,
-            username=shell_user,
-            password=shell_password,
-            database=str(getattr(args, "database", "default") or "default"),
-            command=command,
-            **_clickhouse_transport_kwargs(args),
-        )
-        shell_record = dict(record)
-        shell_record.update(
-            {
-                "execute_command": command,
-                "execute_attempted": True,
-                "execute_ok": error is None,
-                "execute_output": output,
-                "execute_error": error,
-            }
-        )
-        for line in render._format_execute_detail_records(shell_record, "txt"):
-            print(line)
-        if cfg.debug and hasattr(logger, "log"):
-            logger.log(
-                "clickhouse",
-                (str(host), int(port)),
-                phase="os_shell",
-                command=command,
-                execute_ok=error is None,
-                execute_error=error,
+    shell_session: actions._ChSession | None = None
+    try:
+        while True:
+            try:
+                raw_command = input("ch-os> ")
+            except (EOFError, KeyboardInterrupt):
+                console.plain("")
+                break
+            command = raw_command.strip()
+            if not command:
+                continue
+            if command.lower() in {"exit", "quit"}:
+                break
+            actions._add_readline_history(readline_module, command)
+            if shell_session is None:
+                shell_session, connect_error = actions._open_shell_session(
+                    host=str(host),
+                    port=int(port),
+                    timeout=cfg.timeout,
+                    retries=cfg.retries,
+                    protocol=shell_protocol,
+                    username=shell_user,
+                    password=shell_password,
+                    database=str(record.get("effective_database") or getattr(args, "database", "default") or "default"),
+                    **_clickhouse_transport_kwargs(args),
+                )
+                if shell_session is None:
+                    console.error(connect_error or "failed to open ClickHouse shell session")
+                    continue
+            output, error = actions._run_execute_command(shell_session, command)
+            if error and actions._probe_error_info(error).retryable:
+                actions._close_client(shell_session.protocol, shell_session.client)
+                shell_session = None
+                error = f"{error}; connection will be restored before the next command"
+            shell_record = dict(record)
+            shell_record.update(
+                {
+                    "execute_command": command,
+                    "execute_attempted": True,
+                    "execute_ok": error is None,
+                    "execute_output": output,
+                    "execute_error": error,
+                }
             )
+            for line in render._format_execute_detail_records(shell_record, "txt"):
+                print(line)
+            if cfg.debug and hasattr(logger, "log"):
+                logger.log(
+                    "clickhouse",
+                    (str(host), int(port)),
+                    phase="os_shell",
+                    command=command,
+                    execute_ok=error is None,
+                    execute_error=error,
+                )
+    finally:
+        if shell_session is not None:
+            actions._close_client(shell_session.protocol, shell_session.client)
     return 0
 
 

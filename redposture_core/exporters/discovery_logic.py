@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from ..scheduler import BoundedScheduler
 from .http_client import build_http_url
 
 HttpGetDetails = Callable[..., dict[str, Any]]
@@ -103,18 +102,15 @@ def fetch_fingerprint_bodies(
     vars_url = build_http_url(host, port, "/debug/vars", scheme=scheme)
     cmdline_url = build_http_url(host, port, "/debug/pprof/cmdline?debug=1", scheme=scheme)
 
-    scheduler: BoundedScheduler[tuple[str, str], dict[str, Any]] = BoundedScheduler(max_workers=2, max_inflight=2)
-    results: dict[str, dict[str, Any]] = {}
-    for (name, _url), result in scheduler.iter_completed(
-        [("vars", vars_url), ("cmdline", cmdline_url)],
-        lambda item: http_get_details_fn(
-            item[1],
-            timeout,
-            retries,
-            max_bytes=max_bytes,
-        ),
-    ):
-        results[name] = result
+    # This helper already runs inside the command-level scan scheduler. A
+    # separate two-thread pool per target multiplied runnable threads by the
+    # number of outer workers (50 -> up to 100 nested workers). Two short
+    # keep-alive requests are cheaper and safer sequentially on the target's
+    # existing pooled connection.
+    results = {
+        "vars": http_get_details_fn(vars_url, timeout, retries, max_bytes=max_bytes),
+        "cmdline": http_get_details_fn(cmdline_url, timeout, retries, max_bytes=max_bytes),
+    }
 
     vars_result = results.get("vars", {})
     cmdline_result = results.get("cmdline", {})

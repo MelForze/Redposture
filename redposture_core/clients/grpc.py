@@ -26,6 +26,8 @@ from h2.events import ConnectionTerminated, DataReceived, ResponseReceived, Stre
 from redposture_core.proto import grpc_health_pb2, grpc_reflection_pb2
 from redposture_core.utils import utc_now_iso
 
+from .tls_cache import shared_client_ssl_context
+
 _GRPC_AUTH_CODES = {7, 16}
 _GRPC_OK = 0
 _GRPC_UNIMPLEMENTED = 12
@@ -290,17 +292,13 @@ def _http2_headers_to_map(raw_headers: list[tuple[bytes | str, bytes | str]]) ->
 
 def _grpc_ssl_context(config: GrpcTlsConfig | None, *, alpn_h2: bool) -> ssl.SSLContext:
     tls = config or GrpcTlsConfig(insecure=True)
-    context = ssl.create_default_context(cafile=tls.ca_file) if tls.ca_file else ssl.create_default_context()
-    if tls.insecure:
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-    if tls.cert_file or tls.key_file:
-        if not tls.cert_file or not tls.key_file:
-            raise ValueError("TLS client certificate and key must be provided together")
-        context.load_cert_chain(certfile=tls.cert_file, keyfile=tls.key_file)
-    if alpn_h2:
-        context.set_alpn_protocols(["h2"])
-    return context
+    return shared_client_ssl_context(
+        insecure=tls.insecure,
+        ca_file=tls.ca_file,
+        cert_file=tls.cert_file,
+        key_file=tls.key_file,
+        alpn=("h2",) if alpn_h2 else (),
+    )
 
 
 def _open_grpc_socket(
