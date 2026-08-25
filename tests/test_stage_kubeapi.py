@@ -367,8 +367,11 @@ def test_kubeapi_auth_required_skips_requested_anonymous_resource_probes(
         assert pod_calls == [True]
         assert secret_calls == [True]
         assert exec_calls == [True]
-        assert any("anonymous access:limited" in line for line in lines)
+        assert any("auth required:False" in line for line in lines)
+        assert not any("anonymous access:limited" in line for line in lines)
         assert any("Namespaces" in line for line in lines)
+        assert any("namespaces unavailable: anonymous access denied" in line for line in lines)
+        assert not any("system:anonymous" in line for line in lines)
 
 
 def test_auth_required_details_are_hidden_normally_and_probe_error_is_debug_only() -> None:
@@ -395,6 +398,33 @@ def test_auth_required_details_are_hidden_normally_and_probe_error_is_debug_only
     assert any("namespaces unavailable" in line for line in debug_lines)
     assert all("Pods" not in line and "<no pods>" not in line for line in debug_lines)
     assert all("Secrets" not in line and "<no secrets>" not in line for line in debug_lines)
+
+
+def test_kubeapi_resource_access_denials_are_short_normally_and_detailed_in_debug() -> None:
+    denied = 'pods is forbidden: User "system:anonymous" cannot list resource "pods" in API group ""'
+    record = {
+        "host": "127.0.0.1",
+        "port": 6443,
+        "status": "anonymous_limited",
+        "show_namespaces": False,
+        "show_pods": True,
+        "pods": [],
+        "pods_error": denied,
+        "show_secrets": False,
+        "namespace_filters": [],
+    }
+
+    normal_lines = kube._format_detail_records(record, "txt")
+    assert any("pods unavailable: anonymous access denied" in line for line in normal_lines)
+    assert not any("system:anonymous" in line for line in normal_lines)
+
+    debug_lines = kube._format_detail_records(record, "txt", debug=True)
+    assert any("system:anonymous" in line for line in debug_lines)
+
+    authenticated_record = {**record, "auth_mode": "token", "auth_valid": True}
+    authenticated_lines = kube._format_detail_records(authenticated_record, "txt")
+    assert any("pods unavailable: access denied" in line for line in authenticated_lines)
+    assert not any("anonymous access denied" in line for line in authenticated_lines)
 
 
 def test_audit_kubeapi_targets_json_output_is_machine_readable(monkeypatch, tmp_path) -> None:

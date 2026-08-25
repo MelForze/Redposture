@@ -221,9 +221,10 @@ redposture kubeapi -t 127.0.0.1 --port 6443 --insecure --token "$KUBE_TOKEN" --s
 
 KubeAPI detection requires a canonical Kubernetes `/version`, `/api`, or correlated 401/403 Status pair.
 Authentication inference uses one bounded `namespaces?limit=1` request. Anonymous `403` is reported as
-`anonymous access:limited`, while only `401` means authentication is required. A Bearer token that receives
-`403` is verified with a non-persistent Kubernetes `SelfSubjectReview`; the forbidden response alone is never
-treated as valid authentication. Full pagination and pod/secret reads run only for explicitly requested actions.
+`auth required:False`, while `401` is reported as `auth required:True`. The more precise anonymous-access
+classification remains available in JSON. A Bearer token that receives `403` is verified with a non-persistent
+Kubernetes `SelfSubjectReview`; the forbidden response alone is never treated as valid authentication. Full
+pagination and pod/secret reads run only for explicitly requested actions.
 KubeAPI uses 12 workers by default (an explicit `-w` value is preserved), reuses one keep-alive connection per
 target, and retries only transport failures for the current endpoint or page. Secret Base64 is decoded strictly,
 and control characters are escaped in TXT/terminal output.

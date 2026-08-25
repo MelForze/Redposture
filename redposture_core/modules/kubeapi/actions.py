@@ -180,6 +180,14 @@ def _clip(text: str, width: int = 72) -> str:
     return text[: width - 3] + "..."
 
 
+def _format_resource_error(error: str, *, debug: bool, width: int, anonymous: bool) -> str:
+    if not debug:
+        normalized = error.casefold()
+        if "forbidden" in normalized or "access denied" in normalized or "permission denied" in normalized:
+            return "anonymous access denied" if anonymous else "access denied"
+    return _clip(error, width)
+
+
 def _retry_delay(attempt_index: int) -> float:
     return min(1.50, 0.20 * (2**attempt_index))
 
@@ -2361,8 +2369,6 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [-] not a Kubernetes API"
 
     version_text = str(record.get("version") or "-")
-    if record.get("anonymous_access") == "limited":
-        return f"{prefix} [*] Kubernetes API (anonymous access:limited) (version:{version_text})"
     auth_required_text = _bool_text(record.get("auth_required"))
     return f"{prefix} [*] Kubernetes API (auth required:{auth_required_text}) (version:{version_text})"
 
@@ -2433,6 +2439,7 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
 
     prefix = _kxc_prefix(record)
     lines: list[str] = []
+    anonymous_identity = str(record.get("auth_mode") or "none") == "none"
 
     if bool(record.get("show_namespaces")):
         namespaces = record.get("namespaces")
@@ -2442,7 +2449,10 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
             for item in namespaces:
                 lines.append(f"{prefix} {str(item)}")
         elif err:
-            lines.append(f"{prefix} [-] namespaces unavailable: {_clip(err, 96)}")
+            lines.append(
+                f"{prefix} [-] namespaces unavailable: "
+                f"{_format_resource_error(err, debug=debug, width=96, anonymous=anonymous_identity)}"
+            )
         else:
             lines.append(f"{prefix} <no namespaces>")
 
@@ -2462,7 +2472,10 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
                 containers = int(item.get("containers") or 0)
                 lines.append(f"{prefix} {ns}/{name} (phase:{phase}) (containers:{containers})")
         elif err:
-            lines.append(f"{prefix} [-] pods unavailable: {_clip(err, 96)}")
+            lines.append(
+                f"{prefix} [-] pods unavailable: "
+                f"{_format_resource_error(err, debug=debug, width=96, anonymous=anonymous_identity)}"
+            )
         else:
             lines.append(f"{prefix} <no pods>")
 
@@ -2486,7 +2499,10 @@ def _format_detail_records(record: dict[str, Any], output_format: str, *, debug:
                     for key in sorted(data.keys()):
                         lines.append(f"{prefix} {key}:{str(data.get(key) or '')}")
         elif err:
-            lines.append(f"{prefix} [-] secrets unavailable: {_clip(err, 96)}")
+            lines.append(
+                f"{prefix} [-] secrets unavailable: "
+                f"{_format_resource_error(err, debug=debug, width=96, anonymous=anonymous_identity)}"
+            )
         else:
             lines.append(f"{prefix} <no secrets>")
 
