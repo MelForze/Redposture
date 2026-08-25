@@ -67,6 +67,51 @@ def test_parallel_znode_enumeration_success_truncation_and_progress(monkeypatch:
     assert events[-1]["event"] == "enumerate_done"
 
 
+def test_keeper_virtual_stat_mismatch_does_not_abort_table_walk(monkeypatch: pytest.MonkeyPatch) -> None:
+    tree = {
+        "/": ["keeper", "clickhouse"],
+        "/keeper": ["api_version"],
+        "/keeper/api_version": [],
+        "/clickhouse": ["tables"],
+        "/clickhouse/tables": [],
+    }
+
+    class FakeKeeperClient(zk._ZkClient):
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            super().__init__(host, port, timeout)
+
+        def connect(self) -> None:
+            return None
+
+        def get_children2(self, parent: str):
+            children = tree[parent]
+            vector = struct.pack(">i", len(children)) + b"".join(zk._encode_zk_string(child) for child in children)
+            reported_count = 0 if parent == "/keeper" else len(children)
+            stat = struct.pack(">qqqqiiiqiiq", 1, 2, 3, 4, 5, 6, 7, 8, 0, reported_count, 10)
+            self._request = lambda *_args, **_kwargs: (zk._ZK_ERR_OK, vector + stat)  # type: ignore[method-assign]
+            return super().get_children2(parent)
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(zk, "_ZkClient", FakeKeeperClient)
+
+    nodes, total, truncated, meta, error = zk._enumerate_znodes_parallel(
+        host="keeper.internal",
+        port=9181,
+        timeout=1.0,
+        max_znodes=20,
+        enum_workers=2,
+    )
+
+    assert error is None
+    assert total == 4
+    assert truncated is False
+    assert set(nodes) == {"/keeper", "/keeper/api_version", "/clickhouse", "/clickhouse/tables"}
+    assert meta["/keeper"]["children"] == 1
+    assert meta["/clickhouse/tables"]["children"] == 0
+
+
 def test_serial_enumeration_hard_caps_wide_page_and_traversal() -> None:
     calls: list[str] = []
 
@@ -196,6 +241,18 @@ def test_zkclient_rejects_incomplete_or_trailing_root_payloads(monkeypatch: pyte
     monkeypatch.setattr(client, "_request", lambda *_a, **_k: (zk._ZK_ERR_OK, children + mismatched_stat))
     with pytest.raises(ValueError, match="count mismatch"):
         client.get_children2("/")
+
+    keeper_children = struct.pack(">i", 2) + zk._encode_zk_string("feature_flags") + zk._encode_zk_string("api_version")
+    keeper_virtual_stat = struct.pack(">qqqqiiiqiiq", 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 10)
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda *_a, **_k: (zk._ZK_ERR_OK, keeper_children + keeper_virtual_stat),
+    )
+    keeper_result, keeper_err, keeper_stat = client.get_children2("/keeper")
+    assert keeper_result == ["feature_flags", "api_version"]
+    assert keeper_err == zk._ZK_ERR_OK
+    assert keeper_stat == {"data_length": 0, "num_children": 0}
 
     negative_stat = struct.pack(">qqqqiiiqiiq", 1, 2, 3, 4, 5, 6, 7, 8, -1, 0, 10)
     monkeypatch.setattr(client, "_request", lambda *_a, **_k: (zk._ZK_ERR_OK, children + negative_stat))

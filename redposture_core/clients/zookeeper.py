@@ -38,6 +38,7 @@ _ZK_ERR_NODEEXISTS = -110
 _ZK_MAX_FRAME = 64 * 1024 * 1024
 _ZK_MAX_CHILDREN_PER_RESPONSE = 1_000_000
 _ZK_SYSTEM_PREFIX = "/zookeeper"
+_KEEPER_SYSTEM_PREFIX = "/keeper"
 _ZK_ACL_ALL_PERMS = 0x1F
 _ZK_CREATE_EPHEMERAL = 1
 _ZK_AUTH_XID = -4
@@ -344,7 +345,10 @@ def _join_znode_path(parent: str, child: str) -> str:
 
 def _is_system_znode(path: str) -> bool:
     normalized = str(path or "").strip()
-    return normalized == _ZK_SYSTEM_PREFIX or normalized.startswith(f"{_ZK_SYSTEM_PREFIX}/")
+    return any(
+        normalized == prefix or normalized.startswith(f"{prefix}/")
+        for prefix in (_ZK_SYSTEM_PREFIX, _KEEPER_SYSTEM_PREFIX)
+    )
 
 
 def _format_znode_data(data: bytes | None) -> str:
@@ -977,7 +981,13 @@ class _ZkClient:
         if children is None:
             raise ValueError("invalid null ZooKeeper children vector")
         stat, offset = _parse_stat(response_payload, offset)
-        if len(children) != stat["num_children"]:
+        # ClickHouse Keeper exposes virtual nodes below /keeper but reports
+        # numChildren=0 in their Stat record. The children vector is still
+        # fully framed and authoritative, so tolerate this vendor-specific
+        # inconsistency without weakening validation for user znodes.
+        if len(children) != stat["num_children"] and not (
+            path == _KEEPER_SYSTEM_PREFIX or path.startswith(f"{_KEEPER_SYSTEM_PREFIX}/")
+        ):
             raise ValueError("ZooKeeper children vector/stat count mismatch")
         if offset != len(response_payload):
             raise ValueError("unexpected trailing ZooKeeper getChildren2 payload")

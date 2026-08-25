@@ -357,6 +357,8 @@ def test_socket_helpers_encode_decode_and_path_helpers() -> None:
     assert _join_znode_path("/brokers", "ids") == "/brokers/ids"
     assert _is_system_znode("/zookeeper") is True
     assert _is_system_znode("/zookeeper/config") is True
+    assert _is_system_znode("/keeper") is True
+    assert _is_system_znode("/keeper/api_version") is True
     assert _is_system_znode("/brokers") is False
 
 
