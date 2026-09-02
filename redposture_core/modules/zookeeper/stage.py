@@ -20,47 +20,13 @@ from ...stage_runtime import (
     merge_audit_credential_runs,
     sort_default_audit_credential_runs,
 )
+from ...zookeeper_defaults import ZOOKEEPER_DIGEST_DEFAULT_CREDENTIALS
 from . import actions, engine, policy, render
 from .types import ZooKeeperFingerprintCache
 
 _DEFAULT_PORT = 2181
-_DEFAULT_PORTS: tuple[int, ...] | None = (2181, 9181, 12181)
-_DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
-    ("admin", "admin"),
-    ("admin", "changeme"),
-    ("admin", "kafka"),
-    ("admin", "password"),
-    ("admin", "zookeeper"),
-    ("broker", "broker"),
-    ("broker", "brokerpass"),
-    ("client", "client"),
-    ("dev", "dev"),
-    ("guest", "guest"),
-    ("hadoop", "hadoop"),
-    ("kafka", "changeme"),
-    ("kafka", "kafka"),
-    ("kafka", "password"),
-    ("kafka", "zookeeper"),
-    ("root", "admin"),
-    ("root", "password"),
-    ("root", "root"),
-    ("root", "rootpass"),
-    ("root", "zookeeper"),
-    ("service", "password"),
-    ("service", "service"),
-    ("solr", "solr"),
-    ("super", "super"),
-    ("test", "test"),
-    ("user", "password"),
-    ("user", "user"),
-    ("user1", "12345"),
-    ("zk", "password"),
-    ("zk", "zk"),
-    ("zk", "zookeeper"),
-    ("zookeeper", "admin"),
-    ("zookeeper", "password"),
-    ("zookeeper", "zookeeper"),
-)
+_DEFAULT_PORTS: tuple[int, ...] | None = (2181, 12181, 22181)
+_DEFAULT_CREDENTIALS = ZOOKEEPER_DIGEST_DEFAULT_CREDENTIALS
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_zookeeper_host
 
@@ -95,6 +61,7 @@ def _build_zookeeper_lifecycle_options(args: Any) -> dict[str, Any]:
         "ca_file": getattr(args, "ca_file", None),
         "tls_cert": getattr(args, "tls_cert", None),
         "tls_key": getattr(args, "tls_key", None),
+        "record_service": "zookeeper",
     }
 
 
@@ -119,8 +86,12 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
         )
 
     def _detect(ctx: AuditHookContext) -> AuditRecord:
-        return AuditRecord.from_mapping(
+        payload = engine.enforce_expected_implementation(
             engine.detect_zookeeper_implementation(ctx, options),
+            expected_is_keeper=False,
+        )
+        return AuditRecord.from_mapping(
+            payload,
             module="zookeeper",
             service="zookeeper",
         )
@@ -155,6 +126,9 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
         accepted = status in {"open_no_auth", "valid_credentials", "weak_default_creds"}
         return accepted, f"status={status}"
 
+    def _is_detected(record: AuditRecord) -> bool:
+        return bool(record.extra.get("is_zookeeper")) and record.extra.get("is_keeper") is False
+
     return ModuleAuditSpec(
         module="zookeeper",
         label="ZOOKEEPER",
@@ -168,6 +142,7 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
         lifecycle_state_close=(lambda state: state.close()) if use_lifecycle_hooks else None,
         render_module=render,
         colorize=render._render_colored_zookeeper_line,
+        is_detected=_is_detected,
         # E3 opt-in: ZooKeeper anon-open (default ACLs, no digest ACL on /)
         # is confirmed by the anon probe listing /.
         keep_anonymous_open_no_auth=True,
@@ -177,6 +152,7 @@ def build_zookeeper_spec(args: Any) -> ModuleAuditSpec:
         continue_after_credential_error=exhaustive_credentials,
         fallback_to_anonymous_detect_record=exhaustive_credentials,
         credential_attempt_detail_fields=("provided_credentials_ok", "credential_verdict"),
+        suppress_undetected_records_in_text=True,
     )
 
 
@@ -219,7 +195,7 @@ def run_zookeeper_stage(args: Any, logger: Any) -> int:
         console.error(f"failed to process zookeeper output: {exc}")
         return 2
     if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
-        console.warn("all zookeeper targets are unreachable")
+        console.warn("no target confirmed as Apache ZooKeeper")
     return command_result_exit_code(result)
 
 

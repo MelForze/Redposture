@@ -31,7 +31,7 @@ from ...utils import is_signature_compat_typeerror
 from . import actions, policy, render
 
 _DEFAULT_PORT = 5432
-_DEFAULT_PORTS: tuple[int, ...] | None = (5432, 6432, 15432)
+_DEFAULT_PORTS: tuple[int, ...] | None = (5432, 6432, 15432, 16432, 25432, 26432)
 _POSTGRES_HOST_STAGE = actions.host_stage
 _POSTGRES_HOST_STAGE_NAME = actions.host_stage.__name__
 _POSTGRES_HOST_STAGE_IMPL = getattr(actions, _POSTGRES_HOST_STAGE_NAME, actions.host_stage)

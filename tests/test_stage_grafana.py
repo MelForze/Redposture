@@ -112,10 +112,14 @@ def test_grafana_helper_parsers_and_auth_helpers() -> None:
     assert _header_lookup({}, "missing") is None
 
     assert _looks_like_grafana_login(200, "<title>Grafana</title>", {}) is True
-    assert _looks_like_grafana_login(302, "", {"Location": "/login"}) is True
+    assert _looks_like_grafana_login(302, "", {"Location": "/login"}) is False
     assert _looks_like_grafana_login(404, "", {}) is False
 
-    assert _looks_like_grafana_health(200, '{"database":"ok","version":"11.0.0"}') == (True, "11.0.0")
+    assert _looks_like_grafana_health(200, '{"database":"ok","commit":"abc","version":"11.0.0"}') == (
+        True,
+        "11.0.0",
+    )
+    assert _looks_like_grafana_health(200, '{"database":"ok","version":"11.0.0"}') == (False, None)
     assert _looks_like_grafana_health(200, "grafana ready") == (True, None)
     assert _looks_like_grafana_health(500, "{}") == (False, None)
 
@@ -296,7 +300,7 @@ def test_audit_grafana_defcreds_are_checked_even_with_anonymous_access(monkeypat
     ) -> tuple[int, str, dict[str, str]]:
         _ = (host, port, timeout, method, headers, data)
         if path == "/api/health":
-            return 200, '{"database":"ok","version":"11.0.0"}', {}
+            return 200, '{"database":"ok","commit":"abc","version":"11.0.0"}', {}
         if path == "/login":
             return 200, "<title>Grafana</title>", {"Content-Type": "text/html"}
         return 404, "", {}
@@ -383,7 +387,7 @@ def test_audit_grafana_classifies_successful_default_credentials_even_if_anonymo
     ) -> tuple[int, str, dict[str, str]]:
         _ = (host, port, timeout, method, headers, data)
         if path == "/api/health":
-            return 200, '{"database":"ok","version":"11.0.0"}', {}
+            return 200, '{"database":"ok","commit":"abc","version":"11.0.0"}', {}
         if path == "/login":
             return 200, "<title>Grafana</title>", {"Content-Type": "text/html"}
         return 404, "", {}
@@ -478,7 +482,7 @@ def test_audit_grafana_runs_provided_and_default_creds_in_order(monkeypatch) -> 
     ) -> tuple[int, str, dict[str, str]]:
         _ = (host, port, timeout, method, headers, data)
         if path == "/api/health":
-            return 200, '{"database":"ok","version":"11.0.0"}', {}
+            return 200, '{"database":"ok","commit":"abc","version":"11.0.0"}', {}
         if path == "/login":
             return 200, "<title>Grafana</title>", {"Content-Type": "text/html"}
         return 404, "", {}
@@ -628,7 +632,7 @@ def test_audit_grafana_auth_required_after_datasource_denial(monkeypatch) -> Non
     ) -> tuple[int, str, dict[str, str]]:
         _ = (host, port, timeout, method, headers, data)
         if path == "/api/health":
-            return 200, '{"database":"ok","version":"11.0.0"}', {}
+            return 200, '{"database":"ok","commit":"abc","version":"11.0.0"}', {}
         return 404, "", {}
 
     def fake_fetch_datasources(
@@ -673,7 +677,7 @@ def test_audit_grafana_formats_datasources_and_check_failures(monkeypatch) -> No
     ) -> tuple[int, str, dict[str, str]]:
         _ = (host, port, timeout, method, headers, data)
         if path == "/api/health":
-            return 200, '{"database":"ok","version":"11.0.0"}', {}
+            return 200, '{"database":"ok","commit":"abc","version":"11.0.0"}', {}
         return 404, "", {}
 
     def fake_fetch_datasources(

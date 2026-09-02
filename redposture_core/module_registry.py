@@ -17,6 +17,7 @@ from .cli_modules.exporters import configure_collect_parser, configure_scan_pars
 from .cli_modules.gitlab import configure_gitlab_parser
 from .cli_modules.grafana import configure_grafana_parser
 from .cli_modules.grpc import configure_grpc_parser
+from .cli_modules.keeper import configure_keeper_parser
 from .cli_modules.kubeapi import configure_kubeapi_parser
 from .cli_modules.mongodb import MongoDBHelpFormatter, configure_mongodb_parser
 from .cli_modules.oracle import configure_oracle_parser
@@ -43,6 +44,7 @@ COMMAND_QDRANT = "qdrant"
 COMMAND_KUBEAPI = "kubeapi"
 COMMAND_KAFKA = "kafka"
 COMMAND_ZOOKEEPER = "zookeeper"
+COMMAND_KEEPER = "keeper"
 COMMAND_ELASTIC = "elastic"
 COMMAND_GRPC = "grpc"
 COMMAND_MONGODB = "mongodb"
@@ -109,6 +111,7 @@ _STAGE_RUNNER_MODULES: dict[str, str] = {
     COMMAND_KUBEAPI: "redposture_core.modules.kubeapi.stage",
     COMMAND_KAFKA: "redposture_core.modules.kafka.stage",
     COMMAND_ZOOKEEPER: "redposture_core.modules.zookeeper.stage",
+    COMMAND_KEEPER: "redposture_core.modules.keeper.stage",
     COMMAND_ELASTIC: "redposture_core.modules.elastic.stage",
     COMMAND_GRPC: "redposture_core.modules.grpc.stage",
     COMMAND_MONGODB: "redposture_core.modules.mongodb.stage",
@@ -372,13 +375,23 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
     ),
     CommandSpec(
         name=COMMAND_ZOOKEEPER,
-        help="Audit ZooKeeper and ClickHouse Keeper exposure, auth, transport, and znodes.",
+        help="Audit Apache ZooKeeper exposure, auth, transport, and znodes.",
         description=(
-            "ZooKeeper module auto-detects plaintext/TLS ZooKeeper-compatible services, classifies Apache "
-            "ZooKeeper and ClickHouse Keeper, and audits digest auth and znode visibility."
+            "ZooKeeper module auto-detects plaintext/TLS ZooKeeper-compatible services, accepts only a "
+            "confirmed Apache ZooKeeper implementation, and audits digest auth and znode visibility."
         ),
         runner_attr="run_zookeeper_stage",
         configure_parser=_make_configurator(configure_zookeeper_parser, (*_HTTP_MODULE_HELPERS, "positive_int")),
+    ),
+    CommandSpec(
+        name=COMMAND_KEEPER,
+        help="Audit ClickHouse Keeper exposure, auth, transport, quorum health, and znodes.",
+        description=(
+            "Keeper module auto-detects plaintext/TLS ZooKeeper-compatible services, accepts only a confirmed "
+            "ClickHouse Keeper implementation, and audits digest auth, quorum telemetry, and znode visibility."
+        ),
+        runner_attr="run_keeper_stage",
+        configure_parser=_make_configurator(configure_keeper_parser, (*_HTTP_MODULE_HELPERS, "positive_int")),
     ),
 )
 
@@ -463,6 +476,7 @@ __all__ = [
     "COMMAND_SELFCERT",
     "COMMAND_TRIGGER",
     "COMMAND_ZOOKEEPER",
+    "COMMAND_KEEPER",
     "AUDIT_MODULE_NAMES",
     "COMMAND_SPECS",
     "COMMAND_SPECS_BY_NAME",

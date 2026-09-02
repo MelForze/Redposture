@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from redposture_core.cli_args import parse_args
+from redposture_core.clients import transport
 from redposture_core.modules.clickhouse import actions, stage
 
 
@@ -202,13 +203,14 @@ def test_stable_credential_schema_removes_legacy_fields() -> None:
 
 def test_auto_port_matrix_and_http_alias() -> None:
     plain = parse_args(["clickhouse", "-t", "127.0.0.1", "--protocol", "auto"])
-    assert stage.build_clickhouse_plan(plain).ports == (9000, 19000, 8123, 18123)
+    assert stage.build_clickhouse_plan(plain).ports == (9000, 19000, 29000, 8123, 18123)
     tls = parse_args(["clickhouse", "-t", "127.0.0.1", "--protocol", "auto", "--tls"])
     assert stage.build_clickhouse_plan(tls).ports == (9440, 8443)
     alias = parse_args(["clickhouse", "-t", "127.0.0.1", "--http"])
     assert stage._raw_protocol(alias) == "http"
     assert actions._protocol_attempt_order("auto", 8123) == ("http", "native")
     assert actions._protocol_attempt_order("auto", 9000) == ("native", "http")
+    assert actions._protocol_attempt_order("auto", 29000) == ("native", "http")
 
 
 def test_retry_jitter_is_injectable_and_capped() -> None:
@@ -321,3 +323,10 @@ def test_limited_credentials_are_valid_identity(monkeypatch: pytest.MonkeyPatch)
     assert record["status"] == "valid_credentials"
     assert record["auth_status"] == "limited"
     assert record["provided_credentials_ok"] is True
+
+
+def test_application_timeout_not_network_timeout():
+    # серверный лимит выполнения запроса — не сетевой timeout
+    assert transport.classify_failure_reason("Timeout exceeded: elapsed 10s, maximum: max_execution_time") == "other"
+    # настоящий сетевой timeout по-прежнему распознаётся
+    assert transport.classify_failure_reason("connection timeout") == "timeout"

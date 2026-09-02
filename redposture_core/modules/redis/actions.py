@@ -141,6 +141,31 @@ def _is_noauth_error(message: str) -> bool:
     return "NOAUTH" in upper or "NOPERM" in upper or "AUTHENTICATION REQUIRED" in upper
 
 
+def _redis_info_fingerprint(response_type: str, response_value: Any) -> bool:
+    if response_type != "bulk":
+        return False
+    if isinstance(response_value, bytes):
+        text = response_value.decode("utf-8", errors="replace")
+    else:
+        text = str(response_value or "")
+    fields = {line.partition(":")[0].strip().lower() for line in text.splitlines() if ":" in line}
+    return "redis_version" in fields or "valkey_version" in fields
+
+
+def _confirm_redis_error_response(sock: socket.socket, message: str) -> tuple[bool, bool | None]:
+    if _is_noauth_error(message):
+        return True, True
+    upper = message.upper()
+    if "REDIS" in upper and any(marker in upper for marker in ("LOADING", "MISCONF", "BUSY")):
+        return True, None
+    info_type, info_value = _send_cmd(sock, "INFO", "SERVER")
+    if _redis_info_fingerprint(info_type, info_value):
+        return True, False
+    if info_type == "error" and _is_noauth_error(str(info_value)):
+        return True, True
+    return False, None
+
+
 def _open_redis_socket(
     host: str,
     port: int,
@@ -674,13 +699,15 @@ def redis_detect_hook(ctx: Any) -> AuditRecord:
                 state.status = "open_no_auth"
                 state.error = None
                 return _redis_lifecycle_record(state, include_data=False)
-            if ping_type == "error" and _is_noauth_error(str(ping_value)):
-                state.is_redis = True
-                state.auth_required = True
-                state.status = "auth_required"
-                state.error = None
-                return _redis_lifecycle_record(state, include_data=False)
-            state.is_redis = ping_type == "error"
+            if ping_type == "error":
+                confirmed, auth_required = _confirm_redis_error_response(state.sock, str(ping_value))
+                if confirmed:
+                    state.is_redis = True
+                    state.auth_required = auth_required
+                    state.status = "auth_required" if auth_required is True else "unknown_auth"
+                    state.error = None
+                    return _redis_lifecycle_record(state, include_data=False)
+            state.is_redis = False
             state.auth_required = None
             state.status = "fail"
             state.error = f"unexpected PING response: {ping_type} {ping_value}"
@@ -1019,14 +1046,70 @@ def _audit_redis_host(
                 auth_required = False
                 if ping_type == "simple" and str(ping_value).upper() == "PONG":
                     auth_required = False
-                elif ping_type == "error" and _is_noauth_error(str(ping_value)):
-                    auth_required = True
+                elif ping_type == "error":
+                    is_redis_response, inferred_auth = _confirm_redis_error_response(sock, str(ping_value))
+                    if is_redis_response:
+                        auth_required = inferred_auth is True
+                        if inferred_auth is not True:
+                            return {
+                                "timestamp": utc_now_iso(),
+                                "host": host,
+                                "port": port,
+                                "is_redis": True,
+                                "status": "unknown_auth",
+                                "auth_required": None,
+                                "default_credentials": None,
+                                "provided_credentials": provided_credentials,
+                                "provided_username": provided_username,
+                                "provided_password": provided_password if provided_credentials else None,
+                                "provided_credentials_ok": None,
+                                "defcreds_enabled": defaults_enabled,
+                                "show_keys": show_keys,
+                                "show_keys_limit": show_keys_limit,
+                                "dump_keys": dump_keys,
+                                "query_key": query_key,
+                                "key_count": None,
+                                "keys": None,
+                                "key_values": None,
+                                "key_value_entries": None,
+                                "query_key_value": None,
+                                "query_key_entry": None,
+                                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                                "error": None,
+                            }
+                    else:
+                        return {
+                            "timestamp": utc_now_iso(),
+                            "host": host,
+                            "port": port,
+                            "is_redis": False,
+                            "status": "fail",
+                            "auth_required": None,
+                            "default_credentials": None,
+                            "provided_credentials": provided_credentials,
+                            "provided_username": provided_username,
+                            "provided_password": provided_password if provided_credentials else None,
+                            "provided_credentials_ok": None,
+                            "defcreds_enabled": defaults_enabled,
+                            "show_keys": show_keys,
+                            "show_keys_limit": show_keys_limit,
+                            "dump_keys": dump_keys,
+                            "query_key": query_key,
+                            "key_count": None,
+                            "keys": None,
+                            "key_values": None,
+                            "key_value_entries": None,
+                            "query_key_value": None,
+                            "query_key_entry": None,
+                            "elapsed_ms": int((time.monotonic() - started) * 1000),
+                            "error": f"unexpected PING response: {ping_type} {ping_value}",
+                        }
                 else:
                     # RESP-shaped `-` errors (LOADING/BUSY/MISCONF/READONLY) still identify a
                     # Redis-compatible server; anything else (bulk/integer/array/null/simple
                     # non-PONG) is not Redis — a proxy or gRPC service that happened to accept
                     # bytes must not be labelled as Redis in the report.
-                    is_redis_response = ping_type == "error"
+                    is_redis_response = False
                     return {
                         "timestamp": utc_now_iso(),
                         "host": host,

@@ -11,6 +11,7 @@ from .actions import (
     _format_database_fallback_detail_records,
     _format_databases_detail_records,
     _format_detect_record,
+    _format_discover_detail_records,
     _format_execute_detail_records,
     _format_record,
     _format_sql_detail_records,
@@ -33,6 +34,7 @@ __all__ = [
     "_format_table_columns_detail_records",
     "_format_table_dump_detail_records",
     "_format_execute_detail_records",
+    "_format_discover_detail_records",
     "_format_sql_detail_records",
     "_render_colored_clickhouse_line",
 ]

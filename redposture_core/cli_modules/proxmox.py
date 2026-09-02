@@ -22,7 +22,7 @@ def configure_proxmox_parser(
     add_output_flags(common)
     add_log_flag(common)
     add_scan_host_flags(common, include_profiles=False)
-    parser.set_defaults(timeout=3.0)
+    parser.set_defaults(timeout=5.0)
     common.add_argument(
         "--port",
         dest="port",
@@ -32,7 +32,7 @@ def configure_proxmox_parser(
         help=(
             "Proxmox API port spec: single port, list/range, or file "
             "(examples: 8006, 8006,18006, ./ports.txt). "
-            "If omitted, scans 8006, 18006."
+            "If omitted, scans 8006, 18006, 28006."
         ),
     )
     add_multi_ports_flag(common)

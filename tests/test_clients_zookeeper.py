@@ -13,6 +13,48 @@ import pytest
 import redposture_core.clients.zookeeper as zk
 
 
+@pytest.mark.parametrize(
+    ("children", "api_data", "confirmed", "reason"),
+    [
+        (["feature_flags", "api_version"], b"2", True, None),
+        (["api_version"], b"2", False, "virtual children are incomplete"),
+        (["feature_flags", "api_version"], b"%%%", False, "not a positive integer"),
+        (["feature_flags", "api_version"], b"0", False, "not a positive integer"),
+    ],
+)
+def test_keeper_virtual_znode_probe_is_bounded_and_strict(
+    children: list[str],
+    api_data: bytes,
+    confirmed: bool,
+    reason: str | None,
+) -> None:
+    calls: list[str] = []
+
+    class Client(zk._ZkClient):
+        def __init__(self) -> None:
+            return
+
+        def get_children2(self, path: str):
+            calls.append(path)
+            return children, zk._ZK_ERR_OK, {"num_children": 0, "data_length": 0}
+
+        def get_data(self, path: str):
+            calls.append(path)
+            return api_data, zk._ZK_ERR_OK, {"num_children": 0, "data_length": len(api_data)}
+
+    result = Client().probe_keeper_virtual_nodes()
+
+    assert result.confirmed is confirmed
+    if reason is None:
+        assert result.reason is None
+        assert result.api_version == 2
+        assert calls == ["/keeper", "/keeper/api_version"]
+    else:
+        assert reason in str(result.reason)
+        expected_calls = ["/keeper"] if "incomplete" in reason else ["/keeper", "/keeper/api_version"]
+        assert calls == expected_calls
+
+
 def test_parallel_znode_enumeration_success_truncation_and_progress(monkeypatch: pytest.MonkeyPatch) -> None:
     tree = {
         "/": ["app", "zookeeper"],

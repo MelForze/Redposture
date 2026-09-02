@@ -162,7 +162,7 @@ def configure_etcd_parser(
         help=(
             "etcd port spec: single port, list/range, or file "
             "(examples: 2379, 2379,22379, ./ports.txt). "
-            "If omitted, scans 2379, 12379."
+            "If omitted, scans 2379, 12379, 22379."
         ),
     )
     add_multi_ports_flag(common)

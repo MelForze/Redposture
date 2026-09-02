@@ -313,9 +313,17 @@ def _qdrant_looks_like_response(payload: Any) -> bool:
     if isinstance(payload, dict):
         if _qdrant_is_root_payload(payload):
             return True
-        if "result" in payload and ("status" in payload or "time" in payload or "usage" in payload):
-            return True
+        result = payload.get("result")
         status_value = payload.get("status")
+        if isinstance(result, dict) and isinstance(result.get("collections"), list) and status_value == "ok":
+            collections = result["collections"]
+            if all(
+                isinstance(item, dict)
+                and isinstance(item.get("name"), str)
+                and bool(str(item.get("name") or "").strip())
+                for item in collections
+            ):
+                return True
         if isinstance(status_value, dict) and "error" in status_value:
             error_text = str(status_value.get("error") or "").lower()
             return "time" in payload or "usage" in payload or "qdrant" in error_text or "api key" in error_text

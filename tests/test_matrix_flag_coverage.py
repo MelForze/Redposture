@@ -37,20 +37,24 @@ def test_extended_matrix_labels_are_present_in_script() -> None:
         assert label in labels
 
 
-def test_keeper_lab_uses_only_canonical_zookeeper_command() -> None:
+def test_keeper_lab_uses_strict_module_routing() -> None:
     cases = parse_matrix_cases(Path("scripts/run_lab_matrix_sequential.sh").read_text(encoding="utf-8"))
     by_label = {case.label: case for case in cases}
 
-    for label in ("keeper_cluster", "keeper_tls", "keeper_no4lw", "keeper_apache_control"):
+    for label in ("keeper_cluster", "keeper_tls", "keeper_no4lw"):
         case = by_label[label]
-        assert case.module == "zookeeper"
-        assert case.command_key == "zookeeper"
+        assert case.module == "keeper"
+        assert case.command_key == "keeper"
+
+    apache = by_label["keeper_apache_control"]
+    assert apache.module == "zookeeper"
+    assert apache.command_key == "zookeeper"
 
     cluster = by_label["keeper_cluster"]
     assert "--port" in cluster.tokens
     assert "--ports" not in cluster.tokens
 
-    assert all(case.command_key != "keeper" for case in cases)
+    assert any(case.command_key == "keeper" for case in cases)
 
 
 def test_zookeeper_fuzz_cases_keep_numeric_and_tls_validation_failures_isolated() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -197,20 +198,30 @@ def _looks_like_grafana_login(status: int, body: str, headers: dict[str, str]) -
     set_cookie = (_header_lookup(headers, "Set-Cookie") or "").lower()
     if "grafana_session" in set_cookie:
         return True
-    location = (_header_lookup(headers, "Location") or "").lower()
-    if "/login" in location:
-        return True
     return False
+
+
+def _grafana_health_payload(body: str) -> tuple[dict[str, Any] | None, str | None]:
+    payload = _load_json_dict(body)
+    if payload is None:
+        return None, None
+    version = payload.get("version")
+    version_text = str(version).strip() if isinstance(version, str) else ""
+    version_ok = bool(re.fullmatch(r"v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?", version_text))
+    database_ok = str(payload.get("database") or "").strip().lower() == "ok"
+    commit = payload.get("commit")
+    commit_ok = isinstance(commit, str) and bool(commit.strip())
+    if not (version_ok and database_ok and commit_ok):
+        return None, version_text or None
+    return payload, version_text
 
 
 def _looks_like_grafana_health(status: int, body: str) -> tuple[bool, str | None]:
     if status != 200:
         return False, None
-    payload = _load_json_dict(body)
+    payload, version = _grafana_health_payload(body)
     if payload is not None:
-        if "version" in payload or "database" in payload or "commit" in payload:
-            version = payload.get("version")
-            return True, str(version) if isinstance(version, str) else None
+        return True, version
     text = (body or "").lower()
     if "grafana" in text:
         return True, None
@@ -220,8 +231,8 @@ def _looks_like_grafana_health(status: int, body: str) -> tuple[bool, str | None
 def _is_grafana_health_api_response(status: int, body: str) -> bool:
     if status != 200:
         return False
-    payload = _load_json_dict(body)
-    return isinstance(payload, dict) and any(key in payload for key in ("version", "database", "commit"))
+    payload, _version = _grafana_health_payload(body)
+    return payload is not None
 
 
 def _looks_like_grafana_user(body: str) -> bool:

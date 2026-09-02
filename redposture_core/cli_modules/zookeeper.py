@@ -8,9 +8,12 @@ from collections.abc import Callable
 from ..show_limits import optional_dump_count_kwargs, optional_show_count_kwargs
 
 
-def configure_zookeeper_parser(
+def _configure_zookeeper_protocol_parser(
     parser: argparse.ArgumentParser,
     *,
+    service_name: str,
+    default_port: int,
+    default_ports: tuple[int, ...],
     add_output_flags: Callable[..., None],
     add_log_flag: Callable[..., None],
     add_scan_host_flags: Callable[..., None],
@@ -26,7 +29,7 @@ def configure_zookeeper_parser(
     add_output_flags(common)
     add_log_flag(common)
     add_scan_host_flags(common, include_profiles=False)
-    # ZooKeeper often requires a longer handshake window on real networks.
+    # ZooKeeper-protocol services often require a longer handshake window on real networks.
     # Keep module-local default timeout at 5s without changing other modules.
     for action in parser._actions:
         if action.dest == "timeout":
@@ -40,9 +43,9 @@ def configure_zookeeper_parser(
         default=None,
         metavar="port",
         help=(
-            "ZooKeeper-compatible port spec: single port, list/range, or file "
-            "(examples: 2181, 2181,9181,12181, ./ports.txt). "
-            "If omitted, scans 2181, 9181, 12181."
+            f"{service_name} port spec: single port, list/range, or file "
+            f"(examples: {default_port}, {default_port},{default_port + 10000}, ./ports.txt). "
+            f"If omitted, scans {', '.join(str(port) for port in default_ports)}."
         ),
     )
     add_multi_ports_flag(common)
@@ -58,12 +61,12 @@ def configure_zookeeper_parser(
         "--ca-file",
         default=None,
         metavar="file",
-        help="CA certificate for ZooKeeper-compatible TLS verification.",
+        help=f"CA certificate for {service_name} TLS verification.",
     )
     transport.add_argument(
         "--insecure",
         action="store_true",
-        help="Allow an untrusted or self-signed ZooKeeper-compatible TLS certificate.",
+        help=f"Allow an untrusted or self-signed {service_name} TLS certificate.",
     )
     transport.add_argument(
         "--tls-cert",
@@ -85,7 +88,7 @@ def configure_zookeeper_parser(
         dest="username",
         default=None,
         metavar="name",
-        help="Optional ZooKeeper username or credential file for digest auth credential check.",
+        help=f"Optional {service_name} username or credential file for digest auth credential check.",
     )
     auth.add_argument(
         "-p",
@@ -93,13 +96,13 @@ def configure_zookeeper_parser(
         dest="password",
         default=None,
         metavar="value",
-        help="Optional ZooKeeper password for digest auth credential check.",
+        help=f"Optional {service_name} password for digest auth credential check.",
     )
     auth.add_argument(
         "--defcreds",
         action="store_true",
         help=(
-            "Try the built-in ZooKeeper digest credential set after explicit/file credentials. "
+            f"Try the built-in {service_name} digest credential set after explicit/file credentials. "
             "Each candidate performs a network auth attempt and may trigger server lockout policy."
         ),
     )
@@ -122,7 +125,10 @@ def configure_zookeeper_parser(
         dest="znode",
         default=None,
         metavar="path",
-        help="Show one znode detail by path (example: /brokers/ids).",
+        help=(
+            "Show one znode detail by path "
+            f"(example: {'/clickhouse/tables' if default_port == 9181 else '/brokers/ids'})."
+        ),
     )
     actions.add_argument(
         "--probe-write",
@@ -147,7 +153,33 @@ def configure_zookeeper_parser(
         dest="output_format",
         choices=("json", "txt"),
         default="txt",
-        help="ZooKeeper audit output format for stdout/file.",
+        help=f"{service_name} audit output format for stdout/file.",
+    )
+
+
+def configure_zookeeper_parser(
+    parser: argparse.ArgumentParser,
+    *,
+    add_output_flags: Callable[..., None],
+    add_log_flag: Callable[..., None],
+    add_scan_host_flags: Callable[..., None],
+    add_multi_ports_flag: Callable[..., None],
+    add_save_flag: Callable[..., None],
+    port_type: Callable[[str], int],
+    positive_int: Callable[[str], int],
+) -> None:
+    _configure_zookeeper_protocol_parser(
+        parser,
+        service_name="Apache ZooKeeper",
+        default_port=2181,
+        default_ports=(2181, 12181, 22181),
+        add_output_flags=add_output_flags,
+        add_log_flag=add_log_flag,
+        add_scan_host_flags=add_scan_host_flags,
+        add_multi_ports_flag=add_multi_ports_flag,
+        add_save_flag=add_save_flag,
+        port_type=port_type,
+        positive_int=positive_int,
     )
 
 

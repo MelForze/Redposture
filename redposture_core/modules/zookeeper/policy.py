@@ -7,8 +7,8 @@ from typing import Any
 from ...stage_runtime import validate_basic_module_args
 
 
-def validate_args(args: Any, console: Any) -> int | None:
-    common_rc = validate_basic_module_args(args, console, module="zookeeper", pure_http=False)
+def validate_zookeeper_protocol_args(args: Any, console: Any, *, module: str) -> int | None:
+    common_rc = validate_basic_module_args(args, console, module=module, pure_http=False)
     if common_rc is not None:
         return common_rc
     if bool(getattr(args, "tls_cert", None)) != bool(getattr(args, "tls_key", None)):
@@ -24,4 +24,8 @@ def validate_args(args: Any, console: Any) -> int | None:
     return None
 
 
-__all__ = ["validate_args"]
+def validate_args(args: Any, console: Any) -> int | None:
+    return validate_zookeeper_protocol_args(args, console, module="zookeeper")
+
+
+__all__ = ["validate_args", "validate_zookeeper_protocol_args"]

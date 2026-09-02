@@ -248,6 +248,20 @@ def _detect_login_page(body: str) -> bool:
     return "gitlab" in text and ("sign in" in text or "users/sign_in" in text)
 
 
+def _detect_version_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    version = payload.get("version")
+    revision = payload.get("revision")
+    version_text = str(version).strip() if isinstance(version, str) else ""
+    revision_text = str(revision).strip() if isinstance(revision, str) else ""
+    if not re.fullmatch(r"v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?", version_text):
+        return None
+    if not revision_text:
+        return None
+    return version_text
+
+
 def _normalize_project_filters(values: list[str] | None) -> list[str]:
     if not values:
         return []
@@ -779,10 +793,8 @@ def _audit_gitlab_host(
                         version_json = _json_loads_bytes(version_payload)
                     except json.JSONDecodeError:
                         version_json = None
-                    if isinstance(version_json, dict):
-                        raw_version = str(version_json.get("version") or "").strip()
-                        version = raw_version or None
-                if (not token_provided) and version_status < 400:
+                    version = _detect_version_payload(version_json)
+                if (not token_provided) and version_status < 400 and version is not None:
                     open_endpoints.append({"path": "/api/v4/version", "status": version_status})
 
             if not token_provided:
@@ -810,7 +822,7 @@ def _audit_gitlab_host(
             elif public_projects_error == "authentication required":
                 pass
 
-            is_gitlab = bool(login_page) or bool(version) or isinstance(projects_all, list)
+            is_gitlab = bool(login_page) or bool(version)
 
             if token_provided:
                 user_status, user_payload, _user_headers, user_error = _api_get_json(
@@ -1330,8 +1342,7 @@ def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                 payload = _json_loads_bytes(version_payload)
             except json.JSONDecodeError:
                 payload = None
-            if isinstance(payload, dict):
-                version = str(payload.get("version") or "").strip() or None
+            version = _detect_version_payload(payload)
         if login_page or version is not None:
             return {
                 "timestamp": utc_now_iso(),

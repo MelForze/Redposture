@@ -336,6 +336,7 @@ def test_help_documents_implicit_target_file_precedence() -> None:
         ("grpc", ["Common", "Auth", "Invoke / Metadata", "Schema", "Export"]),
         ("kafka", ["Common", "Auth", "Actions"]),
         ("zookeeper", ["Common", "TLS (transport auto-detected)", "Auth", "Actions"]),
+        ("keeper", ["Common", "TLS (transport auto-detected)", "Auth", "Actions"]),
     ],
 )
 def test_module_help_has_grouped_sections_in_stable_order(command: str, sections: list[str]) -> None:
@@ -394,7 +395,7 @@ def test_postgres_dump_without_value_means_unlimited_dump() -> None:
 def test_postgres_help_shows_defaults_only_for_selected_flags() -> None:
     help_text = _command_help("postgres")
 
-    assert "Network timeout in seconds. (default: 1.0)" in help_text
+    assert "Network timeout in seconds. (default: 3.0)" in help_text
     assert "Worker threads used for parallel network checks." in help_text
     assert "(default: 50)" in help_text
     assert "Retry attempts for network requests (with exponential" in help_text
@@ -1931,15 +1932,42 @@ def test_zookeeper_defcreds_documents_online_attempt_risk() -> None:
     assert "lockout" in zookeeper_help
 
 
-def test_keeper_command_is_removed_from_cli() -> None:
+def test_keeper_command_has_full_zookeeper_protocol_flag_parity() -> None:
     parser = build_parser()
     root_action = parser._subparsers._group_actions[0]
-    assert "keeper" not in root_action.choices
+    assert "keeper" in root_action.choices
 
-    with pytest.raises(SystemExit) as exc:
-        parse_args(["keeper", "-t", "10.0.0.9"])
+    args = parse_args(
+        [
+            "keeper",
+            "-t",
+            "10.0.0.9",
+            "--port",
+            "19181",
+            "--defcreds",
+            "--show-znodes",
+            "20",
+            "--dump",
+            "10",
+            "--znode",
+            "/clickhouse/tables",
+            "--probe-write",
+            "--insecure",
+        ]
+    )
+    assert args.command == "keeper"
+    assert args.port == 19181
+    assert args.defcreds is True
+    assert args.show_znodes == 20
+    assert args.dump == 10
+    assert args.znode == "/clickhouse/tables"
+    assert args.probe_write is True
+    assert args.insecure is True
 
-    assert exc.value.code == 2
+    help_text = _command_help("keeper")
+    for flag in ("--defcreds", "--show-znodes", "--dump", "--znode", "--probe-write", "--ca-file"):
+        assert flag in help_text
+    assert "scans 9181" in help_text
 
 
 def test_znode_flag_uses_long_option_only() -> None:
@@ -2562,3 +2590,16 @@ def test_direct_scan_trigger_collect_are_rejected() -> None:
         with pytest.raises(SystemExit) as exc:
             parse_args(argv)
         assert exc.value.code == 2
+
+
+def test_global_timeout_default_is_three() -> None:
+    assert parse_args(["grafana", "-t", "127.0.0.1"]).timeout == 3.0
+
+
+def test_proxmox_timeout_default_is_five() -> None:
+    args = parse_args(["proxmox", "-t", "127.0.0.1", "--pveapitoken", "monitor@pve!audit=token"])
+    assert args.timeout == 5.0
+
+
+def test_zookeeper_timeout_default_unchanged() -> None:
+    assert parse_args(["zookeeper", "-t", "127.0.0.1"]).timeout == 5.0

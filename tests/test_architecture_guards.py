@@ -407,6 +407,7 @@ def test_root_audit_stage_files_are_compatibility_facades_only() -> None:
         "grpc",
         "clickhouse",
         "zookeeper",
+        "keeper",
     ):
         source = (_CORE / f"stage_{module}.py").read_text(encoding="utf-8")
         assert f"Compatibility facade for :mod:`redposture_core.modules.{module}`" in source

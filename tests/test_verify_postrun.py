@@ -429,7 +429,7 @@ def test_golden_text_normalizes_elastic_node_identity_but_keeps_roles(tmp_path: 
 def test_golden_text_normalizes_canonical_keeper_election_and_timing_but_keeps_dump(tmp_path: Path) -> None:
     artifact = tmp_path / "keeper.json"
     row = {
-        "module": "zookeeper",
+        "module": "keeper",
         "label": "keeper_cluster",
         "expected_exit": "0",
         "exit_code": "0",
@@ -437,7 +437,7 @@ def test_golden_text_normalizes_canonical_keeper_election_and_timing_but_keeps_d
         "log_path": "-",
     }
     first = {
-        "module": "zookeeper",
+        "module": "keeper",
         "status": "open_no_auth",
         "connections": 1,
         "latency_ms": {"min": 0, "avg": 0, "max": 0},
@@ -679,7 +679,7 @@ def test_grpc_multi_ports_expected_targets_is_five() -> None:
 
 def test_keeper_cluster_expected_targets_matches_matrix_command() -> None:
     assert _PROGRESS_EXPECTED_TARGETS["keeper_cluster"] == 2
-    assert "keeper" not in _EXPECTED_MODULES
+    assert "keeper" in _EXPECTED_MODULES
     _validate_progress_target_mappings()
 
 
@@ -848,7 +848,7 @@ def test_validate_rich_lab_outputs_requires_keeper_dump_for_each_cluster_target(
             "host": "127.0.0.1",
             "port": 19181,
             "status": "open_no_auth",
-            "service": "zookeeper",
+            "service": "keeper",
             "implementation": "clickhouse-keeper",
             "znode_values": [
                 "/redposture/app/api_key:rp-keeper-key-2026",
@@ -859,7 +859,7 @@ def test_validate_rich_lab_outputs_requires_keeper_dump_for_each_cluster_target(
             "host": "127.0.0.1",
             "port": 29181,
             "status": "open_no_auth",
-            "service": "zookeeper",
+            "service": "keeper",
             "implementation": "clickhouse-keeper",
             "znode_values": [],
         },
@@ -868,7 +868,7 @@ def test_validate_rich_lab_outputs_requires_keeper_dump_for_each_cluster_target(
     log.write_text("", encoding="utf-8")
     rows = [
         {
-            "module": "zookeeper",
+            "module": "keeper",
             "label": "keeper_cluster",
             "expected_exit": "0",
             "exit_code": "0",
@@ -1074,6 +1074,7 @@ def test_sequential_matrix_uses_deep_dump_for_multi_target_seeded_labs() -> None
     assert "qdrant_multi_instance_urls 0 qdrant" in matrix and "--collections --dump" in matrix
     assert "kafka_multi_ports 0 kafka" in matrix and "--show-topics --dump --max-messages 10" in matrix
     assert "zookeeper_multi_ports 0 zookeeper" in matrix and "--show-znodes --dump" in matrix
+    assert "keeper_cluster 0 keeper" in matrix and "--show-znodes 20 --dump 20" in matrix
     assert "registry_gitlab 0 registry" in matrix and "--token glrt-lab-token --gitlab --images" in matrix
 
 
@@ -1527,8 +1528,8 @@ def test_validate_schema_mandatory_fields_passes_complete_record(tmp_path: Path)
     _validate_schema_mandatory_fields(rows)
 
 
-def test_canonical_zookeeper_module_schema_requires_identity_and_keeper_telemetry(tmp_path: Path) -> None:
-    required = verify_postrun._MODULE_SCHEMA_REQUIRED["zookeeper"]
+def test_keeper_module_schema_requires_identity_and_keeper_telemetry(tmp_path: Path) -> None:
+    required = verify_postrun._MODULE_SCHEMA_REQUIRED["keeper"]
     assert {
         "implementation",
         "implementation_confidence",
@@ -1551,14 +1552,14 @@ def test_canonical_zookeeper_module_schema_requires_identity_and_keeper_telemetr
             "host": "127.0.0.1",
             "port": 9181,
             "status": "open_no_auth",
-            "module": "zookeeper",
-            "service": "zookeeper",
+            "module": "keeper",
+            "service": "keeper",
         }
     )
     json_path, log_path = _audit_json(tmp_path, "keeper_cluster", json.dumps(payload))
     rows = [
         _mk_row(
-            module="zookeeper",
+            module="keeper",
             label="keeper_cluster",
             exit_code="0",
             json_path=str(json_path),

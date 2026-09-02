@@ -8,6 +8,7 @@ from typing import Any
 
 from ...clients.zookeeper import (
     ZkImplementationFingerprint,
+    ZkKeeperVirtualProbe,
     ZkTransportConfig,
     fingerprint_zookeeper_implementation,
 )
@@ -70,10 +71,12 @@ def _canonical_implementation_fields(fingerprint: ZkImplementationFingerprint) -
 def _decorate_implementation_record(
     record: dict[str, Any],
     fingerprint: ZkImplementationFingerprint,
+    *,
+    service: str = "zookeeper",
 ) -> dict[str, Any]:
     record.update(
         {
-            "service": "zookeeper",
+            "service": service,
             "protocol": "zookeeper",
             "is_zookeeper_compatible": bool(record.get("is_zookeeper")),
             "is_keeper": fingerprint.is_keeper,
@@ -107,7 +110,7 @@ def _implementation_detection_payload(
         "timestamp": zookeeper_actions.utc_now_iso(),
         "host": str(ctx.host),
         "port": int(ctx.port),
-        "service": "zookeeper",
+        "service": str(options.get("record_service") or "zookeeper"),
         "protocol": "zookeeper",
         "is_zookeeper": detected,
         "is_zookeeper_compatible": detected,
@@ -218,9 +221,43 @@ def detect_zookeeper_implementation(ctx: Any, options: Mapping[str, Any]) -> dic
             config=selected_config or replace(state.requested_config, mode=selected),
         ),
     )
+    virtual_probe: ZkKeeperVirtualProbe | None = None
+    if fingerprint.is_keeper is None and state.zookeeper_state.anonymous_client is not None:
+        try:
+            virtual_probe = state.zookeeper_state.anonymous_client.probe_keeper_virtual_nodes()
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            virtual_probe = ZkKeeperVirtualProbe(confirmed=False, reason=str(exc).strip() or exc.__class__.__name__)
+        if virtual_probe.confirmed:
+            fingerprint = replace(
+                fingerprint,
+                implementation="clickhouse-keeper",
+                is_keeper=True,
+                confidence="confirmed",
+            )
     state.fingerprint = fingerprint
     record["transport"] = selected_transport
-    return _decorate_implementation_record(record, fingerprint)
+    record["implementation_evidence"] = (
+        "keeper_virtual_znodes"
+        if virtual_probe is not None and virtual_probe.confirmed
+        else "four_letter_word"
+        if fingerprint.is_keeper is not None
+        else "unconfirmed"
+    )
+    record["keeper_virtual_probe"] = (
+        {
+            "confirmed": virtual_probe.confirmed,
+            "api_version": virtual_probe.api_version,
+            "children": list(virtual_probe.children),
+            "reason": virtual_probe.reason,
+        }
+        if virtual_probe is not None
+        else None
+    )
+    return _decorate_implementation_record(
+        record,
+        fingerprint,
+        service=str(options.get("record_service") or "zookeeper"),
+    )
 
 
 def authenticate_zookeeper_implementation(
@@ -236,7 +273,11 @@ def authenticate_zookeeper_implementation(
         return dict(detect_record.to_dict() if hasattr(detect_record, "to_dict") else detect_record)
     zookeeper_ctx = replace(ctx, lifecycle_state=state.zookeeper_state)
     result = zookeeper_actions.authenticate_zookeeper(zookeeper_ctx, detect_record, options)
-    return _decorate_implementation_record(result, fingerprint)
+    return _decorate_implementation_record(
+        result,
+        fingerprint,
+        service=str(options.get("record_service") or "zookeeper"),
+    )
 
 
 def collect_zookeeper_implementation_data(
@@ -252,7 +293,11 @@ def collect_zookeeper_implementation_data(
         return dict(record.to_dict() if hasattr(record, "to_dict") else record)
     zookeeper_ctx = replace(ctx, lifecycle_state=state.zookeeper_state)
     result = zookeeper_actions.collect_zookeeper_data(zookeeper_ctx, record, options)
-    return _decorate_implementation_record(result, fingerprint)
+    return _decorate_implementation_record(
+        result,
+        fingerprint,
+        service=str(options.get("record_service") or "zookeeper"),
+    )
 
 
 def probe_zookeeper_implementation_capabilities(
@@ -267,7 +312,38 @@ def probe_zookeeper_implementation_capabilities(
     result = zookeeper_actions.probe_zookeeper_capabilities(zookeeper_ctx, record, options)
     if state.fingerprint is None:
         return result
-    return _decorate_implementation_record(result, state.fingerprint)
+    return _decorate_implementation_record(
+        result,
+        state.fingerprint,
+        service=str(options.get("record_service") or "zookeeper"),
+    )
+
+
+def enforce_expected_implementation(
+    record: Mapping[str, Any],
+    *,
+    expected_is_keeper: bool,
+) -> dict[str, Any]:
+    """Turn a protocol-compatible cross-vendor result into a strict negative."""
+
+    payload = dict(record)
+    if not bool(payload.get("is_zookeeper")):
+        return payload
+    actual = payload.get("is_keeper")
+    payload["expected_implementation"] = "clickhouse-keeper" if expected_is_keeper else "apache-zookeeper"
+    if actual is expected_is_keeper:
+        return payload
+
+    module_name = "keeper" if expected_is_keeper else "zookeeper"
+    if actual is None:
+        payload["status"] = f"not_{module_name}_unconfirmed"
+        payload["error"] = "ZooKeeper-compatible implementation could not be confirmed"
+    else:
+        actual_name = "ClickHouse Keeper" if actual is True else "Apache ZooKeeper"
+        payload["status"] = f"not_{module_name}"
+        payload["error"] = f"{actual_name} fingerprint does not match {module_name} module"
+    payload["operational_failure"] = False
+    return payload
 
 
 __all__ = [
@@ -277,4 +353,5 @@ __all__ = [
     "authenticate_zookeeper_implementation",
     "collect_zookeeper_implementation_data",
     "probe_zookeeper_implementation_capabilities",
+    "enforce_expected_implementation",
 ]

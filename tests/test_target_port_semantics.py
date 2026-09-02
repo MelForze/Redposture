@@ -29,6 +29,7 @@ _AUDIT_MODULES = (
     "grpc",
     "kafka",
     "zookeeper",
+    "keeper",
 )
 
 

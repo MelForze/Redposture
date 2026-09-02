@@ -25,7 +25,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 8006
-_DEFAULT_PORTS: tuple[int, ...] | None = (8006, 18006)
+_DEFAULT_PORTS: tuple[int, ...] | None = (8006, 18006, 28006)
 _PROXMOX_HOST_STAGE = actions.host_stage
 _PROXMOX_HOST_STAGE_NAME = actions.host_stage.__name__
 _PROXMOX_HOST_STAGE_IMPL = getattr(actions, _PROXMOX_HOST_STAGE_NAME, actions.host_stage)

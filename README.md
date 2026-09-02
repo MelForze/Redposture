@@ -25,7 +25,7 @@ Use it only on systems you own or are explicitly authorized to assess.
 ## Features
 
 - Exporter workflows: discover, collect, and trigger Prometheus-style exporters and debug endpoints.
-- Service audit modules: `registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `kubeapi`, `postgres`, `mongodb`, `docker`, `oracle`, `clickhouse`, `redis`, `etcd`, `qdrant`, `elastic`, `grpc`, `kafka`, and `zookeeper`.
+- Service audit modules: `registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `kubeapi`, `postgres`, `mongodb`, `docker`, `oracle`, `clickhouse`, `redis`, `etcd`, `qdrant`, `elastic`, `grpc`, `kafka`, `zookeeper`, and `keeper`.
 - Multi-target and multi-port scans from comma-separated values, per-target `host:port` entries, CIDR/ranges where supported, or target files.
 - Authentication checks with explicit credentials, default-credential checks where implemented, and credential-file workflows in supported modules.
 - Optional data enumeration and bounded dumps for data-store modules.
@@ -76,14 +76,15 @@ postgres    PostgreSQL auth, enumeration, dumps, privilege-risk checks
 mongodb     MongoDB auth, databases, collections, indexes, documents
 docker      Docker Engine TCP API, inventory, explicit container exec checks
 oracle      Oracle listener, SID/service auth, PDB/CDB, privilege and explicit actions
-clickhouse  ClickHouse auth, enumeration, dumps, explicit command checks
+clickhouse  ClickHouse auth, enumeration, exhaustive secret discovery, dumps, explicit command checks
 redis       Redis auth/default credentials, keys, dumps
 etcd        etcd API auth and key/value visibility
 qdrant      Qdrant collections, collection info, snapshot SSRF check helpers
 elastic     Elasticsearch exposure, auth, cluster/user endpoints, discovery
 grpc        gRPC transport/auth/reflection/health/invoke/OpenAPI
 kafka       Kafka auth, topic visibility, bounded message dumps
-zookeeper   ZooKeeper/Keeper identity, TLS, auth, health, and znode visibility
+zookeeper   Apache ZooKeeper identity, TLS, auth, health, and znode visibility
+keeper      ClickHouse Keeper identity, TLS, auth, quorum, and znode visibility
 ```
 
 Use command help for the complete, current flag list:
@@ -154,6 +155,7 @@ redposture elastic -t http://elastic.internal:9200 --proxy http://127.0.0.1:8080
 | gRPC | Basic: `admin:admin`, `admin:changeme`, `admin:password`, `dev:dev`, `grpc:admin`, `grpc:grpc`, `grpc:password`, `guest:guest`, `root:admin`, `root:password`, `root:root`, `service:password`, `service:service`, `test:test`, `user:password`, `user:user`.<br>Bearer tokens: `admin`, `changeme`, `default-token`, `grpc`, `secret`, `token`. |
 | Kafka | `admin:admin`, `admin:admin-secret`, `admin:changeme`, `admin:kafka`, `admin:password`, `broker:broker`, `broker:brokerpass`, `client:client`, `kafka:admin`, `kafka:changeme`, `kafka:kafka`, `kafka:password`, `kafka:zookeeper`, `service:password`, `service:service`, `user:password`, `user:user` |
 | ZooKeeper | `admin:admin`, `admin:changeme`, `admin:kafka`, `admin:password`, `admin:zookeeper`, `broker:broker`, `broker:brokerpass`, `client:client`, `dev:dev`, `guest:guest`, `hadoop:hadoop`, `kafka:changeme`, `kafka:kafka`, `kafka:password`, `kafka:zookeeper`, `root:admin`, `root:password`, `root:root`, `root:rootpass`, `root:zookeeper`, `service:password`, `service:service`, `solr:solr`, `super:super`, `test:test`, `user:password`, `user:user`, `user1:12345`, `zk:password`, `zk:zk`, `zk:zookeeper`, `zookeeper:admin`, `zookeeper:password`, `zookeeper:zookeeper` |
+| Keeper | `admin:admin`, `admin:changeme`, `admin:clickhouse`, `admin:keeper`, `admin:password`, `clickhouse:changeme`, `clickhouse:clickhouse`, `clickhouse:keeper`, `clickhouse:password`, `default:<empty>`, `default:changeme`, `default:clickhouse`, `default:default`, `default:password`, `keeper:changeme`, `keeper:clickhouse`, `keeper:keeper`, `keeper:password`, `root:clickhouse`, `root:keeper`, `root:password`, `root:root`, `service:password`, `service:service`, `user:password`, `user:user` |
 
 ## Module Examples
 
@@ -186,7 +188,7 @@ redposture grafana -t 127.0.0.1 --defcreds --show-datasources
 ```
 
 `--defcreds` performs ordered online authentication probes in ClickHouse, Elastic/OpenSearch, etcd,
-Grafana, gRPC, Kafka, MongoDB, Oracle, Postgres, Proxmox, Redis, and ZooKeeper. Explicit tokens,
+Grafana, gRPC, Kafka, Keeper, MongoDB, Oracle, Postgres, Proxmox, Redis, and ZooKeeper. Explicit tokens,
 username/password pairs, credential-file entries, and module-specific combo/spray inputs keep priority;
 the curated module defaults are sorted case-insensitively by login and then password before they are appended
 once with stable deduplication. With `--defcreds`, every candidate is checked and rendered even after a
@@ -209,8 +211,8 @@ redposture consul -t 127.0.0.1 --keys --services --agents --checks --nodes
 redposture consul -t https://consul.internal --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --services
 ```
 
-Bare Consul targets scan both the HTTP `8500` and HTTPS `8501` defaults. HTTPS verification is never
-disabled automatically; use `--insecure` explicitly for an authorized self-signed lab.
+Bare Consul targets scan HTTP-first `8500`, `18500`, `28500` and HTTPS-first `8501`, `18501`, `28501`.
+HTTPS verification is never disabled automatically; use `--insecure` for an authorized self-signed lab.
 
 Kubernetes API visibility:
 
@@ -278,14 +280,24 @@ redposture oracle -t oracle.internal --port 2484 --protocol tcps --service FREEP
 redposture oracle -t 127.0.0.1 --service FREEPDB1 -u redposture -p 'OracleLab!2026' --show-pdbs --show-users --privesc-check
 ```
 
-ClickHouse enumeration and bounded dump:
+ClickHouse enumeration, bounded dump, and resumable full secret discovery:
 
 ```bash
 redposture clickhouse -t 127.0.0.1 --show-databases --show-tables 20
 redposture clickhouse -t 127.0.0.1 --protocol auto
 redposture clickhouse -t 127.0.0.1 -u default -p default --table secure.secrets_inventory --dump 5
+redposture clickhouse -t 127.0.0.1 --discover --checkpoint clickhouse-discover.json
+redposture clickhouse -t 127.0.0.1 --discover --resume --checkpoint clickhouse-discover.json
 redposture clickhouse -t clickhouse.internal --tls --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --show-databases
 ```
+
+`--discover` inventories readable databases, tables, columns, partitions, sizes and keys, then scans every
+content-capable column in partitioned chunks. Neutral column names are not skipped. Nested JSON, maps and arrays
+are inspected with object paths; malformed JSON is still scanned as text. Findings are fingerprinted, deduplicated
+and emitted with their complete values. The atomic checkpoint records each completed or
+failed chunk and per-column coverage; `--resume` skips only completed chunks. Query time, row, byte, memory and
+thread budgets are configurable in `clickhouse --help`; a budget or permission failure is reported as partial,
+never as 100% coverage.
 
 ClickHouse scans are native-first. If the native driver receives a deterministic incompatible-packet response,
 RedPosture immediately tries the HTTP API on the same port (HTTPS when `--tls` is enabled). `--protocol auto`
@@ -303,7 +315,7 @@ requested action is partial or fails; inspect `action_statuses`, `partial_reason
 ClickHouse HTTP(S) mode can use the global HTTP proxy. Native ClickHouse mode rejects `--proxy` because the
 installed native driver cannot guarantee that traffic is routed through it.
 
-Redis, etcd, Qdrant, Kafka, and ZooKeeper-compatible services:
+Redis, etcd, Qdrant, Kafka, Apache ZooKeeper, and ClickHouse Keeper:
 
 ```bash
 redposture redis -t 127.0.0.1 --show-keys 20 --dump 10
@@ -315,22 +327,16 @@ redposture kafka -t 192.0.2.10 --port 9093 --tls --tls-server-name kafka.interna
 redposture zookeeper -t 127.0.0.1 --show-znodes 20 --dump 10
 redposture zookeeper -t 127.0.0.1 --defcreds --show-znodes 20
 redposture zookeeper -t 127.0.0.1 --port 9281 --insecure --show-znodes 20
+redposture keeper -t 127.0.0.1 --show-znodes 20 --dump 10
+redposture keeper -t 127.0.0.1 --defcreds --probe-write
 ```
 
-ZooKeeper `--defcreds` tries a fixed set of 34 digest username/password pairs. Explicit credentials or
-credential-file entries are attempted first, defaults are appended once with stable deduplication, and the
-defaults are ordered alphabetically by login and then password. The full catalog is checked even after one
-or more identities are confirmed. The first confirmed identity is retained for znode analysis. A credential
-is only accepted when the same ACL-protected path changes from anonymous `NOAUTH` to authenticated `OK`;
-a successful ZooKeeper `addAuth` frame alone does not validate a password. For an anonymously readable root,
-RedPosture checks the explicit `--znode` and at most 32 direct children for a protected verifier. If none is
-available, the default catalog is skipped and one verification-unavailable warning suggests supplying a known
-protected `--znode`. A verifiable run makes up to 34 digest authentication attempts per target (plus unique
-explicit/file entries). Use this option only with authorization and account for server-side lockout,
-throttling, and alerting policies.
+ZooKeeper and Keeper use separate ordered digest catalogs; Keeper favors `clickhouse`, `keeper`, and `default`
+identities. A pair is valid only when an ACL-protected path changes from anonymous `NOAUTH` to authenticated
+`OK`; `addAuth` alone is not proof. RedPosture checks `--znode` and at most 32 root children for such a verifier.
+Without one, defaults are skipped and the output asks for a protected `--znode`.
 
-The focused auth-required lab protects `/` and `/redposture-auth` with a digest ACL for
-`zk:zookeeper`. In the alphabetical catalog that pair is intentionally the 31st default candidate:
+The auth lab protects `/` and `/redposture-auth` for `zk:zookeeper`:
 
 ```bash
 docker compose -f lab/services/zookeeper-auth/docker-compose.yml up -d --wait
@@ -340,21 +346,14 @@ docker compose -f lab/services/zookeeper-auth/docker-compose.yml down -v
 
 ### ZooKeeper and ClickHouse Keeper audit
 
-`zookeeper` is the canonical ZooKeeper-protocol audit and scans bare targets on ports `2181`, `9181`, and
-`12181`. It auto-detects plaintext/TLS and classifies the implementation as Apache ZooKeeper, ClickHouse
-Keeper, or an unconfirmed ZooKeeper-compatible service. TLS trust and mTLS use `--ca-file`, `--insecure`,
-`--tls-cert`, and `--tls-key`; an explicit `host:port` or `--port` still takes priority. Detection is
-read-only. Znode traversal only runs with `--show-znodes` or `--dump`, while `--znode` reads that path
-directly. `--show-znodes` reports the number of displayed paths as `Show Znodes (Count:N)`; partial/tree-limit
-diagnostics remain available with `--debug` and in JSON. A disabled or ambiguous four-letter interface never
-forces a Keeper label.
+Both commands share the wire client but route strictly: `zookeeper` accepts Apache ZooKeeper on default ports
+`2181`, `12181`, and `22181`; `keeper` accepts ClickHouse Keeper on `9181`, `19181`, and `29181`. Wrong-vendor and unconfirmed endpoints are JSON/debug
+diagnostics only and never run credentials or actions. TLS/mTLS and znode flags are identical. When 4LW is
+disabled, Keeper is confirmed read-only only if `/keeper` exposes `api_version` and `feature_flags` and the
+API version is a positive integer.
 
-`--probe-write` is the only write-capable ZooKeeper action. It opens a separate short-lived session, creates a
-unique empty ephemeral znode under `/`, tests deletion, and closes the session as a final cleanup boundary.
-The resulting `create`/`delete` values therefore describe the selected identity's permissions at root scope,
-not every subtree. Without `--probe-write`, credential lines never display speculative capability values and
-the module remains read-only. For a verified credential, the confirmed `(create:...) (delete:...)`
-capabilities are appended to its `[+] user:password` line; anonymous capabilities remain a separate line.
+`--probe-write` is the only write action. It creates and deletes a unique ephemeral root znode in a separate
+session, then closes that session for cleanup. Without the flag both modules remain read-only.
 
 Start the focused lab (three-node Keeper cluster, TLS standalone, a Keeper with diagnostic four-letter commands disabled, seeded znodes, and an Apache ZooKeeper classification control):
 
@@ -363,13 +362,13 @@ docker compose -f lab/services/keeper/docker-compose.yml up -d --wait
 docker compose -f lab/services/keeper/docker-compose.yml ps
 ```
 
-Run high-signal plaintext, TLS, unconfirmed-fallback, and Apache-classification audits:
+Run high-signal plaintext, TLS, read-only fallback, and Apache-classification audits:
 
 ```bash
-redposture zookeeper -t 127.0.0.1 --port 9181,19181,29181 --show-znodes 20 --dump 20 --enum-workers 3 -d -f json
+redposture keeper -t 127.0.0.1 --port 9181,19181,29181 --show-znodes 20 --dump 20 --enum-workers 3 -d -f json
 redposture zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --probe-write
-redposture zookeeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10 -d -f json
-redposture zookeeper -t 127.0.0.1 --port 39181 --znode /keeper/api_version --dump -f json
+redposture keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10 -d -f json
+redposture keeper -t 127.0.0.1 --port 39181 --znode /keeper/api_version --dump -f json
 redposture zookeeper -t 127.0.0.1 --port 12181 --show-znodes 5 -d -f json
 ```
 

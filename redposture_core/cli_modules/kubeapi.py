@@ -33,7 +33,7 @@ def configure_kubeapi_parser(
         help=(
             "Kubernetes API port spec: single port, list/range, or file "
             "(examples: 6443, 6443,8443, ./ports.txt). "
-            "If omitted, scans 6443, 16443."
+            "If omitted, scans 6443, 16443, 26443."
         ),
     )
     add_multi_ports_flag(common)

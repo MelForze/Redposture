@@ -92,6 +92,16 @@ _COMMAND_EXCLUDED_DESTS: dict[str, dict[str, str]] = {
         "ca_file": "CA bundle loading is unit-tested; live lab uses --insecure/self-signed shortcuts.",
         "exec_command": "pod exec is excluded from sequential matrix to avoid pod-name drift; resource visibility is covered.",
     },
+    "keeper": {
+        "ca_file": "Keeper and ZooKeeper share TLS validation; custom-CA handling is covered by the shared protocol tests.",
+        "debug": "wrong-vendor and unconfirmed Keeper debug rendering is covered by focused unit tests.",
+        "defcreds": "Keeper and ZooKeeper share the ordered digest verifier; parity is covered by focused unit tests.",
+        "out_targets": "shared target exclusion is covered through ZooKeeper and common target-expansion tests.",
+        "ports": "the Keeper lab uses comma-separated --port; the equivalent --ports action is covered by parser parity tests.",
+        "probe_write": "the shared ephemeral write probe is exercised by ZooKeeper lab and Keeper parity unit tests.",
+        "tls_cert": "Keeper and ZooKeeper share mTLS validation; certificate pairing is covered by shared tests.",
+        "tls_key": "Keeper and ZooKeeper share mTLS validation; key pairing is covered by shared tests.",
+    },
 }
 
 

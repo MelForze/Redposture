@@ -8,6 +8,8 @@ from typing import Any
 
 import pytest
 
+import redposture_core.clients.http_session as http_session
+from redposture_core.clients.http_session import HttpSessionPool
 from redposture_core.modules.elastic import http_session as session_module
 from redposture_core.modules.elastic.http_session import ElasticHttpSession
 
@@ -426,3 +428,71 @@ def test_https_fallback_with_ca_reports_certificate_verification_enabled(
     assert result[0] == 200
     assert result[4] == "https"
     assert result[5] is False
+
+
+def _pool(retries):
+    return HttpSessionPool(timeout=3.0, retries=retries)
+
+
+def test_request_escalates_timeout_on_timeout(monkeypatch):
+    seen_timeouts = []
+
+    def fake_once(self, method, url, *, headers, body, timeout, response_size_cap):
+        seen_timeouts.append(timeout)
+        exc = TimeoutError("timed out")
+        from redposture_core.clients.http_api import normalize_http_error
+
+        return (
+            http_session.HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc)),
+            exc,
+            False,
+        )
+
+    monkeypatch.setattr(HttpSessionPool, "_request_once", fake_once)
+    # attempts = retries + 1 (see HttpSessionPool.request); retries=2 -> 3 attempts,
+    # exactly matching the 3-rung escalation ladder (base, max(5,base), max(7,base)).
+    pool = _pool(retries=2)
+    pool.request("GET", "http://127.0.0.1:9200/")
+    assert seen_timeouts == [3.0, 5.0, 7.0]
+
+
+def test_request_does_not_retry_on_refused(monkeypatch):
+    calls = []
+
+    def fake_once(self, method, url, *, headers, body, timeout, response_size_cap):
+        calls.append(timeout)
+        exc = ConnectionRefusedError("[Errno 61] Connection refused")
+        from redposture_core.clients.http_api import normalize_http_error
+
+        return (
+            http_session.HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc)),
+            exc,
+            False,
+        )
+
+    monkeypatch.setattr(HttpSessionPool, "_request_once", fake_once)
+    pool = _pool(retries=3)
+    pool.request("GET", "http://127.0.0.1:9200/")
+    assert calls == [3.0]  # одна попытка, без ретраев
+
+
+def test_request_retries_stale_protocol_error_with_empty_str(monkeypatch):
+    calls = []
+
+    def fake_once(self, method, url, *, headers, body, timeout, response_size_cap):
+        calls.append(timeout)
+        if len(calls) == 1:
+            exc = http.client.CannotSendRequest()  # str() пустой → classify="other"
+            from redposture_core.clients.http_api import normalize_http_error
+
+            return (
+                http_session.HttpResponse(status=0, body=b"", headers={}, error=normalize_http_error(exc)),
+                exc,
+                False,
+            )
+        return (http_session.HttpResponse(status=200, body=b"ok", headers={}), None, False)
+
+    monkeypatch.setattr(HttpSessionPool, "_request_once", fake_once)
+    pool = _pool(retries=1)
+    assert pool.request("GET", "http://127.0.0.1:9200/").body == b"ok"
+    assert len(calls) == 2  # переоткрытие + повтор

@@ -31,6 +31,7 @@ COMMAND_QDRANT = _registry.COMMAND_QDRANT
 COMMAND_KUBEAPI = _registry.COMMAND_KUBEAPI
 COMMAND_KAFKA = _registry.COMMAND_KAFKA
 COMMAND_ZOOKEEPER = _registry.COMMAND_ZOOKEEPER
+COMMAND_KEEPER = _registry.COMMAND_KEEPER
 COMMAND_ELASTIC = _registry.COMMAND_ELASTIC
 COMMAND_GRPC = _registry.COMMAND_GRPC
 COMMAND_MONGODB = _registry.COMMAND_MONGODB
@@ -326,7 +327,7 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         "--timeout",
         dest="timeout",
         type=_positive_float,
-        default=1.0,
+        default=3.0,
         metavar="seconds",
         help="Network timeout in seconds.",
     )
@@ -502,7 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Security toolkit for module-focused auditing (exporters, registry, grafana, proxmox, gitlab, "
             "consul, kubeapi, postgres, mongodb, docker, oracle, clickhouse, redis, etcd, qdrant, elastic, kafka, "
-            "zookeeper, grpc). "
+            "zookeeper, keeper, grpc). "
             "Use '<module> -h' for grouped flags by topic."
         ),
     )

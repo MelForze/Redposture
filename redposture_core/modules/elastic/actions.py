@@ -876,6 +876,24 @@ def _is_elastic_auth_error_payload(body: dict[str, Any]) -> bool:
     return False
 
 
+def _has_elastic_version_metadata(body: dict[str, Any]) -> bool:
+    version = body.get("version")
+    if not isinstance(version, dict):
+        return False
+    product_fields = (
+        "build_flavor",
+        "build_type",
+        "build_hash",
+        "build_date",
+        "lucene_version",
+        "minimum_wire_compatibility_version",
+        "minimum_index_compatibility_version",
+    )
+    return any(
+        isinstance(version.get(field), str) and bool(str(version.get(field) or "").strip()) for field in product_fields
+    )
+
+
 def _looks_like_non_json_gateway_payload(payload: bytes, headers: dict[str, str]) -> bool:
     content_type = str(_header_lookup(headers, "Content-Type") or "").strip().lower()
     if "application/json" in content_type:
@@ -954,7 +972,11 @@ def _classify_detect_probe(
                     signals.append("root_tagline")
                 kind = "hard_positive"
                 vendor = vendor or "elasticsearch"
-            if version and (body.get("cluster_name") is not None or body.get("name") is not None):
+            if (
+                version
+                and (body.get("cluster_name") is not None or body.get("name") is not None)
+                and _has_elastic_version_metadata(body)
+            ):
                 if "root_version_shape" not in signals:
                     signals.append("root_version_shape")
                 kind = "hard_positive"

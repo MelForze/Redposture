@@ -246,7 +246,7 @@ def test_audit_gitlab_host_detects_public_projects_and_open_endpoints(monkeypatc
         if path == "/users/sign_in":
             return 200, b"<title>GitLab</title> users/sign_in", {}, None
         if path == "/api/v4/version":
-            return 200, b'{"version":"16.9.0"}', {}, None
+            return 200, b'{"version":"16.9.0","revision":"abc123"}', {}, None
         return 200, b"[]", {}, None
 
     def fake_paginate_projects(
@@ -310,7 +310,7 @@ def test_audit_gitlab_host_valid_token_probes_access_and_clones(monkeypatch) -> 
         if path == "/users/sign_in":
             return 200, b"<title>GitLab</title> users/sign_in", {}, None
         if path == "/api/v4/version":
-            return 200, b'{"version":"16.9.0"}', {}, None
+            return 200, b'{"version":"16.9.0","revision":"abc123"}', {}, None
         return 404, b"{}", {}, None
 
     def fake_api_get_json(
