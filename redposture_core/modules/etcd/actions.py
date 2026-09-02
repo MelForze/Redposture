@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import threading
 import time
 import urllib.error
@@ -322,6 +323,24 @@ def _major_version(value: str | None) -> int | None:
     if not part.isdigit():
         return None
     return int(part)
+
+
+def _looks_like_etcd_version(payload: Any) -> tuple[bool, str | None]:
+    if not isinstance(payload, dict):
+        return False, None
+    server_version = payload.get("etcdserver")
+    if not isinstance(server_version, str):
+        return False, None
+    clean = server_version.strip()
+    if not re.fullmatch(r"v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?", clean):
+        return False, None
+    cluster_version = payload.get("etcdcluster")
+    if cluster_version is not None and not (
+        isinstance(cluster_version, str)
+        and re.fullmatch(r"v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?", cluster_version.strip())
+    ):
+        return False, None
+    return True, clean
 
 
 def _count_v2_nodes(node: Any) -> int:
@@ -712,13 +731,8 @@ def _audit_etcd_host(
 
             server_version: str | None = None
             is_etcd = False
-            if version_status == 200 and isinstance(version_json, dict):
-                etcdserver = version_json.get("etcdserver")
-                if isinstance(etcdserver, str) and etcdserver:
-                    server_version = etcdserver
-                    is_etcd = True
-                elif "etcdcluster" in version_json:
-                    is_etcd = True
+            if version_status == 200:
+                is_etcd, server_version = _looks_like_etcd_version(version_json)
 
             major = _major_version(server_version)
             v3_supported = bool(is_etcd and (major is None or major >= 3))

@@ -346,8 +346,14 @@ def _looks_like_proxmox_response(
     parsed = _parse_json_payload(payload)
     if not isinstance(parsed, dict) or "data" not in parsed:
         return False
-    if status == 200 and isinstance(parsed.get("data"), (dict, list)):
-        return True
+    data = parsed.get("data")
+    if status == 200 and isinstance(data, dict):
+        pve_fields = {"clustername", "ticket", "CSRFPreventionToken", "cap"}
+        if pve_fields.intersection(data):
+            return True
+        username = data.get("username") or data.get("userid")
+        if isinstance(username, str) and "@" in username:
+            return True
     if status not in {401, 403}:
         return False
     message = (_extract_error_message(payload) or "").lower()
@@ -356,11 +362,9 @@ def _looks_like_proxmox_response(
         for marker in (
             "pve",
             "proxmox",
-            "authentication failure",
-            "authentication required",
-            "permission check failed",
-            "permission denied",
-            "ticket",
+            "pve authentication failure",
+            "invalid pve ticket",
+            "pve ticket",
         )
     )
 

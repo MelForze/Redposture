@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from redposture_core.clients.zookeeper import ZkImplementationFingerprint
 from redposture_core.modules.elastic import actions as elastic_actions
 from redposture_core.modules.elastic import stage as elastic_stage
 from redposture_core.modules.kafka import actions as kafka_actions
@@ -25,6 +26,18 @@ def _run_one_target(args, spec, port: int, credential_runs: tuple[AuditCredentia
         workers=1,
     )
     return AuditCommandRunner(args=args, spec=spec, emit_line=lambda _line: None).run_plan(plan)
+
+
+def _force_apache_zookeeper_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        zookeeper_stage.ZooKeeperFingerprintCache,
+        "get_or_probe",
+        lambda *_args, **_kwargs: ZkImplementationFingerprint(
+            implementation="apache-zookeeper",
+            is_keeper=False,
+            confidence="confirmed",
+        ),
+    )
 
 
 def test_kafka_lifecycle_classifies_once_then_authenticates_until_success_and_dumps_once(
@@ -201,6 +214,7 @@ def test_elastic_lifecycle_detect_is_anonymous_and_actions_use_only_selected_aut
 def test_zookeeper_lifecycle_reuses_anonymous_detect_and_runs_selected_data_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _force_apache_zookeeper_fingerprint(monkeypatch)
     args = SimpleNamespace(
         timeout=1.0,
         retries=0,
@@ -297,6 +311,7 @@ def test_zookeeper_lifecycle_reuses_anonymous_detect_and_runs_selected_data_once
 def test_zookeeper_lifecycle_retries_transient_auth_without_repeating_detect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _force_apache_zookeeper_fingerprint(monkeypatch)
     args = SimpleNamespace(
         timeout=1.0,
         retries=1,
@@ -371,6 +386,7 @@ def test_zookeeper_lifecycle_retries_transient_auth_without_repeating_detect(
 def test_zookeeper_lifecycle_does_not_retry_definitive_digest_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _force_apache_zookeeper_fingerprint(monkeypatch)
     args = SimpleNamespace(
         timeout=1.0,
         retries=2,
@@ -433,6 +449,7 @@ def test_zookeeper_lifecycle_does_not_retry_definitive_digest_rejection(
 def test_zookeeper_lifecycle_transient_auth_exhaustion_is_unverified_not_rejected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _force_apache_zookeeper_fingerprint(monkeypatch)
     args = SimpleNamespace(
         timeout=1.0,
         retries=1,
@@ -496,6 +513,7 @@ def test_zookeeper_lifecycle_transient_auth_exhaustion_is_unverified_not_rejecte
 def test_zookeeper_lifecycle_retries_throttled_enumeration_without_redetect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _force_apache_zookeeper_fingerprint(monkeypatch)
     args = SimpleNamespace(
         timeout=1.0,
         retries=2,

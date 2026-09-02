@@ -190,8 +190,8 @@ def _install_proxmox_lifecycle_request_spy(
             )
         if path == "/access" and not auth_headers:
             if anonymous_access:
-                return 200, _json_payload({}), {}, None
-            return 401, _json_payload({"message": "authentication required"}), {}, None
+                return 200, _json_payload({"clustername": "lab"}), {}, None
+            return 401, _json_payload({"message": "authentication required"}), {"Server": "pve-api-daemon"}, None
         if path == "/access" and deep_error is not None:
             raise deep_error
         if path == "/access/permissions?path=/":
@@ -386,7 +386,12 @@ def test_proxmox_invalid_token_falls_back_to_basic_without_disclosure(
         )
         calls.append((path, auth_kind))
         if path == "/access" and auth_kind == "anonymous":
-            return 401, _json_payload({"message": "authentication required"}), {}, None
+            return (
+                401,
+                _json_payload({"message": "authentication required"}),
+                {"Server": "pve-api-daemon"},
+                None,
+            )
         if path == "/access" and auth_kind == "token":
             return 401, _json_payload({"message": "invalid api token"}), {}, None
         if path == "/access/ticket":

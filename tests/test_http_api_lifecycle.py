@@ -414,7 +414,9 @@ def test_consul_token_auth_replays_detection_and_runs_no_action_twice(
     def fake_request(*_args, **_kwargs):
         nonlocal probes
         probes += 1
-        return 200, b'"127.0.0.1:8300"', {}, None, False, False
+        path = str(_args[3])
+        payload = b'["127.0.0.1:8300"]' if path == "/v1/status/peers" else b'"127.0.0.1:8300"'
+        return 200, payload, {}, None, False, False
 
     def fake_scope(*_args, headers=None, **_kwargs):
         matrix_headers.append(headers)
@@ -440,7 +442,7 @@ def test_consul_token_auth_replays_detection_and_runs_no_action_twice(
     args = parse_args(["consul", "-t", "127.0.0.1", "--port", "8500", "--token", "valid", "--format", "json"])
     result = _run(consul, "consul", args)
 
-    assert probes == 1
+    assert probes == 2
     assert matrix_headers == [None, None, None, {"X-Consul-Token": "valid"}] * 1 + [
         {"X-Consul-Token": "valid"},
         {"X-Consul-Token": "valid"},

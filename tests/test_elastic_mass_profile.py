@@ -370,3 +370,13 @@ def test_debug_emits_effective_mass_profile(monkeypatch: pytest.MonkeyPatch) -> 
     assert "workers=50" in profile_lines[0]
     assert "retries=0" in profile_lines[0]
     assert "automatic=retries,timeout" in profile_lines[0]
+
+
+def test_mass_profile_keeps_single_attempt_no_ladder() -> None:
+    args = parse_args(["elastic", "-t", "10.0.0.0/18"])
+    plan = elastic_stage.build_elastic_plan(args)
+    assert plan.target_count >= 10_000
+    # mass-профиль держит retries=0 → одна попытка → лесенка не разворачивается
+    assert args.retries == 0
+    # база mass-профиля остаётся сжатой ради throughput (не эскалирует)
+    assert args.timeout == 1.0

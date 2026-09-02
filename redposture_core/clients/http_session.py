@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..network_proxy import ProxyConfig, open_connection_via_proxy
+from . import transport
 from .http_api import HttpResponse, normalize_http_error
 from .tls_cache import shared_client_ssl_context
 
@@ -32,23 +33,6 @@ def _origin(url: str) -> tuple[str, str, int]:
 def _request_path(url: str) -> str:
     parsed = urllib.parse.urlsplit(url)
     return urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
-
-
-def _transient_error(exc: BaseException) -> bool:
-    if isinstance(exc, ssl.SSLCertVerificationError):
-        return False
-    return isinstance(
-        exc,
-        (
-            TimeoutError,
-            ConnectionError,
-            OSError,
-            ssl.SSLError,
-            http.client.CannotSendRequest,
-            http.client.RemoteDisconnected,
-            http.client.ResponseNotReady,
-        ),
-    )
 
 
 class _LayeredTlsRaw(io.RawIOBase):
@@ -322,16 +306,24 @@ class HttpSessionPool:
             response: HttpResponse | None = None
             attempts = max(1, int(self.default_retries if retries is None else retries) + 1)
             for attempt in range(attempts):
+                attempt_timeout = transport.escalating_timeout(timeout_value, attempt)
                 response, request_error, _reused = self._request_once(
                     method_value,
                     current_url,
                     headers=headers_value,
                     body=body_value,
-                    timeout=timeout_value,
+                    timeout=attempt_timeout,
                     response_size_cap=response_size_cap,
                 )
-                if request_error is None or not safe or not _transient_error(request_error) or attempt >= attempts - 1:
+                if request_error is None or not safe or attempt >= attempts - 1:
                     break
+                reason = transport.classify_failure_reason(response.error)
+                stale_protocol = isinstance(
+                    request_error,
+                    (http.client.CannotSendRequest, http.client.RemoteDisconnected, http.client.ResponseNotReady),
+                )
+                if not (transport.is_escalating_reason(reason) or stale_protocol):
+                    break  # refused/dns/network/tls/other и не-stale — ретрай бесполезен
                 with self._lock:
                     self._stats["retries"] += 1
                 time.sleep(min(1.5, 0.2 * (2**attempt)))

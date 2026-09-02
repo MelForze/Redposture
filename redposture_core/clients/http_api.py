@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..network_proxy import ProxyConfig, open_connection_via_proxy, parse_proxy_config
+from . import transport
 from .tls_cache import shared_client_ssl_context
 
 
@@ -455,16 +456,21 @@ class HttpApiClient:
 
     def send(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:
         attempts = max(1, int(self.config.retries) + 1)
+        base_timeout = self.config.timeout if timeout is None else float(timeout)
         last_error = ""
         for attempt in range(1, attempts + 1):
-            response = self._send_once(request, timeout=timeout)
+            attempt_timeout = transport.escalating_timeout(base_timeout, attempt - 1)
+            response = self._send_once(request, timeout=attempt_timeout)
             if response.error is None:
                 return response
             last_error = response.error
             if response.error.startswith("cross-origin redirect blocked:"):
                 return response
-            if attempt < attempts:
+            reason = transport.classify_failure_reason(response.error)
+            if attempt < attempts and transport.is_escalating_reason(reason):
                 time.sleep(max(0.0, float(self.config.backoff)) * attempt)
+                continue
+            break
         return HttpResponse(
             status=0,
             body=b"",

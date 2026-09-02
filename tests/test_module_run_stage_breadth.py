@@ -28,6 +28,7 @@ RUN_CASES = {
     "grpc": ["grpc", "-t", "127.0.0.1"],
     "clickhouse": ["clickhouse", "-t", "127.0.0.1"],
     "zookeeper": ["zookeeper", "-t", "127.0.0.1"],
+    "keeper": ["keeper", "-t", "127.0.0.1"],
 }
 
 

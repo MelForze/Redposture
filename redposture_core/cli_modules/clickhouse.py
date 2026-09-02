@@ -37,6 +37,7 @@ def configure_clickhouse_parser(
     common = parser.add_argument_group("Common")
     auth = parser.add_argument_group("Auth")
     actions = parser.add_argument_group("Actions")
+    discover = parser.add_argument_group("Discovery")
     exec_group = parser.add_argument_group("Execute / Shell")
     add_output_flags(common, short=False)
     add_log_flag(common)
@@ -153,6 +154,84 @@ def configure_clickhouse_parser(
             "Dump table rows. Optional count limits rows per table. With --table dumps selected table(s); without --table dumps all readable tables."
         ),
     )
+    discover.add_argument(
+        "--discover",
+        action="store_true",
+        help="Exhaustively inventory readable tables and scan every content-capable column for secrets.",
+    )
+    discover.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume --discover from completed chunks in the checkpoint instead of starting a new target run.",
+    )
+    discover.add_argument(
+        "--checkpoint",
+        default=None,
+        metavar="file",
+        help="Durable JSON checkpoint for resumable discovery (opt-in; runs in-memory with no file when omitted).",
+    )
+    discover.add_argument(
+        "--discover-chunk-rows",
+        type=int,
+        default=1000,
+        metavar="count",
+        help="Initial rows per discovery query; resource failures split chunks automatically (default: 1000).",
+    )
+    discover.add_argument(
+        "--max-query-time",
+        type=float,
+        default=10.0,
+        metavar="seconds",
+        help="ClickHouse max_execution_time for each discovery chunk (default: 10).",
+    )
+    discover.add_argument(
+        "--max-query-rows",
+        type=int,
+        default=100000,
+        metavar="count",
+        help="Maximum rows ClickHouse may read for an individual discovery query (default: 100000).",
+    )
+    discover.add_argument(
+        "--max-query-bytes",
+        type=int,
+        default=67108864,
+        metavar="bytes",
+        help="Maximum bytes ClickHouse may read for an individual discovery query (default: 67108864).",
+    )
+    discover.add_argument(
+        "--max-query-memory",
+        "--max-memory",
+        type=int,
+        default=268435456,
+        metavar="bytes",
+        help="Maximum ClickHouse memory for an individual discovery query (default: 268435456).",
+    )
+    discover.add_argument(
+        "--discover-max-threads",
+        type=int,
+        default=1,
+        metavar="count",
+        help="ClickHouse max_threads used inside each discovery query (default: 1).",
+    )
+    discover.add_argument(
+        "--discover-exclude",
+        "--exclude-db",
+        "--exclude-table",
+        "--exclude-column",
+        action="append",
+        default=None,
+        metavar="glob",
+        help="Exclude database, db.table, or db.table.column glob; repeatable/comma-separated.",
+    )
+    discover.add_argument(
+        "--detectors",
+        default=None,
+        metavar="names",
+        help="Comma-separated detector allow-list (default: all registered detectors).",
+    )
+    # Discovered values are always emitted in full (no masking flag). The
+    # attribute is kept for downstream option plumbing.
+    parser.set_defaults(discover_redact=False)
     exec_group.add_argument(
         "-x",
         "--execute",

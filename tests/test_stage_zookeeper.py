@@ -77,6 +77,7 @@ def _zookeeper_host_record(
         auth_required=status == "auth_required",
         extra={
             "is_zookeeper": detected,
+            "is_keeper": False if detected else None,
             "error": error,
             "provided_username": kwargs.get("username"),
             "provided_password": kwargs.get("password"),
@@ -619,6 +620,7 @@ def test_audit_zookeeper_two_pass_scope_and_policy_parity(monkeypatch: pytest.Mo
             "host": host,
             "port": 2181,
             "is_zookeeper": is_zookeeper,
+            "is_keeper": False if is_zookeeper else None,
             "status": status,
             "auth_required": False if status != "auth_required" else True,
             "provided_credentials": False,
@@ -719,6 +721,7 @@ def test_audit_zookeeper_debug_pass_markers_and_stage2_gate_reasons(monkeypatch:
             "host": host,
             "port": 2181,
             "is_zookeeper": is_zookeeper,
+            "is_keeper": False if is_zookeeper else None,
             "status": status,
             "auth_required": status == "auth_required",
             "provided_credentials": False,
@@ -796,6 +799,11 @@ def test_audit_zookeeper_debug_pass_markers_and_stage2_gate_reasons(monkeypatch:
 
 
 def test_audit_zookeeper_without_actions_skips_enumeration_debug(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        implementation_engine,
+        "fingerprint_zookeeper_implementation",
+        lambda *_args, **_kwargs: ZkImplementationFingerprint("apache-zookeeper", False, "confirmed"),
+    )
     monkeypatch.setattr(
         "redposture_core.stage_zookeeper._infer_auth_required_from_anonymous_probes",
         lambda *_a, **_k: (False, "root_ok", ["/:ok"]),
@@ -3156,7 +3164,7 @@ def test_run_stage_additional_error_paths_and_output_modes(monkeypatch: pytest.M
     fake_console.infos.clear()
     rc = run_zookeeper_stage(SimpleNamespace(**base_args), logger=SimpleNamespace(log=lambda *_a, **_k: None))
     assert rc == 1
-    assert any("all zookeeper targets are unreachable" in msg for msg in fake_console.warns)
+    assert any("no target confirmed as Apache ZooKeeper" in msg for msg in fake_console.warns)
     assert any("zookeeper audit started" in msg for msg in fake_console.infos)
 
     args_json = {**base_args, "output_format": "json", "debug": False}
@@ -5510,10 +5518,10 @@ def test_zookeeper_defcreds_plan_has_exact_stable_catalog_order() -> None:
     assert {run.source for run in plan.credential_runs} == {"default"}
 
 
-def test_zookeeper_canonical_plan_scans_zookeeper_and_keeper_default_ports() -> None:
+def test_zookeeper_canonical_plan_scans_only_apache_default_ports() -> None:
     args = parse_args(["zookeeper", "-t", "127.0.0.1"])
 
-    assert lifecycle_stage.build_zookeeper_plan(args).ports == (2181, 9181, 12181)
+    assert lifecycle_stage.build_zookeeper_plan(args).ports == (2181, 12181, 22181)
 
 
 def test_zookeeper_canonical_tls_policy_rejects_conflicting_or_incomplete_trust_options() -> None:
@@ -5642,6 +5650,11 @@ def test_zookeeper_credential_file_preserves_password_bytes_into_digest_auth(
         ]
     )
     observed: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        implementation_engine,
+        "fingerprint_zookeeper_implementation",
+        lambda *_args, **_kwargs: ZkImplementationFingerprint("apache-zookeeper", False, "confirmed"),
+    )
 
     class _ExactCredentialClient:
         selected_transport = "plaintext"
@@ -5720,6 +5733,11 @@ def _run_zookeeper_defcreds_lifecycle(
 ) -> tuple[list[tuple[str, str]], int, dict[str, object]]:
     auth_attempts: list[tuple[str, str]] = []
     data_calls = 0
+    monkeypatch.setattr(
+        implementation_engine,
+        "fingerprint_zookeeper_implementation",
+        lambda *_args, **_kwargs: ZkImplementationFingerprint("apache-zookeeper", False, "confirmed"),
+    )
 
     class FakeClient:
         def __init__(self, credential) -> None:

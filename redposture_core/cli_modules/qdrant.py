@@ -30,9 +30,12 @@ def configure_qdrant_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=6333,
+        default=None,
         metavar="port",
-        help="Qdrant port(s): single, list/range, or file (e.g. 6333, 6333,6334, ./ports.txt).",
+        help=(
+            "Qdrant port(s): single, list/range, or file "
+            "(e.g. 6333, 6333,16333, ./ports.txt). If omitted, scans 6333, 16333, 26333."
+        ),
     )
     add_multi_ports_flag(common)
     auth.add_argument(

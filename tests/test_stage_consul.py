@@ -300,7 +300,7 @@ def test_request_with_tls_fallback_probe_and_put_helpers(monkeypatch: pytest.Mon
         ]
     )
     monkeypatch.setattr(consul, "_request_with_tls_fallback", lambda *args, **kwargs: next(probe_responses))
-    assert consul._probe_consul_scheme("127.0.0.1", 8500, 1.0) == (True, "https", False, False, None, None)
+    assert consul._probe_consul_scheme("127.0.0.1", 8500, 1.0)[0] is False
 
     monkeypatch.setattr(
         consul,
@@ -1809,7 +1809,7 @@ def test_consul_get_json_any_and_probe_scheme_fallbacks(monkeypatch: pytest.Monk
 
     responses = iter(
         [
-            (403, b'"permission denied"', {}, None, False, False),
+            (403, b'"ACL not found"', {}, None, False, False),
         ]
     )
     monkeypatch.setattr(consul, "_request_with_tls_fallback", lambda *_a, **_k: next(responses))
@@ -2959,9 +2959,11 @@ def test_consul_explicit_https_does_not_downgrade(monkeypatch: pytest.MonkeyPatc
 def test_consul_probe_honors_explicit_insecure_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     attempts: list[tuple[bool, bool]] = []
 
-    def _request(*_args, use_https: bool, insecure: bool, **_kwargs):
+    def _request(*args, use_https: bool, insecure: bool, **_kwargs):
         attempts.append((use_https, insecure))
-        return 200, b'"127.0.0.1:8300"', {}, None, insecure, False
+        path = str(args[3])
+        payload = b'["127.0.0.1:8300"]' if path == "/v1/status/peers" else b'"127.0.0.1:8300"'
+        return 200, payload, {}, None, insecure, False
 
     monkeypatch.setattr(consul, "_request_with_tls_fallback", _request)
     state = consul.ConsulLifecycleState(insecure=True)
@@ -2974,17 +2976,38 @@ def test_consul_probe_honors_explicit_insecure_mode(monkeypatch: pytest.MonkeyPa
             allow_scheme_fallback=False,
         )
     assert detected[:5] == (True, "https", True, False, "127.0.0.1:8300")
-    assert attempts == [(True, True)]
+    assert attempts == [(True, True), (True, True)]
 
 
 def test_consul_default_plan_includes_https_and_uses_scheme_port() -> None:
     bare_args = _consul_args(port=None, targets="consul.internal")
     bare_args._port_option_provided = False
     bare_plan = consul.build_consul_plan(bare_args)
-    assert bare_plan.ports == (8500, 8501)
+    assert bare_plan.ports == (8500, 8501, 18500, 18501, 28500, 28501)
 
     https_args = _consul_args(port=None, targets="https://consul.internal")
     https_args._port_option_provided = False
     https_plan = consul.build_consul_plan(https_args)
     targets = [(host, port) for _idx, host, port, _spec in https_plan.iter_target_specs()]
     assert targets == [("consul.internal", 8501)]
+
+
+@pytest.mark.parametrize("port", [8501, 18501, 28501])
+def test_consul_https_default_ports_are_probed_with_https_first(
+    monkeypatch: pytest.MonkeyPatch,
+    port: int,
+) -> None:
+    attempts: list[bool] = []
+
+    def request(*args: object, **kwargs: object) -> tuple[int, bytes, dict[str, str], None, bool, bool]:
+        attempts.append(bool(kwargs["use_https"]))
+        path = str(args[3])
+        payload = b'["127.0.0.1:8300"]' if path == "/v1/status/peers" else b'"127.0.0.1:8300"'
+        return 200, payload, {}, None, False, False
+
+    monkeypatch.setattr(consul, "_request_with_tls_fallback", request)
+
+    detected = consul._probe_consul_scheme("consul.internal", port, 1.0)
+
+    assert detected[0] is True
+    assert attempts == [True, True]

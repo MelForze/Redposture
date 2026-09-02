@@ -22,7 +22,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 9000
-_DEFAULT_PORTS: tuple[int, ...] | None = (9000, 19000)
+_DEFAULT_PORTS: tuple[int, ...] = (9000, 19000, 29000)
 _DEFAULT_HTTP_PORT = 8123
 _DEFAULT_HTTP_PORTS: tuple[int, ...] | None = (8123, 18123)
 _DEFAULT_TLS_PORT = 9440
@@ -30,6 +30,7 @@ _DEFAULT_HTTPS_PORT = 8443
 _AUTO_PORT_PROTOCOLS = {
     9000: "native",
     19000: "native",
+    29000: "native",
     8123: "http",
     18123: "http",
     9440: "native",
@@ -47,9 +48,7 @@ def build_clickhouse_plan(args: Any) -> AuditCommandPlan:
     if protocol == "auto":
         default_port = _DEFAULT_TLS_PORT if tls_enabled else _DEFAULT_PORT
         default_ports = (
-            (_DEFAULT_TLS_PORT, _DEFAULT_HTTPS_PORT)
-            if tls_enabled
-            else (_DEFAULT_PORT, 19000, _DEFAULT_HTTP_PORT, 18123)
+            (_DEFAULT_TLS_PORT, _DEFAULT_HTTPS_PORT) if tls_enabled else (*_DEFAULT_PORTS, _DEFAULT_HTTP_PORT, 18123)
         )
         plan = build_basic_audit_plan(args, default_port=default_port, default_ports=default_ports)
     elif protocol == "http":
@@ -87,6 +86,13 @@ def _build_clickhouse_host_stage_options(args: Any) -> dict[str, Any]:
     table_columns, columns_error = actions._normalize_column_names(list(getattr(args, "columns", None) or []))
     if columns_error:
         raise ValueError(columns_error)
+    exclusions = tuple(
+        item.strip()
+        for raw in list(getattr(args, "discover_exclude", None) or [])
+        for item in str(raw).split(",")
+        if item.strip()
+    )
+    detectors = tuple(item.strip() for item in str(getattr(args, "detectors", "") or "").split(",") if item.strip())
     return {
         "database": str(getattr(args, "database", "default") or "default"),
         "protocol": _raw_protocol(args),
@@ -105,11 +111,24 @@ def _build_clickhouse_host_stage_options(args: Any) -> dict[str, Any]:
         if _raw_protocol(args) == "auto"
         else None,
         "dump_row_limit": dump_flag_limit(getattr(args, "dump", False)),
+        "discover": bool(getattr(args, "discover", False)),
+        "discover_resume": bool(getattr(args, "resume", False)),
+        "discover_checkpoint": getattr(args, "checkpoint", None),
+        "discover_chunk_rows": int(getattr(args, "discover_chunk_rows", 1000)),
+        "discover_max_query_time": float(getattr(args, "max_query_time", 10.0)),
+        "discover_max_query_rows": int(getattr(args, "max_query_rows", 100000)),
+        "discover_max_query_bytes": int(getattr(args, "max_query_bytes", 67108864)),
+        "discover_max_memory": int(getattr(args, "max_query_memory", 268435456)),
+        "discover_max_threads": int(getattr(args, "discover_max_threads", 1)),
+        "discover_exclusions": exclusions,
+        "discover_detectors": detectors,
+        "discover_redact": bool(getattr(args, "discover_redact", False)),
     }
 
 
 def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
     options = _build_clickhouse_host_stage_options(args)
+    host_stage_options = {key: value for key, value in options.items() if not key.startswith("discover")}
     resolved_host_stage = getattr(actions, _PRODUCTION_HOST_STAGE.__name__, _PRODUCTION_HOST_STAGE)
     use_lifecycle_hooks = (
         actions.host_stage is _PRODUCTION_HOST_STAGE
@@ -151,7 +170,7 @@ def build_clickhouse_spec(args: Any) -> ModuleAuditSpec:
         label="CLICKHOUSE",
         default_port=_DEFAULT_PORT,
         host_stage=actions.host_stage,
-        host_stage_options=options,
+        host_stage_options=host_stage_options,
         detect=_detect if use_lifecycle_hooks else None,
         auth=_auth if use_lifecycle_hooks else None,
         data=_data if use_lifecycle_hooks else None,
@@ -503,6 +522,7 @@ def _emit_clickhouse_record(record: dict[str, Any], output_format: str) -> None:
         render._format_tables_detail_records,
         render._format_table_columns_detail_records,
         render._format_table_dump_detail_records,
+        render._format_discover_detail_records,
         render._format_execute_detail_records,
     ):
         lines = formatter(record, output_format)

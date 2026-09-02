@@ -21,7 +21,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 8500
-_DEFAULT_PORTS = (8500, 8501)
+_DEFAULT_PORTS = (8500, 8501, 18500, 18501, 28500, 28501)
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_consul_host
 

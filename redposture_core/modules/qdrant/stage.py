@@ -21,7 +21,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 6333
-_DEFAULT_PORTS = None
+_DEFAULT_PORTS: tuple[int, ...] = (6333, 16333, 26333)
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_qdrant_host
 

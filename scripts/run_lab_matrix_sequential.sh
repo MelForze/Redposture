@@ -649,11 +649,11 @@ run_clickhouse_cases() {
   run_case clickhouse clickhouse_multi_ports 0 clickhouse -t 127.0.0.1 --ports "9000,29001,29002,29003,29004" --show-databases
   run_text_case clickhouse clickhouse_debug_smoke 0 clickhouse -t 127.0.0.1 --debug
   if is_extended_matrix; then
-    run_case clickhouse clickhouse_extended_defcreds 0 clickhouse -t 127.0.0.1 --port 9000 --defcreds --show-databases
+    run_case clickhouse clickhouse_extended_defcreds 0 clickhouse -t 127.0.0.1 --port 9000 --defcreds --show-databases --discover --resume --checkpoint "${OUT_DIR}/clickhouse-discover.checkpoint.json" --discover-chunk-rows 500 --max-query-time 15 --max-query-rows 100000 --max-query-bytes 67108864 --max-memory 268435456 --discover-max-threads 1 --exclude-db no_such_database --detectors jwt,private_key,client_secret,stripe_key --redact
     run_case clickhouse clickhouse_extended_query_columns 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --database secure --show-databases 5 --show-tables 5 --table secure.secrets_inventory --show-columns 5 --column owner,value_hint --dump 5 --sql-cmd "select secret_name, owner from secure.secrets_inventory limit 2"
     run_case clickhouse clickhouse_extended_execute 0 clickhouse -t 127.0.0.1 --port 19000 -u default -p default --execute "id"
     run_case clickhouse fuzz_clickhouse_negative_timeout 2 clickhouse -t 127.0.0.1 --timeout -1 --show-databases
-    run_case clickhouse fuzz_clickhouse_invalid_port 2 clickhouse -t 127.0.0.1 --port -1 --show-databases
+    run_case clickhouse fuzz_clickhouse_invalid_port 2 clickhouse -t 127.0.0.1 --port -1 --show-databases --show-secrets
   fi
 }
 
@@ -847,9 +847,9 @@ run_zookeeper_auth_cases() {
 }
 
 run_keeper_cases() {
-  run_case zookeeper keeper_cluster 0 zookeeper -t 127.0.0.1 --port "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3
-  run_case zookeeper keeper_tls 0 zookeeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
-  run_case zookeeper keeper_no4lw 0 zookeeper -t 127.0.0.1 --port 39181 -u lab -p lab --znode /keeper/api_version --dump
+  run_case keeper keeper_cluster 0 keeper -t 127.0.0.1 --port "19181,29181" --show-znodes 20 --dump 20 --max-znodes 50 --enum-workers 3
+  run_case keeper keeper_tls 0 keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
+  run_case keeper keeper_no4lw 0 keeper -t 127.0.0.1 --port 39181 -u lab -p lab --znode /keeper/api_version --dump
   run_case zookeeper keeper_apache_control 0 zookeeper -t 127.0.0.1 --port 12181 --show-znodes 5
 }
 

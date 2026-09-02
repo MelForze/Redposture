@@ -2774,7 +2774,13 @@ def collect_zookeeper_data(ctx: Any, record: Any, options: Mapping[str, Any]) ->
 def _nxc_prefix(record: dict[str, Any]) -> str:
     host = _clip(str(record.get("host") or "-"), 64)
     port = str(record.get("port") or "-")
-    tag = "KEEPER" if record.get("is_keeper") is True else "ZOOKEEPER"
+    module = str(record.get("module") or "").strip().lower()
+    if module == "keeper":
+        tag = "KEEPER"
+    elif module == "zookeeper":
+        tag = "ZOOKEEPER"
+    else:
+        tag = "KEEPER" if record.get("is_keeper") is True else "ZOOKEEPER"
     return f"{tag:<12}\t{host}\t{port}\t"
 
 

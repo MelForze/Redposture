@@ -19,7 +19,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 2379
-_DEFAULT_PORTS: tuple[int, ...] | None = (2379, 12379)
+_DEFAULT_PORTS: tuple[int, ...] | None = (2379, 12379, 22379)
 
 
 def build_etcd_plan(args: Any) -> AuditCommandPlan:

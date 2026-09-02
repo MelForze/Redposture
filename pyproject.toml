@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "5.17.6"
+version = "5.17.8"
 description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/MongoDB/Docker/Oracle/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper/Keeper/Elasticsearch/gRPC auditing"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -140,7 +140,7 @@ ignore_missing_imports = true
 [tool.ruff]
 line-length = 120
 target-version = "py310"
-extend-exclude = ["redposture_core/proto/*_pb2.py"]
+extend-exclude = ["redposture_core/proto/*_pb2.py", "docs/**"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

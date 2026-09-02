@@ -34,7 +34,10 @@ def configure_consul_parser(
         type=port_type,
         default=None,
         metavar="port",
-        help=("Consul port(s): single, list/range, or file. If omitted, scans HTTP 8500 and HTTPS 8501."),
+        help=(
+            "Consul port(s): single, list/range, or file. If omitted, scans HTTP-first "
+            "8500, 18500, 28500 and HTTPS-first 8501, 18501, 28501."
+        ),
     )
     add_multi_ports_flag(common)
     auth.add_argument(

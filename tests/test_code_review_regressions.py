@@ -139,7 +139,7 @@ def test_fix1_postgres_shell_handles_eof_gracefully(monkeypatch: pytest.MonkeyPa
     [
         ("simple", "PONG", True),  # canonical redis
         ("error", "NOAUTH", True),  # auth-required redis
-        ("error", "LOADING dataset", True),  # any RESP `-` error still identifies redis
+        ("error", "LOADING dataset", False),  # generic RESP errors require a Redis INFO fingerprint
         ("bulk", "hello", False),  # not RESP-shaped for PING
         ("integer", 1, False),  # gRPC / memcached / random tcp
         ("array", [], False),  # `*0\r\n` from something else

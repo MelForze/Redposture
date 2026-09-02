@@ -10,6 +10,7 @@ import pytest
 from redposture_core.clients.http_api import (
     HttpApiClient,
     HttpClientConfig,
+    HttpRequest,
     HttpResponse,
     _decode_chunked_body,
     _flush_tls_outgoing,
@@ -643,3 +644,43 @@ def test_flush_tls_outgoing_sends_until_empty() -> None:
     sock = _Sock()
     _flush_tls_outgoing(sock, outgoing)
     assert b"".join(sock.sent) == b"abcdef"
+
+
+def test_send_escalates_timeout_on_timeout(monkeypatch):
+    seen = []
+
+    def fake_send_once(self, request, *, timeout=None):
+        seen.append(timeout)
+        return HttpResponse(
+            status=0,
+            body=b"",
+            headers={},
+            error="connection timeout",
+            request_url=request.url,
+            final_url=request.url,
+        )
+
+    monkeypatch.setattr(HttpApiClient, "_send_once", fake_send_once)
+    client = HttpApiClient(HttpClientConfig(timeout=3.0, retries=2))
+    client.send(HttpRequest(method="GET", url="http://127.0.0.1/"))
+    assert seen == [3.0, 5.0, 7.0]
+
+
+def test_send_stops_on_refused(monkeypatch):
+    seen = []
+
+    def fake_send_once(self, request, *, timeout=None):
+        seen.append(timeout)
+        return HttpResponse(
+            status=0,
+            body=b"",
+            headers={},
+            error="connection refused (service is not listening on target port)",
+            request_url=request.url,
+            final_url=request.url,
+        )
+
+    monkeypatch.setattr(HttpApiClient, "_send_once", fake_send_once)
+    client = HttpApiClient(HttpClientConfig(timeout=3.0, retries=3))
+    client.send(HttpRequest(method="GET", url="http://127.0.0.1/"))
+    assert seen == [3.0]

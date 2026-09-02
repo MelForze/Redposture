@@ -268,6 +268,25 @@ def _looks_like_consul_payload(status: int, payload: bytes) -> bool:
     return 1 <= port_int <= 65535
 
 
+def _looks_like_consul_peers_payload(status: int, payload: bytes) -> bool:
+    if status != 200:
+        return False
+    try:
+        peers = _parse_json_bytes(payload)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(peers, list) or not peers:
+        return False
+    return all(isinstance(peer, str) and _looks_like_consul_payload(200, json.dumps(peer).encode()) for peer in peers)
+
+
+def _has_consul_response_marker(headers: dict[str, str], payload: bytes) -> bool:
+    if any(str(key).lower().startswith("x-consul-") for key in headers):
+        return True
+    text = _decode_body_text(payload).lower()
+    return "consul" in text or "acl" in text
+
+
 def _consul_get_json_any(
     host: str,
     port: int,
@@ -317,11 +336,11 @@ def _probe_consul_scheme(
     elif normalized_scheme in {"http", "https"}:
         preferred_schemes = [normalized_scheme]
     else:
-        preferred_schemes = ["https", "http"] if port == 8501 else ["http", "https"]
+        preferred_schemes = ["https", "http"] if port in {8501, 18501, 28501} else ["http", "https"]
     last_error: str | None = None
 
     for scheme in preferred_schemes:
-        status, payload, _headers, error, effective_insecure, tls_auto = _request_with_tls_fallback(
+        status, payload, response_headers, error, effective_insecure, tls_auto = _request_with_tls_fallback(
             host,
             port,
             "GET",
@@ -334,10 +353,33 @@ def _probe_consul_scheme(
             last_error = error
             continue
         if _looks_like_consul_payload(status, payload):
-            return True, scheme, effective_insecure, tls_auto, _parse_consul_leader(payload), None
-        body_text = _decode_body_text(payload).strip()
+            peer_status, peer_payload, peer_headers, peer_error, peer_insecure, peer_tls_auto = (
+                _request_with_tls_fallback(
+                    host,
+                    port,
+                    "GET",
+                    "/v1/status/peers",
+                    timeout,
+                    use_https=(scheme == "https"),
+                    insecure=effective_insecure,
+                )
+            )
+            if peer_error is None and (
+                _looks_like_consul_peers_payload(peer_status, peer_payload)
+                or _has_consul_response_marker(peer_headers, peer_payload)
+            ):
+                return (
+                    True,
+                    scheme,
+                    peer_insecure,
+                    tls_auto or peer_tls_auto,
+                    _parse_consul_leader(payload),
+                    None,
+                )
+            last_error = peer_error or f"unconfirmed Consul peers response status={peer_status}"
+            continue
         if status in {401, 403}:
-            if "permission denied" in body_text.lower() or "acl" in body_text.lower():
+            if _has_consul_response_marker(response_headers, payload):
                 return True, scheme, effective_insecure, tls_auto, None, None
         if status not in {404, 400}:
             last_error = f"unexpected status={status}"

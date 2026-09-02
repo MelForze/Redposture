@@ -24,6 +24,7 @@ MODULES = {
     "grpc": ("GRPC", 50051),
     "clickhouse": ("CLICKHOUSE", 9000),
     "zookeeper": ("ZOOKEEPER", 2181),
+    "keeper": ("KEEPER", 9181),
 }
 
 

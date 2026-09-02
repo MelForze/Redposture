@@ -27,9 +27,12 @@ def configure_grafana_parser(
         "--port",
         dest="port",
         type=port_type,
-        default=3000,
+        default=None,
         metavar="port",
-        help="Grafana port spec: single port, list/range, or file (examples: 3000, 3000,3001, ./ports.txt).",
+        help=(
+            "Grafana port spec: single port, list/range, or file "
+            "(examples: 3000, 3000,13000, ./ports.txt). If omitted, scans 3000, 13000, 23000."
+        ),
     )
     add_multi_ports_flag(grafana_common)
     grafana_auth.add_argument(

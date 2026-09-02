@@ -116,7 +116,13 @@ def test_qdrant_error_and_response_helpers_cover_extra_shapes() -> None:
     assert qdrant._qdrant_error_text([{"a": 1}]) == '[{"a":1}]'
     assert qdrant._qdrant_error_text("", fallback_status=404) is None
 
-    assert qdrant._qdrant_looks_like_response({"result": {}, "status": "ok"}) is True
+    assert qdrant._qdrant_looks_like_response({"result": {}, "status": "ok"}) is False
+    assert (
+        qdrant._qdrant_looks_like_response(
+            {"result": {"collections": [{"name": "documents"}]}, "status": "ok", "time": 0.01}
+        )
+        is True
+    )
     assert qdrant._qdrant_looks_like_response({"status": {"error": "forbidden"}}) is False
     assert qdrant._qdrant_looks_like_response({"hello": "world"}) is False
 

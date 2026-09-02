@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -36,6 +37,7 @@ from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
 )
+from .discover import DiscoverConfig, run_discovery
 
 # Connection-error classification + framed reads are shared via the transport layer.
 _is_timeout_error = transport.is_connection_timeout
@@ -208,6 +210,7 @@ class ClickHouseLifecycleState:
     auth_required: bool | None = None
     anonymous_access_limited: bool = False
     credential_limited: set[tuple[str | None, str | None, str]] = field(default_factory=set)
+    discovery_report: dict[str, Any] | None = None
 
     def take_session(self, username: str | None, password: str | None, source: str) -> _ChSession | None:
         return self.credential_sessions.pop((username, password, source), None)
@@ -365,9 +368,10 @@ def _probe_error_info(value: Any) -> _ChProbeError:
         "network unreachable",
         "no route to host",
     )
+    reason = transport.classify_failure_reason(text)
     if (
-        _is_timeout_error(text)
-        or _is_connection_refused_error(text)
+        transport.is_escalating_reason(reason)
+        or reason == "refused"
         or any(marker in lower for marker in retryable_markers)
     ):
         return _ChProbeError(text, kind="transport", retryable=True, code=code)
@@ -1374,6 +1378,7 @@ def _run_clickhouse_actions_on_session(
         "dump": "not_requested",
         "sql": "not_requested",
         "execute": "not_requested",
+        "discover": "not_requested",
     }
     partial_reasons: list[str] = []
 
@@ -1616,6 +1621,7 @@ def _normalize_action_result(value: Mapping[str, Any]) -> dict[str, Any]:
             "dump": "not_requested",
             "sql": "not_requested",
             "execute": "not_requested",
+            "discover": "not_requested",
         },
     }
     for key, default in defaults.items():
@@ -1666,6 +1672,7 @@ def _clickhouse_lifecycle_payload(
             "dump": "not_requested",
             "sql": "not_requested",
             "execute": "not_requested",
+            "discover": "not_requested",
         },
         "requested_operation_failure": False,
         "provided_credentials": provided,
@@ -1701,6 +1708,8 @@ def _clickhouse_lifecycle_payload(
         "sql_ok": None,
         "sql_output": None,
         "sql_error": None,
+        "discover_requested": bool(options.get("discover")),
+        "discover_report": None,
         "read_capability": None,
         "execute_capability": None,
         "admin_capability": None,
@@ -2015,6 +2024,7 @@ def collect_clickhouse_data(
             return payload
 
     started = time.monotonic()
+    discover_report: dict[str, Any] | None = state.discovery_report
     try:
         action_result = _normalize_action_result(
             _run_clickhouse_actions_on_session(
@@ -2034,6 +2044,48 @@ def collect_clickhouse_data(
                 limited_session=limited_session,
             )
         )
+        if bool(options.get("discover")) and discover_report is None:
+            raw_checkpoint = options.get("discover_checkpoint")
+            checkpoint = Path(str(raw_checkpoint)) if raw_checkpoint else None
+            try:
+                discover_report = run_discovery(
+                    session,
+                    host=str(ctx.host),
+                    port=int(ctx.port),
+                    config=DiscoverConfig(
+                        checkpoint=checkpoint,
+                        resume=bool(options.get("discover_resume")),
+                        chunk_rows=int(options.get("discover_chunk_rows") or 1000),
+                        max_query_time=float(options.get("discover_max_query_time") or 10.0),
+                        max_query_rows=int(options.get("discover_max_query_rows") or 100000),
+                        max_query_bytes=int(options.get("discover_max_query_bytes") or 67108864),
+                        max_memory=int(options.get("discover_max_memory") or 268435456),
+                        max_threads=int(options.get("discover_max_threads") or 1),
+                        exclusions=tuple(options.get("discover_exclusions") or ()),
+                        detectors=tuple(options.get("discover_detectors") or ()),
+                        redact=bool(options.get("discover_redact", False)),
+                    ),
+                    query_rows=lambda query: _query_rows(session, query),
+                )
+            except (OSError, ValueError) as exc:
+                discover_report = {
+                    "status": "error",
+                    "checkpoint": str(checkpoint) if checkpoint is not None else None,
+                    "coverage_percent": 0.0,
+                    "findings": [],
+                    "finding_count": 0,
+                    "occurrence_count": 0,
+                    "tables_scanned": 0,
+                    "scan_errors": [{"kind": "discovery_error", "error": str(exc)}],
+                }
+            state.discovery_report = discover_report
+        if bool(options.get("discover")):
+            discover_status = str((discover_report or {}).get("status") or "error")
+            action_result["action_statuses"]["discover"] = "ok" if discover_status == "complete" else "partial"
+            if discover_status != "complete":
+                action_result["partial_reasons"].append(f"discover: {discover_status}")
+                action_result["partial"] = True
+                action_result["requested_operation_failure"] = True
     finally:
         _close_client(session.protocol, session.client)
 
@@ -2088,6 +2140,8 @@ def collect_clickhouse_data(
             "admin_capability": action_result["admin_capability"],
             "elapsed_ms": int((time.monotonic() - started) * 1000),
             "error": "; ".join(dict.fromkeys(errors)) if errors else None,
+            "discover_requested": bool(options.get("discover")),
+            "discover_report": discover_report,
         }
     )
     payload["partial"] = bool(payload["partial_reasons"])
@@ -2504,6 +2558,7 @@ def _normalize_clickhouse_record_schema(record: Mapping[str, Any]) -> dict[str, 
             "dump": "not_requested",
             "sql": "not_requested",
             "execute": "not_requested",
+            "discover": "not_requested",
         },
     )
     payload.setdefault("requested_operation_failure", False)
@@ -3094,6 +3149,94 @@ def _format_sql_detail_records(record: dict[str, Any], output_format: str) -> li
     return lines
 
 
+def _format_discover_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if not bool(record.get("discover_requested")) or output_format != "txt":
+        return []
+    report = record.get("discover_report")
+    prefix = _nxc_prefix(record)
+    if not isinstance(report, dict):
+        return [f"{prefix} [!] Discover Secrets unavailable"]
+    status = str(report.get("status") or "unknown")
+    coverage = float(report.get("coverage_percent") or 0.0)
+    lines = [
+        f"{prefix} [*] Discover Secrets "
+        f"(status:{status}) (coverage:{coverage:.2f}%) "
+        f"(findings:{int(report.get('finding_count') or 0)}) "
+        f"(occurrences:{int(report.get('occurrence_count') or 0)}) "
+        f"(tables:{int(report.get('tables_scanned') or 0)})"
+    ]
+    findings = report.get("findings")
+    if isinstance(findings, list):
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            locations = finding.get("locations")
+            first_location = locations[0] if isinstance(locations, list) and locations else {}
+            if not isinstance(first_location, dict):
+                first_location = {}
+            location = ".".join(str(first_location.get(key) or "?") for key in ("database", "table", "column"))
+            object_path = str(first_location.get("object_path") or "$")
+            shown_value = finding.get("value")
+            if shown_value is None:
+                shown_value = finding.get("masked_value")
+            if shown_value is None:
+                shown_value = "<redacted>"
+            encoded_value = json.dumps(str(shown_value), ensure_ascii=False, separators=(",", ":"))
+            encoded_place = json.dumps(f"{location}{object_path}", ensure_ascii=False, separators=(",", ":"))
+            lines.append(
+                f"{prefix} [+] {str(finding.get('type') or 'secret')} value={encoded_value} place={encoded_place}"
+            )
+    errors = report.get("scan_errors")
+    if isinstance(errors, list) and errors:
+        lines.append(f"{prefix} [!] Discover incomplete chunks:{len(errors)}; resume with --resume")
+    checkpoint_path = report.get("checkpoint")
+    if checkpoint_path:
+        lines.append(f"{prefix} [*] Checkpoint {checkpoint_path}")
+    return lines
+
+
+_DISCOVER_STATUS_RE = re.compile(r"\(status:([^)]*)\)")
+_DISCOVER_COVERAGE_RE = re.compile(r"\(coverage:([0-9.]+)%\)")
+_DISCOVER_FINDINGS_RE = re.compile(r"\(findings:(\d+)\)")
+
+
+def _clickhouse_finding_color_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
+    """Color ClickHouse discover output.
+
+    Finding lines (`... value=... place=...`) are highlighted whole in orange.
+    The Discover Secrets summary line is ranked by health: ``status`` green when
+    complete / yellow when partial / red otherwise; ``coverage`` green at 100%,
+    yellow from 50%, red below; ``findings`` green at 0, red when anything was
+    found.
+    """
+
+    if " value=" in payload and " place=" in payload:
+        return [(0, len(payload), "orange")]
+    if not payload.startswith("Discover Secrets"):
+        return []
+    spans: list[tuple[int, int, str]] = []
+    status_match = _DISCOVER_STATUS_RE.search(payload)
+    if status_match:
+        status_value = status_match.group(1).strip().lower()
+        status_color = (
+            "bright_green" if status_value == "complete" else "yellow" if status_value == "partial" else "red"
+        )
+        spans.append((status_match.start(), status_match.end(), status_color))
+    coverage_match = _DISCOVER_COVERAGE_RE.search(payload)
+    if coverage_match:
+        try:
+            coverage_value = float(coverage_match.group(1))
+        except ValueError:
+            coverage_value = 0.0
+        coverage_color = "bright_green" if coverage_value >= 100.0 else "yellow" if coverage_value >= 50.0 else "red"
+        spans.append((coverage_match.start(), coverage_match.end(), coverage_color))
+    findings_match = _DISCOVER_FINDINGS_RE.search(payload)
+    if findings_match:
+        findings_color = "bright_green" if findings_match.group(1) == "0" else "red"
+        spans.append((findings_match.start(), findings_match.end(), findings_color))
+    return spans
+
+
 def _render_colored_clickhouse_line(console: Console, line: str) -> bool:
     if render_colored_marker_line(
         console,
@@ -3105,6 +3248,7 @@ def _render_colored_clickhouse_line(console: Console, line: str) -> bool:
             BooleanColorRule("admin"),
         ),
         counts=(CountColorRule("DBs", "orange"),),
+        extra_spans=_clickhouse_finding_color_spans,
     ):
         return True
     if line.startswith("CLICKHOUSE") and "\t" in line:

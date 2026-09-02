@@ -18,7 +18,7 @@ from ...stage_runtime import (
 from . import actions, policy, render
 
 _DEFAULT_PORT = 5000
-_DEFAULT_PORTS: tuple[int, ...] | None = (5000, 15000)
+_DEFAULT_PORTS: tuple[int, ...] | None = (5000, 15000, 25000)
 _PRODUCTION_HOST_STAGE = actions.host_stage
 _PRODUCTION_AUDIT_HOST = actions._audit_registry_host
 

@@ -109,6 +109,16 @@ class ZkImplementationFingerprint:
         object.__setattr__(self, "version", _normalize_zookeeper_version(self.version))
 
 
+@dataclass(frozen=True)
+class ZkKeeperVirtualProbe:
+    """Bounded read-only evidence from ClickHouse Keeper virtual znodes."""
+
+    confirmed: bool
+    api_version: int | None = None
+    children: tuple[str, ...] = ()
+    reason: str | None = None
+
+
 def _friendly_error_text(value: str) -> str:
     from ..utils import friendly_error_text
 
@@ -1006,6 +1016,52 @@ class _ZkClient:
         if offset != len(response_payload):
             raise ValueError("unexpected trailing ZooKeeper getData payload")
         return data, err, stat
+
+    def probe_keeper_virtual_nodes(self) -> ZkKeeperVirtualProbe:
+        """Confirm Keeper when diagnostic four-letter commands are disabled.
+
+        The probe is deliberately bounded to one children lookup and one data
+        read on ClickHouse Keeper's virtual ``/keeper`` tree.  Merely finding
+        a user-created ``/keeper`` znode is not sufficient evidence.
+        """
+
+        children, children_err, _stat = self.get_children2(_KEEPER_SYSTEM_PREFIX)
+        if children_err != _ZK_ERR_OK or children is None:
+            return ZkKeeperVirtualProbe(
+                confirmed=False,
+                reason=f"/keeper children: {_zk_error_name(children_err)}",
+            )
+        normalized_children = tuple(sorted(str(child) for child in children))
+        required = {"api_version", "feature_flags"}
+        if not required.issubset(normalized_children):
+            return ZkKeeperVirtualProbe(
+                confirmed=False,
+                children=normalized_children,
+                reason="/keeper virtual children are incomplete",
+            )
+
+        api_data, api_err, _api_stat = self.get_data(f"{_KEEPER_SYSTEM_PREFIX}/api_version")
+        if api_err != _ZK_ERR_OK or api_data is None:
+            return ZkKeeperVirtualProbe(
+                confirmed=False,
+                children=normalized_children,
+                reason=f"/keeper/api_version: {_zk_error_name(api_err)}",
+            )
+        try:
+            api_text = api_data.decode("ascii", errors="strict").strip()
+        except UnicodeDecodeError:
+            api_text = ""
+        if not re.fullmatch(r"[1-9][0-9]{0,9}", api_text):
+            return ZkKeeperVirtualProbe(
+                confirmed=False,
+                children=normalized_children,
+                reason="/keeper/api_version is not a positive integer",
+            )
+        return ZkKeeperVirtualProbe(
+            confirmed=True,
+            api_version=int(api_text),
+            children=normalized_children,
+        )
 
     def create(self, path: str, data: bytes = b"", flags: int = _ZK_CREATE_EPHEMERAL) -> int:
         payload = (

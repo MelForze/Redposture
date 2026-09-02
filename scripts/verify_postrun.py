@@ -29,6 +29,7 @@ _EXPECTED_MODULES = (
     "elastic",
     "grpc",
     "kafka",
+    "keeper",
     "zookeeper",
     "proxmox",
 )
@@ -463,14 +464,15 @@ _RICH_OUTPUT_REQUIRED_SUBSTRINGS = {
     "keeper_cluster": (
         "/redposture/app/api_key",
         "rp-keeper-key-2026",
-        '"service": "zookeeper"',
+        '"service": "keeper"',
         '"implementation": "clickhouse-keeper"',
     ),
     "keeper_tls": ('"implementation": "clickhouse-keeper"', '"transport": "tls"'),
     "keeper_no4lw": (
-        '"service": "zookeeper"',
-        '"implementation": "zookeeper-compatible"',
-        '"implementation_confidence": "unconfirmed"',
+        '"service": "keeper"',
+        '"implementation": "clickhouse-keeper"',
+        '"implementation_confidence": "confirmed"',
+        '"implementation_evidence": "keeper_virtual_znodes"',
     ),
     "keeper_apache_control": (
         '"service": "zookeeper"',
@@ -1331,6 +1333,7 @@ _MODULES_WITH_SEEDED_DUMP = frozenset(
         "mongodb",
         "etcd",
         "consul",
+        "keeper",
         "zookeeper",
         "kafka",
         "qdrant",
@@ -1573,6 +1576,7 @@ _CAPABILITY_FIELDS_BY_MODULE: dict[str, tuple[str, ...]] = {
     "mongodb": ("database_count", "database_names", "collections", "indexes", "server_version"),
     "etcd": ("key_count", "keys", "key_values", "server_version"),
     "consul": ("version", "leader"),
+    "keeper": ("znode_count", "znodes", "znode_values", "version"),
     "zookeeper": ("znode_count", "znodes", "znode_values", "version"),
     "kafka": ("topic_count", "topics"),
     "qdrant": ("collections_count", "collections", "version"),
@@ -1901,7 +1905,7 @@ _ACTION_EXPECTED_VALUES: dict[str, dict[str, object]] = {
         "is_grpc": True,
     },
     "keeper_cluster": {
-        "service": "zookeeper",
+        "service": "keeper",
         "protocol": "zookeeper",
         "implementation": "clickhouse-keeper",
         "implementation_confidence": "confirmed",
@@ -2261,6 +2265,27 @@ _MODULE_SCHEMA_REQUIRED: dict[str, tuple[str, ...]] = {
         "show_znodes",
         "dump",
     ),
+    "keeper": (
+        "service",
+        "is_zookeeper",
+        "is_zookeeper_compatible",
+        "implementation",
+        "implementation_confidence",
+        "vendor",
+        "protocol",
+        "transport",
+        "is_keeper",
+        "version",
+        "server_state",
+        "read_only",
+        "connections",
+        "latency_ms",
+        "raft",
+        "quorum_status",
+        "max_znodes",
+        "show_znodes",
+        "dump",
+    ),
     "qdrant": ("is_qdrant", "anonymous_access", "show_collections"),
     "elastic": ("is_elastic", "scheme", "show_endpoints", "show_plugins"),
     "oracle": ("is_oracle", "transport", "transport_mode", "defcreds_enabled"),
@@ -2335,6 +2360,7 @@ _MISSING_TARGET_MODULES = (
     "elastic",
     "grpc",
     "kafka",
+    "keeper",
     "zookeeper",
     "proxmox",
 )
@@ -2671,6 +2697,12 @@ _GOLDEN_VOLATILE_FIELDS = frozenset(
 # the audit contract. Keep this narrow: typed/status assertions above still validate
 # these records before golden comparison.
 _GOLDEN_MODULE_VOLATILE_FIELDS: dict[str, frozenset[str]] = {
+    "keeper": frozenset(
+        {
+            "connections",
+            "latency_ms",
+        }
+    ),
     "zookeeper": frozenset(
         {
             "connections",  # includes the verifier connection itself
@@ -3012,6 +3044,7 @@ _LIMIT_FLAG_TO_FIELD: dict[tuple[str, str], str] = {
     ("postgres", "--show-columns"): "table_columns_info",
     ("clickhouse", "--show-databases"): "database_names",
     ("clickhouse", "--show-tables"): "table_names",
+    ("keeper", "--show-znodes"): "znodes",
     ("zookeeper", "--show-znodes"): "znodes",
 }
 
