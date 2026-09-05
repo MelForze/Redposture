@@ -15,6 +15,10 @@ _COLORS = {
     "orange": "1;38;5;208",
     "yellow": "1;93",
     "red": "1;91",
+    # 256-color pure red (#ff0000): unlike ANSI bright-red (91), it is taken from
+    # the 256-palette and is not remapped by a terminal theme, so it stays clearly
+    # red next to the 256-color orange above (some themes render 91 orange-ish).
+    "true_red": "1;38;5;196",
     "magenta": "1;95",
     "cyan": "1;96",
     "white": "1;97",

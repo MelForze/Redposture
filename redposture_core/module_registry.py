@@ -19,6 +19,7 @@ from .cli_modules.grafana import configure_grafana_parser
 from .cli_modules.grpc import configure_grpc_parser
 from .cli_modules.keeper import configure_keeper_parser
 from .cli_modules.kubeapi import configure_kubeapi_parser
+from .cli_modules.minio import configure_minio_parser
 from .cli_modules.mongodb import MongoDBHelpFormatter, configure_mongodb_parser
 from .cli_modules.oracle import configure_oracle_parser
 from .cli_modules.postgres import PostgresHelpFormatter, configure_postgres_parser
@@ -42,6 +43,7 @@ COMMAND_GITLAB = "gitlab"
 COMMAND_CONSUL = "consul"
 COMMAND_QDRANT = "qdrant"
 COMMAND_KUBEAPI = "kubeapi"
+COMMAND_MINIO = "minio"
 COMMAND_KAFKA = "kafka"
 COMMAND_ZOOKEEPER = "zookeeper"
 COMMAND_KEEPER = "keeper"
@@ -109,6 +111,7 @@ _STAGE_RUNNER_MODULES: dict[str, str] = {
     COMMAND_CONSUL: "redposture_core.modules.consul.stage",
     COMMAND_QDRANT: "redposture_core.modules.qdrant.stage",
     COMMAND_KUBEAPI: "redposture_core.modules.kubeapi.stage",
+    COMMAND_MINIO: "redposture_core.modules.minio.stage",
     COMMAND_KAFKA: "redposture_core.modules.kafka.stage",
     COMMAND_ZOOKEEPER: "redposture_core.modules.zookeeper.stage",
     COMMAND_KEEPER: "redposture_core.modules.keeper.stage",
@@ -281,6 +284,12 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         ),
         runner_attr="run_kubeapi_stage",
         configure_parser=_make_configurator(configure_kubeapi_parser, _HTTP_MODULE_HELPERS),
+    ),
+    CommandSpec(
+        name=COMMAND_MINIO,
+        help="Audit MinIO exposure: detection, anonymous access, credential verification.",
+        runner_attr="run_minio_stage",
+        configure_parser=_make_configurator(configure_minio_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_POSTGRES,
@@ -465,6 +474,7 @@ __all__ = [
     "COMMAND_KAFKA",
     "COMMAND_KUBEAPI",
     "COMMAND_LISTEN",
+    "COMMAND_MINIO",
     "COMMAND_MONGODB",
     "COMMAND_ORACLE",
     "COMMAND_POSTGRES",

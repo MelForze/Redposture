@@ -21,6 +21,7 @@ from .exporters.output import emit_line as emit_output_line
 from .exporters.output import format_collect_record
 from .logger import AttemptLogger
 from .profiles import default_exporter_ports, load_profiles
+from .stage_runtime import progress_total_from_groups, should_use_global_progress, start_command_progress
 from .stage_validate import VALIDATION_PRECISION_COLLECT_STRICT, ValidationRecordAccumulator
 from .utils import (
     DEFAULT_MAX_NETWORK_HOSTS,
@@ -635,7 +636,10 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 checkpoint_path=checkpoint_path,
                 checkpoint_mode="a" if (resume_enabled or collect_chunk_index > 0) else "w",
                 stats_sink=collect_stats,
-                progress_owner=getattr(args, "_progress_owner", None),
+                # The chunked path owns a single command-level bar across all chunks
+                # (see `chunk_progress`); the owner allows only one active bar, so the
+                # per-chunk collect must not start its own (it would close ours).
+                progress_owner=None,
                 **_collect_transport_kwargs(scheme, tls_context),
             )
             collect_chunk_index += 1
@@ -645,10 +649,18 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
             skipped_jobs_total += int(collect_stats.get("skipped_jobs", 0))
             return part_found
 
+        # A huge target list is chunked; per-chunk scan progress is off, so a single
+        # command-level bar owns the run (counted by hosts). advance() clamps at the
+        # total, so re-visited hosts in the explicit-port matrix never overshoot.
+        chunk_progress = None
+        if should_use_global_progress(args.output_format, target_plan.target_count):
+            chunk_progress = start_command_progress(args, "COLLECT", target_plan.target_count, enabled=True, leave=True)
         try:
             if not target_plan.has_explicit_port_targets:
                 for scheme, host_chunk in _chunk_collect_specs_by_scheme(target_plan.iter_specs()):
                     _process_host_chunk(host_chunk, custom_ports or None, scheme)
+                    if chunk_progress is not None:
+                        chunk_progress.advance(len(host_chunk))
             else:
                 matrix_ports = tuple(custom_ports or default_ports)
                 for port in target_plan.execution_ports(matrix_ports):
@@ -656,9 +668,14 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                         target_plan.iter_specs_for_port(int(port), matrix_ports)
                     ):
                         _process_host_chunk(host_chunk, [int(port)], scheme)
+                        if chunk_progress is not None:
+                            chunk_progress.advance(len(host_chunk))
         except OSError as exc:
             console.error(f"failed to process collect output: {exc}")
             return 2
+        finally:
+            if chunk_progress is not None:
+                chunk_progress.close()
 
         data_ms = int((time.monotonic() - data_started_at) * 1000)
         if args.debug:
@@ -751,6 +768,15 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         scan_found = 0
         found_by_host = {host: [] for host in hosts}
         seen_hits: dict[str, set[tuple[str, int, str]]] = {host: set() for host in hosts}
+        # Mirror `scan`: with explicit-port/URL targets the discovery scan is split
+        # into per-port execution groups, so per-group progress bars would flicker.
+        # A single command-level bar owns the whole discovery instead (per-group
+        # progress stays off). Without this, URL lists showed no progress at all.
+        use_single_global_progress = should_use_global_progress(args.output_format, len(execution_groups))
+        outer_progress = None
+        if use_single_global_progress:
+            global_total = progress_total_from_groups(group.hosts for group in execution_groups)
+            outer_progress = start_command_progress(args, "COLLECT", global_total, enabled=True, leave=True)
         try:
             for group in execution_groups:
                 part_scan_stats: dict[str, int] = {}
@@ -766,7 +792,7 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                     discovery_exporters=discovery_exporters,
                     custom_ports=[group.port],
                     emit_summary=False,
-                    show_progress=False,
+                    show_progress=not use_single_global_progress,
                     progress_leave=False,
                     progress_owner=getattr(args, "_progress_owner", None),
                     stats_sink=part_scan_stats,
@@ -775,6 +801,8 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 scan_checks += part_checks
                 scan_found += part_found
                 scan_errors += int(part_scan_stats.get("errors", 0))
+                if outer_progress is not None:
+                    outer_progress.advance(part_checks)
                 for host, hits in part_found_by_host.items():
                     for hit in hits:
                         exporter = str(hit.get("exporter") or "")
@@ -792,6 +820,9 @@ def run_collect_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         except OSError as exc:
             console.error(f"failed to process collect discovery scan: {exc}")
             return 2
+        finally:
+            if outer_progress is not None:
+                outer_progress.close()
 
     detect_ms = int((time.monotonic() - detect_started_at) * 1000)
     deep_candidates = sum(1 for host in hosts if found_by_host.get(host))
