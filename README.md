@@ -8,6 +8,12 @@
   <a href="https://github.com/MelForze/Redposture/actions/workflows/ci.yml">
     <img src="https://img.shields.io/github/actions/workflow/status/MelForze/Redposture/ci.yml?branch=main&style=flat-square&label=CI" alt="CI">
   </a>
+  <a href="https://github.com/MelForze/Redposture/releases">
+    <img src="https://img.shields.io/github/v/tag/MelForze/Redposture?style=flat-square&label=version" alt="Latest version">
+  </a>
+  <img src="https://img.shields.io/badge/modules-21-2b2f36?style=flat-square" alt="Modules">
+  <img src="https://img.shields.io/badge/lint-ruff-2b2f36?style=flat-square" alt="Ruff">
+  <img src="https://img.shields.io/badge/types-mypy-2b2f36?style=flat-square" alt="mypy">
   <img src="https://img.shields.io/badge/Python-3.10%2B-2b2f36?style=flat-square" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/install-pipx-2b2f36?style=flat-square" alt="Install with pipx">
   <a href="https://github.com/MelForze/Redposture/stargazers">
@@ -25,7 +31,7 @@ Use it only on systems you own or are explicitly authorized to assess.
 ## Features
 
 - Exporter workflows: discover, collect, and trigger Prometheus-style exporters and debug endpoints.
-- Service audit modules: `registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `kubeapi`, `postgres`, `mongodb`, `docker`, `oracle`, `clickhouse`, `redis`, `etcd`, `qdrant`, `elastic`, `grpc`, `kafka`, `zookeeper`, and `keeper`.
+- Service audit modules: `registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `kubeapi`, `postgres`, `mongodb`, `docker`, `oracle`, `clickhouse`, `redis`, `etcd`, `qdrant`, `elastic`, `grpc`, `kafka`, `zookeeper`, `keeper`, and `minio`.
 - Multi-target and multi-port scans from comma-separated values, per-target `host:port` entries, CIDR/ranges where supported, or target files.
 - Authentication checks with explicit credentials, default-credential checks where implemented, and credential-file workflows in supported modules.
 - Optional data enumeration and bounded dumps for data-store modules.
@@ -85,6 +91,7 @@ grpc        gRPC transport/auth/reflection/health/invoke/OpenAPI
 kafka       Kafka auth, topic visibility, bounded message dumps
 zookeeper   Apache ZooKeeper identity, TLS, auth, health, and znode visibility
 keeper      ClickHouse Keeper identity, TLS, auth, quorum, and znode visibility
+minio       MinIO detection, anonymous access, credential/default-credential/admin checks, write-probe, streamed enumeration, secret discovery, object dump/download
 ```
 
 Use command help for the complete, current flag list:
@@ -144,6 +151,7 @@ redposture elastic -t http://elastic.internal:9200 --proxy http://127.0.0.1:8080
 | Module | Credential pairs checked |
 | --- | --- |
 | Grafana | `admin:admin`, `admin:changeme`, `admin:grafana`, `admin:password`, `grafana:grafana`, `grafana:password`, `root:password`, `root:root`, `user:password`, `user:user` |
+| MinIO | `minioadmin:minioadmin`, `minio:minio123`, `minioadmin:minio123`, `minioadmin:password`, `admin:admin`, `admin:minioadmin`, `admin:password`, `root:minioadmin`, `root:password`, `minio:minio`, `access:secret` |
 | Proxmox | `admin@pam:admin`, `admin@pve:admin`, `admin@pve:password`, `root@pam:admin`, `root@pam:changeme`, `root@pam:password`, `root@pam:proxmox`, `root@pam:Proxmox123`, `root@pam:root`, `root@pam:toor` |
 | Postgres | `admin:admin`, `admin:password`, `admin:postgres`, `dev:dev`, `pgbouncer:pgbouncer`, `pgbouncer_exporter:pgbouncer_exporter`, `pgsql:pgsql`, `postgres:admin`, `postgres:changeme`, `postgres:password`, `postgres:postgres`, `service:service`, `test:test`, `user:password`, `user:user` |
 | MongoDB | `admin:admin`, `admin:changeme`, `admin:mongo`, `admin:mongodb`, `admin:password`, `dev:dev`, `mongo:mongo`, `mongo:password`, `mongodb:mongodb`, `mongodb:password`, `root:admin`, `root:mongo`, `root:mongodb`, `root:password`, `root:root`, `test:test`, `user:password`, `user:user` |
@@ -159,282 +167,152 @@ redposture elastic -t http://elastic.internal:9200 --proxy http://127.0.0.1:8080
 
 ## Module Examples
 
-Exporter scan and collect:
+Every example is `redposture <module> …`; run `redposture <module> -h` for the full flag set. `--defcreds` runs
+ordered online credential probes (see the table above) — exhaustive by default (`--stop-on-success` stops at the
+first hit where supported) and able to trigger lockout/alerts, so use it only on authorized targets.
+
+**Exporters** — Prometheus/metrics scan, collect, trigger:
 
 ```bash
 redposture exporters scan -t 127.0.0.1
 redposture exporters collect -t 127.0.0.1 --deep --save-responses-dir /tmp/rp_collect_raw
-redposture exporters scan -t https://metrics.internal:9100 --tls-ca ca.pem
-```
-
-Trigger workflow with a local listener window:
-
-```bash
 redposture exporters trigger -t 127.0.0.1 --callback-dns host.docker.internal --with-listen --listen-seconds 8
 ```
 
-Registry metadata:
+**Registry** — Docker registry metadata:
 
 ```bash
 redposture registry -t 127.0.0.1 --port 5000 --docker --images
 redposture registry -t 127.0.0.1 --port 5000 --docker --repository redposture/demo-api --show-tags
 ```
 
-Grafana default credentials and datasource visibility:
+**Grafana** — default creds + datasources:
 
 ```bash
-redposture grafana -t 127.0.0.1 --defcreds
 redposture grafana -t 127.0.0.1 --defcreds --show-datasources
 ```
 
-`--defcreds` performs ordered online authentication probes in ClickHouse, Elastic/OpenSearch, etcd,
-Grafana, gRPC, Kafka, Keeper, MongoDB, Oracle, Postgres, Proxmox, Redis, and ZooKeeper. Explicit tokens,
-username/password pairs, credential-file entries, and module-specific combo/spray inputs keep priority;
-the curated module defaults are sorted case-insensitively by login and then password before they are appended
-once with stable deduplication. With `--defcreds`, every candidate is checked and rendered even after a
-credential succeeds; the first confirmed identity is retained for follow-up data and capability checks.
-These requests can trigger account lockout, throttling, or security alerts, so use them only on authorized
-targets.
-
-GitLab public and token-backed checks:
+**GitLab** — public + token-backed:
 
 ```bash
 redposture gitlab -t 127.0.0.1 --port 18080
 redposture gitlab -t 127.0.0.1 --port 18080 --token glpat-example --project group/project
 ```
 
-Consul KV and catalog details:
+**Consul** — KV + catalog (bare targets scan HTTP `8500/18500/28500`, HTTPS `8501/18501/28501`):
 
 ```bash
-redposture consul -t 127.0.0.1 --dump 25
-redposture consul -t 127.0.0.1 --keys --services --agents --checks --nodes
+redposture consul -t 127.0.0.1 --keys --services --agents --checks --nodes --dump 25
 redposture consul -t https://consul.internal --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --services
 ```
 
-Bare Consul targets scan HTTP-first `8500`, `18500`, `28500` and HTTPS-first `8501`, `18501`, `28501`.
-HTTPS verification is never disabled automatically; use `--insecure` for an authorized self-signed lab.
-
-Kubernetes API visibility:
+**KubeAPI** — Kubernetes API visibility (a token that gets 403 is verified with a non-persistent `SelfSubjectReview`):
 
 ```bash
 redposture kubeapi -t 127.0.0.1 --port 6443 --insecure --namespaces --pods
 redposture kubeapi -t 127.0.0.1 --port 6443 --insecure --token "$KUBE_TOKEN" --secrets
 ```
 
-KubeAPI detection requires a canonical Kubernetes `/version`, `/api`, or correlated 401/403 Status pair.
-Authentication inference uses one bounded `namespaces?limit=1` request. Anonymous `403` is reported as
-`auth required:False`, while `401` is reported as `auth required:True`. The more precise anonymous-access
-classification remains available in JSON. A Bearer token that receives `403` is verified with a non-persistent
-Kubernetes `SelfSubjectReview`; the forbidden response alone is never treated as valid authentication. Full
-pagination and pod/secret reads run only for explicitly requested actions.
-KubeAPI uses 12 workers by default (an explicit `-w` value is preserved), reuses one keep-alive connection per
-target, and retries only transport failures for the current endpoint or page. Secret Base64 is decoded strictly,
-and control characters are escaped in TXT/terminal output.
-
-HTTP-based modules reuse bounded per-target HTTP/1.1 connections across detection, authentication, and requested
-actions, including direct, CONNECT, and SOCKS proxy transports. TLS contexts are cached by trust and client-identity
-configuration. Nested work such as GitLab project checks and ZooKeeper enumeration shares a command-wide
-`min(workers, 20)` budget; `--enum-workers` remains the per-target ZooKeeper ceiling. With `--debug`, the final
-`transport summary` shows request, connection, reuse, retry, and TLS-context cache counters.
-
-PostgreSQL enumeration and privilege-risk check:
+**PostgreSQL** — enumeration + privilege-risk check:
 
 ```bash
-redposture postgres -t 127.0.0.1 --defcreds
 redposture postgres -t 127.0.0.1 --defcreds --stop-on-success
-redposture postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables 20
-redposture postgres -t 127.0.0.1 -u postgres -p postgres --privesc-check
-redposture postgres -t 127.0.0.1 -u postgres -p postgres --table 'public."offlineStocks:city_4949:552400"' --dump 5
+redposture postgres -t 127.0.0.1 -u postgres -p postgres --show-databases --show-tables 20 --privesc-check
 redposture postgres -t db.internal --sslmode verify-full --ssl-ca ca.pem --ssl-cert client.pem --ssl-key client.key
 ```
 
-Postgres credential probes are serialized per host across all scanned ports and paced by 100–250 ms; different
-hosts remain parallel. Explicit overload responses add a bounded per-host cooldown. `--defcreds` remains
-exhaustive by default, while `--stop-on-success` stops after the first verified credential. Startup failures that
-do not prove a password rejection are reported as `verification unavailable` rather than invalid credentials.
-
-MongoDB enumeration, query, and dump:
+**MongoDB** — enumeration, query, dump (`--proxy` fails closed; use a tunnel):
 
 ```bash
 redposture mongodb -t 127.0.0.1 --defcreds
-redposture mongodb -t 127.0.0.1 --show-databases --show-collections 20
 redposture mongodb -t 127.0.0.1 --database redposture --collection demo_accounts --query '{"role":"admin"}' --dump 10
-redposture mongodb -t mongo.internal --tls --tls-ca ca.pem --tls-cert-key client.pem --show-databases
 ```
 
-PyMongo does not expose a reliable HTTP/SOCKS proxy transport, so `mongodb --proxy` fails closed instead of
-silently connecting directly; use an explicit network tunnel when proxying MongoDB.
-
-Docker Engine API inventory:
+**Docker** — Engine API inventory:
 
 ```bash
-redposture docker -t 127.0.0.1
 redposture docker -t 127.0.0.1 --port 2375 --containers --images --networks --volumes --system
 ```
 
-Oracle listener and post-auth enumeration:
+**Oracle** — listener + post-auth enumeration:
 
 ```bash
 redposture oracle -t 127.0.0.1 --port 1521 --listener-dump
-redposture oracle -t oracle.internal --port 2484 --protocol tcps --service FREEPDB1
 redposture oracle -t 127.0.0.1 --service FREEPDB1 -u redposture -p 'OracleLab!2026' --show-pdbs --show-users --privesc-check
 ```
 
-ClickHouse enumeration, bounded dump, and resumable full secret discovery:
+**ClickHouse** — native-first (HTTP fallback), enumeration, resumable secret discovery:
 
 ```bash
 redposture clickhouse -t 127.0.0.1 --show-databases --show-tables 20
-redposture clickhouse -t 127.0.0.1 --protocol auto
 redposture clickhouse -t 127.0.0.1 -u default -p default --table secure.secrets_inventory --dump 5
-redposture clickhouse -t 127.0.0.1 --discover --checkpoint clickhouse-discover.json
-redposture clickhouse -t 127.0.0.1 --discover --resume --checkpoint clickhouse-discover.json
-redposture clickhouse -t clickhouse.internal --tls --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --show-databases
+redposture clickhouse -t 127.0.0.1 --discover --checkpoint clickhouse-discover.json   # + --resume to continue
 ```
 
-`--discover` inventories readable databases, tables, columns, partitions, sizes and keys, then scans every
-content-capable column in partitioned chunks. Neutral column names are not skipped. Nested JSON, maps and arrays
-are inspected with object paths; malformed JSON is still scanned as text. Findings are fingerprinted, deduplicated
-and emitted with their complete values. The atomic checkpoint records each completed or
-failed chunk and per-column coverage; `--resume` skips only completed chunks. Query time, row, byte, memory and
-thread budgets are configurable in `clickhouse --help`; a budget or permission failure is reported as partial,
-never as 100% coverage.
-
-ClickHouse scans are native-first. If the native driver receives a deterministic incompatible-packet response,
-RedPosture immediately tries the HTTP API on the same port (HTTPS when `--tls` is enabled). `--protocol auto`
-also scans the standard native and HTTP port sets, preferring the protocol associated with each port. Transport
-failures are retried only on the current protocol and do not trigger fallback. `--http` remains an alias for
-`--protocol http`.
-Unconfirmed per-target protocol and transport errors are available in JSON and `--debug`; normal TXT output keeps
-only confirmed services and the aggregate no-service or inconclusive summary.
-
-Numeric `--show-databases` and `--show-tables` limits are applied by ClickHouse before rows are transferred.
-SQL command output is streamed and stopped after 500 rows. JSON records keep a confirmed service status when a
-requested action is partial or fails; inspect `action_statuses`, `partial_reasons`, and
-`requested_operation_failure` for the operation result.
-
-ClickHouse HTTP(S) mode can use the global HTTP proxy. Native ClickHouse mode rejects `--proxy` because the
-installed native driver cannot guarantee that traffic is routed through it.
-
-Redis, etcd, Qdrant, Kafka, Apache ZooKeeper, and ClickHouse Keeper:
+**Redis / etcd / Qdrant / Kafka** — keys, collections, topics, dumps (add `--tls …` for TLS):
 
 ```bash
 redposture redis -t 127.0.0.1 --show-keys 20 --dump 10
-redposture redis -t redis.internal --port 6380 --tls --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --dump 10
 redposture etcd -t 127.0.0.1 --show-keys 20 --dump 10
 redposture qdrant -t 127.0.0.1 --collections --dump 10
 redposture kafka -t 127.0.0.1 --show-topics --dump 10
-redposture kafka -t 192.0.2.10 --port 9093 --tls --tls-server-name kafka.internal --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --dump 10
-redposture zookeeper -t 127.0.0.1 --show-znodes 20 --dump 10
-redposture zookeeper -t 127.0.0.1 --defcreds --show-znodes 20
-redposture zookeeper -t 127.0.0.1 --port 9281 --insecure --show-znodes 20
-redposture keeper -t 127.0.0.1 --show-znodes 20 --dump 10
-redposture keeper -t 127.0.0.1 --defcreds --probe-write
 ```
 
-ZooKeeper and Keeper use separate ordered digest catalogs; Keeper favors `clickhouse`, `keeper`, and `default`
-identities. A pair is valid only when an ACL-protected path changes from anonymous `NOAUTH` to authenticated
-`OK`; `addAuth` alone is not proof. RedPosture checks `--znode` and at most 32 root children for such a verifier.
-Without one, defaults are skipped and the output asks for a protected `--znode`.
-
-The auth lab protects `/` and `/redposture-auth` for `zk:zookeeper`:
-
-```bash
-docker compose -f lab/services/zookeeper-auth/docker-compose.yml up -d --wait
-redposture zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --dump -f json
-docker compose -f lab/services/zookeeper-auth/docker-compose.yml down -v
-```
-
-### ZooKeeper and ClickHouse Keeper audit
-
-Both commands share the wire client but route strictly: `zookeeper` accepts Apache ZooKeeper on default ports
-`2181`, `12181`, and `22181`; `keeper` accepts ClickHouse Keeper on `9181`, `19181`, and `29181`. Wrong-vendor and unconfirmed endpoints are JSON/debug
-diagnostics only and never run credentials or actions. TLS/mTLS and znode flags are identical. When 4LW is
-disabled, Keeper is confirmed read-only only if `/keeper` exposes `api_version` and `feature_flags` and the
-API version is a positive integer.
-
-`--probe-write` is the only write action. It creates and deletes a unique ephemeral root znode in a separate
-session, then closes that session for cleanup. Without the flag both modules remain read-only.
-
-Start the focused lab (three-node Keeper cluster, TLS standalone, a Keeper with diagnostic four-letter commands disabled, seeded znodes, and an Apache ZooKeeper classification control):
-
-```bash
-docker compose -f lab/services/keeper/docker-compose.yml up -d --wait
-docker compose -f lab/services/keeper/docker-compose.yml ps
-```
-
-Run high-signal plaintext, TLS, read-only fallback, and Apache-classification audits:
-
-```bash
-redposture keeper -t 127.0.0.1 --port 9181,19181,29181 --show-znodes 20 --dump 20 --enum-workers 3 -d -f json
-redposture zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --probe-write
-redposture keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10 -d -f json
-redposture keeper -t 127.0.0.1 --port 39181 --znode /keeper/api_version --dump -f json
-redposture zookeeper -t 127.0.0.1 --port 12181 --show-znodes 5 -d -f json
-```
-
-Remove containers, network, certificates, snapshots, and Raft logs:
-
-```bash
-docker compose -f lab/services/keeper/docker-compose.yml down -v --remove-orphans
-```
-
-Elasticsearch and gRPC:
+**Elasticsearch / gRPC**:
 
 ```bash
 redposture elastic -t http://127.0.0.1:9200/ --endpoints --cluster --discover
-redposture grpc -t 127.0.0.1 --port 50051
 redposture grpc -t 127.0.0.1 --port 50051 --analyze
 redposture grpc -t 127.0.0.1 --port 50051 --invoke /grpc.health.v1.Health/Check --data '{"service":""}'
 redposture grpc -t 127.0.0.1 --port 50051 --openapi
-redposture grpc -t 192.0.2.10 --port 50051 --tls --tls-server-name grpc.internal --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --analyze
 ```
 
-Elastic scans bare targets on ports `9200`, `19200`, and `29200` by default. Use `host:port` for a
-target-specific port or `--port` for an explicit port set; when both are supplied, the explicit set is
-added without removing the target-specific port. Transient transport retries are opt-in through
-`-r/--retries`. Worker count is never silently reduced or raised: modules default to 50 except KubeAPI, whose
-CPU-conscious default is 12; an explicit `-w/--workers` value is preserved. Explicit `-r/--retries` and
-`--timeout` values also always win.
+### MinIO
 
-Elastic `--discover` uses mappings to target sensitive fields, then performs a bounded `_source` sweep and
-audits readable settings, templates, mappings, and ingest pipelines. Findings are deduplicated by secret
-value and include confidence plus coverage; partial authorization, disabled/filtered `_source`, closed
-indices, timeouts, and scan limits are reported without claiming that no secrets exist. Found secret values
-are intentionally written in full to the terminal, `-o`, debug output, and logs. Normal TXT keeps each
-finding compact (`secret_type`, JSON-escaped `value`, and its first source location) and highlights the
-`value` token in orange on color-capable terminals; confidence, score, detectors, occurrence counts, and
-the first location remain available in `--debug`, while JSON preserves every retained location.
+```bash
+redposture minio -t 127.0.0.1                                            # detect (transport auto)
+redposture minio -t 127.0.0.1 --defcreds                                # try default credentials
+redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --show-buckets --show-objects
+redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --show-buckets --probe-write
+redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --bucket data --discover --max-objects 200
+redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.env --dump
+redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.env --download /tmp/rp-dl
+```
 
-The inventory and search path falls back to Elasticsearch 1.x-compatible CAT, mapping, settings, and
-search requests only when a server explicitly rejects a modern parameter. If a PIT or scroll context is
-lost between pages, discovery restarts that index once from page one and deduplicates replayed documents;
-a second loss remains a structured partial error with its original status, type, reason, and root cause.
+- **Transport is automatic**: scheme (HTTP/HTTPS) is probed per target and TLS certificates are always accepted
+  (no `--https`/`--insecure`/`--ca-file`). Credentials use the S3 model (`-u` access key, `-p` secret key,
+  `--session-token`); a valid signature that gets `AccessDenied` is `valid_but_restricted`, never invalid. The
+  detection line shows the server version (`(version:…)`) when an authenticated Admin API read exposes it.
+- **Enumeration** (`--show-buckets`/`--show-objects`/`--bucket`/`--prefix`) is unbounded but memory-safe — objects
+  are streamed (no `--limit`; JSON is emitted as NDJSON). `--discover` scans interesting-by-name objects for secrets
+  and prints each finding **in real time** as it is found (large objects are read in chunks, not skipped), then a
+  clickhouse-style `[*] Discover Secrets` summary. Secret values are shown in full; bounded by
+  `--max-objects` / `--max-object-size` / `--discover-time`.
+- **`--probe-write`** is the only mutating action: a canary object is PUT then DELETEd per bucket, reporting
+  `(write:True/False)`. Otherwise every operation is GET/HEAD only.
+- **`--object <bucket>/<key>`** with `--dump` prints content or `--download <dir>` saves it (read-only, capped by
+  `--max-object-size`).
 
-The default gRPC scan only fingerprints transport, protocol, Reflection availability, and separate
-Health/Reflection access policies. Public Health is not treated as endpoint-wide anonymous access.
-`--analyze` enables service, method, descriptor, and per-service Health enumeration. `--invoke` and
-`--openapi` enable that analysis automatically. Without a transport flag, gRPC tries the scheme-aware
-automatic transport sequence; `--tls` and `--plaintext` constrain probes to one mode. Kafka retains its
-port/protocol auto-detection unless either transport flag is supplied. Both modules accept
-`--tls-server-name` for TLS SNI and certificate verification when the connection target is an IP or alias.
+### ZooKeeper and ClickHouse Keeper
 
-Kafka dumps decode gzip without extra packages. Snappy, LZ4, and Zstandard batches are supported by the
-`kafka-codecs` extra (`pip install 'redposture[kafka-codecs]'`); when a codec is unavailable, the dump
-keeps other partitions and reports the affected partition explicitly.
+Strict routing: `zookeeper` accepts Apache ZooKeeper on `2181/12181/22181`, `keeper` accepts ClickHouse Keeper on
+`9181/19181/29181`; wrong-vendor endpoints are diagnostics only. TLS/mTLS and znode flags are identical.
+`--probe-write` (the only write action) creates and deletes an ephemeral znode in a separate session. `--defcreds`
+needs an ACL-protected verifier (`--znode` or a root child) to confirm a pair — without one, defaults are skipped.
 
-`--openapi` merges and deduplicates descriptors discovered across every target. The artifact is still
-written when no descriptors are available; `x-redposture.descriptors_obtained` and
-`x-redposture.targets_without_descriptors` make complete and partial exports explicit. Generated schemas
-follow protobuf JSON rules for maps and 64-bit integers, preserve oneof/optional semantics, and model the
-protobuf well-known JSON types. Conflicting same-name descriptor variants are reported in
-`x-redposture.descriptor_conflicts`; selection uses the lowest normalized schema SHA-256 and ignores
-source-location-only differences. Malformed inputs are listed in `descriptor_errors`, while duplicate
-message, enum, or service symbols from different files are listed in `descriptor_symbol_conflicts`.
-When no path follows `--openapi`, a single endpoint is written to `openapi_HOST_PORT.json`; a multi-target
-scan is written to the merged `openapi_merged.json`. The analysis performed implicitly for export stays
-compact on the console; combine `--analyze --openapi [path]` to print the full service inventory as well.
-Generated OpenAPI `servers` entries use the detected endpoint addresses and transport (`http` for plaintext,
-`https` for TLS), so Swagger clients do not silently substitute `localhost`.
+```bash
+redposture zookeeper -t 127.0.0.1 --show-znodes 20 --dump 10
+redposture zookeeper -t 127.0.0.1 --port 22185 --defcreds --znode /redposture-auth --probe-write
+redposture keeper -t 127.0.0.1 --port 9181,19181,29181 --show-znodes 20 --dump 20 -d -f json
+redposture keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
+```
+
+Focused Keeper lab (cluster + TLS + 4LW-disabled + Apache control):
+
+```bash
+docker compose -f lab/services/keeper/docker-compose.yml up -d --wait
+docker compose -f lab/services/keeper/docker-compose.yml down -v --remove-orphans
+```
 
 ## License
 

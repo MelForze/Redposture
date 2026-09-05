@@ -326,6 +326,30 @@ def test_line_output_sink_emits_to_callback_and_file(tmp_path) -> None:
     assert emitted == ["one", "two", "first", "second"]
 
 
+def test_line_output_sink_emit_stream_file_streams_in_bounded_batches(tmp_path) -> None:
+    src = tmp_path / "stream.txt"
+    src.write_text("a\nb\n\nc\n", encoding="utf-8")  # blank line is skipped
+    emitted: list[str] = []
+    batches: list[int] = []
+
+    class _Sink(LineOutputSink):
+        def emit_many(self, lines):
+            lines = [line for line in lines if line]
+            batches.append(len(lines))
+            emitted.extend(lines)
+
+    sink = _Sink(None, emitted.append)
+    count = sink.emit_stream_file(str(src), batch=2)
+    assert count == 3
+    assert emitted == ["a", "b", "c"]
+    assert batches == [2, 1]  # bounded to `batch` per flush -> never materialised whole
+
+
+def test_line_output_sink_emit_stream_file_missing_path_is_noop() -> None:
+    sink = LineOutputSink(None, lambda _line: None)
+    assert sink.emit_stream_file("/nonexistent/redposture-stream.txt") == 0
+
+
 def test_audit_command_runner_streams_explicit_lifecycle_in_completion_order(tmp_path) -> None:
     release_first = threading.Event()
     first_started = threading.Event()

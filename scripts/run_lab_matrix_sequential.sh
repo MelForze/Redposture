@@ -43,7 +43,7 @@ fi
 
 MATRIX_SERVICES=(
   exporters registry grafana gitlab consul kubeapi postgres mongodb oracle docker
-  clickhouse redis etcd qdrant elastic opensearch grpc kafka zookeeper zookeeper-auth keeper proxmox proxy-isolated
+  clickhouse redis etcd qdrant elastic opensearch grpc kafka zookeeper zookeeper-auth keeper proxmox minio proxy-isolated
 )
 READINESS_ALLOWED_COMPLETED=(
   redposture-lab-registry-seed
@@ -480,6 +480,13 @@ run_grafana_cases() {
   fi
 }
 
+run_minio_cases() {
+  run_case minio minio_default 1 minio -t 127.0.0.1 --debug --defcreds
+  run_case minio minio_creds 1 minio --targets 127.0.0.1 --port 9000 --ports 9000,9001 -u minioadmin -p minioadmin --session-token fake-token --probe-write
+  run_case minio minio_tls 1 minio -t 127.0.0.1 --port 443 -ot excluded.invalid
+  run_case minio minio_enum 1 minio -t 127.0.0.1 --show-buckets --show-objects --bucket data --prefix logs/ --probe-write --object data/app.log --dump --download /tmp/redposture-minio-dl --discover --max-object-size 1048576 --max-objects 50 --discover-time 10
+}
+
 run_gitlab_cases() {
   run_case gitlab gitlab_public 0 gitlab -t 127.0.0.1 --port 18080
   run_case gitlab gitlab_analyst 0 gitlab -t 127.0.0.1 --port 18080 --token glpat-redposture-lab-analyst-2026
@@ -901,6 +908,7 @@ fi
 run_service_block exporters run_exporters_cases
 run_service_block registry run_registry_cases
 run_service_block grafana run_grafana_cases
+run_service_block minio run_minio_cases
 run_service_block gitlab run_gitlab_cases
 run_service_block consul run_consul_cases
 run_service_block kubeapi run_kubeapi_cases

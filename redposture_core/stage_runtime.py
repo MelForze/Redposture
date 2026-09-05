@@ -363,6 +363,37 @@ class LineOutputSink:
                 self.emit_line(line)
             self.output_written = True
 
+    def emit_stream_file(self, path: str, *, batch: int = 1000) -> int:
+        """Stream a file of pre-formatted lines to the sink without materialising it.
+
+        Used for very large streamed sections (e.g. a minio object listing buffered
+        during the data phase): the file is read and teed to file+console in bounded
+        batches, so memory stays bounded regardless of the listing size. Returns the
+        number of lines emitted.
+        """
+        emitted = 0
+        try:
+            handle = open(path, encoding="utf-8")
+        except OSError:
+            return 0
+        try:
+            buffer: list[str] = []
+            for raw in handle:
+                line = raw.rstrip("\n")
+                if not line:
+                    continue
+                buffer.append(line)
+                if len(buffer) >= max(1, batch):
+                    self.emit_many(buffer)
+                    emitted += len(buffer)
+                    buffer = []
+            if buffer:
+                self.emit_many(buffer)
+                emitted += len(buffer)
+        finally:
+            handle.close()
+        return emitted
+
     def close(self) -> None:
         with self._lock:
             if self._handle is not None:
@@ -401,6 +432,10 @@ class AuditHookContext:
     credential_runs: tuple[AuditCredentialRun, ...] = ()
     lifecycle_state: Any = None
     nested_scheduler: SharedNestedScheduler | None = None
+    # Live output sink (tees console + `-o` file). When set, a data hook may emit
+    # lines in real time during the scan; it then marks its record `_self_emitted`
+    # so the runtime does not render the record again (TXT only). None disables it.
+    live_emit: Callable[[Iterable[str]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -1808,6 +1843,9 @@ class AuditCommandRunner:
             self.console.set_structured_output(plan.output_format == "json")
         sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append)
         sink.prepare()
+        # Data hooks may stream lines live (real-time output) via this sink, but only
+        # for TXT; JSON stays a single serialized record per target.
+        self._live_emit = sink.emit_many if plan.output_format == "txt" else None
         try:
             return self._run_prepared_plan(plan, sink)
         finally:
@@ -1891,21 +1929,42 @@ class AuditCommandRunner:
 
         def _emit_record(record: AuditRecord) -> None:
             nonlocal emitted_lines, suppressed_records
-            if plan.output_format == "json":
-                payload = record.to_dict()
-                for field_name in self.spec.structured_output_redact_fields:
-                    payload.pop(field_name, None)
-                emitted_lines += 1
-                sink.emit_many((json.dumps(payload, ensure_ascii=False),))
-                return
-            if self.spec.render is None and self.spec.render_module is None:
-                return
-            if not debug and self._suppress_in_normal_text(record):
-                suppressed_records += 1
-                return
-            lines = self._render_record(record, render_plan, plan.output_format, debug)
-            emitted_lines += len(lines)
-            sink.emit_many(lines)
+            # A record may buffer a large, pre-formatted section (e.g. a streamed
+            # minio object listing) into a temp file; emit it after the static
+            # content and always delete it, even when the record is suppressed.
+            stream_file = record.extra.get("_stream_lines_file") if isinstance(record.extra, dict) else None
+            try:
+                if plan.output_format == "json":
+                    payload = record.to_dict()
+                    for field_name in self.spec.structured_output_redact_fields:
+                        payload.pop(field_name, None)
+                    payload.pop("_stream_lines_file", None)
+                    emitted_lines += 1
+                    sink.emit_many((json.dumps(payload, ensure_ascii=False),))
+                    if stream_file:
+                        emitted_lines += sink.emit_stream_file(stream_file)
+                    return
+                if isinstance(record.extra, dict) and record.extra.get("_self_emitted"):
+                    # A data hook already streamed this record's TXT lines live
+                    # (real-time discovery); do not render it again.
+                    emitted_lines += int(record.extra.get("_self_emitted_lines") or 0)
+                    return
+                if self.spec.render is None and self.spec.render_module is None:
+                    return
+                if not debug and self._suppress_in_normal_text(record):
+                    suppressed_records += 1
+                    return
+                lines = self._render_record(record, render_plan, plan.output_format, debug)
+                emitted_lines += len(lines)
+                sink.emit_many(lines)
+                if stream_file:
+                    emitted_lines += sink.emit_stream_file(stream_file)
+            finally:
+                if stream_file:
+                    try:
+                        os.remove(stream_file)
+                    except OSError:
+                        pass
 
         def _finalize_record(record: AuditRecord) -> None:
             nonlocal operational_failure_count, record_count
@@ -2056,6 +2115,7 @@ class AuditCommandRunner:
             credential_runs=credential_runs,
             lifecycle_state=lifecycle_state,
             nested_scheduler=self._nested_scheduler,
+            live_emit=getattr(self, "_live_emit", None),
         )
 
     def _register_lifecycle_state(self, state: Any) -> None:

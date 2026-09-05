@@ -1711,3 +1711,119 @@ def test_collect_stage_debug_emits_staged_markers(
     assert "pass=2 deep start total=1" in out
     assert "stage2_gate=run reason=detected=1" in out
     assert "stage_timing_summary status=ok attempts=1/1" in out
+
+
+def test_collect_stage_explicit_url_targets_use_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    # URL / explicit-port targets take the `has_target_overrides` path; it must own a
+    # single command-level progress bar (per-group progress off), like `scan` does.
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.load_profiles",
+        lambda *_a, **_k: {
+            "discovery_exporters": [{"port": 9353}],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/vars"],
+        },
+    )
+
+    scan_show_progress_flags: list[bool] = []
+    scan_calls = 0
+
+    def fake_scan(*_a: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        nonlocal scan_calls
+        scan_calls += 1
+        scan_show_progress_flags.append(bool(kwargs.get("show_progress", True)))
+        hosts = list(kwargs.get("hosts") or [])
+        ports = list(kwargs.get("custom_ports") or [])
+        return len(hosts) * len(ports), 0, {h: [] for h in hosts}
+
+    monkeypatch.setattr("redposture_core.stage_collect.scan_exporter_presence", fake_scan)
+    monkeypatch.setattr("redposture_core.stage_collect.collect_exporter_debug_data", lambda *_a, **_k: (0, 0))
+
+    progress_totals: list[int] = []
+    progress_advances: list[int] = []
+    progress_closed = 0
+
+    class _DummyProgress:
+        def __init__(self, _label: str, total: int, **_kw: object) -> None:
+            progress_totals.append(total)
+
+        def advance(self, amount: int = 1) -> None:
+            progress_advances.append(amount)
+
+        def close(self) -> None:
+            nonlocal progress_closed
+            progress_closed += 1
+
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.start_command_progress",
+        lambda _args, label, total, **kw: _DummyProgress(label, total, **kw),
+    )
+
+    rc = run_collect_stage(_base_args(targets="http://127.0.0.1:9353/,http://127.0.0.1:8008/"), AttemptLogger())
+    assert rc == 0
+    assert scan_calls == 2  # one execution group per distinct port
+    assert scan_show_progress_flags == [False, False]  # per-group progress disabled
+    assert len(progress_totals) == 1  # a single command-level bar owns the run
+    assert sum(progress_advances) == 2  # advanced by discovery checks across groups
+    assert progress_closed == 1
+
+
+def test_collect_stage_large_list_uses_command_progress(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The huge-target chunked path must also own a single command-level progress bar
+    # (counted by hosts), instead of running with no progress at all.
+    monkeypatch.setattr(collect, "DEFAULT_MAX_NETWORK_HOSTS", 1)
+    monkeypatch.setattr(
+        collect,
+        "load_profiles",
+        lambda *_a, **_k: {
+            "discovery_exporters": [{"port": 9100}],
+            "collect_exporters": [],
+            "collect_debug_endpoints": ["/debug/vars"],
+        },
+    )
+
+    scan_show_progress_flags: list[bool] = []
+
+    def fake_scan(*_a: object, **kwargs: object) -> tuple[int, int, dict[str, list[dict[str, object]]]]:
+        scan_show_progress_flags.append(bool(kwargs.get("show_progress", True)))
+        hosts = list(kwargs.get("hosts") or [])
+        # found>0 so the per-chunk collect runs and we can assert it owns no bar
+        return len(hosts), len(hosts), {h: [{"exporter": "node_exporter", "port": 9100}] for h in hosts}
+
+    collect_owner_args: list[object] = []
+
+    def fake_collect(*_a: object, **kwargs: object) -> tuple[int, int]:
+        collect_owner_args.append(kwargs.get("progress_owner"))
+        return 0, 0
+
+    monkeypatch.setattr(collect, "scan_exporter_presence", fake_scan)
+    monkeypatch.setattr(collect, "collect_exporter_debug_data", fake_collect)
+
+    progress_totals: list[int] = []
+    progress_advances: list[int] = []
+    progress_closed = 0
+
+    class _DummyProgress:
+        def __init__(self, _label: str, total: int, **_kw: object) -> None:
+            progress_totals.append(total)
+
+        def advance(self, amount: int = 1) -> None:
+            progress_advances.append(amount)
+
+        def close(self) -> None:
+            nonlocal progress_closed
+            progress_closed += 1
+
+    monkeypatch.setattr(
+        "redposture_core.stage_collect.start_command_progress",
+        lambda _args, label, total, **kw: _DummyProgress(label, total, **kw),
+    )
+
+    rc = run_collect_stage(_base_args(targets="10.0.0.0/30"), AttemptLogger())
+    assert rc == 0
+    assert scan_show_progress_flags and not any(scan_show_progress_flags)  # per-chunk scan progress off
+    assert progress_totals == [2]  # one command-level bar for 10.0.0.1 + 10.0.0.2
+    assert sum(progress_advances) == 2  # advanced by host count across chunks
+    assert progress_closed == 1
+    # per-chunk collect must NOT own its own bar (would close the command-level one)
+    assert collect_owner_args and all(owner is None for owner in collect_owner_args)
