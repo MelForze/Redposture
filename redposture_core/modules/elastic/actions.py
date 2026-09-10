@@ -624,8 +624,12 @@ def _looks_like_elastic_root(status: int, payload: bytes, headers: dict[str, str
     if not isinstance(body_dict, dict):
         return False, None
 
-    has_markers = any(name in body_dict for name in ("tagline", "cluster_name", "version", "name"))
-    if not has_markers:
+    tagline = str(body_dict.get("tagline") or "").strip().lower()
+    cluster_name = body_dict.get("cluster_name")
+    has_elastic_marker = tagline == "you know, for search" or (
+        isinstance(cluster_name, str) and bool(cluster_name.strip())
+    )
+    if not has_elastic_marker:
         return False, None
 
     version = body_dict.get("version")

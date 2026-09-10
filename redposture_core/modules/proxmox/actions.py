@@ -351,9 +351,6 @@ def _looks_like_proxmox_response(
         pve_fields = {"clustername", "ticket", "CSRFPreventionToken", "cap"}
         if pve_fields.intersection(data):
             return True
-        username = data.get("username") or data.get("userid")
-        if isinstance(username, str) and "@" in username:
-            return True
     if status not in {401, 403}:
         return False
     message = (_extract_error_message(payload) or "").lower()

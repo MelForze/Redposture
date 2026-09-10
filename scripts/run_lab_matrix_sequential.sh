@@ -43,7 +43,7 @@ fi
 
 MATRIX_SERVICES=(
   exporters registry grafana gitlab consul kubeapi postgres mongodb oracle docker
-  clickhouse redis etcd qdrant elastic opensearch grpc kafka zookeeper zookeeper-auth keeper proxmox minio proxy-isolated
+  clickhouse redis etcd qdrant elastic opensearch grpc kafka rabbitmq zookeeper zookeeper-auth keeper proxmox minio proxy-isolated
 )
 READINESS_ALLOWED_COMPLETED=(
   redposture-lab-registry-seed
@@ -53,6 +53,8 @@ READINESS_ALLOWED_COMPLETED=(
   redposture-lab-etcd-auth-seed
   redposture-lab-etcd-seed
   redposture-lab-keeper-tls-certs
+  redposture-lab-rabbitmq-certs
+  redposture-lab-rabbitmq-seed
 )
 
 collect_lab_ports() {
@@ -255,6 +257,7 @@ run_case() {
   local json_path="${OUT_DIR}/json/${label}.json"
   local log_path="${OUT_DIR}/logs/${label}.log"
   echo "== ${label} =="
+  printf '%q ' "${PYTHON_BIN}" redposture.py "$@" --format json --output "${json_path}" > "${OUT_DIR}/logs/${label}.command.txt"
   set +e
   "${PYTHON_BIN}" redposture.py "$@" --format json --output "${json_path}" >"${log_path}" 2>&1
   local rc=$?
@@ -265,6 +268,8 @@ run_case() {
   if [ "${rc}" -ne "${expected_exit}" ]; then
     echo "[error] ${label} exit mismatch: expected=${expected_exit} actual=${rc}" >&2
     echo "[error] log: ${log_path}" >&2
+    # The local runner validates every recorded exit after collecting all cases.
+    if [ -n "${REDPOSTURE_LOCAL_QA_SERVICE:-}" ]; then return 0; fi
     return 1
   fi
   if [ "${rc}" -ne 0 ]; then
@@ -281,6 +286,7 @@ run_text_case() {
   local text_path="${OUT_DIR}/logs/${label}.txt"
   local log_path="${OUT_DIR}/logs/${label}.log"
   echo "== ${label} =="
+  printf '%q ' "${PYTHON_BIN}" redposture.py "$@" --output "${text_path}" > "${OUT_DIR}/logs/${label}.command.txt"
   set +e
   "${PYTHON_BIN}" redposture.py "$@" --output "${text_path}" >"${log_path}" 2>&1
   local rc=$?
@@ -291,6 +297,7 @@ run_text_case() {
   if [ "${rc}" -ne "${expected_exit}" ]; then
     echo "[error] ${label} exit mismatch: expected=${expected_exit} actual=${rc}" >&2
     echo "[error] log: ${log_path}" >&2
+    if [ -n "${REDPOSTURE_LOCAL_QA_SERVICE:-}" ]; then return 0; fi
     return 1
   fi
 }
@@ -303,6 +310,7 @@ run_raw_case() {
 
   local log_path="${OUT_DIR}/logs/${label}.log"
   echo "== ${label} =="
+  printf '%q ' "${PYTHON_BIN}" redposture.py "$@" > "${OUT_DIR}/logs/${label}.command.txt"
   set +e
   "${PYTHON_BIN}" redposture.py "$@" >"${log_path}" 2>&1
   local rc=$?
@@ -313,6 +321,7 @@ run_raw_case() {
   if [ "${rc}" -ne "${expected_exit}" ]; then
     echo "[error] ${label} exit mismatch: expected=${expected_exit} actual=${rc}" >&2
     echo "[error] log: ${log_path}" >&2
+    if [ -n "${REDPOSTURE_LOCAL_QA_SERVICE:-}" ]; then return 0; fi
     return 1
   fi
   if [ "${rc}" -ne 0 ]; then
@@ -441,7 +450,7 @@ run_exporters_cases() {
     run_case exporters exporters_collect_extended_controls 0 exporters collect -t 127.0.0.1 -p "19100,19121" --exporters node,blackbox --deep --no-adaptive-collect --max-inflight 4 --pprof-seconds 1 --trace-seconds 1 --checkpoint-file "${collect_checkpoint}" --save-responses-dir "${OUT_DIR}/collect_extended"
     run_case exporters exporters_collect_resume_checkpoint 0 exporters collect -t 127.0.0.1 -p "19100,19121" --exporters node --resume --checkpoint-file "${collect_checkpoint}" --save-responses-dir "${OUT_DIR}/collect_extended_resume"
     run_text_case exporters exporters_collect_debug_smoke 0 exporters collect -t 127.0.0.1 -p "19100" --exporters node --debug
-    run_case exporters exporters_trigger_extended_controls 0 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 -p "19121,19187" --no-with-listen --exporters blackbox,postgres --services blackbox --blackbox-port 29115 --postgres-auth-module stage --no-postgres-tls --no-proxmox-tls
+    run_case exporters exporters_trigger_extended_controls 0 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 -p "19121,19187" --no-with-listen --exporters blackbox,postgres --services blackbox --blackbox-port 29115 --postgres-auth-module stage --no-postgres-tls
     run_text_case exporters exporters_trigger_debug_smoke 0 exporters trigger -t 127.0.0.1 --callback-ip 127.0.0.1 -p "19121" --no-with-listen --exporters blackbox --debug
   fi
 }
@@ -478,6 +487,18 @@ run_grafana_cases() {
     run_case grafana fuzz_grafana_invalid_target 2 grafana -t "not://valid" --show-datasource
     run_case grafana fuzz_grafana_huge_port 2 grafana -t 127.0.0.1 --port 99999 --defcreds
   fi
+}
+
+run_rabbitmq_cases() {
+  run_case rabbitmq rabbitmq_default 0 rabbitmq -t localhost --port 15672 --debug --defcreds
+  run_case rabbitmq rabbitmq_enum 0 rabbitmq --targets 127.0.0.1 --port 15672 --ports 15672 -u guest -p guest --enum --vhost / --limit 5 --page-size 2 -f json -o "${OUT_DIR}/json/rabbitmq-enum.json" -ot excluded.invalid
+  run_case rabbitmq rabbitmq_rejected 0 rabbitmq -t 127.0.0.1:15672 -u guest -p wrong
+  run_case rabbitmq rabbitmq_cluster_tls 0 rabbitmq -t https://localhost:15671 -u ops_admin -p 'Ops-Lab-2026!' --enum --vhost prod/orders
+  run_case rabbitmq rabbitmq_observer 0 rabbitmq -t localhost:15672 -u observer -p 'Observe-Lab-2026!' --enum
+  run_case rabbitmq rabbitmq_scoped_management 0 rabbitmq -t localhost:15672 -u admin -p admin --enum --vhost staging
+  run_case rabbitmq rabbitmq_amqp_only 0 rabbitmq -t localhost:15672 -u orders_api -p 'Publish-Lab-2026!'
+  run_case rabbitmq rabbitmq_selected_sections 0 rabbitmq -t localhost:15672 -u guest -p guest --show-vhosts --show-queues --show-exchanges --show-bindings --show-permissions --vhost prod/orders
+  run_case rabbitmq rabbitmq_nodes 0 rabbitmq -t localhost:15672 -u guest -p guest --show-nodes
 }
 
 run_minio_cases() {
@@ -897,6 +918,23 @@ run_service_block() {
   stop_service "${service}"
 }
 
+# The local QA runner owns startup/readiness and preserves existing containers.
+# Execute just the requested case function, without global preflight or teardown.
+if [ -n "${REDPOSTURE_LOCAL_QA_SERVICE:-}" ]; then
+  qa_service="${REDPOSTURE_LOCAL_QA_SERVICE}"
+  case "${qa_service}" in
+    exporters|registry|grafana|gitlab|consul|kubeapi|postgres|mongodb|oracle|docker|clickhouse|redis|etcd|qdrant|elastic|opensearch|grpc|kafka|zookeeper|zookeeper-auth|keeper|proxmox|proxy-isolated)
+      qa_function="run_${qa_service//-/_}_cases"
+      ;;
+    *) echo "[error] unsupported local QA service: ${qa_service}" >&2; exit 2 ;;
+  esac
+  CURRENT_SERVICE=""
+  trap - EXIT
+  printf "module\tlabel\texpected_exit\texit_code\tjson_path\tlog_path\n" > "${STATUS_FILE}"
+  "${qa_function}"
+  exit 0
+fi
+
 set -e
 preflight_lab_environment
 printf "module\tlabel\texpected_exit\texit_code\tjson_path\tlog_path\n" > "${STATUS_FILE}"
@@ -909,6 +947,14 @@ run_service_block exporters run_exporters_cases
 run_service_block registry run_registry_cases
 run_service_block grafana run_grafana_cases
 run_service_block minio run_minio_cases
+run_service_block rabbitmq run_rabbitmq_cases
+
+run_airflow_cases() {
+  run_case airflow airflow_default 1 airflow -t 127.0.0.1 --debug --defcreds
+  run_case airflow airflow_creds 1 airflow --targets 127.0.0.1 --port 8080 --ports 8080,8081 -u airflow -p airflow -f json -o /tmp/redposture-airflow.json -ot excluded.invalid
+}
+
+run_service_block airflow run_airflow_cases
 run_service_block gitlab run_gitlab_cases
 run_service_block consul run_consul_cases
 run_service_block kubeapi run_kubeapi_cases

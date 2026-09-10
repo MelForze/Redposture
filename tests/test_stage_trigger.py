@@ -1384,65 +1384,12 @@ def test_trigger_with_listen_closes_progress_before_credential_checks(monkeypatc
     assert progress.closed is True
 
 
-def test_trigger_with_listen_warns_when_proxmox_tls_is_disabled_for_pve_profile(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    def fake_start_listeners(*_args: object, **_kwargs: object) -> tuple[list[object], None]:
-        return [], None
-
-    def fake_scan(*_args: object, **_kwargs: object) -> dict[str, object]:
-        return {
-            "detected_exporters": 0,
-            "attempted": 0,
-            "triggered": 0,
-            "failed": 0,
-            "by_host": {"10.0.0.1": {"detected": 0, "attempted": 0, "success": 0, "fail": 0}},
-            "by_callback": {"10.0.0.2": {"success": 0, "fail": 0}},
-        }
-
-    def fake_load_profiles(_path: object) -> dict[str, object]:
-        return {
-            "trigger_exporters": [
-                {
-                    "name": "proxmox_exporter",
-                    "port": 9221,
-                    "detect_path": "/metrics",
-                    "markers": ("pve_", "proxmox_"),
-                    "trigger_path": "/pve",
-                    "target_fmt": "{our_host}:8006",
-                }
-            ]
-        }
-
-    def fake_stop_listeners(*_args: object, **_kwargs: object) -> None:
-        return None
-
-    def fake_sleep(_seconds: float) -> None:
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr("redposture_core.stage_trigger.start_listeners_for_trigger", fake_start_listeners)
-    monkeypatch.setattr("redposture_core.stage_trigger.load_profiles", fake_load_profiles)
-    monkeypatch.setattr("redposture_core.stage_trigger.scan_exporters_and_trigger", fake_scan)
-    monkeypatch.setattr("redposture_core.stage_trigger.stop_started_listeners", fake_stop_listeners)
-    monkeypatch.setattr("redposture_core.stage_trigger.time.sleep", fake_sleep)
-
-    rc = run_trigger_stage(
-        _base_args(with_listen=True, proxmox_tls=False),
-        AttemptLogger(),
-    )
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "proxmox callback likely to fail" in out
-    assert "--proxmox-tls" in out
-
-
 def test_patch_with_listen_proxmox_target_includes_ticket_path() -> None:
     args = argparse.Namespace(
         postgres_port=15432,
         redis_port=16379,
         proxmox_port=18006,
         blackbox_port=19115,
-        proxmox_tls=True,
     )
     exporters = [{"name": "proxmox_exporter", "target_fmt": "https://{our_host}:8006/api2/json/access/ticket"}]
     patched = _patch_trigger_exporters_for_with_listen(exporters, args)
@@ -1455,7 +1402,6 @@ def test_patch_with_listen_proxmox_target_for_pve_path_uses_host_port() -> None:
         redis_port=16379,
         proxmox_port=18006,
         blackbox_port=19115,
-        proxmox_tls=True,
     )
     exporters = [{"name": "proxmox_exporter", "trigger_path": "/pve", "target_fmt": "{our_host}:8006"}]
     patched = _patch_trigger_exporters_for_with_listen(exporters, args)

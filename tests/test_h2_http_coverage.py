@@ -369,7 +369,7 @@ def test_gitlab_detect_handles_malformed_version_json_via_login_marker(
 ) -> None:
     def fake_http(_host: str, _port: int, _method: str, path: str, _timeout: float, **_kwargs: Any):
         if path == "/users/sign_in":
-            return 200, b"<title>GitLab</title> Sign in", {}, None
+            return 200, b"<title>GitLab</title><form action='/users/sign_in'>Sign in</form>", {}, None
         return 200, b"{malformed", {}, None
 
     monkeypatch.setattr(gitlab, "_http_request", fake_http)

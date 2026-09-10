@@ -81,6 +81,23 @@ _SECRET_KEY_RE = re.compile(
     r"(?i)(?:^|[_\-.])(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|client[_-]?secret|session|cookie|private[_-]?key)(?:$|[_\-.])"
 )
 _WORD_RE = re.compile(r"[A-Za-z0-9_+/=-]{20,256}")
+_SECRET_SENTINELS = frozenset(
+    {
+        "disabled",
+        "enabled",
+        "false",
+        "n/a",
+        "nil",
+        "none",
+        "null",
+        "placeholder",
+        "redacted",
+        "true",
+        "<redacted>",
+        "<value>",
+    }
+)
+_SECRET_SENTINEL_MASK_RE = re.compile(r"(?:\*{3,}|x{4,})", re.IGNORECASE)
 
 
 def detector_names() -> tuple[str, ...]:
@@ -120,6 +137,15 @@ def _url_credential(text: str) -> Iterable[str]:
             yield candidate
 
 
+def _is_secret_sentinel(value: Any) -> bool:
+    """Return whether a value is an explicit non-secret marker."""
+
+    if isinstance(value, bool):
+        return True
+    text = str(value).strip().casefold()
+    return text in _SECRET_SENTINELS or bool(_SECRET_SENTINEL_MASK_RE.fullmatch(text))
+
+
 def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
     found: list[SecretMatch] = []
     for name, confidence, pattern in _PATTERNS:
@@ -127,7 +153,7 @@ def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
             continue
         for match in pattern.finditer(text):
             value = match.group(1) if match.lastindex else match.group(0)
-            if value:
+            if value and not _is_secret_sentinel(value):
                 found.append(SecretMatch(name, confidence, path, value))
     if "url_credentials" in enabled:
         found.extend(SecretMatch("url_credentials", "high", path, value) for value in _url_credential(text))
@@ -141,8 +167,15 @@ def _scan_text(text: str, path: str, enabled: set[str]) -> list[SecretMatch]:
     return found
 
 
+def _normalize_secret_key(key: str) -> str:
+    """Normalize delimited, camelCase and acronym-based field names."""
+    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
+    return re.sub(r"[\s.\-]+", "_", separated).lower()
+
+
 def _key_detector(key: str) -> str:
-    lowered = key.lower().replace("-", "_")
+    lowered = _normalize_secret_key(key)
     if "client_secret" in lowered:
         return "client_secret"
     if "password" in lowered or "passwd" in lowered or lowered.endswith("pwd"):
@@ -173,13 +206,15 @@ def scan_value(
         for raw_key, nested in value.items():
             key = str(raw_key)
             path = f"{object_path}.{key}"
+            normalized_key = _normalize_secret_key(key)
             if (
-                _SECRET_KEY_RE.search(key)
+                _SECRET_KEY_RE.search(normalized_key)
                 and nested is not None
                 and nested != ""
                 and not isinstance(nested, (Mapping, list, tuple, set))
+                and not _is_secret_sentinel(nested)
             ):
-                detector = _key_detector(key)
+                detector = _key_detector(normalized_key)
                 if detector in enabled_set:
                     matches.append(SecretMatch(detector, "high", path, str(nested)))
             matches.extend(scan_value(nested, object_path=path, enabled=enabled_set, _depth=_depth + 1))

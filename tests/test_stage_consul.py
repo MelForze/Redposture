@@ -1809,7 +1809,7 @@ def test_consul_get_json_any_and_probe_scheme_fallbacks(monkeypatch: pytest.Monk
 
     responses = iter(
         [
-            (403, b'"ACL not found"', {}, None, False, False),
+            (403, b'"ACL not found"', {"X-Consul-Index": "1"}, None, False, False),
         ]
     )
     monkeypatch.setattr(consul, "_request_with_tls_fallback", lambda *_a, **_k: next(responses))
@@ -2510,7 +2510,7 @@ def test_ssl_context_and_http_request_branches(monkeypatch: pytest.MonkeyPatch) 
     assert strict_ctx is not None and strict_ctx.verify_mode == ssl.CERT_REQUIRED
     assert insecure_ctx is not None and insecure_ctx.verify_mode == ssl.CERT_NONE
 
-    monkeypatch.setattr(consul.urllib.request, "urlopen", lambda *_a, **_k: _Resp())
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", lambda *_a, **_k: _Resp())
     status, payload, headers, error = consul._http_request(
         "127.0.0.1",
         8500,
@@ -2532,7 +2532,9 @@ def test_ssl_context_and_http_request_branches(monkeypatch: pytest.MonkeyPatch) 
         {"X-Err": "yes"},
         io.BytesIO(b'{"error":"denied"}'),
     )
-    monkeypatch.setattr(consul.urllib.request, "urlopen", lambda *_a, **_k: (_ for _ in ()).throw(http_error))
+    monkeypatch.setattr(
+        "redposture_core.clients.http_api._open_http_request", lambda *_a, **_k: (_ for _ in ()).throw(http_error)
+    )
     status2, payload2, headers2, error2 = consul._http_request(
         "127.0.0.1",
         8500,
@@ -2547,8 +2549,7 @@ def test_ssl_context_and_http_request_branches(monkeypatch: pytest.MonkeyPatch) 
     http_error.close()
 
     monkeypatch.setattr(
-        consul.urllib.request,
-        "urlopen",
+        "redposture_core.clients.http_api._open_http_request",
         lambda *_a, **_k: (_ for _ in ()).throw(urllib.error.URLError(TimeoutError("timed out"))),
     )
     status3, payload3, headers3, error3 = consul._http_request(

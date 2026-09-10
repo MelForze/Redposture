@@ -1360,8 +1360,7 @@ def test_http_request_and_ws_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None
             return None
 
     monkeypatch.setattr(
-        kube.urllib.request,
-        "urlopen",
+        "redposture_core.clients.http_api._open_http_request",
         lambda *_args, **_kwargs: _Resp(200, b'{"ok":true}', {"Content-Type": "application/json"}),
     )
     status, payload, headers, error = kube._http_request(
@@ -1377,8 +1376,7 @@ def test_http_request_and_ws_exec_paths(monkeypatch: pytest.MonkeyPatch) -> None
     assert (status, payload, headers, error) == (200, b'{"ok":true}', {"content-type": "application/json"}, None)
 
     monkeypatch.setattr(
-        kube.urllib.request,
-        "urlopen",
+        "redposture_core.clients.http_api._open_http_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(urllib.error.URLError(OSError("operation not permitted"))),
     )
     status, payload, headers, error = kube._http_request(

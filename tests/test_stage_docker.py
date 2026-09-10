@@ -74,6 +74,53 @@ def _patch_probe(monkeypatch: pytest.MonkeyPatch, *, transport: str = "plaintext
     monkeypatch.setattr(docker_stage, "_probe_docker", fake_probe)
 
 
+@pytest.mark.parametrize("run_deep_checks", [False, True])
+@pytest.mark.parametrize("close_error", [None, RuntimeError("close exploded"), OSError("close failed")])
+def test_cleanup_preserves_docker_audit_record(monkeypatch, run_deep_checks, close_error):
+    def audit():
+        return docker_stage._audit_docker_host(
+            "127.0.0.1",
+            2375,
+            1.0,
+            0,
+            show_containers=True,
+            show_images=True,
+            show_networks=True,
+            show_volumes=True,
+            run_deep_checks=run_deep_checks,
+        )
+
+    _patch_probe(monkeypatch)
+    expected = audit()
+
+    class ClosingClient(_FakeDockerClient):
+        closes = 0
+
+        def close(self):
+            self.closes += 1
+            if close_error is not None:
+                raise close_error
+
+    client = ClosingClient()
+    monkeypatch.setattr(
+        docker_stage,
+        "_probe_docker",
+        lambda *_a, **_kw: (client, client.version(), "plaintext", None, False),
+    )
+    assert audit() == expected
+    assert client.closes == 1
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_docker_cleanup_does_not_swallow_interrupts(interrupt):
+    class InterruptedClient:
+        def close(self):
+            raise interrupt()
+
+    with pytest.raises(interrupt):
+        docker_stage._close_docker_client(InterruptedClient())
+
+
 def test_audit_docker_host_inventory_and_exec(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_probe(monkeypatch)
     record = docker_stage._audit_docker_host(

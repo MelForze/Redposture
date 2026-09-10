@@ -21,6 +21,7 @@ from ...rendering import (
     CountColorRule,
     render_colored_marker_line,
     render_tagged_detail_line,
+    sanitize_report_payload,
 )
 
 _UNDETECTED = {"not_minio", "transport_failure", ""}
@@ -38,8 +39,13 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     """One-line detection summary: `[*] MinIO (auth required:X) [(version:Y)]`."""
     if output_format != "txt":
         return ""
-    if str(record.get("detection_status") or "") in _UNDETECTED:
+    detection_status = str(record.get("detection_status") or "")
+    if detection_status in _UNDETECTED:
         return ""
+    if detection_status == "console":
+        # Console-only exposure: MinIO is present but the S3 API is not verified
+        # here, so no `auth required` claim is made.
+        return f"{_prefix(record)} [*] MinIO Console (S3 API:unverified)"
     line = f"{_prefix(record)} [*] MinIO (auth required:{_bool_text(record.get('auth_required'))})"
     version = record.get("version")
     if version:
@@ -60,7 +66,7 @@ def _admin_text(record: dict[str, Any]) -> str:
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
-    """Per-credential line, shown only when a credential was accepted.
+    """Per-credential result, including a neutral line when verification is unavailable.
 
     The `[+]` marker already means the credential is valid, so the line does not
     repeat a `(credential:valid)` field. Capabilities are boolean (`admin:True`).
@@ -70,12 +76,17 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     if output_format != "txt":
         return ""
     state = str(record.get("credential_state") or "")
-    if state not in {"valid", "valid_but_restricted"}:
+    if state not in {"valid", "valid_but_restricted", "verification_unavailable"}:
         return ""  # anonymous / invalid: the detect line already carries the summary
     results = record.get("credential_results") or []
     access_key = None
     if results and isinstance(results[0], dict):
         access_key = results[0].get("access_key")
+    if state == "verification_unavailable":
+        attempts = record.get("attempted_credentials")
+        if isinstance(attempts, list) and len(attempts) >= 2:
+            return ""  # Each attempt is rendered below, without duplicating the selected one.
+        return f"{_prefix(record)} [!] {access_key or '?'} (credential verification unavailable)"
     parts = [f"(admin:{_admin_text(record)})"]
     # A present list means the corresponding flag ran; show the count (even 0).
     buckets = record.get("buckets")
@@ -86,7 +97,11 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
     objects_count = record.get("objects_count")
     if isinstance(objects_count, int):
         parts.append(f"(objects:{objects_count})")
-    return f"{_prefix(record)} [+] {access_key or '?'} {' '.join(parts)}"
+    # `credential_secret` is a TXT-only echo of the accepted secret (redacted from
+    # JSON alongside attempted_credentials); an operator needs the working pair.
+    secret = _password_text(record.get("credential_secret")) if "credential_secret" in record else None
+    identity = f"{access_key or '?'}:{secret}" if secret is not None else (access_key or "?")
+    return f"{_prefix(record)} [+] {identity} {' '.join(parts)}"
 
 
 def _password_text(password: Any) -> str:
@@ -102,7 +117,8 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
 
     The accepted, selected credential is rendered by `_format_record` (with its
     admin/enumeration suffix), so it is skipped here; the remaining attempts show as
-    `[-] user:pass` (rejected) or `[+] user` (another working default).
+    `[-] user:pass` (rejected), `[+] user:pass` (another working default),
+    or `[!] user:pass` with a neutral explanation if verification was unavailable.
     """
     if output_format != "txt":
         return []
@@ -122,8 +138,15 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
         if accepted and not winner_skipped and username == selected_key:
             winner_skipped = True  # the winning credential is shown by _format_record
             continue
+        # Show the password on both outcomes: the operator must be able to see
+        # which exact credential worked, not just that some default did (several
+        # defaults can share a username). Mirrors the other 13 default-cred modules.
         if accepted:
-            lines.append(f"{prefix} [+] {username}")
+            lines.append(f"{prefix} [+] {username}:{_password_text(attempt.get('password'))}")
+        elif attempt.get("credential_state") == "verification_unavailable":
+            lines.append(
+                f"{prefix} [!] {username}:{_password_text(attempt.get('password'))} (credential verification unavailable)"
+            )
         else:
             lines.append(f"{prefix} [-] {username}:{_password_text(attempt.get('password'))}")
     return lines
@@ -245,20 +268,42 @@ def _format_minio_detail_records(record: dict[str, Any], output_format: str) -> 
     reasons = record.get("discover_partial_reasons") or []
     if reasons:
         lines.append(f"{prefix} [!] Discover partial: {','.join(str(r) for r in reasons)}")
-    dump = record.get("object_dump")
-    if isinstance(dump, dict):
-        lines.append(f"{prefix} [*] Dump {dump.get('bucket', '?')}/{dump.get('key', '?')} (size:{dump.get('size', 0)})")
-        # Raw object content, one line per line, without the MINIO tag prefix.
-        lines.extend(str(dump.get("content") or "").splitlines())
-    download = record.get("object_download")
-    if isinstance(download, dict):
-        lines.append(
-            f"{prefix} [+] downloaded {download.get('bucket', '?')}/{download.get('key', '?')}"
-            f" -> {download.get('path', '?')} (size:{download.get('size', 0)})"
-        )
+    dumps = record.get("object_dumps")
+    if isinstance(dumps, list):
+        # A bucket-wide dump labels each object with a `=== bucket/key ===` header so
+        # the concatenated content stays legible; a single --object dump does not.
+        labeled = bool(record.get("object_dumps_labeled"))
+        for dump in dumps:
+            if not isinstance(dump, dict):
+                continue
+            # The object key is target-controlled; the `=== bucket/key ===` header
+            # has no structural tabs, so the central emit scrubber would not reach
+            # it — sanitise the name here. The raw content below is left as-is (the
+            # whole point of --dump is to show it verbatim).
+            b = sanitize_report_payload(str(dump.get("bucket", "?")))
+            k = sanitize_report_payload(str(dump.get("key", "?")))
+            size = dump.get("size", 0)
+            if labeled:
+                lines.append(f"=== {b}/{k} ({size}) ===")
+            else:
+                lines.append(f"{prefix} [*] Dump {b}/{k} (size:{size})")
+            # Raw object content, one line per line, without the MINIO tag prefix.
+            lines.extend(str(dump.get("content") or "").splitlines())
+    downloads = record.get("object_downloads")
+    if isinstance(downloads, list):
+        for download in downloads:
+            if not isinstance(download, dict):
+                continue
+            lines.append(
+                f"{prefix} [+] downloaded {download.get('bucket', '?')}/{download.get('key', '?')}"
+                f" -> {download.get('path', '?')} (size:{download.get('size', 0)})"
+            )
     op_error = record.get("object_op_error")
     if op_error:
         lines.append(f"{prefix} [!] object error: {op_error}")
+    for extra_error in record.get("object_op_errors") or []:
+        if extra_error != op_error:
+            lines.append(f"{prefix} [!] object error: {extra_error}")
     return lines
 
 

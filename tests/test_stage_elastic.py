@@ -5,7 +5,6 @@ import io
 import json
 import ssl
 import urllib.error
-import urllib.request
 import zlib
 from types import SimpleNamespace
 
@@ -2415,7 +2414,7 @@ def test_elastic_request_http_error_and_exception_paths(monkeypatch: pytest.Monk
                 raise http_error
             raise urllib.error.URLError(OSError("[Errno 111] Connection refused"))
 
-    monkeypatch.setattr(urllib.request, "urlopen", _UrlOpen("http_error"))
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", _UrlOpen("http_error"))
     status, payload, headers, error = elastic_stage._elastic_request(
         "127.0.0.1",
         9200,
@@ -2431,7 +2430,7 @@ def test_elastic_request_http_error_and_exception_paths(monkeypatch: pytest.Monk
     assert error is None
     http_error.close()
 
-    monkeypatch.setattr(urllib.request, "urlopen", _UrlOpen("url_error"))
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", _UrlOpen("url_error"))
     status, payload, headers, error = elastic_stage._elastic_request(
         "127.0.0.1",
         9200,

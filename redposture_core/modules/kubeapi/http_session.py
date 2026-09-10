@@ -17,9 +17,8 @@ from ...clients.http_api import (
     join_http_target_path,
     normalize_http_error,
 )
+from ...clients.http_redirects import follow_redirects, http_origin
 from ...clients.tls_cache import clear_tls_context_cache, shared_client_ssl_context
-
-_MAX_REDIRECTS = 5
 
 
 def _ca_cache_key(ca_file: str | None) -> tuple[str, int, int] | None:
@@ -101,6 +100,7 @@ class KubeApiHttpSession:
         self.timeout = max(0.1, float(timeout))
         self.insecure = bool(insecure)
         self.ca_file = ca_file
+        self._connection_origin = ("https" if use_https else "http", self.host, self.port)
         self._connection: http.client.HTTPConnection | None = None
         self._owner_thread_id: int | None = None
         self._closed = False
@@ -115,14 +115,15 @@ class KubeApiHttpSession:
 
     def _new_connection(self) -> http.client.HTTPConnection:
         self._stats["connections"] += 1
-        if self.use_https:
+        scheme, host, port = self._connection_origin
+        if scheme == "https":
             return http.client.HTTPSConnection(
-                self.host,
-                self.port,
+                host,
+                port,
                 timeout=self.timeout,
                 context=shared_ssl_context(insecure=self.insecure, ca_file=self.ca_file),
             )
-        return http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+        return http.client.HTTPConnection(host, port, timeout=self.timeout)
 
     def _close_connection(self) -> None:
         connection = self._connection
@@ -153,74 +154,21 @@ class KubeApiHttpSession:
         self._claim_thread()
         if self._closed:
             raise RuntimeError("KubeApiHttpSession is closed")
-        method_value = str(method or "GET").upper()
-        body_value = body.encode("utf-8") if isinstance(body, str) else body
-        headers_value = {str(key): str(value) for key, value in (headers or {}).items()}
-        parsed = urllib.parse.urlsplit(str(url))
-        original_origin = (
-            parsed.scheme.lower(),
-            str(parsed.hostname or "").lower(),
-            parsed.port or (443 if parsed.scheme == "https" else 80),
+        parsed = urllib.parse.urlsplit(url)
+        initial_url = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, join_http_target_path(parsed.path), parsed.query, "")
         )
-        path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
-        request_url = str(url)
-        current_url = request_url
 
-        for _redirect in range(_MAX_REDIRECTS + 1):
-            response = self._request_once(
-                method_value,
-                path,
-                headers_value,
-                body_value,
-                timeout=timeout,
-                response_size_cap=response_size_cap,
-            )
-            if response.error or response.status not in {301, 302, 303, 307, 308}:
-                return HttpResponse(
-                    status=response.status,
-                    body=response.body,
-                    headers=response.headers,
-                    error=response.error,
-                    truncated=response.truncated,
-                    request_url=request_url,
-                    final_url=current_url,
-                    redirect_history=(request_url,) if current_url != request_url else (),
-                )
-            location = next((value for key, value in response.headers.items() if key.lower() == "location"), "")
-            if not location:
-                return response
-            redirected_url = urllib.parse.urljoin(current_url, location)
-            redirected = urllib.parse.urlsplit(redirected_url)
-            redirect_origin = (
-                redirected.scheme.lower(),
-                str(redirected.hostname or "").lower(),
-                redirected.port or (443 if redirected.scheme == "https" else 80),
-            )
-            if redirect_origin != original_origin:
-                return HttpResponse(
-                    status=response.status,
-                    body=response.body,
-                    headers=response.headers,
-                    error=f"cross-origin redirect blocked: {current_url} -> {redirected_url}",
-                    request_url=request_url,
-                    final_url=current_url,
-                )
-            current_url = redirected_url
-            path = urllib.parse.urlunsplit(("", "", redirected.path or "/", redirected.query, ""))
-            if response.status in {301, 302, 303} and method_value == "POST":
-                method_value = "GET"
-                body_value = None
-                headers_value = {
-                    k: v for k, v in headers_value.items() if k.lower() not in {"content-length", "content-type"}
-                }
-        return HttpResponse(
-            status=0,
-            body=b"",
-            headers={},
-            error="too many redirects",
-            request_url=request_url,
-            final_url=current_url,
-        )
+        def send(method: str, url: str, headers: dict[str, str], body: bytes | None) -> HttpResponse:
+            origin = http_origin(url)
+            if origin != self._connection_origin:
+                self._close_connection()
+                self._connection_origin = origin
+            parsed = urllib.parse.urlsplit(url)
+            path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+            return self._request_once(method, path, headers, body, timeout=timeout, response_size_cap=response_size_cap)
+
+        return follow_redirects(send, method, initial_url, headers=headers, body=body)
 
     def _request_once(
         self,
@@ -242,8 +190,7 @@ class KubeApiHttpSession:
             connection_socket = getattr(self._connection, "sock", None)
             if connection_socket is not None:
                 connection_socket.settimeout(self._connection.timeout)
-            normalized_path = join_http_target_path(path)
-            self._connection.request(method, normalized_path, body=body, headers=dict(headers))
+            self._connection.request(method, path, body=body, headers=dict(headers))
             response = self._connection.getresponse()
             self._stats["requests"] += 1
             cap = max(0, int(response_size_cap))

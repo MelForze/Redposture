@@ -109,7 +109,11 @@ def _docker_client(
 def _close_docker_client(client: Any) -> None:
     close = getattr(client, "close", None)
     if callable(close):
-        close()
+        try:
+            close()
+        except Exception:
+            # Cleanup must not replace the audit result or the original probe error.
+            pass
 
 
 def _probe_docker(
@@ -121,7 +125,7 @@ def _probe_docker(
     tls_ca: str | None,
     tls_cert: str | None,
     tls_key: str | None,
-) -> tuple[DockerEngineClient | None, dict[str, Any] | None, str | None, str | None, bool]:
+) -> tuple[DockerEngineClient | None, dict[str, Any] | None, str | None, str | None, bool | None]:
     last_error: str | None = None
     auth_required = False
     for transport in _transport_order(port):
@@ -149,9 +153,24 @@ def _probe_docker(
                     "Os": info.get("OSType"),
                 }
             if _looks_like_docker_version(version):
-                return client, version, transport, None, auth_required
+                # /version is commonly exposed by authorization plugins and
+                # reverse proxies.  It fingerprints Docker, but it does not
+                # prove that useful daemon operations are anonymous.  /info is
+                # read-only and authorization-sensitive, so use it for the
+                # exposure verdict.
+                try:
+                    info = client.info()
+                except DockerEngineHTTPError as exc:
+                    if exc.status in {401, 403}:
+                        return client, version, transport, normalize_docker_error(exc), True
+                    return client, version, transport, normalize_docker_error(exc), None
+                except DockerEngineError as exc:
+                    return client, version, transport, normalize_docker_error(exc), None
+                if _looks_like_docker_info_access(info):
+                    return client, version, transport, None, False
+                return client, version, transport, "Docker /info response fingerprint mismatch", None
             info = client.info()
-            if _looks_like_docker_info(info):
+            if _looks_like_docker_info_access(info):
                 version = {
                     "Version": info.get("ServerVersion"),
                     "ApiVersion": info.get("ApiVersion"),
@@ -196,6 +215,32 @@ def _looks_like_docker_info(payload: Any) -> bool:
     return any(marker in payload for marker in identity_markers) and any(
         marker in payload for marker in inventory_markers
     )
+
+
+def _looks_like_docker_info_access(payload: Any) -> bool:
+    """Recognise a parsed Docker /info result used as an access proof.
+
+    A preceding valid /version response already identifies the product.  Some
+    Docker versions and compatible daemons omit inventory counters, so one
+    documented /info field is enough to show that the protected operation was
+    actually served.  Empty or unrelated JSON still leaves authorization
+    unknown.
+    """
+    if not isinstance(payload, dict):
+        return False
+    markers = (
+        "ID",
+        "DockerRootDir",
+        "Driver",
+        "OperatingSystem",
+        "ServerVersion",
+        "OSType",
+        "Containers",
+        "Images",
+        "NCPU",
+        "MemTotal",
+    )
+    return any(marker in payload for marker in markers)
 
 
 def _docker_http_error_has_fingerprint(exc: DockerEngineHTTPError) -> bool:
@@ -265,7 +310,7 @@ def _audit_docker_host(
     version: dict[str, Any] | None = None
     transport: str | None = None
     last_error: str | None = None
-    auth_required = False
+    auth_required: bool | None = None
 
     for attempt in range(attempts):
         client, version, transport, last_error, auth_required = _probe_docker(
@@ -282,7 +327,7 @@ def _audit_docker_host(
         if attempt + 1 < attempts:
             time.sleep(_retry_delay(attempt))
 
-    if auth_required:
+    if auth_required is True:
         record.update(
             {
                 "is_docker": True,
@@ -290,6 +335,9 @@ def _audit_docker_host(
                 "auth_required": True,
                 "transport_mode": transport,
                 "tls_required": transport == "tls",
+                "api_version": (version or {}).get("ApiVersion") or (version or {}).get("APIVersion"),
+                "server_version": (version or {}).get("Version"),
+                "ostype": (version or {}).get("Os") or (version or {}).get("OSType"),
                 "error": last_error or "authentication required",
             }
         )
@@ -301,6 +349,23 @@ def _audit_docker_host(
         error = last_error or "connection failed"
         status = "not_docker" if "not Docker" in error or "status:404" in error else "fail"
         record.update({"status": status, "error": error, "auth_required": None})
+        return record
+
+    if auth_required is None:
+        record.update(
+            {
+                "is_docker": True,
+                "status": "detected",
+                "auth_required": None,
+                "transport_mode": transport,
+                "tls_required": transport == "tls",
+                "api_version": version.get("ApiVersion") or version.get("APIVersion"),
+                "server_version": version.get("Version"),
+                "ostype": version.get("Os") or version.get("OSType"),
+                "error": last_error or "Docker authorization state could not be verified",
+            }
+        )
+        _close_docker_client(client)
         return record
 
     client_certificate_used = bool(transport == "tls" and tls_cert and tls_key)
@@ -533,6 +598,8 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
         return f"{prefix} [-] authentication required (transport:{record.get('transport_mode') or '-'})"
     if status == "not_docker":
         return f"{prefix} [-] not Docker Engine API endpoint err={_clip(str(record.get('error') or '-'), 96)}"
+    if status == "detected":
+        return f"{prefix} [!] Docker authorization state unknown err={_clip(str(record.get('error') or '-'), 96)}"
     return f"{prefix} [!] connection failed err={_clip(str(record.get('error') or 'connection failed'), 96)}"
 
 

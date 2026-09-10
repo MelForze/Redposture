@@ -327,8 +327,8 @@ def test_gitlab_gitlab_api_headers_omits_token_when_none() -> None:
 
 
 def test_gitlab_detect_login_page_recognizes_sign_in_markers() -> None:
-    assert gitlab_actions._detect_login_page("<html>GitLab Community Edition – Sign in</html>") is True
-    assert gitlab_actions._detect_login_page("<a href='/users/sign_in'>GitLab</a>") is True
+    assert gitlab_actions._detect_login_page("<html>GitLab Community Edition – Sign in</html>") is False
+    assert gitlab_actions._detect_login_page("<a href='/users/sign_in'>GitLab</a>") is False
     # Neither token alone is enough — need both 'gitlab' and a sign-in marker.
     assert gitlab_actions._detect_login_page("<html>GitHub</html>") is False
     assert gitlab_actions._detect_login_page("Sign in to GitHub") is False

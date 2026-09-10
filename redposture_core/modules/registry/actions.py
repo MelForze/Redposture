@@ -1592,7 +1592,7 @@ def _registry_probe_has_fingerprint(status: int, body: bytes, headers: Mapping[s
             if not isinstance(item, dict):
                 continue
             code = str(item.get("code") or "").upper()
-            if code in {"UNAUTHORIZED", "DENIED", "NAME_UNKNOWN", "MANIFEST_UNKNOWN"}:
+            if code in {"NAME_UNKNOWN", "MANIFEST_UNKNOWN"}:
                 return True
     # Status alone is deliberately insufficient: generic reverse proxies and
     # login portals commonly return 200/401/403 at /v2/.

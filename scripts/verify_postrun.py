@@ -62,6 +62,17 @@ _EXPECTED_LABELS = (
     "minio_creds",
     "minio_tls",
     "minio_enum",
+    "rabbitmq_default",
+    "rabbitmq_enum",
+    "rabbitmq_rejected",
+    "rabbitmq_cluster_tls",
+    "rabbitmq_observer",
+    "rabbitmq_scoped_management",
+    "rabbitmq_amqp_only",
+    "rabbitmq_selected_sections",
+    "rabbitmq_nodes",
+    "airflow_default",
+    "airflow_creds",
     "gitlab_public",
     "gitlab_analyst",
     "gitlab_url_override_http",
@@ -2380,6 +2391,8 @@ _EXPECTED_FAILURE_OUTPUT_SUBSTRINGS: dict[str, tuple[str, ...]] = {
     "minio_creds": ("audit inconclusive: no service confirmed",),
     "minio_tls": ("audit inconclusive: no service confirmed",),
     "minio_enum": ("audit inconclusive: no service confirmed",),
+    "airflow_default": ("audit inconclusive: no service confirmed",),
+    "airflow_creds": ("audit inconclusive: no service confirmed",),
     "mongodb_extended_invalid_document_query": ("--document cannot be combined with --query",),
     "docker_extended_tls_files_pairing_error": ("--tls-cert and --tls-key must be used together",),
     "kafka_extended_dump_max_conflict": ("--dump count cannot conflict with --max-messages",),
@@ -3233,6 +3246,146 @@ def _cli_smoke_checks() -> None:
             raise SystemExit(f"cli smoke failed: redposture.py {' '.join(args)}")
 
 
+RABBITMQ_QA_CASES = {
+    "rabbitmq_default": ("admin", False, None),
+    "rabbitmq_enum": ("guest", True, "/"),
+    "rabbitmq_rejected": ("guest", None, None),
+    "rabbitmq_cluster_tls": ("ops_admin", True, "prod/orders"),
+    "rabbitmq_observer": ("observer", False, "all"),
+    "rabbitmq_scoped_management": ("admin", False, "staging"),
+    "rabbitmq_amqp_only": ("orders_api", None, None),
+    "rabbitmq_selected_sections": ("guest", True, "prod/orders"),
+    "rabbitmq_nodes": ("guest", True, None),
+}
+
+
+def _validate_rabbitmq_contracts(rows: list[dict[str, str]]) -> None:
+    """Expected outcomes of the local commerce fixture, independent of CLI exit status."""
+    queue_names = {
+        "/": {"legacy.tasks"},
+        "prod/orders": {
+            "orders.process",
+            "billing.invoice",
+            "orders.process.dlq",
+            "orders.retry.15s",
+            "audit.archive",
+            "notifications.email",
+            "notifications.webhook",
+        },
+        "payments": {"payments.capture", "payments.review"},
+        "staging": {"demo.jobs", "demo.idle"},
+    }
+    quorum = {"orders.process", "billing.invoice", "orders.process.dlq", "payments.capture"}
+    for row in rows:
+        label = row["label"]
+        if label not in RABBITMQ_QA_CASES:
+            continue
+
+        def require(condition: bool, detail: str, case_label: str = label) -> None:
+            if not condition:
+                raise SystemExit(f"RabbitMQ contract '{case_label}': {detail}")
+
+        require(row.get("exit_code") == "0", "CLI did not finish successfully")
+        records = list(_iter_audit_records_for_row(row))
+        require(len(records) == 1, f"expected one record, got {len(records)}")
+        record = records[0]
+        user, admin, scope = RABBITMQ_QA_CASES[label]
+        require(record.get("detection_status") == "confirmed", "service was not confirmed")
+        require(record.get("auth_required") is True, "fixture requires authentication")
+        require(record.get("credential_username") == user, f"expected identity {user}")
+        require(record.get("credential_error") is None, "credential check had a transport error")
+        expected_port = 15671 if label == "rabbitmq_cluster_tls" else 15672
+        require(record.get("port") == expected_port, "wrong endpoint port")
+        endpoint = urllib.parse.urlsplit(str(record.get("api_endpoint", "")))
+        require(endpoint.scheme == ("https" if expected_port == 15671 else "http"), "wrong transport")
+        if admin is None:
+            require(record.get("provided_credentials_ok") is False, "Management access was incorrectly accepted")
+            require(record.get("credential_state") == "rejected", "expected Management rejection")
+            require(record.get("credential_http_status") == 401, "expected HTTP 401, not a transport failure")
+            require("enumeration" not in record, "deep enumeration ran after denied access")
+            continue
+        require(record.get("provided_credentials_ok") is True, "valid account was not accepted")
+        require(record.get("effective_username") == user, "effective identity mismatch")
+        require(record.get("admin") is admin, f"expected admin:{admin}")
+        enumeration = record.get("enumeration", {})
+        require(isinstance(enumeration, dict), "invalid enumeration")
+        sections = {"vhosts", "queues", "exchanges", "bindings", "nodes"} if scope is not None else set()
+        if label == "rabbitmq_selected_sections":
+            sections.remove("nodes")
+        if label == "rabbitmq_nodes":
+            sections = {"nodes"}
+        require(set(enumeration) == sections, f"expected sections {sorted(sections)}")
+        for name, result in enumeration.items():
+            require(isinstance(result, dict), f"invalid collection {name}")
+            items = result.get("items")
+            require(isinstance(items, list) and all(isinstance(item, dict) for item in items), f"invalid {name} items")
+            if name == "nodes" and label == "rabbitmq_scoped_management":
+                require(result.get("status") == "denied" and not items, "scoped Management user must be denied nodes")
+                continue
+            require(result.get("status") == "ok", f"{name} failed: {result.get('status')}")
+            limited = label == "rabbitmq_enum" and name == "exchanges"
+            require(result.get("truncated") is limited, f"unexpected truncation in {name}")
+            if name == "nodes":
+                require(len(items) == 3, "expected three nodes")
+                require(
+                    {item.get("name") for item in items} == {"rabbit@rabbitmq", "rabbit@rabbitmq2", "rabbit@rabbitmq3"},
+                    "node set mismatch",
+                )
+                require(all(item.get("running") is True for item in items), "a node is offline")
+                require(
+                    all(item.get("mem_alarm") is False and item.get("disk_free_alarm") is False for item in items),
+                    "resource alarm or missing node metrics",
+                )
+            elif name == "vhosts":
+                expected = set(queue_names) if scope == "all" else {scope}
+                require(
+                    len(items) == len(expected) and {item.get("name") for item in items} == expected,
+                    "vhost scope mismatch",
+                )
+            elif name == "queues":
+                expected_queues = {
+                    (vhost, queue)
+                    for vhost, names in queue_names.items()
+                    if scope == "all" or scope == vhost
+                    for queue in names
+                }
+                require(
+                    len(items) == len(expected_queues)
+                    and {(item.get("vhost"), item.get("name")) for item in items} == expected_queues,
+                    "queue inventory mismatch",
+                )
+                require(
+                    all(item.get("type") == ("quorum" if item.get("name") in quorum else "classic") for item in items),
+                    "queue type mismatch",
+                )
+            else:
+                if scope != "all":
+                    require(all(item.get("vhost") == scope for item in items), f"{name} escaped vhost scope")
+                counts = {"all": (36, 23), "/": (5, 2), "prod/orders": (11, 14), "staging": (8, 3)}
+                require(len(items) == counts[str(scope)][0 if name == "exchanges" else 1], f"{name} count mismatch")
+                if name == "bindings" and scope in {"all", "prod/orders"}:
+                    require(
+                        any(
+                            item.get("source") == "orders.failed"
+                            and item.get("destination") == "orders.process.dlq"
+                            and item.get("routing_key") == "rejected"
+                            for item in items
+                        ),
+                        "dead-letter binding missing",
+                    )
+        if label in {"rabbitmq_enum", "rabbitmq_selected_sections", "rabbitmq_cluster_tls"}:
+            require(record.get("permissions_status") == "ok", "permissions unavailable")
+            permissions = record.get("permissions", [])
+            if label == "rabbitmq_selected_sections":
+                require(permissions == [], "guest has resource permissions only on /, not prod/orders")
+                continue
+            require(len(permissions) == 1 and permissions[0].get("vhost") == scope, "permission scope mismatch")
+            require(
+                all(permissions[0].get(key) == ".*" for key in ("configure", "write", "read")),
+                "fixture permissions changed",
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify lab matrix outputs and artifacts.")
     parser.add_argument("--status-file", required=True)
@@ -3276,6 +3429,7 @@ def main() -> int:
     _validate_rich_lab_outputs(rows)
     _validate_discover_lab_contracts(rows)
     _validate_opensearch_defcreds_contract(rows)
+    _validate_rabbitmq_contracts(rows)
     _validate_tee_when_output_set(rows)
     _validate_dump_not_empty(rows)
     _validate_status_coherence(rows)

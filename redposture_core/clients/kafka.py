@@ -140,7 +140,7 @@ class KafkaSession:
             self.api_versions.update(result.versions)
         return result
 
-    def bootstrap(self, *, known_kafka: bool, sasl_first: bool = False) -> tuple[bool, str | None]:
+    def bootstrap(self, *, known_kafka: bool, sasl_first: bool = False) -> tuple[bool | None, str | None]:
         username, password = self.identity
         versions = self.api_versions if self.api_versions is not None else {}
         ok, correlation, error = _authenticate_or_probe(
@@ -1422,7 +1422,7 @@ def _authenticate_or_probe(
     sasl_first: bool = False,
     known_kafka: bool = False,
     api_versions_out: dict[int, tuple[int, int]] | None = None,
-) -> tuple[bool, int, str | None]:
+) -> tuple[bool | None, int, str | None]:
     """Bootstrap a Kafka session on ``sock``.
 
     The normal path starts with ApiVersions (many brokers require it as the
@@ -1439,7 +1439,9 @@ def _authenticate_or_probe(
         if not hs_ok:
             return False, correlation, hs_error or "SASL handshake failed"
         auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
-        if not auth_ok:
+        if auth_ok is None:
+            return None, correlation, auth_error or "SASL authentication response unavailable"
+        if auth_ok is False:
             return False, correlation, auth_error or "authentication failed"
         api_probe = _probe_apiversions(sock, correlation)
         correlation += 1
@@ -1470,7 +1472,9 @@ def _authenticate_or_probe(
         if not hs_ok:
             return False, correlation, hs_error or "SASL handshake failed"
         auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
-        if not auth_ok:
+        if auth_ok is None:
+            return None, correlation, auth_error or "SASL authentication response unavailable"
+        if auth_ok is False:
             return False, correlation, auth_error or "authentication failed"
     return True, correlation, None
 
@@ -2344,7 +2348,7 @@ def _sasl_handshake_plain(sock: socket.socket, correlation_id: int) -> tuple[boo
 
 def _sasl_authenticate_plain(
     sock: socket.socket, correlation_id: int, username: str, password: str
-) -> tuple[bool, int, str | None]:
+) -> tuple[bool | None, int, str | None]:
     auth_bytes = b"\x00" + username.encode("utf-8") + b"\x00" + password.encode("utf-8")
 
     # Preferred modern flow: SASL_AUTHENTICATE request.
@@ -2413,7 +2417,7 @@ def _sasl_authenticate_plain(
         except OSError:
             pass
 
-    return True, correlation_id, None
+    return None, correlation_id, "SASL authentication response unavailable"
 
 
 def _authenticate_and_fetch_metadata(
@@ -2427,7 +2431,7 @@ def _authenticate_and_fetch_metadata(
     tls_config: KafkaTlsConfig | None = None,
     known_kafka: bool = False,
     sasl_first: bool = False,
-) -> tuple[bool, dict[str, Any] | None, str | None, str]:
+) -> tuple[bool | None, dict[str, Any] | None, str | None, str]:
     try:
         sock, transport_mode = _open_kafka_socket_configured(
             host,
@@ -2462,7 +2466,9 @@ def _authenticate_and_fetch_metadata(
                 return False, None, hs_error or "SASL handshake failed", transport_mode
 
             auth_ok, correlation, auth_error = _sasl_authenticate_plain(sock, correlation, username, password)
-            if not auth_ok:
+            if auth_ok is None:
+                return None, None, auth_error or "SASL authentication response unavailable", transport_mode
+            if auth_ok is False:
                 return False, None, auth_error or "authentication failed", transport_mode
 
             metadata, metadata_error = _fetch_metadata(sock, correlation, topics=None)

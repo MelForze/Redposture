@@ -157,20 +157,10 @@ def test_exporter_http_url_brackets_ipv6_literal() -> None:
     )
 
 
-def test_urllib_and_pool_return_redirect_without_following(monkeypatch: pytest.MonkeyPatch) -> None:
-    redirect = urllib.error.HTTPError(
-        "http://example.test/metrics",
-        302,
-        "found",
-        {"Location": "/login"},
-        _Response(302, b"redirect"),
-    )
-
-    class _Opener:
-        def open(self, *_args: Any, **_kwargs: Any) -> Any:
-            raise redirect
-
-    monkeypatch.setattr(http_client, "_NO_REDIRECT_OPENER", _Opener())
+def test_urllib_and_pool_return_redirect_without_location(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A 3xx without a Location has no destination to follow in either transport.
+    redirect = urllib.error.HTTPError("http://example.test/metrics", 302, "found", {}, _Response(302, b"redirect"))
+    monkeypatch.setattr(http_client, "_default_urlopen", lambda *_a, **_k: (_ for _ in ()).throw(redirect))
     direct = http_client.http_get_details("http://example.test/metrics", 1.0, retries=0)
 
     class _Pool:
@@ -178,11 +168,10 @@ def test_urllib_and_pool_return_redirect_without_following(monkeypatch: pytest.M
             return 302, b"redirect", "text/plain", None, False
 
         def close(self) -> None:
-            return None
+            pass
 
     with http_pool.activate_http_pool(_Pool()):
         pooled = http_client.http_get_details("http://example.test/metrics", 1.0, retries=0)
-
     assert direct["status"] == pooled["status"] == 302
     assert direct["body"] == pooled["body"] == "redirect"
 

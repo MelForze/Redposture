@@ -10,7 +10,17 @@ class _FakePool:
         self._headers = headers or {}
         self.calls = []
 
-    def request(self, method, url, *, headers=None, body=None, timeout=None, response_size_cap=10 * 1024 * 1024):
+    def request(
+        self,
+        method,
+        url,
+        *,
+        headers=None,
+        body=None,
+        timeout=None,
+        response_size_cap=10 * 1024 * 1024,
+        prepare_request=None,
+    ):
         self.calls.append({"method": method, "url": url, "headers": headers or {}})
         return _FakeResponse(self._status, self._body, self._headers)
 
@@ -106,7 +116,17 @@ class _BodyCapturingPool:
         self._headers = headers or {}
         self.calls = []
 
-    def request(self, method, url, *, headers=None, body=None, timeout=None, response_size_cap=10 * 1024 * 1024):
+    def request(
+        self,
+        method,
+        url,
+        *,
+        headers=None,
+        body=None,
+        timeout=None,
+        response_size_cap=10 * 1024 * 1024,
+        prepare_request=None,
+    ):
         self.calls.append({"method": method, "url": url, "headers": headers or {}, "body": body})
         return _FakeResponse(self._status, self._body, self._headers)
 

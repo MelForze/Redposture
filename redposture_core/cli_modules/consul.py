@@ -18,6 +18,7 @@ def configure_consul_parser(
     add_save_flag: Callable[..., None],
     mirror_group_actions: Callable[..., None],
     port_type: Callable[[str], int],
+    scalar_port_type: Callable[[str], int],
 ) -> None:
     common = parser.add_argument_group("Common")
     auth = parser.add_argument_group("Auth")
@@ -129,7 +130,7 @@ def configure_consul_parser(
     revshell_options.add_argument(
         "--lport",
         dest="revshell_port",
-        type=port_type,
+        type=scalar_port_type,
         default=None,
         metavar="port",
         help="Listener port for default --revshell payload.",

@@ -1299,7 +1299,7 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
         error = None
         metadata = None
         transport_mode = state.transport_mode or "plaintext"
-        ok = False
+        ok: bool | None = False
         for attempt in range(attempts):
             candidate: KafkaSession | None = None
             try:
@@ -1324,7 +1324,8 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
                     retained_session = candidate
                     break
                 candidate.close()
-                # Authentication and Kafka protocol verdicts are deterministic.
+                # Authentication failures are deterministic; an unavailable
+                # authentication response remains unknown.
                 break
             except (TimeoutError, ConnectionError, OSError) as exc:
                 if candidate is not None:
@@ -1363,8 +1364,10 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
     is_default = credential.source == "default"
     if ok:
         status = "weak_default_creds" if is_default else "valid_credentials"
-    elif anonymous_open:
+    elif anonymous_open and ok is False:
         status = "invalid_credentials_anonymous"
+    elif anonymous_open:
+        status = "open_no_auth"
     else:
         status = "auth_required"
 
@@ -1379,14 +1382,14 @@ def authenticate_kafka(ctx: Any, detect_record: Any, options: Mapping[str, Any])
             "provided_credentials": credential.source != "default",
             "provided_username": credential.username,
             "provided_password": credential.password if credential.source != "default" else None,
-            "provided_credentials_ok": bool(ok) if credential.source != "default" else None,
+            "provided_credentials_ok": ok if credential.source != "default" else None,
             "defcreds_enabled": credential.source == "default",
             "credential_attempts": [
                 {
                     "username": credential.username,
                     "password": credential.password,
                     "default": bool(is_default),
-                    "ok": bool(ok),
+                    "ok": ok,
                     "error": None if ok else error,
                 }
             ],

@@ -37,6 +37,8 @@ def _tag(elem: Any) -> str:
 
 def iter_buckets(client: MinioClient, *, limit: int | None = None) -> Iterator[BucketInfo]:
     """Yield buckets. `limit=None` (default) lists all of them (buckets are few)."""
+    if limit is not None and limit <= 0:
+        return
     resp = client.get_service_root(signed=True)
     if resp.transport_error or resp.http_status != 200:
         return
@@ -58,7 +60,7 @@ def iter_buckets(client: MinioClient, *, limit: int | None = None) -> Iterator[B
         if name:
             yield BucketInfo(name=name, creation_date=created)
             count += 1
-            if limit is not None and count >= max(1, limit):
+            if limit is not None and count >= limit:
                 return
 
 
@@ -99,7 +101,7 @@ def _parse_page(bucket: str, body: bytes) -> tuple[list[ObjectInfo], str | None]
 
 
 def iter_objects(
-    client: MinioClient, bucket: str, *, prefix: str = "", limit: int | None = None, page_size: int = 1000
+    client: MinioClient, bucket: str, *, limit: int | None = None, page_size: int = 1000
 ) -> Iterator[ObjectInfo]:
     """Stream objects with continuation-token pagination.
 
@@ -107,24 +109,34 @@ def iter_objects(
     (default) streams the entire bucket — the caller consumes lazily so memory
     stays bounded to one page (~page_size).
     """
+    if limit is not None and limit <= 0:
+        return
     yielded = 0
     token: str | None = None
     while True:
-        resp = client.list_objects_v2(bucket, max_keys=page_size, prefix=prefix, continuation_token=token, signed=True)
+        request_page_size = max(1, int(page_size))
+        if limit is not None:
+            request_page_size = min(request_page_size, limit - yielded)
+        resp = client.list_objects_v2(
+            bucket,
+            max_keys=request_page_size,
+            continuation_token=token,
+            signed=True,
+        )
         if resp.transport_error or resp.http_status != 200:
             return
         objects, token = _parse_page(bucket, resp.body or b"")
         for obj in objects:
             yield obj
             yielded += 1
-            if limit is not None and yielded >= max(1, limit):
+            if limit is not None and yielded >= limit:
                 return
         if not token:
             return
 
 
 def iter_objects_multi(
-    client: MinioClient, buckets: Any, *, prefix: str = "", limit: int | None = None, page_size: int = 1000
+    client: MinioClient, buckets: Any, *, limit: int | None = None, page_size: int = 1000
 ) -> Iterator[ObjectInfo]:
     """Stream objects across several buckets.
 
@@ -134,13 +146,13 @@ def iter_objects_multi(
     """
     if limit is None:
         for bucket in buckets:
-            yield from iter_objects(client, str(bucket), prefix=prefix, limit=None, page_size=page_size)
+            yield from iter_objects(client, str(bucket), limit=None, page_size=page_size)
         return
-    remaining = max(1, limit)
+    remaining = max(0, limit)
     for bucket in buckets:
         if remaining <= 0:
             return
-        for obj in iter_objects(client, str(bucket), prefix=prefix, limit=remaining, page_size=page_size):
+        for obj in iter_objects(client, str(bucket), limit=remaining, page_size=page_size):
             yield obj
             remaining -= 1
             if remaining <= 0:

@@ -18,6 +18,26 @@ class _Cursor(list):
         return _Cursor(self[:value])
 
 
+@pytest.mark.parametrize(
+    "message, expected",
+    [
+        ("operation exceeded time limit, code 130", "operation exceeded time limit, code 130"),
+        ("server error code 131", "server error code 131"),
+        ("code 1300 internal error", "code 1300 internal error"),
+        ("server error code 180", "server error code 180"),
+        ("server error code 13", "authentication required"),
+        ("server error code 18", "authentication required"),
+        ("Authentication failed.", "authentication required"),
+    ],
+)
+def test_list_databases_preserves_non_auth_errors(message, expected):
+    class FailingClient:
+        def list_database_names(self):
+            raise RuntimeError(message)
+
+    assert mongodb_actions._try_list_databases(FailingClient()) == (None, expected)
+
+
 class _ValidationConsole:
     def __init__(self) -> None:
         self.errors: list[str] = []

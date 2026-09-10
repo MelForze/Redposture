@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import parse_qs, urlsplit
+
 from redposture_core.clients import minio_api, s3_sigv4
 from redposture_core.modules.minio import enumerate as enum
 
@@ -9,7 +11,17 @@ class _FakePool:
         self._pages = list(pages)
         self.calls = []
 
-    def request(self, method, url, *, headers=None, body=None, timeout=None, response_size_cap=10 * 1024 * 1024):
+    def request(
+        self,
+        method,
+        url,
+        *,
+        headers=None,
+        body=None,
+        timeout=None,
+        response_size_cap=10 * 1024 * 1024,
+        prepare_request=None,
+    ):
         self.calls.append({"method": method, "url": url, "headers": headers or {}, "cap": response_size_cap})
         status, payload = self._pages[min(len(self.calls) - 1, len(self._pages) - 1)]
         return _Resp(status, payload)
@@ -36,6 +48,14 @@ def test_iter_objects_streams_and_stops_at_limit_without_reading_all_pages():
     assert [o.key for o in got] == ["a", "b", "c"]
     # only 2 pages fetched (limit hit mid-page-2), not the 3rd
     assert len(pool.calls) == 2
+    assert [parse_qs(urlsplit(call["url"]).query)["max-keys"] for call in pool.calls] == [["2"], ["1"]]
+
+
+def test_zero_object_limit_does_not_send_a_request():
+    pool = _FakePool([(200, _page(["a"]))])
+    client = minio_api.MinioClient(pool, scheme="http", host="h", port=9000, access_key="AK", secret_key="SK")
+    assert list(enum.iter_objects(client, "bucket", limit=0)) == []
+    assert pool.calls == []
 
 
 def test_iter_objects_multi_streams_across_buckets_bounded_by_total_limit():

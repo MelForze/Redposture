@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 from xml.etree import ElementTree
 
@@ -17,7 +18,7 @@ _SERVER_VERSION_RE = re.compile(r"MinIO/(\S+)", re.IGNORECASE)
 
 
 def _server_header_version(resp: MinioResponse) -> str | None:
-    server = str(resp.headers.get("Server") or resp.headers.get("server") or "")
+    server = next((str(value) for key, value in resp.headers.items() if str(key).lower() == "server"), "")
     match = _SERVER_VERSION_RE.search(server)
     return match.group(1) if match else None
 
@@ -81,8 +82,21 @@ def _has_s3_shape(resp: MinioResponse) -> bool:
 
 
 def _server_is_minio(resp: MinioResponse) -> bool:
-    server = str(resp.headers.get("Server") or resp.headers.get("server") or "")
-    return "minio" in server.lower()
+    server = next((v for k, v in resp.headers.items() if k.lower() == "server"), "")
+    return "minio" in str(server).lower()
+
+
+_MINIO_CONSOLE_TITLE_RE = re.compile(rb"<title\b[^>]*>\s*MinIO\s+Console\b", re.I)
+
+
+def _is_minio_console(resp: MinioResponse) -> bool:
+    """True when the endpoint serves the MinIO Console SPA (an HTML page titled
+    ``MinIO Console``) rather than the S3/Admin API. The console proves a MinIO
+    deployment is present but carries no S3 verifier, so credentials are never
+    replayed against it."""
+    if resp.transport_error or resp.http_status != 200:
+        return False
+    return bool(_MINIO_CONSOLE_TITLE_RE.search(resp.body or b""))
 
 
 def _health_live(resp: MinioResponse) -> bool:
@@ -128,12 +142,13 @@ def detect_minio(client: MinioClient) -> MinioDetection:
 
     strong_signals = sum(1 for flag in (health_ok, admin_ok, server_minio) if flag)
     if s3_shape and strong_signals >= 1 and (health_ok or admin_ok or (server_minio and strong_signals >= 2)):
-        status = "confirmed"
-    elif s3_shape:
-        status = "probable"
-    else:
-        status = "not_minio"
-
+        return MinioDetection(status="confirmed", api_endpoint=client.base_url, evidence=evidence)
+    if _is_minio_console(root):
+        # Console-only exposure: MinIO is present, but the S3 API is not reachable
+        # here. Report the console endpoint and leave the S3 API unverified.
+        evidence["console"] = True
+        return MinioDetection(status="console", console_endpoint=client.base_url, evidence=evidence)
+    status = "probable" if s3_shape else "not_minio"
     return MinioDetection(status=status, api_endpoint=client.base_url, evidence=evidence)
 
 
@@ -187,13 +202,28 @@ def classify_anonymous(client: MinioClient, *, known_bucket: str | None = None) 
 _INVALID_CRED_CODES = {"SignatureDoesNotMatch", "InvalidAccessKeyId", "AccessKeyDisabled"}
 
 
+def _is_service_bucket_listing(body: bytes) -> bool:
+    """Require the ListBuckets response structure, including an empty bucket list."""
+    try:
+        root = ElementTree.fromstring(body)
+    except (ElementTree.ParseError, ValueError, LookupError):
+        return False
+    for namespace in ("", "{http://s3.amazonaws.com/doc/2006-03-01/}"):
+        if root.tag == f"{namespace}ListAllMyBucketsResult":
+            return root.find(f"{namespace}Buckets") is not None
+    return False
+
+
 def verify_credential(client: MinioClient) -> CredentialResult:
     resp = client.get_service_root(signed=True)
     access_key = getattr(client, "access_key", None)
     if resp.transport_error:
         return CredentialResult(state="transient_failure", access_key=access_key)
     if 200 <= resp.http_status < 300:
-        return CredentialResult(state="valid", access_key=access_key)
+        state = (
+            "valid" if resp.http_status == 200 and _is_service_bucket_listing(resp.body) else "verification_unavailable"
+        )
+        return CredentialResult(state=state, access_key=access_key)
     code = resp.error.code if resp.error is not None else ""
     if code in _INVALID_CRED_CODES:
         return CredentialResult(state="invalid", access_key=access_key, error_code=code)
@@ -204,11 +234,37 @@ def verify_credential(client: MinioClient) -> CredentialResult:
     return CredentialResult(state="verification_unavailable", access_key=access_key, error_code=code or None)
 
 
-def _probe_state(resp: MinioResponse) -> str:
+def _json_object(body: bytes) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(body or b"")
+    except (ValueError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _account_info_shape(body: bytes) -> bool:
+    payload = _json_object(body)
+    if payload is None:
+        return False
+    markers = {"accountname", "policy", "buckets", "server"}
+    return any(str(key).lower() in markers for key in payload)
+
+
+def _users_shape(body: bytes) -> bool:
+    payload = _json_object(body)
+    return payload is not None and all(isinstance(value, dict) for value in payload.values())
+
+
+def _policies_shape(body: bytes) -> bool:
+    payload = _json_object(body)
+    return payload is not None and all(isinstance(value, dict) for value in payload.values())
+
+
+def _probe_state(resp: MinioResponse, expected_shape: Callable[[bytes], bool]) -> str:
     if resp.transport_error:
         return "unknown"
     if 200 <= resp.http_status < 300:
-        return "ok"
+        return "ok" if expected_shape(resp.body or b"") else "unknown"
     if resp.error is not None and resp.error.code in {"AccessDenied", "AccessKeyDisabled"}:
         return "denied"
     if resp.http_status in {401, 403}:
@@ -227,9 +283,9 @@ def classify_admin_capability(client: Any) -> AdminCapability:
     users = client.list_users(signed=True)
     policies = client.list_canned_policies(signed=True)
     states = {
-        "accountinfo": _probe_state(account),
-        "list_users": _probe_state(users),
-        "list_canned_policies": _probe_state(policies),
+        "accountinfo": _probe_state(account, _account_info_shape),
+        "list_users": _probe_state(users, _users_shape),
+        "list_canned_policies": _probe_state(policies, _policies_shape),
     }
     admin_probes = [states["list_users"], states["list_canned_policies"]]
     ok_admin = sum(1 for state in admin_probes if state == "ok")
@@ -283,10 +339,10 @@ _WRITE_DENIED_CODES = {"AccessDenied", "SignatureDoesNotMatch", "InvalidAccessKe
 
 def probe_write_capability(client: MinioClient, buckets: Any) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Active write-probe (opt-in, mutating): PUT a random canary object into each
-    bucket, then immediately DELETE it to roll back.
+    bucket, read the exact canary back, then immediately DELETE it to roll back.
 
     Returns ``(per_bucket, leftovers)`` where per_bucket maps a bucket to
-    ``{"write": True/False/"unknown", "cleanup": "ok"/"failed", "leftover": key?}``
+    ``{"write": True/False/"unknown", "cleanup": "ok"/"failed"/"unknown", "leftover": key?}``
     and leftovers lists canaries whose rollback DELETE failed (so the operator can
     remove them). A 403/AccessDenied on PUT means write is denied; the object was
     never created, so no DELETE is attempted.
@@ -302,11 +358,15 @@ def probe_write_capability(client: MinioClient, buckets: Any) -> tuple[dict[str,
             per_bucket[bucket] = {"write": "unknown"}
             continue
         if put.http_status in {200, 201, 204}:
-            entry: dict[str, Any] = {"write": True}
+            verify = client.get_object(bucket, key, max_bytes=len(_WRITE_PROBE_BODY) + 1, signed=True)
+            write_confirmed = (
+                not verify.transport_error and verify.http_status in {200, 206} and verify.body == _WRITE_PROBE_BODY
+            )
+            entry: dict[str, Any] = {"write": True if write_confirmed else "unknown"}
             delete = client.delete_object(bucket, key, signed=True)
             rolled_back = not delete.transport_error and delete.http_status in {200, 202, 204}
             if rolled_back:
-                entry["cleanup"] = "ok"
+                entry["cleanup"] = "ok" if write_confirmed else "unknown"
             else:
                 entry["cleanup"] = "failed"
                 entry["leftover"] = key
@@ -328,10 +388,15 @@ class MinioLifecycleState:
     otherwise untrusted TLS endpoint must never abort the scan.
     """
 
-    def __init__(self, args: Any, host: str, port: int) -> None:
+    def __init__(self, args: Any, host: str, port: int, *, scheme: str | None = None) -> None:
         self.host = str(host)
         self.port = int(port)
-        self.resolved_scheme: str | None = None
+        if scheme not in {None, "http", "https"}:
+            raise ValueError("minio supports HTTP/HTTPS targets only")
+        # An explicit scheme from the target URL is authoritative: never probed,
+        # never flipped. Without one, `resolve_scheme` probes from the port guess.
+        self.explicit_scheme: str | None = scheme
+        self.resolved_scheme: str | None = scheme
         self.pool = HttpSessionPool(
             timeout=float(getattr(args, "timeout", 5.0) or 5.0),
             insecure=True,
@@ -345,15 +410,20 @@ class MinioLifecycleState:
     def resolve_scheme(self) -> str:
         """Return the transport scheme for this target, probing once and caching.
 
-        Starts from the port heuristic, then flips to the other scheme if the
-        first probe returns a transport-mismatch signature. A single probe is
-        enough: an unrelated failure (refused/timeout) leaves the guess intact.
+        An explicit ``http``/``https`` from the target URL is authoritative and
+        returned without any probe. Otherwise the port heuristic is the starting
+        guess, flipped when the first probe returns a transport-mismatch signature
+        or a plaintext ``400`` whose body says the server expected TLS (a common
+        reverse-proxy/console front). A single probe is enough: an unrelated
+        failure (refused/timeout) leaves the guess intact.
         """
         if self.resolved_scheme is not None:
             return self.resolved_scheme
         guess = "https" if self.port in _TLS_PORTS else "http"
         resp = self._probe(guess)
-        if resp.transport_error and _transport_mismatch(guess, resp.transport_error):
+        mismatch = bool(resp.transport_error and _transport_mismatch(guess, resp.transport_error))
+        tls_required = guess == "http" and resp.http_status == 400 and b"https" in (resp.body or b"").lower()
+        if mismatch or tls_required:
             guess = "http" if guess == "https" else "https"
         self.resolved_scheme = guess
         return guess
@@ -363,7 +433,9 @@ class MinioLifecycleState:
 
 
 def minio_lifecycle_state_factory(ctx: Any) -> MinioLifecycleState:
-    return MinioLifecycleState(ctx.args, ctx.host, ctx.port)
+    target = getattr(ctx, "target", None)
+    scheme = getattr(target, "scheme", None)
+    return MinioLifecycleState(ctx.args, ctx.host, ctx.port, scheme=scheme)
 
 
 def _client_for(ctx: Any, credential: Any) -> MinioClient:
@@ -392,6 +464,7 @@ def detect_record(ctx: Any) -> dict[str, Any]:
     verification_status = "available" if detection.status == "confirmed" else "unavailable"
     status_word = {
         "confirmed": "detected",
+        "console": "detected",
         "probable": "probable",
         "not_minio": "not_service",
         "transport_failure": "fail",
@@ -406,6 +479,14 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         "detection": detection.evidence,
         "credential_verification_status": verification_status,
     }
+    if detection.status == "transport_failure":
+        # Surface the transport error so the runtime classifies this as a
+        # pre-detection operational failure (reported as "audit inconclusive")
+        # rather than a conclusive "no service".
+        record["operational_failure"] = True
+        transport_error = detection.evidence.get("transport_error")
+        if transport_error:
+            record["error"] = str(transport_error)
     header_version = detection.evidence.get("server_version")
     if header_version:
         record["version"] = header_version
@@ -425,13 +506,35 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     client = _client_for(ctx, credential)
     result = verify_credential(client)
     merged = dict(prior)
-    merged["credential_state"] = result.state
+    anonymous_open = prior.get("auth_required") is False or str(prior.get("anonymous") or "") in {
+        "anonymous_list_ok",
+        "anonymous_bucket_read_ok",
+    }
+    credential_state = result.state
+    error_code = result.error_code
+    if anonymous_open and credential_state in {"valid", "valid_but_restricted"}:
+        credential_state = "verification_unavailable"
+        error_code = "anonymous_access_already_succeeded"
+    merged["credential_state"] = credential_state
     merged["credential_type"] = "session-token" if getattr(ctx.args, "session_token", None) else "access-key"
     merged["credential_results"] = [
-        {"access_key": result.access_key, "state": result.state, "error_code": result.error_code}
+        {"access_key": result.access_key, "state": credential_state, "error_code": error_code}
     ]
-    merged["provided_credentials_ok"] = result.state in {"valid", "valid_but_restricted"}
-    merged["default_credentials"] = getattr(credential, "source", "") == "default" and merged["provided_credentials_ok"]
+    merged["provided_credentials_ok"] = (
+        True
+        if credential_state in {"valid", "valid_but_restricted"}
+        else False
+        if credential_state == "invalid"
+        else None
+    )
+    merged["default_credentials"] = (
+        getattr(credential, "source", "") == "default" and merged["provided_credentials_ok"] is True
+    )
+    if merged["provided_credentials_ok"]:
+        # TXT-only echo of the accepted secret so the detail line can show the
+        # working access-key:secret pair. Redacted from JSON (see stage spec),
+        # matching how minio already keeps attempted_credentials out of JSON.
+        merged["credential_secret"] = getattr(credential, "password", None)
     return merged
 
 
@@ -476,51 +579,96 @@ def _split_object_ref(ref: Any) -> tuple[str | None, str | None]:
     return (bucket or None), (key or None)
 
 
+def _object_op_targets(
+    client: MinioClient, merged: dict[str, Any], *, object_ref: Any, bucket: Any
+) -> list[tuple[str, str]] | None:
+    """Resolve the (bucket, key) targets for --dump/--download.
+
+    Exactly one source is expected (the CLI already rejects both): ``--object``
+    yields the single pair, ``--bucket`` yields every object in that bucket.
+    Returns None on an invalid reference (with ``object_op_error`` set)."""
+    from . import enumerate as _enum
+
+    if object_ref:
+        o_bucket, o_key = _split_object_ref(object_ref)
+        if not o_bucket or not o_key:
+            merged["object_op_error"] = f"invalid --object '{object_ref}' (expected bucket/key)"
+            return None
+        return [(o_bucket, o_key)]
+    if bucket:
+        return [(str(obj.bucket), str(obj.key)) for obj in _enum.iter_objects(client, str(bucket))]
+    merged["object_op_error"] = "specify --object bucket/key or --bucket name for --dump/--download"
+    return None
+
+
 def _run_object_op(
     client: MinioClient,
     merged: dict[str, Any],
     *,
     object_ref: Any,
+    bucket: Any,
     want_dump: bool,
-    download_dir: Any,
+    want_download: bool,
     max_bytes: int,
 ) -> None:
-    """--dump / --download a single object (bounded by max_bytes). Read-only GET."""
+    """--dump / --download for one --object or every object in --bucket.
+
+    Read-only GET, bounded per object by max_bytes. Downloads are written to
+    ``./<bucket>/<key>`` (the bucket folder is created if missing)."""
     import os
 
-    o_bucket, o_key = _split_object_ref(object_ref)
-    if not object_ref:
-        merged["object_op_error"] = "specify --object bucket/key for --dump/--download"
+    targets = _object_op_targets(client, merged, object_ref=object_ref, bucket=bucket)
+    if targets is None:
         return
-    if not o_bucket or not o_key:
-        merged["object_op_error"] = f"invalid --object '{object_ref}' (expected bucket/key)"
-        return
-    resp = client.get_object(o_bucket, o_key, max_bytes=max_bytes)
-    if resp.transport_error:
-        merged["object_op_error"] = f"{o_bucket}/{o_key}: transport error"
-        return
-    if resp.http_status not in {200, 206}:
-        code = resp.error.code if resp.error is not None and resp.error.code else str(resp.http_status)
-        merged["object_op_error"] = f"{o_bucket}/{o_key}: {code}"
-        return
-    body = resp.body or b""
-    if want_dump:
-        merged["object_dump"] = {
-            "bucket": o_bucket,
-            "key": o_key,
-            "size": len(body),
-            "content": body.decode("utf-8", errors="replace"),
-        }
-    if download_dir:
-        dest = os.path.join(str(download_dir), o_bucket, o_key)
-        try:
-            os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-            with open(dest, "wb") as handle:
-                handle.write(body)
-        except OSError as exc:
-            merged["object_op_error"] = f"{o_bucket}/{o_key}: write failed ({exc})"
-            return
-        merged["object_download"] = {"bucket": o_bucket, "key": o_key, "path": dest, "size": len(body)}
+    # A bucket-wide dump prefixes each object with a `=== bucket/key ===` header so
+    # the concatenated content stays legible; a single --object dump does not.
+    labeled = bool(bucket) and not object_ref
+
+    dumps: list[dict[str, Any]] = []
+    downloads: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for o_bucket, o_key in targets:
+        resp = client.get_object(o_bucket, o_key, max_bytes=max_bytes)
+        if resp.transport_error:
+            errors.append(f"{o_bucket}/{o_key}: transport error")
+            continue
+        if resp.http_status not in {200, 206}:
+            code = resp.error.code if resp.error is not None and resp.error.code else str(resp.http_status)
+            errors.append(f"{o_bucket}/{o_key}: {code}")
+            continue
+        body = resp.body or b""
+        if want_dump:
+            dumps.append(
+                {
+                    "bucket": o_bucket,
+                    "key": o_key,
+                    "size": len(body),
+                    "content": body.decode("utf-8", errors="replace"),
+                }
+            )
+        if want_download:
+            # ./<bucket>/<key>; key may contain '/', which nests real subfolders.
+            dest = os.path.join(o_bucket, *o_key.split("/"))
+            try:
+                os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+                with open(dest, "wb") as handle:
+                    handle.write(body)
+            except OSError as exc:
+                errors.append(f"{o_bucket}/{o_key}: write failed ({exc})")
+                continue
+            downloads.append({"bucket": o_bucket, "key": o_key, "path": dest, "size": len(body)})
+
+    if dumps:
+        merged["object_dumps"] = dumps
+        merged["object_dumps_labeled"] = labeled
+    if downloads:
+        merged["object_downloads"] = downloads
+    if errors:
+        # Preserve the single-error field for the common one-object case; keep the
+        # full list for a bucket-wide op where several objects may fail.
+        merged["object_op_error"] = errors[0]
+        if len(errors) > 1:
+            merged["object_op_errors"] = errors
 
 
 def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
@@ -538,21 +686,23 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     from . import enumerate as _enum
     from . import render as _render
 
+    if prior.get("credential_state") == "verification_unavailable":
+        return dict(prior)
+
     args = ctx.args
     want_buckets = bool(getattr(args, "show_buckets", False))
     want_objects = bool(getattr(args, "show_objects", False))
     want_discover = bool(getattr(args, "discover", False))
     want_probe = bool(getattr(args, "probe_write", False))
     want_dump = bool(getattr(args, "dump", False))
-    download_dir = getattr(args, "download", None)
-    want_object_op = want_dump or bool(download_dir)
+    want_download = bool(getattr(args, "download", False))
+    want_object_op = want_dump or want_download
     if not (want_buckets or want_objects or want_discover or want_probe or want_object_op):
         return dict(prior)
 
     merged = dict(prior)
     client = _client_for(ctx, ctx.credential)
     bucket = getattr(args, "bucket", None)
-    prefix = str(getattr(args, "prefix", "") or "")
     output_format = str(getattr(args, "output_format", "txt") or "txt")
 
     if want_object_op:
@@ -560,8 +710,9 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             client,
             merged,
             object_ref=getattr(args, "object", None),
+            bucket=bucket,
             want_dump=want_dump,
-            download_dir=download_dir,
+            want_download=want_download,
             max_bytes=int(getattr(args, "max_object_size", 10 * 1024 * 1024)),
         )
 
@@ -594,7 +745,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             fd, stream_path = tempfile.mkstemp(prefix="redposture-minio-objects-", suffix=".txt")
             count = 0
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                for obj in _enum.iter_objects_multi(client, target_buckets, prefix=prefix):
+                for obj in _enum.iter_objects_multi(client, target_buckets):
                     handle.write(_render.object_stream_line(ctx.host, ctx.port, asdict(obj), output_format) + "\n")
                     count += 1
             merged["objects_streamed"] = True
@@ -606,7 +757,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                 max_objects=int(getattr(args, "max_objects", 1000)),
                 time_budget=float(getattr(args, "discover_time", 30.0)),
             )
-            scan_iter = _enum.iter_objects_multi(client, target_buckets, prefix=prefix, limit=budget.max_objects + 1)
+            scan_iter = _enum.iter_objects_multi(client, target_buckets, limit=budget.max_objects + 1)
 
             # Real-time output: when TXT and a live sink is available (and we are not
             # also streaming an object listing), emit the target's static lines now,

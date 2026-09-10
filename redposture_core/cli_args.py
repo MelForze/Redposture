@@ -173,7 +173,7 @@ def _append_selected_defaults(parser: argparse.ArgumentParser, *dests: str) -> N
         action.help = f"{action.help} (default: %(default)s)"
 
 
-def _add_listener_flags(parser: argparse.ArgumentParser) -> None:
+def _add_listener_flags(parser: argparse.ArgumentParser | argparse._ArgumentGroup) -> None:
     parser.add_argument(
         "-s",
         "--services",
@@ -209,12 +209,10 @@ def _add_listener_flags(parser: argparse.ArgumentParser) -> None:
         metavar="port",
         help="Proxmox listener port.",
     )
-    parser.add_argument(
-        "--proxmox-tls",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Serve proxmox listener via HTTPS.",
-    )
+    # Proxmox exporter callback targets use HTTPS, so the corresponding
+    # listener transport is fixed rather than exposed as a contradictory CLI
+    # toggle.
+    parser.set_defaults(proxmox_tls=True)
     parser.add_argument(
         "--blackbox-port",
         type=_port,
@@ -303,7 +301,7 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         default=None,
         metavar="targets",
         help=(
-            "Targets list: dns[:port]/ipv4[:port]/[ipv6]:port/cidr/http(s)://host[:port]/file "
+            "Targets list: dns[:port]/ipv4[:port]/[ipv6]:port/cidr/start_IP-end_IP/http(s)://host[:port]/file "
             "(comma-separated). A target-specific port overrides module defaults; an explicitly supplied "
             "port option adds ports to bare host:port targets. URL scheme/path/query are preserved for "
             "URL-aware modules and host/port are used for TCP modules. "
@@ -319,7 +317,7 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         default=None,
         metavar="exclusions",
         help=(
-            "Exclude targets before scanning: DNS names, IP addresses, CIDR networks, URL hosts, or existing "
+            "Exclude targets before scanning: DNS names, IP addresses, IPv4 ranges, CIDR networks, URL hosts, or existing "
             "files (comma-separated; repeatable). Matching ignores scheme and port."
         ),
     )
@@ -523,6 +521,7 @@ def build_parser() -> argparse.ArgumentParser:
             append_selected_defaults=_append_selected_defaults,
             mirror_group_actions=_mirror_group_actions,
             port_type=_port_spec,
+            scalar_port_type=_port,
             positive_int=_positive_int,
         ),
     )

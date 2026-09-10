@@ -40,6 +40,8 @@ def build_minio_plan(args: Any) -> AuditCommandPlan:
 
 
 def _minio_credential_gate(credential: Any, record: AuditRecord) -> tuple[bool, str]:
+    if record.extra.get("credential_state") == "verification_unavailable":
+        return False, "minio credential verification unavailable"
     ok = record.extra.get("provided_credentials_ok") is True
     return ok, "minio credential verified" if ok else "minio credential rejected"
 
@@ -74,7 +76,7 @@ def build_minio_spec(args: Any) -> ModuleAuditSpec:
         colorize=render._render_colored_minio_line,
         credential_gate=_minio_credential_gate,
         skip_credentials_without_verifier=True,
-        structured_output_redact_fields=("attempted_credentials",),
+        structured_output_redact_fields=("attempted_credentials", "credential_secret"),
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         # `--defcreds` is exhaustive (house convention): try every default pair and
         # render each attempt, instead of stopping at the first accepted one.

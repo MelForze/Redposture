@@ -369,6 +369,9 @@ def test_send_request_and_sasl_error_paths() -> None:
     sent_size = struct.unpack(">i", sock.sent[0][:4])[0]
     assert sent_size == len(sock.sent[0]) - 4
 
+    # `ok` is reused across handshake (bool) and authenticate (bool | None, which
+    # now returns None when the broker never answers) — widen it once.
+    ok: bool | None
     ok, next_corr, error = kafka._sasl_handshake_plain(
         _FrameSocket([struct.pack(">ih", 1, 35), struct.pack(">ih", 1, 35)]),
         1,

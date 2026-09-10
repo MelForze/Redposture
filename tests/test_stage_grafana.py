@@ -120,7 +120,7 @@ def test_grafana_helper_parsers_and_auth_helpers() -> None:
         "11.0.0",
     )
     assert _looks_like_grafana_health(200, '{"database":"ok","version":"11.0.0"}') == (False, None)
-    assert _looks_like_grafana_health(200, "grafana ready") == (True, None)
+    assert _looks_like_grafana_health(200, "grafana ready") == (False, None)
     assert _looks_like_grafana_health(500, "{}") == (False, None)
 
     assert _auth_header("admin", "admin").startswith("Basic ")
@@ -155,7 +155,7 @@ def test_grafana_helper_parsers_and_auth_helpers() -> None:
 def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_grafana._http_request",
-        lambda *_args, **_kwargs: (200, '{"id":1,"login":"admin"}', {}),
+        lambda *_args, **_kwargs: (200, '{"id":1,"login":"admin","isGrafanaAdmin":true}', {}),
     )
     ok, error = _verify_credentials("127.0.0.1", 3000, 1.0, "admin", "admin")
     assert (ok, error) == (True, None)
@@ -165,7 +165,8 @@ def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.Monke
         lambda *_args, **_kwargs: (403, "{}", {}),
     )
     ok, error = _verify_credentials("127.0.0.1", 3000, 1.0, "admin", "bad")
-    assert (ok, error) == (False, "invalid credentials")
+    assert ok is None
+    assert "without credential evidence" in str(error)
 
     monkeypatch.setattr(
         "redposture_core.stage_grafana._http_request",
@@ -234,7 +235,7 @@ def test_grafana_auth_rejects_login_page_payloads(monkeypatch: pytest.MonkeyPatc
     assert "invalid identity payload" in str(token_error)
 
 
-def test_grafana_service_account_403_is_accepted_as_scoped(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_grafana_service_account_403_is_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_grafana._http_request",
         lambda *_args, **_kwargs: (403, '{"message":"access denied"}', {}),
@@ -242,8 +243,8 @@ def test_grafana_service_account_403_is_accepted_as_scoped(monkeypatch: pytest.M
 
     ok, error = grafana_stage._verify_apitoken("127.0.0.1", 3000, 1.0, "glsa-scoped")
 
-    assert ok is True
-    assert "identity endpoint is not permitted" in str(error)
+    assert ok is None
+    assert "without token evidence" in str(error)
 
 
 def test_run_temp_prometheus_check_success_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1235,11 +1236,15 @@ def test_grafana_defcreds_falls_back_after_api_token_transport_error(
         if path == "/api/health":
             return 401, "", {}
         if path == "/login":
-            return 200, "Grafana login", {}
+            return 200, "<title>Grafana</title>", {}
         if path == "/api/user":
             if str(authorization).startswith("Bearer "):
                 raise OSError("token transport failure")
-            return (200, '{"id":1,"login":"admin"}', {}) if authorization == winning_header else (401, "", {})
+            return (
+                (200, '{"id":1,"login":"admin","isGrafanaAdmin":true}', {})
+                if authorization == winning_header
+                else (401, "", {})
+            )
         if path == "/api/datasources":
             datasource_headers.append(authorization)
             return 200, "[]", {}
@@ -1263,7 +1268,7 @@ def test_grafana_defcreds_falls_back_after_api_token_transport_error(
     assert record["effective_password"] == "password"
     assert record["attempted_credentials_count"] == 11
     assert record["auth_attempts"][0]["source"] == "apitoken"
-    assert record["auth_attempts"][0]["ok"] is False
+    assert record["auth_attempts"][0]["ok"] is None
     assert "token transport failure" in record["auth_attempts"][0]["error"]
     assert datasource_headers == [winning_header]
     lines = _format_auth_attempt_detail_records(record, "txt")

@@ -9,6 +9,8 @@ import urllib.parse
 from contextlib import contextmanager
 from typing import Any
 
+from ..clients.http_api import HttpResponse
+from ..clients.http_redirects import follow_redirects
 from ..clients.tls_cache import shared_client_ssl_context
 
 HTTP_POOL_MAX_IDLE_TOTAL = 512
@@ -134,6 +136,32 @@ class HTTPConnectionPool:
         *,
         max_bytes: int | None = None,
     ) -> tuple[int | None, bytes, str | None, BaseException | None, bool]:
+        failure: BaseException | None = None
+
+        def send(method: str, url: str, headers: dict[str, str], body: bytes | None) -> HttpResponse:
+            nonlocal failure
+            status, raw, content_type, failure, truncated, response_headers = self._get_once(
+                url,
+                timeout,
+                max_bytes=max_bytes,
+            )
+            return HttpResponse(
+                status or 0, raw, response_headers, error=str(failure) if failure else None, truncated=truncated
+            )
+
+        response = follow_redirects(send, "GET", url)
+        if response.error:
+            return None, b"", None, failure or ValueError(response.error), response.truncated
+        content_type = next((v for k, v in response.headers.items() if k.lower() == "content-type"), None)
+        return response.status, response.body, content_type, None, response.truncated
+
+    def _get_once(
+        self,
+        url: str,
+        timeout: float,
+        *,
+        max_bytes: int | None = None,
+    ) -> tuple[int | None, bytes, str | None, BaseException | None, bool, dict[str, str]]:
         scheme, host, port, path = self._target_from_url(url)
         conn = self._acquire(scheme, host, port, timeout)
         reusable = False
@@ -161,9 +189,14 @@ class HTTPConnectionPool:
             # framing bytes. Do not drain here: that would defeat the cap on
             # a peer that keeps sending an unbounded body.
             reusable = not truncated and not response.will_close
-            return int(response.status), raw, response.getheader("Content-Type"), None, truncated
+            response_headers = (
+                {str(k): str(v) for k, v in response.getheaders()}
+                if callable(getattr(response, "getheaders", None))
+                else {k: v for k in ("Content-Type", "Location") if (v := response.getheader(k)) is not None}
+            )
+            return int(response.status), raw, response.getheader("Content-Type"), None, truncated, response_headers
         except Exception as exc:
-            return None, b"", None, exc, False
+            return None, b"", None, exc, False, {}
         finally:
             self._release(scheme, host, port, conn, reusable)
 

@@ -19,6 +19,7 @@ from .audit_config import AuditConfig
 from .audit_models import StageTrace
 from .clients.tls_cache import tls_context_cache_stats
 from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
+from .rendering import sanitize_report_line
 from .scheduler import BoundedScheduler, SharedNestedScheduler
 from .show_limits import dump_flag_enabled, dump_flag_limit, show_flag_enabled, show_flag_limit
 from .targeting import (
@@ -346,7 +347,12 @@ class LineOutputSink:
             self._prepare_unlocked()
 
     def emit_many(self, lines: Iterable[str]) -> None:
-        buffered = [line for line in lines if line]
+        # Single choke point for every TXT line reaching the file or the console
+        # (streamed sections tee through here too): scrub control characters from
+        # the record payload so a target-supplied name cannot forge a report line,
+        # add a TSV field, or drive the operator's terminal. A no-op for JSON and
+        # run-level lines, which carry no target data (see sanitize_report_line).
+        buffered = [sanitize_report_line(line) for line in lines if line]
         if not buffered:
             return
         with self._lock:
@@ -686,6 +692,10 @@ class AuditCommandResult:
     status_counts: dict[str, int] = field(default_factory=dict)
     record_retention_truncated: bool = False
     operational_failure_count: int = 0
+    # True when run_plan already emitted a run-level outcome summary (an
+    # "audit inconclusive" / "No X service detected" fallback line, or its JSON
+    # summary). Callers use it to suppress a coarser, redundant fallback message.
+    summary_emitted: bool = False
 
     @property
     def inconclusive(self) -> bool:
@@ -2030,6 +2040,7 @@ class AuditCommandRunner:
         inconclusive = detected_count == 0 and operational_failure_count > 0
         partial = detected_count > 0 and operational_failure_count > 0
         conclusive_negative_count = max(0, record_count - operational_failure_count)
+        summary_emitted = False
         if (inconclusive or partial) and plan.output_format == "json":
             summary = {
                 "type": "summary",
@@ -2045,6 +2056,7 @@ class AuditCommandRunner:
                 "reason": "operational_failures_before_detection" if inconclusive else "partial_operational_failure",
             }
             emitted_lines += 1
+            summary_emitted = True
             sink.emit_many((json.dumps(summary, ensure_ascii=False),))
         elif record_count == 0 and plan.fallback_target_count > 0 and plan.output_format == "json":
             summary = {
@@ -2059,6 +2071,7 @@ class AuditCommandRunner:
                 "reason": "no_service_detected",
             }
             emitted_lines += 1
+            summary_emitted = True
             sink.emit_many((json.dumps(summary, ensure_ascii=False),))
         elif inconclusive and plan.output_format != "json":
             total = fallback_target_count
@@ -2068,6 +2081,7 @@ class AuditCommandRunner:
                 f"{operational_failure_count}/{total} {target_word} unreachable or failed before detection",
             )
             emitted_lines += len(fallback_lines)
+            summary_emitted = True
             sink.emit_many(fallback_lines)
         elif detected_count == 0 and emitted_lines == 0 and fallback_target_count > 0 and plan.output_format != "json":
             if fallback_target_count > 1:
@@ -2075,6 +2089,7 @@ class AuditCommandRunner:
             else:
                 fallback_lines = (f"[*] No {self.spec.label} service detected on target",)
             emitted_lines += len(fallback_lines)
+            summary_emitted = True
             sink.emit_many(fallback_lines)
 
         return AuditCommandResult(
@@ -2087,6 +2102,7 @@ class AuditCommandRunner:
             status_counts=status_counts,
             record_retention_truncated=not retain_records,
             operational_failure_count=operational_failure_count,
+            summary_emitted=summary_emitted,
         )
 
     def _ctx(
@@ -3108,7 +3124,11 @@ def run_basic_host_audit(
     except OSError as exc:
         console.error(f"failed to process {name} output: {exc}")
         return 2
-    if cfg.debug and result.detected_count == 0 and hasattr(console, "warn"):
+    if cfg.debug and result.detected_count == 0 and not result.summary_emitted and hasattr(console, "warn"):
+        # Only a last-resort note: when run_plan already emitted a run-level
+        # outcome summary ("audit inconclusive" for operational failures, or
+        # "No X service detected" for a conclusive negative), this coarser and
+        # potentially misleading "unreachable" line would just duplicate it.
         console.warn(f"all {name} targets are unreachable")
     return command_result_exit_code(result)
 

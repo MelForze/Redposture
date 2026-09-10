@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from .cli_modules.airflow import configure_airflow_parser
 from .cli_modules.clickhouse import configure_clickhouse_parser
 from .cli_modules.consul import configure_consul_parser
 from .cli_modules.datastores import configure_etcd_parser, configure_kafka_parser, configure_redis_parser
@@ -25,6 +26,7 @@ from .cli_modules.oracle import configure_oracle_parser
 from .cli_modules.postgres import PostgresHelpFormatter, configure_postgres_parser
 from .cli_modules.proxmox import configure_proxmox_parser
 from .cli_modules.qdrant import configure_qdrant_parser
+from .cli_modules.rabbitmq import configure_rabbitmq_parser
 from .cli_modules.registry import configure_registry_parser
 from .cli_modules.zookeeper import configure_zookeeper_parser
 
@@ -44,6 +46,8 @@ COMMAND_CONSUL = "consul"
 COMMAND_QDRANT = "qdrant"
 COMMAND_KUBEAPI = "kubeapi"
 COMMAND_MINIO = "minio"
+COMMAND_RABBITMQ = "rabbitmq"
+COMMAND_AIRFLOW = "airflow"
 COMMAND_KAFKA = "kafka"
 COMMAND_ZOOKEEPER = "zookeeper"
 COMMAND_KEEPER = "keeper"
@@ -70,6 +74,7 @@ class ParserHelperSet:
     # compatibility) or a list/range/file spec (returned as str and merged
     # with `args.ports` downstream). See `_port_spec` in cli_args.py.
     port_type: Callable[[str], int | str]
+    scalar_port_type: Callable[[str], int]
     positive_int: Callable[[str], int]
 
 
@@ -112,6 +117,8 @@ _STAGE_RUNNER_MODULES: dict[str, str] = {
     COMMAND_QDRANT: "redposture_core.modules.qdrant.stage",
     COMMAND_KUBEAPI: "redposture_core.modules.kubeapi.stage",
     COMMAND_MINIO: "redposture_core.modules.minio.stage",
+    COMMAND_RABBITMQ: "redposture_core.modules.rabbitmq.stage",
+    COMMAND_AIRFLOW: "redposture_core.modules.airflow.stage",
     COMMAND_KAFKA: "redposture_core.modules.kafka.stage",
     COMMAND_ZOOKEEPER: "redposture_core.modules.zookeeper.stage",
     COMMAND_KEEPER: "redposture_core.modules.keeper.stage",
@@ -272,7 +279,10 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
             "EnableRemoteScriptChecks), and can perform SSRF probes via temporary agent HTTP checks."
         ),
         runner_attr="run_consul_stage",
-        configure_parser=_make_configurator(configure_consul_parser, _HTTP_MODULE_HELPERS_WITH_MIRROR),
+        configure_parser=_make_configurator(
+            configure_consul_parser,
+            (*_HTTP_MODULE_HELPERS_WITH_MIRROR, "scalar_port_type"),
+        ),
     ),
     CommandSpec(
         name=COMMAND_KUBEAPI,
@@ -290,6 +300,18 @@ COMMAND_SPECS: tuple[CommandSpec, ...] = (
         help="Audit MinIO exposure: detection, anonymous access, credential verification.",
         runner_attr="run_minio_stage",
         configure_parser=_make_configurator(configure_minio_parser, _HTTP_MODULE_HELPERS),
+    ),
+    CommandSpec(
+        name=COMMAND_RABBITMQ,
+        help="Audit RabbitMQ Management auth, tags, permissions, and queue topology.",
+        runner_attr="run_rabbitmq_stage",
+        configure_parser=_make_configurator(configure_rabbitmq_parser, (*_HTTP_MODULE_HELPERS, "positive_int")),
+    ),
+    CommandSpec(
+        name=COMMAND_AIRFLOW,
+        help="Audit Airflow exposure: detection, version, anonymous access, default/provided credentials.",
+        runner_attr="run_airflow_stage",
+        configure_parser=_make_configurator(configure_airflow_parser, _HTTP_MODULE_HELPERS),
     ),
     CommandSpec(
         name=COMMAND_POSTGRES,
@@ -475,6 +497,8 @@ __all__ = [
     "COMMAND_KUBEAPI",
     "COMMAND_LISTEN",
     "COMMAND_MINIO",
+    "COMMAND_RABBITMQ",
+    "COMMAND_AIRFLOW",
     "COMMAND_MONGODB",
     "COMMAND_ORACLE",
     "COMMAND_POSTGRES",

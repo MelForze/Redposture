@@ -94,11 +94,22 @@ def _start_servers(
                 )
         elif auto_detected:
             console.info(f"TLS enabled; auto-detected cert/key: {selected_cert} + {selected_key}")
-        cert_path, key_path, temp_cert_dir = prepare_cert_files(
-            selected_cert,
-            selected_key,
-            generate_local_selfcert=False,
-        )
+        callback_dns = str(getattr(args, "callback_dns", "") or "").strip()
+        callback_ip = str(getattr(args, "callback_ip", "") or "").strip()
+        if callback_dns or callback_ip:
+            cert_path, key_path, temp_cert_dir = prepare_cert_files(
+                selected_cert,
+                selected_key,
+                generate_local_selfcert=False,
+                san_dns_names=(callback_dns,) if callback_dns else (),
+                san_ip_addresses=(callback_ip,) if callback_ip else (),
+            )
+        else:
+            cert_path, key_path, temp_cert_dir = prepare_cert_files(
+                selected_cert,
+                selected_key,
+                generate_local_selfcert=False,
+            )
 
     def _start_listener(name: str, port: int, server_factory: Callable[[], Any], *, tls: bool) -> None:
         server: Any | None = None

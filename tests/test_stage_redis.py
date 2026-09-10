@@ -1025,7 +1025,11 @@ def test_run_redis_stage_debug_shows_unreachable_summary(
     rc = redis_stage.run_redis_stage(args, _DummyLogger())
     assert rc == 1
     captured = capsys.readouterr()
-    assert "all redis targets are unreachable" in captured.out
+    # A pre-detection connection failure is reported by run_plan's precise
+    # "audit inconclusive" summary; the coarser "all redis targets are
+    # unreachable" line is suppressed as a redundant duplicate.
+    assert "audit inconclusive" in captured.out.lower()
+    assert "all redis targets are unreachable" not in captured.out
 
 
 def test_run_redis_stage_multi_port_verbose_uses_single_global_progress(monkeypatch: pytest.MonkeyPatch) -> None:

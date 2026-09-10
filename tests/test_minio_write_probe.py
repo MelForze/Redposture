@@ -5,17 +5,27 @@ from redposture_core.modules.minio import actions
 
 
 class _FakeClient:
-    """Records PUT/DELETE calls and replays canned responses per method."""
+    """Records PUT/GET/DELETE calls and replays canned responses per method."""
 
-    def __init__(self, put_resp, delete_resp=None):
+    def __init__(self, put_resp, delete_resp=None, get_resp=None):
         self._put = put_resp
         self._delete = delete_resp
+        self._get = get_resp or MinioResponse(
+            http_status=200,
+            headers={},
+            body=actions._WRITE_PROBE_BODY,
+        )
         self.puts = []
+        self.gets = []
         self.deletes = []
 
     def put_object(self, bucket, key, body, *, signed=True):
         self.puts.append((bucket, key, body))
         return self._put(bucket, key) if callable(self._put) else self._put
+
+    def get_object(self, bucket, key, *, max_bytes, signed=True):
+        self.gets.append((bucket, key, max_bytes))
+        return self._get(bucket, key) if callable(self._get) else self._get
 
     def delete_object(self, bucket, key, *, signed=True):
         self.deletes.append((bucket, key))
@@ -38,6 +48,7 @@ def test_write_probe_true_with_cleanup_ok():
     assert leftovers == []
     # canary key looks like the reserved probe prefix, and DELETE targets the same key
     assert client.puts[0][1].startswith(".redposture-probe-")
+    assert client.gets[0][1] == client.puts[0][1]
     assert client.deletes[0][1] == client.puts[0][1]
 
 
@@ -62,6 +73,18 @@ def test_write_probe_unknown_on_transport_error():
     client = _FakeClient(put_resp=MinioResponse(http_status=0, headers={}, body=b"", transport_error="boom"))
     per_bucket, _ = actions.probe_write_capability(client, ["b1"])
     assert per_bucket["b1"]["write"] == "unknown"
+
+
+def test_write_probe_unknown_when_canary_cannot_be_read_back():
+    client = _FakeClient(
+        put_resp=_ok(200),
+        get_resp=MinioResponse(http_status=200, headers={}, body=b"proxy response"),
+        delete_resp=_ok(204),
+    )
+    per_bucket, leftovers = actions.probe_write_capability(client, ["b1"])
+    assert per_bucket["b1"] == {"write": "unknown", "cleanup": "unknown"}
+    assert len(client.deletes) == 1
+    assert leftovers == []
 
 
 def test_write_probe_iterates_all_buckets_with_distinct_canaries():

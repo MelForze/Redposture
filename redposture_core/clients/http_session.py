@@ -16,10 +16,8 @@ from typing import Any
 from ..network_proxy import ProxyConfig, open_connection_via_proxy
 from . import transport
 from .http_api import HttpResponse, normalize_http_error
+from .http_redirects import RequestPreparer, follow_redirects
 from .tls_cache import shared_client_ssl_context
-
-_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
-_MAX_REDIRECTS = 5
 
 
 def _origin(url: str) -> tuple[str, str, int]:
@@ -250,6 +248,12 @@ class HttpSessionPool:
             cap = max(0, int(response_size_cap))
             payload = response.read(cap + 1)
             truncated = len(payload) > cap
+            remaining_length = getattr(response, "length", None)
+            if not truncated and remaining_length is not None and remaining_length > 0:
+                raise ConnectionError(
+                    f"unexpected EOF: incomplete HTTP response body "
+                    f"({len(payload)} bytes received, {remaining_length} more expected)"
+                )
             if truncated:
                 payload = payload[:cap]
             reusable = not truncated and not response.will_close
@@ -289,21 +293,18 @@ class HttpSessionPool:
         response_size_cap: int = 10 * 1024 * 1024,
         retries: int | None = None,
         replay_safe: bool | None = None,
-        allow_cross_origin_redirects: bool = False,
-        preserve_authorization_on_cross_origin: bool = False,
+        allow_cross_origin_redirects: bool = True,
+        preserve_authorization_on_cross_origin: bool = True,
+        prepare_request: RequestPreparer | None = None,
     ) -> HttpResponse:
-        method_value = str(method or "GET").upper()
-        body_value = body.encode("utf-8") if isinstance(body, str) else body
-        headers_value = {str(name): str(value) for name, value in (headers or {}).items()}
+        if self._closed:
+            raise RuntimeError("HTTP session pool is closed")
         timeout_value = self.timeout if timeout is None else max(0.1, float(timeout))
-        original_url = str(url)
-        current_url = original_url
-        history: list[str] = []
-        visited = {current_url}
-        safe = method_value in {"GET", "HEAD"} if replay_safe is None else bool(replay_safe)
+        safe = str(method or "GET").upper() in {"GET", "HEAD"} if replay_safe is None else bool(replay_safe)
 
-        for _redirect in range(_MAX_REDIRECTS + 1):
-            response: HttpResponse | None = None
+        def send(
+            method_value: str, current_url: str, headers_value: dict[str, str], body_value: bytes | None
+        ) -> HttpResponse:
             attempts = max(1, int(self.default_retries if retries is None else retries) + 1)
             for attempt in range(attempts):
                 attempt_timeout = transport.escalating_timeout(timeout_value, attempt)
@@ -316,70 +317,29 @@ class HttpSessionPool:
                     response_size_cap=response_size_cap,
                 )
                 if request_error is None or not safe or attempt >= attempts - 1:
-                    break
+                    return response
                 reason = transport.classify_failure_reason(response.error)
                 stale_protocol = isinstance(
                     request_error,
                     (http.client.CannotSendRequest, http.client.RemoteDisconnected, http.client.ResponseNotReady),
                 )
                 if not (transport.is_escalating_reason(reason) or stale_protocol):
-                    break  # refused/dns/network/tls/other и не-stale — ретрай бесполезен
+                    return response
                 with self._lock:
                     self._stats["retries"] += 1
                 time.sleep(min(1.5, 0.2 * (2**attempt)))
-            assert response is not None
-            if response.error or response.status not in _REDIRECT_STATUSES:
-                return HttpResponse(
-                    status=response.status,
-                    body=response.body,
-                    headers=response.headers,
-                    error=response.error,
-                    truncated=response.truncated,
-                    request_url=original_url,
-                    final_url=current_url,
-                    redirect_history=tuple(history),
-                )
-            if not safe:
-                return HttpResponse(
-                    status=response.status,
-                    body=response.body,
-                    headers=response.headers,
-                    error="redirect suppressed after non-replay-safe request",
-                    request_url=original_url,
-                    final_url=current_url,
-                    redirect_history=tuple(history),
-                )
-            location = next((value for name, value in response.headers.items() if name.lower() == "location"), "")
-            if not location:
-                return response
-            redirected = urllib.parse.urljoin(current_url, location)
-            if redirected in visited:
-                return HttpResponse(status=0, body=b"", headers={}, error="redirect loop detected")
-            cross_origin = _origin(current_url) != _origin(redirected)
-            if cross_origin and not allow_cross_origin_redirects:
-                return HttpResponse(
-                    status=response.status,
-                    body=response.body,
-                    headers=response.headers,
-                    error=f"cross-origin redirect blocked: {current_url} -> {redirected}",
-                )
-            if cross_origin and not preserve_authorization_on_cross_origin:
-                headers_value = {
-                    name: value for name, value in headers_value.items() if name.lower() != "authorization"
-                }
-            history.append(current_url)
-            visited.add(redirected)
-            current_url = redirected
-            if response.status in {301, 302, 303} and method_value == "POST":
-                method_value = "GET"
-                body_value = None
-                headers_value = {
-                    name: value
-                    for name, value in headers_value.items()
-                    if name.lower() not in {"content-length", "content-type"}
-                }
-                safe = True
-        return HttpResponse(status=0, body=b"", headers={}, error=f"redirect limit exceeded ({_MAX_REDIRECTS})")
+            raise AssertionError("unreachable")
+
+        return follow_redirects(
+            send,
+            method,
+            url,
+            headers=headers,
+            body=body,
+            allow_cross_origin=allow_cross_origin_redirects,
+            preserve_authorization=preserve_authorization_on_cross_origin,
+            prepare_request=prepare_request,
+        )
 
     def stats(self) -> dict[str, int]:
         with self._lock:

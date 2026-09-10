@@ -52,6 +52,18 @@ def test_discover_finds_secret_via_shared_engine_with_full_value():
     assert res.coverage_complete is True
 
 
+def test_discover_finds_camelcase_secret_key_in_json_object():
+    body = b'{"service":{"accessToken":"S3cretValue123"}}'
+    client = _Client({"config.json": (200, body)})
+    res = discover.discover_secrets(client, [_obj("config.json", size=len(body))])
+    assert any(
+        finding["type"] == "access_token"
+        and finding["value"] == "S3cretValue123"
+        and finding["object_path"] == "$.service.accessToken"
+        for finding in res.findings
+    )
+
+
 def test_large_object_scanned_in_chunks_not_skipped():
     # A secret near the start, then padding beyond the per-object cap: the object is
     # read in ranged chunks up to max_object_size (not skipped), and flagged truncated.

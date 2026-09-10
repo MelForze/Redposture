@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Any
 
+from ..clients.http_api import open_following_http_request
 from ..clients.tls_cache import shared_client_ssl_context
 from .http_pool import get_active_http_pool, pool_get_compat
 
@@ -26,20 +27,6 @@ class HTTPResponseDetails(dict[str, Any]):
         self.raw_body = raw_body
 
 
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Return redirects to the caller instead of silently following them.
-
-    Exporter discovery treats the response body as evidence about the endpoint
-    that was requested.  Following a redirect to an unrelated login page makes
-    that evidence ambiguous and used to differ depending on whether the pooled
-    or urllib transport happened to be active.
-    """
-
-    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> None:
-        return None
-
-
-_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
 _ACTIVE_TLS_CONTEXT = threading.local()
 
 
@@ -79,14 +66,7 @@ def activate_exporter_tls_context(context: ssl.SSLContext | None) -> Iterator[No
 
 
 def _default_urlopen(request: Any, *, timeout: float) -> Any:
-    context = getattr(_ACTIVE_TLS_CONTEXT, "value", None)
-    if context is None:
-        return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
-    opener = urllib.request.build_opener(
-        _NoRedirectHandler(),
-        urllib.request.HTTPSHandler(context=context),
-    )
-    return opener.open(request, timeout=timeout)
+    return open_following_http_request(request, timeout=timeout, context=getattr(_ACTIVE_TLS_CONTEXT, "value", None))
 
 
 def format_http_host(host: str) -> str:

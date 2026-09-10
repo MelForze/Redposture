@@ -99,9 +99,6 @@ def configure_minio_parser(
         help="List objects in --bucket (streaming, bounded by --limit).",
     )
     enum.add_argument(
-        "--prefix", dest="prefix", default="", metavar="p", help="Object key prefix filter for listing/discovery."
-    )
-    enum.add_argument(
         "--object",
         dest="object",
         default=None,
@@ -112,14 +109,13 @@ def configure_minio_parser(
         "--dump",
         dest="dump",
         action="store_true",
-        help="Print the content of --object to stdout.",
+        help="Print object content to stdout: one --object, or the whole --bucket.",
     )
     enum.add_argument(
         "--download",
         dest="download",
-        default=None,
-        metavar="dir",
-        help="Download --object into this directory (saved as <dir>/<bucket>/<key>).",
+        action="store_true",
+        help="Download objects to ./<bucket>/<key>: one --object, or the whole --bucket.",
     )
     enum.add_argument(
         "--discover",

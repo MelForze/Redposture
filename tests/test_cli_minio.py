@@ -57,9 +57,12 @@ def test_minio_probe_write_flag_parses():
 
 
 def test_minio_object_dump_download_flags_parse():
-    args = parse_args(["minio", "-t", "127.0.0.1", "--object", "bulk/creds.env", "--dump", "--download", "/tmp/out"])
+    # --dump and --download are both bare flags now; the target is --object or --bucket.
+    args = parse_args(["minio", "-t", "127.0.0.1", "--object", "bulk/creds.env", "--dump", "--download"])
     assert args.object == "bulk/creds.env"
     assert args.dump is True
-    assert args.download == "/tmp/out"
+    assert args.download is True
+    bucket_args = parse_args(["minio", "-t", "127.0.0.1", "--bucket", "bulk", "--dump"])
+    assert bucket_args.bucket == "bulk" and bucket_args.dump is True
     base = parse_args(["minio", "-t", "127.0.0.1"])
-    assert base.object is None and base.dump is False and base.download is None
+    assert base.object is None and base.dump is False and base.download is False

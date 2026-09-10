@@ -101,18 +101,19 @@ def normalize_mongodb_error(exc: BaseException) -> str:
 
 def is_auth_error(exc: BaseException | str | None) -> bool:
     text = str(exc or "").lower()
-    return any(
-        needle in text
-        for needle in (
-            "authentication failed",
-            "not authorized",
-            "unauthorized",
-            "requires authentication",
-            "command requires authentication",
-            "auth error",
-            "code 13",
-            "code 18",
+    return (
+        any(
+            needle in text
+            for needle in (
+                "authentication failed",
+                "not authorized",
+                "unauthorized",
+                "requires authentication",
+                "command requires authentication",
+                "auth error",
+            )
         )
+        or re.search(r"\bcode\s+(?:13|18)\b", text) is not None
     )
 
 

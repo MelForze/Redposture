@@ -20,6 +20,8 @@ RUN_CASES = {
     "qdrant": ["qdrant", "-t", "127.0.0.1"],
     "kubeapi": ["kubeapi", "-t", "127.0.0.1"],
     "minio": ["minio", "-t", "127.0.0.1"],
+    "rabbitmq": ["rabbitmq", "-t", "127.0.0.1"],
+    "airflow": ["airflow", "-t", "127.0.0.1"],
     "registry": ["registry", "-t", "127.0.0.1"],
     "proxmox": ["proxmox", "-t", "127.0.0.1", "--insecure", "--defcreds"],
     "etcd": ["etcd", "-t", "127.0.0.1"],

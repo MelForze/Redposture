@@ -17,6 +17,7 @@ from typing import Any
 
 from ..network_proxy import ProxyConfig, open_connection_via_proxy, parse_proxy_config
 from . import transport
+from .http_redirects import NoAutomaticRedirects, follow_redirects
 from .tls_cache import shared_client_ssl_context
 
 
@@ -32,7 +33,7 @@ class HttpClientConfig:
     proxy: ProxyConfig | str | None = None
     response_size_cap: int = 10 * 1024 * 1024
     default_headers: Mapping[str, str] = field(default_factory=dict)
-    allow_cross_origin_redirects: bool = False
+    allow_cross_origin_redirects: bool = True
     ssl_context: ssl.SSLContext | None = field(default=None, compare=False, repr=False)
 
 
@@ -173,6 +174,59 @@ def _url_origin(url: str) -> tuple[str, str, int | None]:
     except ValueError:
         port = None
     return scheme, str(parsed.hostname or "").lower(), port
+
+
+def _open_http_request(
+    request: urllib.request.Request, *, timeout: float, context: ssl.SSLContext | None = None
+) -> Any:
+    opener = urllib.request.build_opener(NoAutomaticRedirects(), urllib.request.HTTPSHandler(context=context))
+    return opener.open(request, timeout=timeout)
+
+
+def open_following_http_request(
+    request: urllib.request.Request,
+    *,
+    timeout: float,
+    context: ssl.SSLContext | None = None,
+    allow_cross_origin: bool = True,
+) -> Any:
+    """Return an open final response for streaming consumers; close every hop."""
+    final_response: Any = None
+
+    def send(method: str, url: str, headers: dict[str, str], body: bytes | None) -> HttpResponse:
+        nonlocal final_response
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        try:
+            resp = _open_http_request(req, timeout=timeout, context=context)
+        except urllib.error.HTTPError as exc:
+            resp = exc
+        status = int(getattr(resp, "status", 0) or resp.getcode())
+        response_headers = {str(k): str(v) for k, v in getattr(resp, "headers", {}).items()}
+        if status in {301, 302, 303, 307, 308} and any(
+            k.lower() == "location" and v for k, v in response_headers.items()
+        ):
+            resp.close()
+        else:
+            final_response = resp
+        return HttpResponse(status, b"", response_headers)
+
+    if request.data is not None and not isinstance(request.data, bytes):
+        raise TypeError("HTTP redirect requests require a buffered bytes body")
+    response = follow_redirects(
+        send,
+        request.get_method(),
+        request.full_url,
+        headers=dict(request.header_items()),
+        body=request.data,
+        allow_cross_origin=allow_cross_origin,
+    )
+    if response.error:
+        if final_response is not None:
+            final_response.close()
+        raise urllib.error.URLError(response.error)
+    if isinstance(final_response, urllib.error.HTTPError):
+        raise final_response
+    return final_response
 
 
 def _response_final_url(response: Any, request_url: str) -> str:
@@ -429,32 +483,60 @@ class HttpApiClient:
         timeout: float | None = None,
         chunk_size: int = 1024 * 64,
     ) -> tuple[int, int, str | None]:
-        req = urllib.request.Request(
-            url,
-            method="GET",
-            headers={**{str(k): str(v) for k, v in self.config.default_headers.items()}, **dict(headers or {})},
-        )
-        try:
+        size = 0
+        request_headers = {**dict(self.config.default_headers), **dict(headers or {})}
+
+        def download_hop(method: str, url: str, headers: dict[str, str], body: bytes | None) -> HttpResponse:
+            nonlocal size
+            req = urllib.request.Request(url, method=method, headers=headers)
             timeout_value = float(timeout if timeout is not None else self.config.timeout)
-            request_kwargs: dict[str, Any] = {"timeout": timeout_value}
-            if self._context is not None:
-                request_kwargs["context"] = self._context
-            with urllib.request.urlopen(req, **request_kwargs) as resp:
-                size = 0
-                with open(out_path, "wb") as fh:
-                    while True:
-                        chunk = resp.read(max(1, int(chunk_size)))
-                        if not chunk:
-                            break
-                        fh.write(chunk)
-                        size += len(chunk)
-                return int(getattr(resp, "status", 0) or resp.getcode()), size, None
-        except urllib.error.HTTPError as exc:
-            return int(exc.code), 0, None
-        except Exception as exc:
-            return 0, 0, normalize_http_error(exc)
+            try:
+                resp = _open_http_request(req, timeout=timeout_value, context=self._context)
+            except urllib.error.HTTPError as exc:
+                resp = exc
+            with resp:
+                status = int(getattr(resp, "status", 0) or resp.getcode())
+                response_headers = {str(k): str(v) for k, v in getattr(resp, "headers", {}).items()}
+                if 200 <= status < 300:
+                    with open(out_path, "wb") as fh:
+                        while True:
+                            chunk = resp.read(max(1, int(chunk_size)))
+                            if not chunk:
+                                break
+                            fh.write(chunk)
+                            size += len(chunk)
+                return HttpResponse(status, b"", response_headers)
+
+        response = follow_redirects(
+            download_hop,
+            "GET",
+            url,
+            headers=request_headers,
+            allow_cross_origin=self.config.allow_cross_origin_redirects,
+        )
+        return response.status, size, response.error
 
     def send(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:
+        headers = {str(k): str(v) for k, v in self.config.default_headers.items()}
+        headers.update({str(k): str(v) for k, v in request.headers.items()})
+        body = request.body
+        if request.json_body is not None:
+            body = json.dumps(request.json_body, separators=(",", ":")).encode("utf-8")
+            headers.setdefault("Content-Type", "application/json")
+
+        def send_hop(method: str, url: str, headers: dict[str, str], body: bytes | None) -> HttpResponse:
+            return self._send_with_retries(HttpRequest(method, url, headers, body), timeout=timeout)
+
+        return follow_redirects(
+            send_hop,
+            request.method,
+            request.url,
+            headers=headers,
+            body=body,
+            allow_cross_origin=self.config.allow_cross_origin_redirects,
+        )
+
+    def _send_with_retries(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:
         attempts = max(1, int(self.config.retries) + 1)
         base_timeout = self.config.timeout if timeout is None else float(timeout)
         last_error = ""
@@ -481,8 +563,7 @@ class HttpApiClient:
         )
 
     def _send_once(self, request: HttpRequest, *, timeout: float | None = None) -> HttpResponse:
-        headers = {str(key): str(value) for key, value in self.config.default_headers.items()}
-        headers.update({str(key): str(value) for key, value in request.headers.items()})
+        headers = {str(key): str(value) for key, value in request.headers.items()}
         body = request.body
         if request.json_body is not None:
             body = json.dumps(request.json_body, separators=(",", ":")).encode("utf-8")
@@ -507,7 +588,7 @@ class HttpApiClient:
             request_kwargs: dict[str, Any] = {"timeout": timeout_value}
             if self._context is not None:
                 request_kwargs["context"] = self._context
-            open_response = urllib.request.urlopen(req, **request_kwargs)
+            open_response = _open_http_request(req, **request_kwargs)
             with open_response as resp:
                 response_cap = max(0, int(self.config.response_size_cap))
                 read_size = response_cap + 1
@@ -547,6 +628,7 @@ class HttpApiClient:
                     payload = exc.read()
             except Exception:
                 payload = b""
+            exc.close()
             truncated = len(payload) > response_cap
             if truncated:
                 payload = payload[:response_cap]

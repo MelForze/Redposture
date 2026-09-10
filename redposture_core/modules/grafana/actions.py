@@ -193,12 +193,10 @@ def _looks_like_grafana_login(status: int, body: str, headers: dict[str, str]) -
     if status not in {200, 301, 302, 303, 307, 308}:
         return False
     text = (body or "").lower()
-    if "grafana" in text:
-        return True
     set_cookie = (_header_lookup(headers, "Set-Cookie") or "").lower()
     if "grafana_session" in set_cookie:
         return True
-    return False
+    return bool(re.search(r"<title[^>]*>[^<]*\bgrafana\b[^<]*</title\s*>", text))
 
 
 def _grafana_health_payload(body: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -222,9 +220,6 @@ def _looks_like_grafana_health(status: int, body: str) -> tuple[bool, str | None
     payload, version = _grafana_health_payload(body)
     if payload is not None:
         return True, version
-    text = (body or "").lower()
-    if "grafana" in text:
-        return True, None
     return False, None
 
 
@@ -241,7 +236,14 @@ def _looks_like_grafana_user(body: str) -> bool:
         return False
     user_id = payload.get("id")
     login = payload.get("login")
-    return isinstance(user_id, int) and not isinstance(user_id, bool) and isinstance(login, str) and bool(login.strip())
+    grafana_fields = {"isGrafanaAdmin", "orgId", "orgName", "theme", "isDisabled"}
+    return (
+        isinstance(user_id, int)
+        and not isinstance(user_id, bool)
+        and isinstance(login, str)
+        and bool(login.strip())
+        and bool(grafana_fields.intersection(payload))
+    )
 
 
 def _auth_header(username: str, password: str) -> str:
@@ -250,7 +252,9 @@ def _auth_header(username: str, password: str) -> str:
     return f"Basic {token}"
 
 
-def _verify_credentials(host: str, port: int, timeout: float, username: str, password: str) -> tuple[bool, str | None]:
+def _verify_credentials(
+    host: str, port: int, timeout: float, username: str, password: str
+) -> tuple[bool | None, str | None]:
     status, body, _headers = _http_request(
         host,
         port,
@@ -262,18 +266,20 @@ def _verify_credentials(host: str, port: int, timeout: float, username: str, pas
         return True, None
     if status == 200:
         return False, "/api/user returned an invalid identity payload"
-    if status in {401, 403}:
+    if status == 401:
         return False, "invalid credentials"
-    return False, f"/api/user returned status {status}"
+    if status == 403:
+        return None, "/api/user access denied without credential evidence"
+    return None, f"/api/user returned status {status}"
 
 
-def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tuple[bool, str | None]:
+def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tuple[bool | None, str | None]:
     """Validate user tokens and capability-scoped service-account tokens.
 
     Grafana service-account tokens are not guaranteed to expose ``/api/user``.
-    A 403 is therefore an accepted-but-restricted credential, while a 401 is
-    cross-checked against a normal service-account capability endpoint before
-    being rejected.
+    A denial alone does not prove that the token was accepted, so a 401 is
+    cross-checked against a normal service-account capability endpoint and a
+    bare 403 remains unverified.
     """
     headers = {"Authorization": f"Bearer {apitoken}"}
     status, body, _headers = _http_request(
@@ -296,10 +302,10 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
         if capability_status == 200 and _load_json_list(capability_body) is not None:
             return True, None
         if capability_status == 403:
-            return True, "token accepted; datasource capability is not permitted"
+            return None, "datasource access denied without token evidence"
         return False, "/api/user returned an invalid identity payload"
     if status == 403:
-        return True, "token accepted; identity endpoint is not permitted"
+        return None, "identity access denied without token evidence"
     if status == 401:
         capability_status, capability_body, _capability_headers = _http_request(
             host,
@@ -313,9 +319,9 @@ def _verify_apitoken(host: str, port: int, timeout: float, apitoken: str) -> tup
         if capability_status == 200:
             return False, "/api/datasources returned an invalid capability payload"
         if capability_status == 403:
-            return True, "token accepted; datasource capability is not permitted"
+            return None, "datasource access denied without token evidence"
         return False, "invalid api token"
-    return False, f"/api/user returned status {status}"
+    return None, f"/api/user returned status {status}"
 
 
 def _fetch_datasources(
@@ -808,14 +814,14 @@ def _audit_grafana_host(
                     except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
                         if not defcreds:
                             raise
-                        ok = False
+                        ok = None
                         cred_error = _friendly_error_from_exception(exc)
                     auth_attempts_local.append(
                         {
                             "username": cand_user,
                             "password": cand_pass,
                             "source": source,
-                            "ok": bool(ok),
+                            "ok": ok,
                             "error": str(cred_error or ""),
                         }
                     )
@@ -829,19 +835,12 @@ def _audit_grafana_host(
                             default_credentials = True
                         if source == "provided":
                             provided_credentials_ok = True
+                    elif source == "provided" and ok is False:
+                        provided_credentials_ok = False
                     if cred_error:
                         errors_local.append(cred_error)
                     if ok and not defcreds:
                         break
-
-            if provided_credentials:
-                # Reset to False if not already verified elsewhere (e.g. by the
-                # apitoken block below). E2E revealed this line used to
-                # unconditionally overwrite `True` back to `False`, causing a
-                # successful token check to silently downgrade to
-                # `invalid_credentials_anonymous`.
-                if provided_credentials_ok is None:
-                    provided_credentials_ok = False
 
             # E2E-batch fix: try `--apitoken` BEFORE the username/password
             # candidate loop. Grafana treats API keys and service-account
@@ -854,7 +853,7 @@ def _audit_grafana_host(
                 except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
                     if not defcreds:
                         raise
-                    token_ok = False
+                    token_ok = None
                     token_error = _friendly_error_from_exception(exc)
                 attempted_credentials += 1
                 auth_attempts.append(
@@ -862,7 +861,7 @@ def _audit_grafana_host(
                         "username": None,
                         "password": None,
                         "source": "apitoken",
-                        "ok": bool(token_ok),
+                        "ok": token_ok,
                         "error": str(token_error or ""),
                     }
                 )
@@ -871,6 +870,8 @@ def _audit_grafana_host(
                     credentials_source = "apitoken"
                     effective_username = None
                     auth_header = f"Bearer {apitoken}"
+                elif token_ok is False:
+                    provided_credentials_ok = False
                 elif token_error:
                     errors.append(token_error)
 
@@ -923,7 +924,11 @@ def _audit_grafana_host(
             if effective_username is not None or (provided_credentials_ok is True and credentials_source == "apitoken"):
                 status = "weak_default_creds" if credentials_source == "default" else "valid_credentials"
             elif auth_required is False and attempted_credentials > 0 and (provided_credentials or defcreds):
-                status = "invalid_credentials_anonymous"
+                status = (
+                    "invalid_credentials_anonymous"
+                    if provided_credentials_ok is False or any(item.get("ok") is False for item in auth_attempts)
+                    else "open_no_auth"
+                )
             elif auth_required is False:
                 status = "open_no_auth"
             elif auth_required is True:
@@ -1494,9 +1499,9 @@ def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any])
         except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
             if not continue_after_error:
                 raise
-            ok = False
+            ok = None
             error = _friendly_error_from_exception(exc)
-        attempt = {"username": None, "password": None, "source": source, "ok": bool(ok), "error": error or ""}
+        attempt = {"username": None, "password": None, "source": source, "ok": ok, "error": error or ""}
         auth_header = f"Bearer {token}"
     else:
         effective_user = (username or "admin").strip() or "admin"
@@ -1512,13 +1517,13 @@ def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any])
         except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
             if not continue_after_error:
                 raise
-            ok = False
+            ok = None
             error = _friendly_error_from_exception(exc)
         attempt = {
             "username": effective_user,
             "password": effective_password,
             "source": source,
-            "ok": bool(ok),
+            "ok": ok,
             "error": error or "",
         }
         auth_header = _auth_header(effective_user, effective_password)
@@ -1536,7 +1541,11 @@ def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any])
         else "valid_credentials"
         if ok
         else "invalid_credentials_anonymous"
+        if anonymous_open and ok is False
+        else "open_no_auth"
         if anonymous_open
+        else "unknown_auth"
+        if ok is None
         else "auth_required"
     )
     record.update(
@@ -1545,7 +1554,7 @@ def authenticate_grafana(ctx: Any, detect_record: Any, _options: dict[str, Any])
             "status": status,
             "provided_credentials": source != "default",
             "provided_username": username,
-            "provided_credentials_ok": bool(ok) if source != "default" else None,
+            "provided_credentials_ok": ok if source != "default" else None,
             "default_credentials": bool(ok and source == "default"),
             "defcreds_enabled": source == "default",
             "attempted_credentials": list(state.auth_attempts),

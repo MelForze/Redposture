@@ -47,6 +47,42 @@ class CountColorRule:
     unknown_color: str = "yellow"
 
 
+# Control characters (C0 range, DEL, and the C1 range) never belong in a TXT
+# report payload. Target-supplied names carry them to forge report lines (\n), add
+# TSV fields (\t), or drive the terminal (ESC, \r). Each is replaced with a single
+# space rather than dropped, so an injected `a\nb` collapses to a readable `a b`
+# instead of `ab`.
+_REPORT_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def sanitize_report_payload(text: str) -> str:
+    """Neutralise control characters in a value bound for a TXT report line.
+
+    Structural tabs between the `LABEL host port` fields are added by the line
+    builders, never by this function's input, so callers pass only the payload
+    (the field after `LABEL\\thost\\tport\\t`). See ``sanitize_report_line``."""
+
+    return _REPORT_CONTROL_RE.sub(" ", str(text))
+
+
+def sanitize_report_line(line: str) -> str:
+    """Scrub the payload of a `LABEL\\thost\\tport\\tPAYLOAD` TXT report line.
+
+    Every module builds detail lines with exactly three leading structural tabs
+    (`LABEL\\thost\\tport\\t`); the payload is the fourth field and is the only
+    part carrying target-supplied names. Those three separators — and any line
+    with fewer than four fields (JSON output, run-level summaries, debug markers,
+    all of which carry no target data) — are left untouched, so this is a no-op
+    for everything except a record payload that actually contains a control
+    character."""
+
+    parts = line.split("\t", 3)
+    if len(parts) < 4:
+        return line
+    parts[3] = sanitize_report_payload(parts[3])
+    return "\t".join(parts)
+
+
 def format_count_value(value: object, *, state: str | None = None) -> str:
     """Render a text count without conflating unknown values with zero."""
 

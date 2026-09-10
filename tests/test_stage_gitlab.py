@@ -5,7 +5,6 @@ import json
 import pathlib
 import subprocess
 import urllib.error
-import urllib.request
 from types import SimpleNamespace
 
 import pytest
@@ -76,7 +75,7 @@ def test_gitlab_undetected_record_is_normal_text_suppressed_but_debug_and_json_v
 
 
 def test_detect_login_page() -> None:
-    assert gitlab._detect_login_page("<title>GitLab</title> users/sign_in") is True
+    assert gitlab._detect_login_page("<title>GitLab</title><form action='/users/sign_in'>Sign in</form>") is True
     assert gitlab._detect_login_page("Welcome") is False
 
 
@@ -244,7 +243,7 @@ def test_audit_gitlab_host_detects_public_projects_and_open_endpoints(monkeypatc
     ) -> tuple[int, bytes, dict[str, str], str | None]:
         _ = (host, port, method, timeout, use_https, headers, data)
         if path == "/users/sign_in":
-            return 200, b"<title>GitLab</title> users/sign_in", {}, None
+            return 200, b"<title>GitLab</title><form action='/users/sign_in'>Sign in</form>", {}, None
         if path == "/api/v4/version":
             return 200, b'{"version":"16.9.0","revision":"abc123"}', {}, None
         return 200, b"[]", {}, None
@@ -308,7 +307,7 @@ def test_audit_gitlab_host_valid_token_probes_access_and_clones(monkeypatch) -> 
     ) -> tuple[int, bytes, dict[str, str], str | None]:
         _ = (host, port, method, timeout, use_https, headers, data)
         if path == "/users/sign_in":
-            return 200, b"<title>GitLab</title> users/sign_in", {}, None
+            return 200, b"<title>GitLab</title><form action='/users/sign_in'>Sign in</form>", {}, None
         if path == "/api/v4/version":
             return 200, b'{"version":"16.9.0","revision":"abc123"}', {}, None
         return 404, b"{}", {}, None
@@ -323,7 +322,7 @@ def test_audit_gitlab_host_valid_token_probes_access_and_clones(monkeypatch) -> 
         token: str | None,
     ) -> tuple[int, dict[str, object] | None, dict[str, str], str | None]:
         _ = (host, port, path, timeout, use_https, token)
-        return 200, {"id": 7, "username": "scanner"}, {}, None
+        return 200, {"id": 7, "username": "scanner", "state": "active"}, {}, None
 
     def fake_paginate_projects(
         host: str,
@@ -412,7 +411,7 @@ def test_audit_gitlab_host_valid_token_probes_access_and_clones(monkeypatch) -> 
     # unconditionally `detected` regardless of token verdict).
     assert record["status"] == "valid_credentials"
     assert record["token_valid"] is True
-    assert record["token_user"] == {"id": 7, "username": "scanner"}
+    assert record["token_user"] == {"id": 7, "username": "scanner", "state": "active"}
     assert record["clone_scope"] == "token"
     token_access = record.get("token_access")
     assert isinstance(token_access, list) and token_access[0]["path_with_namespace"] == "group/app"
@@ -508,8 +507,7 @@ def test_http_and_api_helpers_cover_success_error_and_invalid_json(monkeypatch: 
             return None
 
     monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
+        "redposture_core.clients.http_api._open_http_request",
         lambda *_args, **_kwargs: _FakeResponse(200, b'{"ok":1}', {"X-Next-Page": "2"}),
     )
     status, payload, headers, error = gitlab._http_request("127.0.0.1", 8080, "GET", "/api", 1.0, use_https=False)
@@ -526,14 +524,13 @@ def test_http_and_api_helpers_cover_success_error_and_invalid_json(monkeypatch: 
     def _raise_http_error(*_args: object, **_kwargs: object) -> object:
         raise http_error
 
-    monkeypatch.setattr(urllib.request, "urlopen", _raise_http_error)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", _raise_http_error)
     status, payload, headers, error = gitlab._http_request("127.0.0.1", 8080, "GET", "/api", 1.0, use_https=False)
     assert (status, payload, headers, error) == (404, b'{"message":"missing"}', {"x-test": "1"}, None)
     http_error.close()
 
     monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
+        "redposture_core.clients.http_api._open_http_request",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("timed out")),
     )
     status, payload, headers, error = gitlab._http_request("127.0.0.1", 8080, "GET", "/api", 1.0, use_https=False)
@@ -777,7 +774,8 @@ def test_clone_project_handles_missing_git_existing_dir_and_fallback(
 
 
 def test_gitlab_identity_schema_and_repository_only_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert gitlab._looks_like_gitlab_user({"id": 7, "username": "alice"}) is True
+    assert gitlab._looks_like_gitlab_user({"id": 7, "username": "alice", "state": "active"}) is True
+    assert gitlab._looks_like_gitlab_user({"id": 7, "username": "alice"}) is False
     assert gitlab._looks_like_gitlab_user({}) is False
     assert gitlab._looks_like_gitlab_user("<html>sign in</html>") is False
 
@@ -800,6 +798,28 @@ def test_gitlab_identity_schema_and_repository_only_token(monkeypatch: pytest.Mo
 
     assert record["token_valid"] is True
     assert record["token_capability"] == "repository"
+
+
+def test_gitlab_bare_403_does_not_prove_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = gitlab.GitLabLifecycleState()
+    ctx = SimpleNamespace(
+        host="gitlab.local",
+        port=443,
+        args=SimpleNamespace(timeout=1.0),
+        credential=SimpleNamespace(token="unverified-token"),
+        lifecycle_state=state,
+    )
+    monkeypatch.setattr(gitlab, "_api_get_json", lambda *_args, **_kwargs: (403, {}, {}, None))
+
+    record = gitlab.authenticate_gitlab(
+        ctx,
+        {"host": "gitlab.local", "port": 443, "https": True, "status": "auth_required"},
+        {"project_filters": []},
+    )
+
+    assert record["token_valid"] is None
+    assert record["status"] == "detected"
+    assert "without token evidence" in str(record["token_projects_error"])
 
 
 def test_gitlab_pagination_keeps_completed_pages_on_later_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1068,7 +1088,7 @@ def test_fix_e2e_gitlab_invalid_token_yields_invalid_credentials_status(
     def _fake_http(host, port, method, path, timeout, *, use_https=False, headers=None, body=None):
         _ = (host, port, method, timeout, use_https, headers, body)
         if path == "/users/sign_in":
-            return 200, b"<title>GitLab</title> users/sign_in", {}, None
+            return 200, b"<title>GitLab</title><form action='/users/sign_in'>Sign in</form>", {}, None
         if path == "/api/v4/version":
             return 200, b'{"version":"16.7.0"}', {"content-type": "application/json"}, None
         if path == "/api/v4/user":

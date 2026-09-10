@@ -60,7 +60,7 @@ class _FakeOpener:
         self.result = result
         self.requests: list[Any] = []
 
-    def open(self, req: Any, timeout: float) -> Any:
+    def open(self, req: Any, timeout: float, **_kwargs: Any) -> Any:
         self.requests.append((req, timeout))
         if isinstance(self.result, BaseException):
             raise self.result
@@ -69,7 +69,7 @@ class _FakeOpener:
 
 def test_http_api_client_get_success(monkeypatch) -> None:
     opener = _FakeOpener(_FakeResponse(b'{"status":"ok"}', {"X-Test": "1"}))
-    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", opener.open)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", opener.open)
 
     client = HttpApiClient(HttpClientConfig(timeout=2.5))
     response = client.get("http://127.0.0.1:8080/api", headers={"Accept": "application/json"})
@@ -85,11 +85,11 @@ def test_http_api_client_get_success(monkeypatch) -> None:
     assert req.get_header("Accept") == "application/json"
 
 
-def test_http_api_client_records_redirect_and_rejects_cross_origin(monkeypatch) -> None:
+def test_http_api_client_records_same_and_cross_origin_redirects(monkeypatch) -> None:
     source = "https://service.local/api/health"
     same_origin = "https://service.local/login"
     monkeypatch.setattr(
-        "redposture_core.clients.http_api.urllib.request.urlopen",
+        "redposture_core.clients.http_api._open_http_request",
         _FakeOpener(_FakeResponse(b"login", final_url=same_origin)).open,
     )
 
@@ -103,14 +103,14 @@ def test_http_api_client_records_redirect_and_rejects_cross_origin(monkeypatch) 
 
     cross_origin = "https://login.other.local/sign-in"
     monkeypatch.setattr(
-        "redposture_core.clients.http_api.urllib.request.urlopen",
+        "redposture_core.clients.http_api._open_http_request",
         _FakeOpener(_FakeResponse(b"login", final_url=cross_origin)).open,
     )
     response = HttpApiClient().get(source)
 
     assert response.status == 200
     assert response.final_url == cross_origin
-    assert response.error == f"cross-origin redirect blocked: {source} -> {cross_origin}"
+    assert response.error is None
 
 
 def test_http_target_context_preserves_https_ipv6_and_reverse_proxy_base_path() -> None:
@@ -124,7 +124,7 @@ def test_http_target_context_preserves_https_ipv6_and_reverse_proxy_base_path() 
 
 def test_http_api_client_post_json_and_response_cap(monkeypatch) -> None:
     opener = _FakeOpener(_FakeResponse(b"abcdef"))
-    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", opener.open)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", opener.open)
 
     client = HttpApiClient(HttpClientConfig(response_size_cap=3))
     response = client.post("http://127.0.0.1:8080/api", json_body={"a": 1})
@@ -145,7 +145,7 @@ def test_http_api_client_http_error_is_response(monkeypatch) -> None:
         _FakeResponse(b"denied"),
     )
     opener = _FakeOpener(error)
-    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", opener.open)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", opener.open)
 
     response = HttpApiClient().get("http://127.0.0.1/api")
 
@@ -164,7 +164,7 @@ def test_http_api_client_http_error_reports_response_cap_truncation(monkeypatch)
         _FakeResponse(b"denied"),
     )
     opener = _FakeOpener(error)
-    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", opener.open)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", opener.open)
 
     response = HttpApiClient(HttpClientConfig(response_size_cap=3)).get("http://127.0.0.1/api")
 
@@ -181,7 +181,7 @@ def test_http_response_truncated_defaults_false_for_compatible_construction() ->
 
 def test_http_api_client_transport_error_is_normalized(monkeypatch) -> None:
     opener = _FakeOpener(urllib.error.URLError("[Errno 111] Connection refused"))
-    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", opener.open)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", opener.open)
 
     response = HttpApiClient(HttpClientConfig(retries=1, backoff=0)).get("http://127.0.0.1/api")
 
@@ -217,7 +217,7 @@ def test_http_api_client_https_target_via_https_proxy_uses_manual_tunnel(monkeyp
         exchanged.append(kwargs["request_payload"])
         return b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{"ok":true}', False
 
-    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", _unexpected_urlopen)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", _unexpected_urlopen)
     monkeypatch.setattr("redposture_core.clients.http_api.open_connection_via_proxy", _fake_open_connection)
     monkeypatch.setattr("redposture_core.clients.http_api._tls_over_tls_exchange", _fake_exchange)
 
@@ -429,7 +429,7 @@ def test_http_api_client_download_to_file_success_http_error_and_io_error(monkey
             return self.status
 
     response = _ChunkResponse([b"abc", b"def"])
-    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", lambda *_a, **_k: response)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", lambda *_a, **_k: response)
 
     out_path = tmp_path / "download.bin"
     status, size, error = HttpApiClient(HttpClientConfig(timeout=1.0)).download_to_file(
@@ -442,11 +442,11 @@ def test_http_api_client_download_to_file_success_http_error_and_io_error(monkey
     assert out_path.read_bytes() == b"abcdef"
 
     http_error = urllib.error.HTTPError("http://127.0.0.1/file", 404, "missing", {}, None)
-    monkeypatch.setattr("redposture_core.clients.http_api.urllib.request.urlopen", lambda *_a, **_k: http_error)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", lambda *_a, **_k: http_error)
     assert HttpApiClient().download_to_file("http://127.0.0.1/file", str(out_path)) == (404, 0, None)
 
     monkeypatch.setattr(
-        "redposture_core.clients.http_api.urllib.request.urlopen",
+        "redposture_core.clients.http_api._open_http_request",
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk/network boom")),
     )
     status, size, error = HttpApiClient().download_to_file("http://127.0.0.1/file", str(out_path))
@@ -474,7 +474,7 @@ def test_http_api_client_read_fallback_paths_for_typeerror(monkeypatch) -> None:
             return self.status
 
     monkeypatch.setattr(
-        "redposture_core.clients.http_api.urllib.request.urlopen",
+        "redposture_core.clients.http_api._open_http_request",
         lambda *_a, **_k: _NoSizeReadResponse(),
     )
     response = HttpApiClient().get("http://127.0.0.1/api")
@@ -489,7 +489,7 @@ def test_http_api_client_read_fallback_paths_for_typeerror(monkeypatch) -> None:
 
     error = _NoSizeHTTPError("http://127.0.0.1/api", 418, "teapot", {"X-Error": "fallback"}, None)
     monkeypatch.setattr(
-        "redposture_core.clients.http_api.urllib.request.urlopen", lambda *_a, **_k: (_ for _ in ()).throw(error)
+        "redposture_core.clients.http_api._open_http_request", lambda *_a, **_k: (_ for _ in ()).throw(error)
     )
     response = HttpApiClient().get("http://127.0.0.1/api")
     assert response.status == 418

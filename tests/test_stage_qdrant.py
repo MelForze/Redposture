@@ -4,7 +4,6 @@ import io
 import json
 import urllib.error
 import urllib.parse
-import urllib.request
 from types import SimpleNamespace
 
 import pytest
@@ -555,11 +554,16 @@ def test_http_json_request_handles_success_http_error_and_transport(monkeypatch:
         def __exit__(self, *_args: object) -> None:
             return None
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: _FakeResponse(200, b'{"ok":1}'))
+    monkeypatch.setattr(
+        "redposture_core.clients.http_api._open_http_request", lambda *_args, **_kwargs: _FakeResponse(200, b'{"ok":1}')
+    )
     status, payload, error = qdrant._http_json_request("127.0.0.1", 6333, "GET", "/", 1.0)
     assert (status, payload, error) == (200, {"ok": 1}, None)
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: _FakeResponse(200, b"plain text"))
+    monkeypatch.setattr(
+        "redposture_core.clients.http_api._open_http_request",
+        lambda *_args, **_kwargs: _FakeResponse(200, b"plain text"),
+    )
     status, payload, error = qdrant._http_json_request("127.0.0.1", 6333, "GET", "/", 1.0)
     assert (status, payload, error) == (200, "plain text", None)
 
@@ -574,12 +578,15 @@ def test_http_json_request_handles_success_http_error_and_transport(monkeypatch:
     def _raise_http_error(*_args: object, **_kwargs: object) -> object:
         raise http_error
 
-    monkeypatch.setattr(urllib.request, "urlopen", _raise_http_error)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", _raise_http_error)
     status, payload, error = qdrant._http_json_request("127.0.0.1", 6333, "GET", "/", 1.0)
     assert (status, payload, error) == (403, {"error": "forbidden"}, None)
     http_error.close()
 
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError()))
+    monkeypatch.setattr(
+        "redposture_core.clients.http_api._open_http_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError()),
+    )
     status, payload, error = qdrant._http_json_request("127.0.0.1", 6333, "GET", "/", 1.0)
     assert status == 0
     assert payload is None

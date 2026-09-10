@@ -52,7 +52,7 @@ def test_grafana_credential_file_classifies_anonymously_then_stops_on_first_succ
             return 200, "<title>Grafana</title>", {}
         if path == "/api/user":
             return (
-                (200, '{"id":1,"login":"good"}', {})
+                (200, '{"id":1,"login":"good","isGrafanaAdmin":false}', {})
                 if authorization == grafana._auth_header("good", "good")
                 else (401, "", {})
             )
@@ -85,14 +85,18 @@ def test_grafana_defcreds_are_explicit_ordered_runs_not_an_internal_batch(
         if path == "/api/health":
             return 401, "", {}
         if path == "/login":
-            return 200, "Grafana login", {}
+            return 200, "<title>Grafana</title>", {}
         if path == "/api/user":
             auth_headers.append(authorization)
             accepted = {
                 grafana._auth_header("admin", "admin"),
                 grafana._auth_header("grafana", "grafana"),
             }
-            return (200, '{"id":1,"login":"accepted"}', {}) if authorization in accepted else (401, "", {})
+            return (
+                (200, '{"id":1,"login":"accepted","isGrafanaAdmin":false}', {})
+                if authorization in accepted
+                else (401, "", {})
+            )
         if path == "/api/datasources":
             datasource_headers.append(authorization)
             if authorization == "Bearer bad-token":
@@ -158,11 +162,15 @@ def test_grafana_rejected_api_token_falls_back_to_defaults(
         if path == "/api/health":
             return 401, "", {}
         if path == "/login":
-            return 200, "Grafana login", {}
+            return 200, "<title>Grafana</title>", {}
         if path == "/api/user":
             auth_headers.append(authorization)
             accepted = {winning_header, grafana._auth_header("grafana", "grafana")}
-            return (200, '{"id":1,"login":"accepted"}', {}) if authorization in accepted else (401, "", {})
+            return (
+                (200, '{"id":1,"login":"accepted","isGrafanaAdmin":false}', {})
+                if authorization in accepted
+                else (401, "", {})
+            )
         if path == "/api/datasources":
             datasource_headers.append(authorization)
             if authorization == "Bearer bad-token":
@@ -218,13 +226,13 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
         if path == "/api/health":
             return 401, "", {}
         if path == "/login":
-            return 200, "Grafana login", {}
+            return 200, "<title>Grafana</title>", {}
         if path == "/api/user":
             auth_headers.append(authorization)
             if authorization == first_header:
                 raise OSError("candidate transport failure")
             return (
-                (200, '{"id":1,"login":"accepted"}', {})
+                (200, '{"id":1,"login":"accepted","isGrafanaAdmin":false}', {})
                 if authorization in {winning_header, later_header}
                 else (401, "", {})
             )
@@ -265,7 +273,7 @@ def test_grafana_defcreds_continues_after_candidate_exception_and_keeps_first_wi
         "username": "admin",
         "password": "admin",
         "source": "default",
-        "ok": False,
+        "ok": None,
         "error": "candidate transport failure",
     }
     attempt_lines = [line for line in emitted if " [+] " in line or " [-] " in line]
@@ -345,7 +353,7 @@ def test_gitlab_invalid_token_runs_public_data_once_without_reclassification(
         token = (headers or {}).get("PRIVATE-TOKEN")
         requests.append((path, token))
         if path == "/users/sign_in":
-            return 200, b"GitLab users/sign_in", {}, None
+            return 200, b"<title>GitLab</title><form action='/users/sign_in'>Sign in</form>", {}, None
         if path == "/api/v4/version":
             return 200, b'{"version":"17.0.0"}', {}, None
         if path == "/api/v4/user":

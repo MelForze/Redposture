@@ -8,7 +8,6 @@ subsystem is split into smaller files.
 from __future__ import annotations
 
 import time
-import urllib.request
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
@@ -24,6 +23,7 @@ from .exporters.discover import fetch_fingerprint_bodies_default as _fetch_finge
 from .exporters.discover import scan_exporter_presence as _scan_exporter_presence_impl
 from .exporters.discover import scan_presence_port_task as _scan_presence_port_task_impl
 from .exporters.discover import scan_presence_task as _scan_presence_task_impl
+from .exporters.http_client import _default_urlopen
 from .exporters.http_client import http_get_details as _http_get_details_impl
 from .exporters.http_client import http_get_text as _http_get_text_impl
 from .exporters.http_pool import (
@@ -65,7 +65,7 @@ def http_get_text(url: str, timeout: float, retries: int = 1) -> tuple[int, str]
         timeout,
         retries,
         sleep_fn=time.sleep,
-        urlopen_fn=urllib.request.urlopen,
+        urlopen_fn=_default_urlopen,
     )
 
 
@@ -79,7 +79,7 @@ def http_get_details(url: str, timeout: float, retries: int = 1, *, max_bytes: i
         max_bytes=max_bytes,
         monotonic_fn=time.monotonic,
         sleep_fn=time.sleep,
-        urlopen_fn=urllib.request.urlopen,
+        urlopen_fn=_default_urlopen,
     )
 
 

@@ -11,14 +11,9 @@
   <a href="https://github.com/MelForze/Redposture/releases">
     <img src="https://img.shields.io/github/v/tag/MelForze/Redposture?style=flat-square&label=version" alt="Latest version">
   </a>
-  <img src="https://img.shields.io/badge/modules-21-2b2f36?style=flat-square" alt="Modules">
-  <img src="https://img.shields.io/badge/lint-ruff-2b2f36?style=flat-square" alt="Ruff">
-  <img src="https://img.shields.io/badge/types-mypy-2b2f36?style=flat-square" alt="mypy">
+  <img src="https://img.shields.io/badge/modules-22-2b2f36?style=flat-square" alt="Modules">
   <img src="https://img.shields.io/badge/Python-3.10%2B-2b2f36?style=flat-square" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/install-pipx-2b2f36?style=flat-square" alt="Install with pipx">
-  <a href="https://github.com/MelForze/Redposture/stargazers">
-    <img src="https://img.shields.io/github/stars/MelForze/Redposture?style=flat-square&label=Stars" alt="GitHub Stars">
-  </a>
 </p>
 
 
@@ -31,8 +26,8 @@ Use it only on systems you own or are explicitly authorized to assess.
 ## Features
 
 - Exporter workflows: discover, collect, and trigger Prometheus-style exporters and debug endpoints.
-- Service audit modules: `registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `kubeapi`, `postgres`, `mongodb`, `docker`, `oracle`, `clickhouse`, `redis`, `etcd`, `qdrant`, `elastic`, `grpc`, `kafka`, `zookeeper`, `keeper`, and `minio`.
-- Multi-target and multi-port scans from comma-separated values, per-target `host:port` entries, CIDR/ranges where supported, or target files.
+- Service audit modules: `registry`, `grafana`, `proxmox`, `gitlab`, `consul`, `kubeapi`, `postgres`, `mongodb`, `docker`, `oracle`, `clickhouse`, `redis`, `etcd`, `qdrant`, `elastic`, `grpc`, `kafka`, `zookeeper`, `keeper`, `minio`, `airflow`, and `rabbitmq`.
+- Multi-target and multi-port scans from comma-separated values, per-target `host:port` entries, CIDR, inclusive IPv4 ranges (`10.0.0.1-10.0.0.10`), or target files. IPv4 ranges also work in `-ot` exclusions; select their ports with the module's port option. Both endpoints must be full IPv4 addresses in ascending order (equal endpoints select one host).
 - Authentication checks with explicit credentials, default-credential checks where implemented, and credential-file workflows in supported modules.
 - Optional data enumeration and bounded dumps for data-store modules.
 - JSON and text output, file output, debug traces, progress bars, and proxy support.
@@ -92,6 +87,8 @@ kafka       Kafka auth, topic visibility, bounded message dumps
 zookeeper   Apache ZooKeeper identity, TLS, auth, health, and znode visibility
 keeper      ClickHouse Keeper identity, TLS, auth, quorum, and znode visibility
 minio       MinIO detection, anonymous access, credential/default-credential/admin checks, write-probe, streamed enumeration, secret discovery, object dump/download
+airflow     Airflow REST API detection, anonymous role, auth/default-credential and role checks
+rabbitmq    RabbitMQ Management auth, tags, permissions, and queue/exchange/vhost topology
 ```
 
 Use command help for the complete, current flag list:
@@ -164,6 +161,8 @@ redposture elastic -t http://elastic.internal:9200 --proxy http://127.0.0.1:8080
 | Kafka | `admin:admin`, `admin:admin-secret`, `admin:changeme`, `admin:kafka`, `admin:password`, `broker:broker`, `broker:brokerpass`, `client:client`, `kafka:admin`, `kafka:changeme`, `kafka:kafka`, `kafka:password`, `kafka:zookeeper`, `service:password`, `service:service`, `user:password`, `user:user` |
 | ZooKeeper | `admin:admin`, `admin:changeme`, `admin:kafka`, `admin:password`, `admin:zookeeper`, `broker:broker`, `broker:brokerpass`, `client:client`, `dev:dev`, `guest:guest`, `hadoop:hadoop`, `kafka:changeme`, `kafka:kafka`, `kafka:password`, `kafka:zookeeper`, `root:admin`, `root:password`, `root:root`, `root:rootpass`, `root:zookeeper`, `service:password`, `service:service`, `solr:solr`, `super:super`, `test:test`, `user:password`, `user:user`, `user1:12345`, `zk:password`, `zk:zk`, `zk:zookeeper`, `zookeeper:admin`, `zookeeper:password`, `zookeeper:zookeeper` |
 | Keeper | `admin:admin`, `admin:changeme`, `admin:clickhouse`, `admin:keeper`, `admin:password`, `clickhouse:changeme`, `clickhouse:clickhouse`, `clickhouse:keeper`, `clickhouse:password`, `default:<empty>`, `default:changeme`, `default:clickhouse`, `default:default`, `default:password`, `keeper:changeme`, `keeper:clickhouse`, `keeper:keeper`, `keeper:password`, `root:clickhouse`, `root:keeper`, `root:password`, `root:root`, `service:password`, `service:service`, `user:password`, `user:user` |
+| Airflow | `airflow:airflow`, `admin:admin`, `admin:airflow`, `airflow:password`, `admin:password` |
+| RabbitMQ | `admin:admin`, `admin:changeme`, `admin:password`, `admin:rabbitmq`, `guest:guest`, `guest:password`, `rabbitmq:admin`, `rabbitmq:password`, `rabbitmq:rabbitmq`, `root:password`, `root:root`, `service:password`, `service:service`, `test:test`, `user:password`, `user:user` |
 
 ## Module Examples
 
@@ -307,12 +306,12 @@ redposture keeper -t 127.0.0.1 --port 9181,19181,29181 --show-znodes 20 --dump 2
 redposture keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 10
 ```
 
-Focused Keeper lab (cluster + TLS + 4LW-disabled + Apache control):
+## HTTP redirects
 
-```bash
-docker compose -f lab/services/keeper/docker-compose.yml up -d --wait
-docker compose -f lab/services/keeper/docker-compose.yml down -v --remove-orphans
-```
+HTTP audit modules and exporter discovery/collection follow redirects across
+schemes, hosts and ports, retaining supplied credentials. This is intentional
+for operator-controlled audits. Redirect chains are bounded; TLS verification
+continues to use the configured settings.
 
 ## License
 

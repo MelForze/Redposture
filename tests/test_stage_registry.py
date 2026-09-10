@@ -1213,7 +1213,7 @@ def _registry_host_record(
 
 def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     # `_http_request` now runs a one-time HTTP/HTTPS scheme probe that also goes
-    # through urllib.request.urlopen. Preseed the resolver cache so the test
+    # through the shared HTTP opener. Preseed the resolver cache so the test
     # exercises the real error path without the probe consuming the mocked
     # HTTPError body first.
     from redposture_core.clients.http_api import _SCHEME_CACHE
@@ -1231,7 +1231,7 @@ def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, 
     def raise_http_error(*_args, **_kwargs):
         raise http_error
 
-    monkeypatch.setattr(registry.urllib.request, "urlopen", raise_http_error)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", raise_http_error)
     status, body, headers, error = registry._http_request("registry.local", 5000, "GET", "/v2/", 1.0, headers={})
     assert status == 401 and error is None
     assert b"UNAUTHORIZED" in body
@@ -1241,7 +1241,7 @@ def test_http_request_and_download_error_paths(monkeypatch: pytest.MonkeyPatch, 
     def raise_url_error(*_args, **_kwargs):
         raise urllib.error.URLError(TimeoutError("timed out"))
 
-    monkeypatch.setattr(registry.urllib.request, "urlopen", raise_url_error)
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", raise_url_error)
     status, body, headers, error = registry._http_request("registry.local", 5000, "GET", "/v2/", 1.0, headers={})
     assert status == 0 and body == b"" and headers == {}
     assert error == "connection timeout"
@@ -2204,7 +2204,7 @@ def test_http_request_url_and_render_colored_registry_line_branches(monkeypatch:
         def read(self) -> bytes:
             return b'{"token":"ok"}'
 
-    monkeypatch.setattr(registry.urllib.request, "urlopen", lambda *_a, **_k: _Resp())
+    monkeypatch.setattr("redposture_core.clients.http_api._open_http_request", lambda *_a, **_k: _Resp())
     status, body, headers, error = registry._http_request_url("https://auth.local/token", "GET", 1.0, headers={})
     assert status == 200 and error is None
     assert b'"token"' in body and headers["x-test"] == "ok"
@@ -2216,7 +2216,9 @@ def test_http_request_url_and_render_colored_registry_line_branches(monkeypatch:
         {"WWW-Authenticate": 'Bearer realm="x"'},
         io.BytesIO(b'{"errors":[{"message":"unauthorized"}]}'),
     )
-    monkeypatch.setattr(registry.urllib.request, "urlopen", lambda *_a, **_k: (_ for _ in ()).throw(http_error))
+    monkeypatch.setattr(
+        "redposture_core.clients.http_api._open_http_request", lambda *_a, **_k: (_ for _ in ()).throw(http_error)
+    )
     status2, body2, headers2, error2 = registry._http_request_url("https://auth.local/token", "GET", 1.0, headers={})
     assert status2 == 401 and error2 is None
     assert b"unauthorized" in body2
@@ -2224,8 +2226,7 @@ def test_http_request_url_and_render_colored_registry_line_branches(monkeypatch:
     http_error.close()
 
     monkeypatch.setattr(
-        registry.urllib.request,
-        "urlopen",
+        "redposture_core.clients.http_api._open_http_request",
         lambda *_a, **_k: (_ for _ in ()).throw(urllib.error.URLError(TimeoutError("timed out"))),
     )
     status3, body3, headers3, error3 = registry._http_request_url("https://auth.local/token", "GET", 1.0, headers={})
@@ -2492,10 +2493,20 @@ def test_registry_lifecycle_sends_no_auth_on_classification_and_reuses_selected_
         authorization = (headers or {}).get("Authorization")
         probe_authorizations.append(authorization)
         if authorization is None:
-            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
+            return (
+                401,
+                b'{"errors":[{"code":"UNAUTHORIZED"}]}',
+                {"www-authenticate": "Basic", "docker-distribution-api-version": "registry/2.0"},
+                None,
+            )
         if authorization == registry._auth_headers("good", "good", None)["Authorization"]:
             return 200, b"{}", {"docker-distribution-api-version": "registry/2.0"}, None
-        return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
+        return (
+            401,
+            b'{"errors":[{"code":"UNAUTHORIZED"}]}',
+            {"www-authenticate": "Basic", "docker-distribution-api-version": "registry/2.0"},
+            None,
+        )
 
     def fake_catalog(_host, _port, _timeout, *, headers):
         catalog_authorizations.append(headers.get("Authorization"))
@@ -2591,7 +2602,12 @@ def test_registry_auth_retries_transient_failure_without_repeating_anonymous_pro
         authorization = (headers or {}).get("Authorization")
         probe_authorizations.append(authorization)
         if authorization is None:
-            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
+            return (
+                401,
+                b'{"errors":[{"code":"UNAUTHORIZED"}]}',
+                {"www-authenticate": "Basic", "docker-distribution-api-version": "registry/2.0"},
+                None,
+            )
         authenticated_attempts += 1
         if authenticated_attempts == 1:
             return 0, b"", {}, "connection timeout"
@@ -2645,9 +2661,19 @@ def test_registry_definitive_auth_rejection_is_not_retried(
         nonlocal authenticated_attempts
         _ = body
         if not (headers or {}).get("Authorization"):
-            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
+            return (
+                401,
+                b'{"errors":[{"code":"UNAUTHORIZED"}]}',
+                {"www-authenticate": "Basic", "docker-distribution-api-version": "registry/2.0"},
+                None,
+            )
         authenticated_attempts += 1
-        return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
+        return (
+            401,
+            b'{"errors":[{"code":"UNAUTHORIZED"}]}',
+            {"www-authenticate": "Basic", "docker-distribution-api-version": "registry/2.0"},
+            None,
+        )
 
     monkeypatch.setattr(registry, "_http_request", fake_request)
 
@@ -2688,7 +2714,12 @@ def test_registry_transient_auth_exhaustion_is_not_reported_as_rejected_credenti
         _ = body
         if not (headers or {}).get("Authorization"):
             anonymous_probes += 1
-            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
+            return (
+                401,
+                b'{"errors":[{"code":"UNAUTHORIZED"}]}',
+                {"www-authenticate": "Basic", "docker-distribution-api-version": "registry/2.0"},
+                None,
+            )
         authenticated_attempts += 1
         return 0, b"", {}, "connection timeout"
 
@@ -2734,7 +2765,12 @@ def test_registry_data_retries_transient_result_without_reprobing_v2(
         _ = body
         probe_calls += 1
         if not (headers or {}).get("Authorization"):
-            return 401, b'{"errors":[{"code":"UNAUTHORIZED"}]}', {"www-authenticate": "Basic"}, None
+            return (
+                401,
+                b'{"errors":[{"code":"UNAUTHORIZED"}]}',
+                {"www-authenticate": "Basic", "docker-distribution-api-version": "registry/2.0"},
+                None,
+            )
         return 200, b"{}", {"docker-distribution-api-version": "registry/2.0"}, None
 
     def fake_core(host, port, _timeout, retries, **_kwargs):

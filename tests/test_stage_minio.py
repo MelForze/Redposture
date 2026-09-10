@@ -43,6 +43,17 @@ def test_minio_credential_gate_verified_and_rejected():
     assert "rejected" in reason
 
 
+def test_minio_credential_gate_unavailable_skips_deep_checks_without_rejection():
+    record = AuditRecord(
+        host="h",
+        port=9000,
+        service="minio",
+        status="detected",
+        extra={"provided_credentials_ok": None, "credential_state": "verification_unavailable"},
+    )
+    assert stage._minio_credential_gate(None, record) == (False, "minio credential verification unavailable")
+
+
 def test_run_minio_stage_returns_validation_error_without_network():
     args = parse_args(["minio", "-t", "127.0.0.1", "--session-token", "TOK"])
     rc = stage.run_minio_stage(args, logger=SimpleNamespace(log=lambda *_a, **_k: None))
@@ -266,6 +277,26 @@ def test_minio_policy_validate_args_branches():
         is None
     )
 
+    assert (
+        policy.validate_args(SimpleNamespace(port=None, session_token=None, username="AK", password=None), console) == 2
+    )
+    assert errors[-1].endswith("-p/--password is missing")
+
+    assert (
+        policy.validate_args(SimpleNamespace(port=None, session_token=None, username=None, password="SK"), console) == 2
+    )
+    assert errors[-1].endswith("-u/--username is missing")
+
+    assert (
+        policy.validate_args(SimpleNamespace(port=None, session_token=None, username="", password="SK"), console) == 2
+    )
+    assert errors[-1] == "--username must not be empty"
+
+    assert (
+        policy.validate_args(SimpleNamespace(port=None, session_token=None, username="AK", password=""), console)
+        is None
+    )
+
 
 def test_spec_wires_capabilities_hook():
     from redposture_core.cli_args import parse_args
@@ -302,15 +333,14 @@ def test_enumeration_flags_parse():
             "--show-objects",
             "--bucket",
             "b",
-            "--prefix",
-            "p/",
             "--discover",
             "--max-objects",
             "7",
         ]
     )
     assert args.show_buckets and args.show_objects and args.discover
-    assert args.bucket == "b" and args.prefix == "p/" and args.max_objects == 7
+    assert args.bucket == "b" and args.max_objects == 7
+    assert not hasattr(args, "prefix")  # --prefix removed
 
 
 def test_data_record_noop_without_flags():

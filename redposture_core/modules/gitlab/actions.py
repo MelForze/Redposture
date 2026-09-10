@@ -207,11 +207,13 @@ def _looks_like_gitlab_user(payload: Any) -> bool:
         return False
     user_id = payload.get("id")
     username = payload.get("username")
+    gitlab_fields = {"state", "web_url", "created_at", "avatar_url", "namespace_id", "bot"}
     return (
         isinstance(user_id, int)
         and not isinstance(user_id, bool)
         and isinstance(username, str)
         and bool(username.strip())
+        and bool(gitlab_fields.intersection(payload))
     )
 
 
@@ -245,7 +247,11 @@ def _api_get_json(
 
 def _detect_login_page(body: str) -> bool:
     text = body.lower()
-    return "gitlab" in text and ("sign in" in text or "users/sign_in" in text)
+    has_gitlab_title = bool(re.search(r"<title[^>]*>[^<]*\bgitlab\b[^<]*</title\s*>", text))
+    has_sign_in_form = bool(
+        re.search(r"<form\b[^>]*\baction\s*=\s*['\"][^'\"]*/users/sign_in(?:[?#][^'\"]*)?['\"]", text)
+    )
+    return has_gitlab_title and has_sign_in_form
 
 
 def _detect_version_payload(payload: Any) -> str | None:
@@ -834,16 +840,22 @@ def _audit_gitlab_host(
                     token=token,
                 )
                 if user_error:
-                    token_valid = False
+                    token_valid = None
                     token_projects_error = user_error
                 elif user_status == 200 and _looks_like_gitlab_user(user_payload):
                     token_valid = True
                     token_user = user_payload
-                elif user_status in {401, 403}:
+                elif user_status == 401:
                     token_valid = False
-                    token_projects_error = "invalid token or insufficient API access"
+                    token_projects_error = "invalid token"
+                elif user_status == 403:
+                    token_valid = None
+                    token_projects_error = "identity access denied without token evidence"
+                elif user_status == 200:
+                    token_valid = None
+                    token_projects_error = "identity response contained no GitLab-specific evidence"
                 else:
-                    token_valid = False
+                    token_valid = None
                     token_projects_error = f"unexpected /api/v4/user status={user_status}"
 
                 if token_valid and run_deep_checks:
@@ -1415,14 +1427,27 @@ def authenticate_gitlab(ctx: Any, detect_record: Any, options: dict[str, Any]) -
         use_https=bool(record.get("https")),
         token=token,
     )
-    state.token_valid = error is None and status == 200 and _looks_like_gitlab_user(payload)
+    if error is not None:
+        state.token_valid = None
+    elif status == 200 and _looks_like_gitlab_user(payload):
+        state.token_valid = True
+    elif status == 401:
+        state.token_valid = False
+    else:
+        state.token_valid = None
     state.token_user = payload if state.token_valid and isinstance(payload, dict) else None
     state.token_capability = "identity" if state.token_valid else None
-    state.token_error = error or (None if state.token_valid else "invalid token or insufficient API access")
+    state.token_error = error or (
+        None
+        if state.token_valid
+        else "invalid token"
+        if state.token_valid is False
+        else "credential verification unavailable"
+    )
     if error is None and status == 403:
-        state.token_valid = True
-        state.token_capability = "authenticated_forbidden"
-        state.token_error = "token accepted but /api/v4/user is outside its scope"
+        state.token_valid = None
+        state.token_capability = None
+        state.token_error = "identity access denied without token evidence"
     elif error is None and status == 401:
         probe_errors: list[str] = []
         for project_ref in options["project_filters"]:
@@ -1445,7 +1470,13 @@ def authenticate_gitlab(ctx: Any, detect_record: Any, options: dict[str, Any]) -
     record.update(
         {
             "timestamp": utc_now_iso(),
-            "status": "valid_credentials" if state.token_valid else "invalid_credentials",
+            "status": (
+                "valid_credentials"
+                if state.token_valid is True
+                else "invalid_credentials"
+                if state.token_valid is False
+                else "detected"
+            ),
             "token_provided": True,
             "token_valid": state.token_valid,
             "token_user": state.token_user,

@@ -353,7 +353,9 @@ def test_credential_attempts_render_accepted_non_selected():
         ],
     )
     lines = render._format_credential_attempts_records(rec, "txt")
-    assert f"{_PFX} [+] admin" in lines  # a second working default cred is surfaced
+    # A second working default is surfaced with its password: several defaults can
+    # share a username, so the operator needs the exact working pair.
+    assert f"{_PFX} [+] admin:admin" in lines
     assert not any("minioadmin" in line for line in lines)  # winner skipped (shown by _format_record)
 
 
@@ -368,3 +370,46 @@ def test_credential_attempts_empty_for_single_or_json():
         ]
     )
     assert render._format_credential_attempts_records(multi, "json") == []
+
+
+def test_unavailable_credential_has_neutral_result():
+    rec = _record(
+        credential_state="verification_unavailable",
+        credential_results=[{"access_key": "AKID", "state": "verification_unavailable"}],
+    )
+    assert render._format_record(rec, "txt") == f"{_PFX} [!] AKID (credential verification unavailable)"
+    assert render._format_record(rec, "json") == ""
+
+
+def test_unavailable_attempts_are_neutral_and_not_duplicated():
+    rec = _record(
+        credential_state="verification_unavailable",
+        credential_results=[{"access_key": "admin", "state": "verification_unavailable"}],
+        attempted_credentials=[
+            {"username": "admin", "password": "bad", "credential_state": "invalid"},
+            {"username": "admin", "password": "unknown1", "credential_state": "verification_unavailable"},
+            {"username": "admin", "password": "unknown2", "credential_state": "verification_unavailable"},
+        ],
+    )
+    assert render._format_record(rec, "txt") == ""
+    assert render._format_credential_attempts_records(rec, "txt") == [
+        f"{_PFX} [-] admin:bad",
+        f"{_PFX} [!] admin:unknown1 (credential verification unavailable)",
+        f"{_PFX} [!] admin:unknown2 (credential verification unavailable)",
+    ]
+
+
+def test_unavailable_attempt_is_shown_alongside_accepted_credential():
+    rec = _record(
+        credential_state="valid",
+        credential_results=[{"access_key": "admin", "state": "valid"}],
+        credential_secret="working",
+        attempted_credentials=[
+            {"username": "admin", "password": "unknown", "credential_state": "verification_unavailable"},
+            {"username": "admin", "password": "working", "credential_state": "valid"},
+        ],
+    )
+    assert "[+] admin:working" in render._format_record(rec, "txt")
+    assert render._format_credential_attempts_records(rec, "txt") == [
+        f"{_PFX} [!] admin:unknown (credential verification unavailable)",
+    ]

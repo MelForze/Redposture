@@ -281,10 +281,8 @@ def _looks_like_consul_peers_payload(status: int, payload: bytes) -> bool:
 
 
 def _has_consul_response_marker(headers: dict[str, str], payload: bytes) -> bool:
-    if any(str(key).lower().startswith("x-consul-") for key in headers):
-        return True
-    text = _decode_body_text(payload).lower()
-    return "consul" in text or "acl" in text
+    del payload
+    return any(str(key).lower().startswith("x-consul-") for key in headers)
 
 
 def _consul_get_json_any(

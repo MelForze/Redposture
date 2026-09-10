@@ -772,6 +772,13 @@ def test_trigger_listener_defaults_have_tls_enabled() -> None:
     assert args.proxmox_tls is True
 
 
+@pytest.mark.parametrize("flag", ["--proxmox-tls", "--no-proxmox-tls"])
+def test_trigger_rejects_removed_proxmox_tls_flags(flag: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        parse_args(["exporters", "trigger", "-t", "10.0.0.1", "--callback-ip", "10.0.0.2", flag])
+    assert exc.value.code == 2
+
+
 def test_scan_flags_are_parsed() -> None:
     args = parse_args(
         [

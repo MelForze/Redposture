@@ -92,7 +92,7 @@ def test_http_get_text_without_pool_does_not_retry_http_exception(
         call_counter["count"] += 1
         raise http.client.RemoteDisconnected("plain-http-failure")
 
-    monkeypatch.setattr("redposture_core.scanner.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("redposture_core.scanner._default_urlopen", fake_urlopen)
 
     with pytest.raises(http.client.RemoteDisconnected):
         scanner.http_get_text("http://example.test/metrics", timeout=1.0, retries=3)

@@ -130,6 +130,31 @@ def test_prepare_cert_files_bundled_and_generated_modes(monkeypatch: pytest.Monk
         servers.prepare_cert_files(str(tmp_path / "only-cert.pem"), None)
 
 
+def test_prepare_cert_files_forwards_callback_sans(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    cert_dir = tmp_path / "callback-cert"
+    cert_dir.mkdir()
+    monkeypatch.setattr(servers.tempfile, "mkdtemp", lambda prefix="": str(cert_dir))
+    calls: list[dict[str, tuple[str, ...]]] = []
+
+    def fake_generate(_cert: str, _key: str, **kwargs) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(servers, "_generate_self_signed_cert", fake_generate)
+    servers.prepare_cert_files(
+        None,
+        None,
+        san_dns_names=("callback.example.test",),
+        san_ip_addresses=("192.0.2.10",),
+    )
+
+    assert calls == [
+        {
+            "dns_names": ("callback.example.test",),
+            "ip_addresses": ("192.0.2.10",),
+        }
+    ]
+
+
 def test_prepare_cert_files_falls_back_to_bundled_when_generation_unavailable(
     monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
@@ -503,6 +528,13 @@ def test_generate_self_signed_cert_surfaces_openssl_errors(monkeypatch: pytest.M
     monkeypatch.setattr(servers.subprocess, "run", raise_oserror)
     with pytest.raises(ValueError, match="missing openssl"):
         servers._generate_self_signed_cert("/tmp/cert.pem", "/tmp/key.pem")
+
+
+def test_certificate_subject_alt_name_includes_local_and_callback_values() -> None:
+    assert servers._certificate_subject_alt_name(
+        dns_names=("Callback.Example.Test.", "192.0.2.11"),
+        ip_addresses=("192.0.2.10", "2001:0db8::1"),
+    ) == ("DNS:localhost,DNS:Callback.Example.Test,IP:127.0.0.1,IP:::1,IP:192.0.2.11,IP:192.0.2.10,IP:2001:db8::1")
 
 
 def test_write_self_signed_cert_files_rejects_bad_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

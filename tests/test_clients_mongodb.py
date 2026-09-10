@@ -136,6 +136,31 @@ def test_mongo_audit_client_hello_normalizes_non_json_values() -> None:
     assert hello["topologyVersion"]["processId"] == "object-id-like"
 
 
+@pytest.mark.parametrize("wrap", [str, RuntimeError])
+@pytest.mark.parametrize("message", ["code 13", "Error code 18: denied", "CODE 13.", "code\t18", "code  13"])
+def test_auth_error_matches_complete_codes(message, wrap) -> None:
+    assert is_auth_error(wrap(message)) is True
+
+
+@pytest.mark.parametrize("wrap", [str, RuntimeError])
+@pytest.mark.parametrize(
+    "message",
+    [
+        "operation exceeded time limit, code 130",
+        "server error code 131",
+        "code 1300 internal error",
+        "server error code 180",
+        "server error code 1800",
+        "server error code 113",
+        "server error code 118",
+        "decode 13",
+        "code 18suffix",
+    ],
+)
+def test_non_auth_error_codes_are_not_auth_errors(message, wrap) -> None:
+    assert is_auth_error(wrap(message)) is False
+
+
 def test_normalize_mongodb_error_and_auth_detection() -> None:
     assert normalize_mongodb_error(RuntimeError("")) == "mongodb operation failed"
     assert normalize_mongodb_error(RuntimeError("ServerSelectionTimeoutError: timed out")) == "connection timeout"

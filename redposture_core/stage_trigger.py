@@ -227,7 +227,6 @@ def _with_listen_target_fmt(exporter: dict[str, Any], args: argparse.Namespace) 
     postgres_port = int(getattr(args, "postgres_port", 15432))
     blackbox_port = int(getattr(args, "blackbox_port", 19115))
     proxmox_port = int(getattr(args, "proxmox_port", 18006))
-    proxmox_tls = bool(getattr(args, "proxmox_tls", False))
     if exporter_name == "redis_exporter":
         raw_target_fmt = str(exporter.get("target_fmt") or "").strip()
         if not raw_target_fmt:
@@ -278,8 +277,7 @@ def _with_listen_target_fmt(exporter: dict[str, Any], args: argparse.Namespace) 
     if exporter_name == "proxmox_exporter":
         if trigger_path == "/pve":
             return f"{{our_host}}:{proxmox_port}"
-        scheme = "https" if proxmox_tls else "http"
-        return f"{scheme}://{{our_host}}:{proxmox_port}/api2/json/access/ticket"
+        return f"https://{{our_host}}:{proxmox_port}/api2/json/access/ticket"
     return None
 
 
@@ -947,6 +945,7 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
     if callback_ip:
         callback_targets.append(callback_ip)
+        args.callback_ip = callback_ip
 
     callback_dns = normalize_scan_host(args.callback_dns or "")
     if args.callback_dns and not callback_dns:
@@ -954,6 +953,8 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
         return 2
     if callback_dns and callback_dns not in callback_targets:
         callback_targets.append(callback_dns)
+    if callback_dns:
+        args.callback_dns = callback_dns
 
     if not callback_targets:
         console.error("trigger requires --callback-ip and/or --callback-dns")
@@ -1038,20 +1039,8 @@ def run_trigger_stage(args: argparse.Namespace, logger: AttemptLogger) -> int:
                 (batch_hosts, _patch_trigger_exporters_for_with_listen(batch_exporters, args), scheme)
             )
         run_batches = patched_batches
-        check_exporters = run_batches[0][1]
-        proxmox_tls_enabled = bool(getattr(args, "proxmox_tls", False))
-        proxmox_requires_tls = any(
-            str(item.get("name") or "").strip().lower() == "proxmox_exporter"
-            and str(item.get("trigger_path") or "").strip() == "/pve"
-            for item in check_exporters
-        )
-        if proxmox_requires_tls and not proxmox_tls_enabled:
-            console.warn(
-                "proxmox callback likely to fail: proxmox_exporter /pve uses HTTPS target; "
-                "enable --proxmox-tls to capture proxmox callbacks"
-            )
         if args.debug:
-            for item in check_exporters:
+            for item in run_batches[0][1]:
                 query = str(item.get("trigger_query") or "").strip()
                 if query:
                     console.debug(

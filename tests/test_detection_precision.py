@@ -48,7 +48,7 @@ def test_qdrant_detection_rejects_generic_result_envelope() -> None:
 def test_gitlab_version_detection_requires_revision_correlation() -> None:
     assert gitlab._detect_version_payload({"version": "17.8.1"}) is None
     assert gitlab._detect_version_payload({"version": "17.8.1", "revision": "abc123"}) == "17.8.1"
-    assert gitlab._detect_login_page("GitLab users/sign_in") is True
+    assert gitlab._detect_login_page("<title>GitLab</title><form action='/users/sign_in'>Sign in</form>") is True
 
 
 def test_redis_generic_resp_error_requires_second_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:

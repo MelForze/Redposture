@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from xml.etree import ElementTree
 
 from . import s3_sigv4
@@ -81,7 +81,8 @@ class MinioClient:
 
     @property
     def base_url(self) -> str:
-        return f"{self.scheme}://{self.host}:{self.port}"
+        host = f"[{self.host}]" if ":" in self.host and not self.host.startswith("[") else self.host
+        return f"{self.scheme}://{host}:{self.port}"
 
     @property
     def _host_header(self) -> str:
@@ -104,26 +105,55 @@ class MinioClient:
         if query:
             url = f"{url}?{query}"
         headers: dict[str, str] = dict(extra_headers or {})
-        if signed and self.access_key and self.secret_key:
-            # SigV4 must bind the actual request body: an empty-payload hash for
-            # GET/HEAD/DELETE, the real sha256 for a PUT that carries a body.
-            payload_hash = hashlib.sha256(body).hexdigest() if body else s3_sigv4.EMPTY_PAYLOAD_HASH
-            headers.update(
-                s3_sigv4.sign_request(
+
+        def prepare(method: str, url: str, headers: dict[str, str], body: bytes | None) -> dict[str, str]:
+            parsed = urlsplit(url)
+            hostname = str(parsed.hostname or "")
+            authority = f"[{hostname}]" if ":" in hostname else hostname
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            if port != (443 if parsed.scheme == "https" else 80):
+                authority += f":{port}"
+            unsigned = {
+                k: v
+                for k, v in headers.items()
+                if k.lower()
+                not in {
+                    "authorization",
+                    "host",
+                    "x-amz-date",
+                    "x-amz-content-sha256",
+                    "x-amz-security-token",
+                }
+            }
+            return {
+                **unsigned,
+                "Host": authority,
+                **s3_sigv4.sign_request(
                     method=method,
-                    host=self._host_header,
-                    path=path,
-                    query=query,
-                    headers=extra_headers,
-                    payload_hash=payload_hash,
-                    access_key=self.access_key,
-                    secret_key=self.secret_key,
+                    host=authority,
+                    path=parsed.path or "/",
+                    query=parsed.query,
+                    headers=unsigned,
+                    payload_hash=hashlib.sha256(body or b"").hexdigest(),
+                    access_key=str(self.access_key),
+                    secret_key=str(self.secret_key),
                     session_token=self.session_token,
-                )
-            )
+                ),
+            }
+
+        signing = bool(signed and self.access_key and self.secret_key)
+        if signing:
+            headers = prepare(method, url, headers, body)
         cap = _RESPONSE_CAP if response_cap is None else max(1, int(response_cap))
         try:
-            resp = self._pool.request(method, url, headers=headers, body=body, response_size_cap=cap)
+            resp = self._pool.request(
+                method,
+                url,
+                headers=headers,
+                body=body,
+                response_size_cap=cap,
+                prepare_request=prepare if signing else None,
+            )
         except Exception as exc:  # noqa: BLE001 - transport errors normalized for callers
             return MinioResponse(http_status=0, headers={}, body=b"", transport_error=str(exc))
         if getattr(resp, "error", None):

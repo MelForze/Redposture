@@ -32,10 +32,13 @@ dist/
 
 # Local outputs
 .redposture/
-# Local integration labs are never versioned.
+# Local integration labs and opt-in suites are never versioned.
 lab/
+qa_tests/
 lab_tests/
 /docker/
+# Local design notes / bug catalog — not versioned.
+docs/
 *.jsonl
 *.log
 result

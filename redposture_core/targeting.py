@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
@@ -13,8 +14,16 @@ DEFAULT_MAX_NETWORK_HOSTS = 65_536
 DEFAULT_STREAM_TARGET_WINDOW_SIZE = 4_096
 
 
+def _clean_target_token(value: str) -> str:
+    """Discard leading BOM/whitespace without changing characters inside a target."""
+    start = 0
+    while start < len(value) and (value[start].isspace() or value[start] == "\ufeff"):
+        start += 1
+    return value[start:].rstrip()
+
+
 def normalize_scan_host(value: str) -> str | None:
-    raw = (value or "").strip()
+    raw = _clean_target_token(value or "")
     if not raw:
         return None
 
@@ -530,6 +539,22 @@ def _parse_bare_target_authority(item: str, *, source: str | None = None) -> tup
     return host, None
 
 
+def _parse_ipv4_range(item: str, *, source: str | None = None) -> tuple[int, int] | None:
+    # Only numeric, address-shaped tokens are ranges; DNS names with hyphens
+    # (including names starting with an IP) retain their existing meaning.
+    if "-" not in item or "." not in item or re.fullmatch(r"[0-9.\s:\-]+", item) is None:
+        return None
+    location = f" at {source}" if source else ""
+    try:
+        left, right = item.split("-")
+        start, end = int(ipaddress.IPv4Address(left.strip())), int(ipaddress.IPv4Address(right.strip()))
+        if start > end:
+            raise ValueError("start address must not exceed end address")
+    except ValueError as exc:
+        raise ValueError(f"invalid IPv4 range '{item}'{location}: {exc}; use start_IP-end_IP") from exc
+    return start, end
+
+
 def _expand_network_targets(token: str, max_hosts: int) -> list[str]:
     network = ipaddress.ip_network(token, strict=False)
 
@@ -605,7 +630,7 @@ def _range_contains(ranges: Iterable[tuple[int, int]], value: int) -> bool:
 
 
 def parse_target_exclusions(values: str | Iterable[str] | None) -> TargetExclusions:
-    """Parse comma-separated host, IP, CIDR, URL-host, and file exclusions.
+    """Parse comma-separated host, IP, IPv4 range, CIDR, URL-host, and file exclusions.
 
     Matching is host-level: ports, URL schemes, paths, and queries do not
     affect exclusion. DNS names are compared case-insensitively without a
@@ -637,7 +662,7 @@ def parse_target_exclusions(values: str | Iterable[str] | None) -> TargetExclusi
             ipv6_networks.append(ipaddress.IPv6Network(f"{address}/128"))
 
     def _consume(raw_token: str, *, source: str | None = None) -> None:
-        item = str(raw_token or "").strip()
+        item = _clean_target_token(str(raw_token or ""))
         if not item:
             return
         expanded_path = os.path.expanduser(item)
@@ -676,6 +701,10 @@ def parse_target_exclusions(values: str | Iterable[str] | None) -> TargetExclusi
             else:
                 ipv6_networks.append(network)
             return
+        address_range = _parse_ipv4_range(item, source=source)
+        if address_range is not None:
+            ipv4_ranges[:] = _merge_ipv4_range(ipv4_ranges, address_range)
+            return
         try:
             host, _port = _parse_bare_target_authority(item, source=source)
         except ValueError as exc:
@@ -701,19 +730,21 @@ def _consume_target_tokens(
     processed_files: set[str],
     append_spec: Callable[[ScanTargetSpec], None],
     handle_network: Callable[[str, str | None], None],
+    handle_ipv4_range: Callable[[str, tuple[int, int], str | None], None],
 ) -> None:
-    """Walk comma/file/URL/CIDR target tokens, delegating the strategy-specific
+    """Walk comma/file/URL/CIDR/IPv4-range tokens, delegating the strategy-specific
     parts to callbacks.
 
     `append_spec` receives each resolved single-host spec (bare host or URL).
     `handle_network` receives each ``host/prefix`` token (and its source) so the
-    caller can either materialize hosts or keep them as ranges. File inclusion,
+    caller can either materialize hosts or keep them as ranges.
+    `handle_ipv4_range` receives inclusive start/end addresses as integers. File inclusion,
     URL parsing/validation, and bare-host normalization are shared here so the
     streaming and eager parsers cannot drift apart.
     """
 
     def _consume_token(token: str, *, source: str | None = None) -> None:
-        item = token.strip()
+        item = _clean_target_token(token)
         if not item:
             return
 
@@ -806,6 +837,11 @@ def _consume_target_tokens(
             handle_network(item, source)
             return
 
+        address_range = _parse_ipv4_range(item, source=source or policy.source)
+        if address_range is not None:
+            handle_ipv4_range(item, address_range, source)
+            return
+
         host, explicit_port = _parse_bare_target_authority(item, source=source or policy.source)
         append_spec(
             ScanTargetSpec(
@@ -834,7 +870,7 @@ def stream_scan_target_specs(
 ) -> StreamingTargetPlan:
     """Parse targets into a lazy plan.
 
-    IPv4 CIDR targets are not bounded by `max_network_hosts` here. They are
+    IPv4 CIDR and explicit range targets are not bounded by `max_network_hosts` here. They are
     represented by ranges and generated on demand. IPv6 CIDR expansion remains
     bounded because its address space is too large to represent safely in the
     current execution model.
@@ -898,11 +934,8 @@ def stream_scan_target_specs(
         target_count += 1
         _remember_count(spec)
 
-    def _append_ipv4_network(item: str, network: ipaddress.IPv4Network, source: str | None) -> None:
+    def _append_ipv4_range(item: str, host_range: tuple[int, int], source: str | None) -> None:
         nonlocal target_count, no_port_count, seen_ipv4_ranges
-        host_range = _ipv4_network_host_range(network)
-        if host_range is None:
-            return
         remaining = _subtract_ranges(host_range, seen_ipv4_ranges)
         seen_ipv4_ranges = _merge_ipv4_range(seen_ipv4_ranges, host_range)
         if exclusions.ipv4_ranges:
@@ -943,7 +976,9 @@ def stream_scan_target_specs(
         except ValueError as exc:
             raise ValueError(f"invalid network target '{item}': {exc}") from exc
         if isinstance(network, ipaddress.IPv4Network):
-            _append_ipv4_network(item, network, source)
+            host_range = _ipv4_network_host_range(network)
+            if host_range is not None:
+                _append_ipv4_range(item, host_range, source)
         else:
             _append_ipv6_network(item, network, source)
 
@@ -954,6 +989,7 @@ def stream_scan_target_specs(
             processed_files=processed_files,
             append_spec=_append_list_spec,
             handle_network=_handle_network,
+            handle_ipv4_range=_append_ipv4_range,
         )
 
     return StreamingTargetPlan(
@@ -1017,12 +1053,24 @@ def parse_scan_target_specs(
                 )
             )
 
+    def _handle_ipv4_range(item: str, host_range: tuple[int, int], source: str | None) -> None:
+        start, end = host_range
+        count = end - start + 1
+        if count > active_policy.max_network_hosts:
+            raise ValueError(f"IPv4 range '{item}' expands to {count} hosts (limit: {active_policy.max_network_hosts})")
+        for value in range(start, end + 1):
+            host = str(ipaddress.IPv4Address(value))
+            _append_spec(
+                ScanTargetSpec(host=host, raw=item, source=source or active_policy.source, normalized_key=host)
+            )
+
     _consume_target_tokens(
         targets,
         policy=active_policy,
         processed_files=processed_files,
         append_spec=_append_spec,
         handle_network=_handle_network,
+        handle_ipv4_range=_handle_ipv4_range,
     )
 
     return unique

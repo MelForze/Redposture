@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import socket
@@ -10,6 +11,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -702,7 +704,55 @@ def build_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
     return context
 
 
-def _generate_self_signed_cert(cert_path: str, key_path: str) -> None:
+def _certificate_subject_alt_name(
+    *,
+    dns_names: Iterable[str] = (),
+    ip_addresses: Iterable[str] = (),
+) -> str:
+    normalized_dns: list[str] = ["localhost"]
+    normalized_ips: list[str] = ["127.0.0.1", "::1"]
+
+    for raw_name in dns_names:
+        name = str(raw_name or "").strip().rstrip(".")
+        if not name:
+            continue
+        try:
+            normalized_ip = ipaddress.ip_address(name).compressed
+        except ValueError:
+            try:
+                name = name.encode("idna").decode("ascii")
+            except UnicodeError as exc:
+                raise ValueError(f"invalid DNS name for generated certificate: {raw_name}") from exc
+            if any(character in name for character in (",", "\r", "\n")):
+                raise ValueError(f"invalid DNS name for generated certificate: {raw_name}") from None
+            if name.lower() not in {item.lower() for item in normalized_dns}:
+                normalized_dns.append(name)
+        else:
+            if normalized_ip not in normalized_ips:
+                normalized_ips.append(normalized_ip)
+
+    for raw_address in ip_addresses:
+        address = str(raw_address or "").strip()
+        if not address:
+            continue
+        try:
+            normalized_ip = ipaddress.ip_address(address).compressed
+        except ValueError as exc:
+            raise ValueError(f"invalid IP address for generated certificate: {raw_address}") from exc
+        if normalized_ip not in normalized_ips:
+            normalized_ips.append(normalized_ip)
+
+    return ",".join([*(f"DNS:{name}" for name in normalized_dns), *(f"IP:{address}" for address in normalized_ips)])
+
+
+def _generate_self_signed_cert(
+    cert_path: str,
+    key_path: str,
+    *,
+    dns_names: Iterable[str] = (),
+    ip_addresses: Iterable[str] = (),
+) -> None:
+    subject_alt_name = _certificate_subject_alt_name(dns_names=dns_names, ip_addresses=ip_addresses)
     command = [
         "openssl",
         "req",
@@ -715,6 +765,8 @@ def _generate_self_signed_cert(cert_path: str, key_path: str) -> None:
         "365",
         "-subj",
         "/CN=redposture-local",
+        "-addext",
+        f"subjectAltName={subject_alt_name}",
         "-keyout",
         key_path,
         "-out",
@@ -762,6 +814,9 @@ def prepare_cert_files(
     cert_path: str | None,
     key_path: str | None,
     generate_local_selfcert: bool = False,
+    *,
+    san_dns_names: Iterable[str] = (),
+    san_ip_addresses: Iterable[str] = (),
 ) -> tuple[str, str, str | None]:
     if bool(cert_path) != bool(key_path):
         raise ValueError("both --cert-file and --key-file must be set together")
@@ -778,7 +833,12 @@ def prepare_cert_files(
     # to the bundled PEM only when local generation is unavailable (e.g. openssl
     # is missing) and a caller has not asked to force generation.
     try:
-        _generate_self_signed_cert(cert, key)
+        dns_names = tuple(san_dns_names)
+        ip_addresses = tuple(san_ip_addresses)
+        if dns_names or ip_addresses:
+            _generate_self_signed_cert(cert, key, dns_names=dns_names, ip_addresses=ip_addresses)
+        else:
+            _generate_self_signed_cert(cert, key)
         return cert, key, tmp_dir
     except (ValueError, OSError):
         if generate_local_selfcert:

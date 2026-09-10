@@ -97,6 +97,7 @@ def test_start_servers_builds_selected_services_with_tls_autodetect(monkeypatch:
     console = _DummyConsole()
     logger = AttemptLogger()
     calls: list[tuple[str, int, bool]] = []
+    cert_calls: list[dict[str, object]] = []
 
     args = Namespace(
         bind="127.0.0.1",
@@ -109,6 +110,8 @@ def test_start_servers_builds_selected_services_with_tls_autodetect(monkeypatch:
         proxmox_tls=False,
         cert_file=None,
         key_file=None,
+        callback_ip="192.0.2.10",
+        callback_dns="callback.example.test",
     )
 
     monkeypatch.setattr(
@@ -116,7 +119,9 @@ def test_start_servers_builds_selected_services_with_tls_autodetect(monkeypatch:
     )
     monkeypatch.setattr(
         "redposture_core.listener_runtime.prepare_cert_files",
-        lambda cert, key, generate_local_selfcert=False: (str(cert), str(key), None),
+        lambda cert, key, generate_local_selfcert=False, **kwargs: (
+            cert_calls.append(kwargs) or (str(cert), str(key), None)
+        ),
     )
     monkeypatch.setattr(
         "redposture_core.listener_runtime.build_ssl_context",
@@ -156,6 +161,12 @@ def test_start_servers_builds_selected_services_with_tls_autodetect(monkeypatch:
     assert any("proxmox: http://127.0.0.1:18006" in message for message in console.messages["info"])
     assert any("blackbox: http://127.0.0.1:19115" in message for message in console.messages["info"])
     assert console.messages["debug"] == ["services=blackbox,postgres,proxmox,redis"]
+    assert cert_calls == [
+        {
+            "san_dns_names": ("callback.example.test",),
+            "san_ip_addresses": ("192.0.2.10",),
+        }
+    ]
 
 
 def test_stop_started_listeners_ignores_shutdown_errors(tmp_path) -> None:

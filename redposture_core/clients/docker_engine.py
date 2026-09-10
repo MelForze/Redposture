@@ -8,8 +8,10 @@ import ssl
 import threading
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
+from .http_api import HttpResponse
+from .http_redirects import follow_redirects, http_origin
 from .tls_cache import shared_client_ssl_context
 
 
@@ -132,6 +134,7 @@ class DockerEngineClient:
         self.key_file = key_file
         self.http_connection_cls = http_connection_cls or http.client.HTTPConnection
         self.https_connection_cls = https_connection_cls or http.client.HTTPSConnection
+        self._connection_origin = ("https" if self.transport == "tls" else "http", self.host, self.port)
         self._active_connection: http.client.HTTPConnection | None = None
         self._connection_lock = threading.Lock()
 
@@ -139,7 +142,8 @@ class DockerEngineClient:
         with self._connection_lock:
             if self._active_connection is not None:
                 return self._active_connection
-        if self.transport == "tls":
+        scheme, host, port = self._connection_origin
+        if scheme == "https":
             context = _ssl_context(
                 insecure=self.insecure,
                 ca_file=self.ca_file,
@@ -147,10 +151,10 @@ class DockerEngineClient:
                 key_file=self.key_file,
             )
             connection: http.client.HTTPConnection = self.https_connection_cls(
-                self.host, self.port, timeout=self.timeout, context=context
+                host, port, timeout=self.timeout, context=context
             )
         else:
-            connection = self.http_connection_cls(self.host, self.port, timeout=self.timeout)
+            connection = self.http_connection_cls(host, port, timeout=self.timeout)
         with self._connection_lock:
             self._active_connection = connection
         return connection
@@ -195,37 +199,56 @@ class DockerEngineClient:
         if json_body is not None:
             body = json.dumps(json_body, separators=(",", ":")).encode("utf-8")
             req_headers["Content-Type"] = "application/json"
-        conn: http.client.HTTPConnection | None = None
-        try:
-            conn = self._connection()
-            conn.request(method.upper(), path, body=body, headers=req_headers)
-            response = conn.getresponse()
+        last_reason = ""
+        failure: DockerEngineError | None = None
+
+        def send(method: str, url: str, headers: dict[str, str], body: bytes | None) -> HttpResponse:
+            nonlocal last_reason, failure
+            origin = http_origin(url)
+            if origin != self._connection_origin:
+                self.close()
+                self._connection_origin = origin
+            parsed = urlsplit(url)
+            path = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
             try:
-                raw = response.read(max(0, int(response_size_cap)) + 1)
-            except TypeError:
-                # Compatibility for lightweight HTTPResponse test doubles.
-                raw = response.read()
-            if len(raw) > response_size_cap:
+                conn = self._connection()
+                conn.request(method, path, body=body, headers=headers)
+                response = conn.getresponse()
+                try:
+                    try:
+                        raw = response.read(max(0, int(response_size_cap)) + 1)
+                    except TypeError:
+                        raw = response.read()
+                    if len(raw) > response_size_cap:
+                        raise DockerEngineError(f"docker API response exceeds {response_size_cap} bytes")
+                    normalized_headers = {str(k).lower(): str(v) for k, v in response.getheaders()}
+                    last_reason = str(response.reason)
+                    if bool(getattr(response, "will_close", False)):
+                        self.close()
+                    return HttpResponse(int(response.status), raw, normalized_headers)
+                finally:
+                    close = getattr(response, "close", None)
+                    if callable(close):
+                        close()
+            except DockerEngineError as exc:
                 self.close()
-                raise DockerEngineError(f"docker API response exceeds {response_size_cap} bytes")
-            normalized_headers = {str(key).lower(): str(value) for key, value in response.getheaders()}
-            result = DockerHTTPResponse(int(response.status), str(response.reason), normalized_headers, raw)
-            allowed = allow_statuses or set(range(200, 300))
-            response_will_close = bool(getattr(response, "will_close", False))
-            if result.status not in allowed:
-                if response_will_close:
-                    self.close()
-                raise DockerEngineHTTPError(result.status, result.reason, result.body, result.headers)
-            if response_will_close:
+                failure = exc
+                raise
+            except (OSError, TimeoutError, ssl.SSLError, http.client.HTTPException) as exc:
                 self.close()
-            return result
-        except DockerEngineHTTPError:
-            raise
-        except DockerEngineError:
-            raise
-        except (OSError, TimeoutError, ssl.SSLError, http.client.HTTPException) as exc:
-            self.close()
-            raise DockerEngineConnectionError(normalize_docker_error(exc)) from exc
+                failure = DockerEngineConnectionError(normalize_docker_error(exc))
+                raise failure from exc
+
+        scheme = "https" if self.transport == "tls" else "http"
+        url = f"{scheme}://{authority_host}:{self.port}{path}"
+        result = follow_redirects(send, method, url, headers=req_headers, body=body)
+        if failure is not None:
+            raise failure
+        if result.error:
+            raise DockerEngineError(result.error)
+        if result.status not in (allow_statuses or set(range(200, 300))):
+            raise DockerEngineHTTPError(result.status, last_reason, result.body, result.headers)
+        return DockerHTTPResponse(result.status, last_reason, result.headers, result.body)
 
     def ping(self) -> bool:
         response = self.request("GET", "/_ping", allow_statuses={200, 204}, response_size_cap=256 * 1024)

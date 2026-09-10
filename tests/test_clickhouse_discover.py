@@ -12,6 +12,7 @@ from redposture_core.cli import parse_args
 from redposture_core.modules.clickhouse import actions, policy
 from redposture_core.modules.clickhouse.discover import DiscoverConfig, run_discovery
 from redposture_core.modules.clickhouse.discover.checkpoint import CheckpointStore
+from redposture_core.modules.clickhouse.discover.engine import _scan_rows
 from redposture_core.modules.clickhouse.discover.inventory import (
     collect_inventory,
     is_content_type,
@@ -68,6 +69,24 @@ def test_detector_engine_handles_nested_json_neutral_column_and_dedup_material()
     assert any(match.object_path == "$.neutral.client_secret" for match in matches)
     assert fingerprint("same") == fingerprint("same")
     assert mask_secret("super-secret-value-123") != "super-secret-value-123"
+
+
+def test_clickhouse_row_scanner_finds_camelcase_secret_key():
+    chunk = ScanChunk("app", "events", ("payload",), "202609", 0, 1)
+    coverage = {"app.events.payload": {"rows_scanned": 0, "bytes_scanned": 0}}
+    findings: dict[str, dict[str, Any]] = {}
+    _scan_rows(
+        [['{"service":{"userPassword":"S3cretValue123"}}']],
+        chunk,
+        findings,
+        coverage,
+        enabled=detector_names(),
+        redact=False,
+    )
+    finding = next(iter(findings.values()))
+    assert finding["type"] == "password"
+    assert finding["value"] == "S3cretValue123"
+    assert finding["object_path"] == "$.service.userPassword"
 
 
 @pytest.mark.parametrize(

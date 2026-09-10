@@ -12,10 +12,12 @@ import errno
 import http.client
 import ssl
 import threading
+import urllib.parse
 from collections.abc import Mapping
 from types import TracebackType
 
 from ...clients.http_api import HttpResponse, join_http_target_path, normalize_http_error
+from ...clients.http_redirects import follow_redirects, http_origin
 from ...clients.tls_cache import shared_client_ssl_context
 
 _STALE_SOCKET_ERRNOS = frozenset(
@@ -105,6 +107,8 @@ class ElasticHttpSession:
 
         self.host = normalized_host
         self.port = normalized_port
+        self._connect_host = self.host
+        self._connect_port = self.port
         self.timeout = max(0.0, float(timeout))
         self.response_cap = max(0, int(response_cap))
         # Loading the platform CA bundle is relatively expensive.  Keep HTTP
@@ -149,12 +153,12 @@ class ElasticHttpSession:
                     ca_file=self._ca_file,
                 )
             return http.client.HTTPSConnection(
-                self.host,
-                self.port,
+                self._connect_host,
+                self._connect_port,
                 timeout=self.timeout,
                 context=self._ssl_context,
             )
-        return http.client.HTTPConnection(self.host, self.port, timeout=self.timeout)
+        return http.client.HTTPConnection(self._connect_host, self._connect_port, timeout=self.timeout)
 
     def _close_connection_unchecked(self) -> None:
         connection = self._connection
@@ -281,27 +285,25 @@ class ElasticHttpSession:
         if body is not None and "content-length" not in lower_header_names:
             normalized_headers["Content-Length"] = str(len(body))
 
-        result, request_error, reused = self._request_once(
-            normalized_scheme,
-            normalized_method,
-            normalized_path,
-            normalized_headers,
-            body,
-        )
-        if (
-            request_error is not None
-            and reused
-            and _is_read_only_elastic_request(normalized_method, normalized_path)
-            and _is_stale_keep_alive_error(request_error)
-        ):
-            result, _retry_exc, _retry_reused = self._request_once(
-                normalized_scheme,
-                normalized_method,
-                normalized_path,
-                normalized_headers,
-                body,
-            )
-        return result
+        def send(method: str, url: str, headers: dict[str, str], body: bytes | None) -> HttpResponse:
+            scheme, host, port = http_origin(url)
+            if (host, port) != (self._connect_host, self._connect_port):
+                self._close_connection_unchecked()
+                self._connect_host, self._connect_port = host, port
+            parsed = urllib.parse.urlsplit(url)
+            path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+            result, request_error, reused = self._request_once(scheme, method, path, headers, body)
+            if (
+                request_error is not None
+                and reused
+                and _is_read_only_elastic_request(method, path)
+                and _is_stale_keep_alive_error(request_error)
+            ):
+                result, _, _ = self._request_once(scheme, method, path, headers, body)
+            return result
+
+        url = f"{normalized_scheme}://{self._authority(normalized_scheme)}{normalized_path}"
+        return follow_redirects(send, normalized_method, url, headers=normalized_headers, body=body)
 
     def close(self) -> None:
         """Permanently close the session and its active connection."""

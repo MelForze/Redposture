@@ -186,7 +186,7 @@ def test_http_pool_reopens_stale_and_truncated_connections(monkeypatch: pytest.M
     pool.close()
 
 
-def test_http_pool_never_replays_post_after_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_http_pool_follows_post_redirect_and_stops_on_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[str] = []
 
     class _Connection:
@@ -204,8 +204,8 @@ def test_http_pool_never_replays_post_after_redirect(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(http_session.http.client, "HTTPConnection", _Connection)
     response = HttpSessionPool(timeout=1.0).request("POST", "http://127.0.0.1:8080/action", body=b"{}")
-    assert response.error == "redirect suppressed after non-replay-safe request"
-    assert requests == ["POST"]
+    assert response.error == "redirect loop detected"
+    assert requests == ["POST", "POST"]
 
 
 def test_http_pool_follows_bounded_same_origin_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,12 +321,13 @@ def test_http_pool_passes_parsed_proxy_to_reusable_tunnel(monkeypatch: pytest.Mo
     pool.close()
 
 
-def test_kube_direct_session_reuses_connection_and_blocks_cross_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_kube_direct_session_reuses_connection_and_follows_cross_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     connections: list[Any] = []
     responses = [
         _Response(status=302, headers=[("Location", "/api")]),
         _Response(b'{"versions":["v1"]}'),
         _Response(status=302, headers=[("Location", "https://elsewhere.invalid/api")]),
+        _Response(b"destination"),
     ]
 
     class _Connection:
@@ -346,14 +347,15 @@ def test_kube_direct_session_reuses_connection_and_blocks_cross_origin(monkeypat
             self.closed = True
 
     monkeypatch.setattr(kube_http_session.http.client, "HTTPConnection", _Connection)
+    monkeypatch.setattr(kube_http_session.http.client, "HTTPSConnection", _Connection)
     session = kube_http_session.KubeApiHttpSession(
         "127.0.0.1", 8080, use_https=False, timeout=1.0, insecure=False, ca_file=None
     )
     response = session.request("GET", "http://127.0.0.1:8080/version")
     assert response.status == 200
     blocked = session.request("GET", "http://127.0.0.1:8080/redirect")
-    assert blocked.error and blocked.error.startswith("cross-origin redirect blocked")
-    assert len(connections) == 1
+    assert blocked.error is None and blocked.body == b"destination"
+    assert len(connections) == 2
     assert session.stats()["reused"] == 2
     session.close()
     assert connections[0].closed is True

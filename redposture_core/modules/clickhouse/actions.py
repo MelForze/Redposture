@@ -2189,7 +2189,7 @@ def _audit_clickhouse_host_on_protocol_legacy(
         provided_password = provided_candidates[0][1] if provided_candidates else None
         provided_credentials = bool(provided_candidates)
         defaults_enabled = any(source == "default" for _user, _secret, source in candidates)
-    provided_credentials_ok: bool | None = False if provided_credentials else None
+    provided_credentials_ok: bool | None = None
 
     last_error: str | None = None
     last_error_kind: str | None = None
@@ -2240,9 +2240,6 @@ def _audit_clickhouse_host_on_protocol_legacy(
                 time.sleep(_retry_delay(attempt))
                 continue
 
-        if provided_credentials and provided_credentials_ok is None:
-            provided_credentials_ok = False
-
         for cand_user, cand_pass, source in candidates:
             attempted_credentials += 1
             cred_session, cred_error = _connect_and_probe(
@@ -2275,6 +2272,10 @@ def _audit_clickhouse_host_on_protocol_legacy(
                 default_credentials = True
             if source != "default" and ok:
                 provided_credentials_ok = True
+            elif source != "default":
+                credential_error = _probe_error_info(cred_error)
+                if credential_error.auth_required is True or credential_error.code in _CLICKHOUSE_AUTH_ERROR_CODES:
+                    provided_credentials_ok = False
             if cred_session is not None and cred_session is not selected_credential_session:
                 _close_client(protocol, cred_session.client)
             if ok and not defaults_enabled:
