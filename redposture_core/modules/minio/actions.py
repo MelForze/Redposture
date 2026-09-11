@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
 from ...clients.http_session import HttpSessionPool
@@ -393,10 +394,14 @@ class MinioLifecycleState:
         self.port = int(port)
         if scheme not in {None, "http", "https"}:
             raise ValueError("minio supports HTTP/HTTPS targets only")
-        # An explicit scheme from the target URL is authoritative: never probed,
-        # never flipped. Without one, `resolve_scheme` probes from the port guess.
+        # HTTPS targets can be used immediately. HTTP is treated as the preferred
+        # starting scheme: an unsigned probe may reveal that the endpoint redirects
+        # to HTTPS, which must be cached before SigV4 credentials are sent.
         self.explicit_scheme: str | None = scheme
-        self.resolved_scheme: str | None = scheme
+        self.resolved_scheme: str | None = "https" if scheme == "https" else None
+        self.resolved_host = self.host
+        self.resolved_port = self.port
+        self._https_probe_attempted = False
         self.pool = HttpSessionPool(
             timeout=float(getattr(args, "timeout", 5.0) or 5.0),
             insecure=True,
@@ -404,29 +409,71 @@ class MinioLifecycleState:
         )
 
     def _probe(self, scheme: str) -> MinioResponse:
-        client = MinioClient(self.pool, scheme=scheme, host=self.host, port=self.port)
+        client = MinioClient(
+            self.pool,
+            scheme=scheme,
+            host=self.resolved_host,
+            port=self.resolved_port,
+        )
         return client.get_service_root(signed=False)
+
+    def _remember_final_origin(self, resp: MinioResponse) -> str | None:
+        if not resp.final_url:
+            return None
+        try:
+            parsed = urlsplit(resp.final_url)
+            scheme = str(parsed.scheme or "").lower()
+            host = parsed.hostname
+            if scheme not in {"http", "https"} or not host:
+                return None
+            port = parsed.port or (443 if scheme == "https" else 80)
+        except ValueError:
+            return None
+        self.resolved_host = host
+        self.resolved_port = port
+        return scheme
 
     def resolve_scheme(self) -> str:
         """Return the transport scheme for this target, probing once and caching.
 
-        An explicit ``http``/``https`` from the target URL is authoritative and
-        returned without any probe. Otherwise the port heuristic is the starting
-        guess, flipped when the first probe returns a transport-mismatch signature
-        or a plaintext ``400`` whose body says the server expected TLS (a common
-        reverse-proxy/console front). A single probe is enough: an unrelated
-        failure (refused/timeout) leaves the guess intact.
+        An explicit ``http`` is a starting preference rather than a lock. If its
+        unsigned probe is redirected to HTTPS, subsequent detection and signed
+        credential requests start directly on HTTPS. The port heuristic remains
+        the starting point for bare targets. Transport mismatches and plaintext
+        ``400`` responses that require TLS also flip the scheme.
         """
         if self.resolved_scheme is not None:
             return self.resolved_scheme
-        guess = "https" if self.port in _TLS_PORTS else "http"
+        guess = self.explicit_scheme or ("https" if self.port in _TLS_PORTS else "http")
         resp = self._probe(guess)
+        final_scheme = self._remember_final_origin(resp)
         mismatch = bool(resp.transport_error and _transport_mismatch(guess, resp.transport_error))
         tls_required = guess == "http" and resp.http_status == 400 and b"https" in (resp.body or b"").lower()
-        if mismatch or tls_required:
+        if final_scheme in {"http", "https"} and final_scheme != guess:
+            guess = final_scheme
+        elif mismatch or tls_required:
             guess = "http" if guess == "https" else "https"
+        elif guess == "http" and _is_minio_console(resp) and self.try_https_upgrade():
+            return "https"
         self.resolved_scheme = guess
         return guess
+
+    def try_https_upgrade(self) -> bool:
+        """Switch an HTTP lifecycle to HTTPS when HTTPS exposes an S3 endpoint.
+
+        This is also used after an ambiguous signed response. The alternate probe
+        is unsigned and runs at most once per target, so ``--defcreds`` does not
+        repeat it for every candidate.
+        """
+        if self.resolved_scheme not in {None, "http"} or self._https_probe_attempted:
+            return self.resolved_scheme == "https"
+        self._https_probe_attempted = True
+        alternate = self._probe("https")
+        if _has_s3_shape(alternate):
+            self._remember_final_origin(alternate)
+            self.resolved_scheme = "https"
+            return True
+        return False
 
     def close(self) -> None:
         self.pool.close()
@@ -443,14 +490,18 @@ def _client_for(ctx: Any, credential: Any) -> MinioClient:
     if isinstance(state, MinioLifecycleState):
         scheme = state.resolve_scheme()
         pool = state.pool
+        host = state.resolved_host
+        port = state.resolved_port
     else:
         scheme = "https" if int(ctx.port) in _TLS_PORTS else "http"
         pool = HttpSessionPool(timeout=float(getattr(ctx.args, "timeout", 5.0) or 5.0), insecure=True)
+        host = str(ctx.host)
+        port = int(ctx.port)
     return MinioClient(
         pool,
         scheme=scheme,
-        host=str(ctx.host),
-        port=int(ctx.port),
+        host=host,
+        port=port,
         access_key=getattr(credential, "username", None),
         secret_key=getattr(credential, "password", None),
         session_token=getattr(ctx.args, "session_token", None),
@@ -505,6 +556,15 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
         return dict(prior)
     client = _client_for(ctx, credential)
     result = verify_credential(client)
+    state = getattr(ctx, "lifecycle_state", None)
+    if (
+        result.state in {"verification_unavailable", "transient_failure"}
+        and isinstance(state, MinioLifecycleState)
+        and client.scheme == "http"
+        and state.try_https_upgrade()
+    ):
+        client = _client_for(ctx, credential)
+        result = verify_credential(client)
     merged = dict(prior)
     anonymous_open = prior.get("auth_required") is False or str(prior.get("anonymous") or "") in {
         "anonymous_list_ok",

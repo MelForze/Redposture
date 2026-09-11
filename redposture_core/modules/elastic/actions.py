@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url
+from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, http_response_origin
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...rendering import BooleanColorRule, render_colored_marker_line, render_tagged_detail_line
@@ -139,6 +139,9 @@ class ElasticLifecycleState:
     unsupported_auth_endpoints: set[str] = dataclass_field(default_factory=set)
     unsupported_auth_details: dict[str, dict[str, Any]] = dataclass_field(default_factory=dict)
     session: ElasticHttpSession | None = None
+    origin_scheme: str | None = None
+    origin_host: str | None = None
+    origin_port: int | None = None
 
 
 @dataclass(frozen=True)
@@ -361,11 +364,14 @@ def _elastic_headers(
 
 
 @contextmanager
-def _elastic_session_scope(session: ElasticHttpSession | None) -> Iterator[None]:
+def _elastic_session_scope(
+    session: ElasticHttpSession | None, state: ElasticLifecycleState | None = None
+) -> Iterator[None]:
     """Expose a direct per-target session to legacy request helpers."""
 
     sentinel = object()
     previous = getattr(_THREAD_LOCAL_ELASTIC_SESSION, "session", sentinel)
+    previous_state = getattr(_THREAD_LOCAL_ELASTIC_SESSION, "state", sentinel)
     if session is None:
         try:
             delattr(_THREAD_LOCAL_ELASTIC_SESSION, "session")
@@ -373,6 +379,13 @@ def _elastic_session_scope(session: ElasticHttpSession | None) -> Iterator[None]
             pass
     else:
         _THREAD_LOCAL_ELASTIC_SESSION.session = session
+    if state is None:
+        try:
+            delattr(_THREAD_LOCAL_ELASTIC_SESSION, "state")
+        except AttributeError:
+            pass
+    else:
+        _THREAD_LOCAL_ELASTIC_SESSION.state = state
     try:
         yield
     finally:
@@ -383,6 +396,13 @@ def _elastic_session_scope(session: ElasticHttpSession | None) -> Iterator[None]
                 pass
         else:
             _THREAD_LOCAL_ELASTIC_SESSION.session = previous
+        if previous_state is sentinel:
+            try:
+                delattr(_THREAD_LOCAL_ELASTIC_SESSION, "state")
+            except AttributeError:
+                pass
+        else:
+            _THREAD_LOCAL_ELASTIC_SESSION.state = previous_state
 
 
 def _active_elastic_session(host: str, port: int) -> ElasticHttpSession | None:
@@ -419,6 +439,13 @@ def _elastic_request(
     req_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         req_headers.update(headers)
+    lifecycle = getattr(_THREAD_LOCAL_ELASTIC_SESSION, "state", None)
+    if isinstance(lifecycle, ElasticLifecycleState):
+        host = lifecycle.origin_host or str(host)
+        port = lifecycle.origin_port or int(port)
+        if lifecycle.origin_scheme in {"http", "https"}:
+            scheme = lifecycle.origin_scheme
+            use_https = scheme == "https"
     active_session = _active_elastic_session(host, port)
     if active_session is not None:
         response = active_session.request(
@@ -429,7 +456,13 @@ def _elastic_request(
             data=data,
         )
     else:
-        url = build_http_target_url(host, port, path, default_scheme=scheme)
+        url = build_http_target_url(
+            host,
+            port,
+            path,
+            default_scheme=scheme,
+            override_bound_scheme=isinstance(lifecycle, ElasticLifecycleState),
+        )
         response = HttpApiClient(
             HttpClientConfig(
                 timeout=timeout,
@@ -440,6 +473,13 @@ def _elastic_request(
         ).request(method, url, headers=req_headers, body=data, timeout=timeout)
     if response.error:
         return 0, b"", {}, str(response.error)
+    if isinstance(lifecycle, ElasticLifecycleState):
+        lifecycle.origin_scheme, lifecycle.origin_host, lifecycle.origin_port = http_response_origin(
+            response,
+            fallback_scheme=scheme,
+            fallback_host=host,
+            fallback_port=port,
+        )
     response_headers = dict(response.headers)
     if response.truncated:
         response_headers[_RESPONSE_TRUNCATED_HEADER] = "true"
@@ -482,7 +522,13 @@ def _request_with_tls_fallback(
         data=data,
     )
     if status > 0:
-        return status, payload, response_headers, error, first_scheme, first_insecure, False
+        lifecycle = getattr(_THREAD_LOCAL_ELASTIC_SESSION, "state", None)
+        effective_scheme = (
+            lifecycle.origin_scheme
+            if isinstance(lifecycle, ElasticLifecycleState) and lifecycle.origin_scheme in {"http", "https"}
+            else first_scheme
+        )
+        return status, payload, response_headers, error, effective_scheme, first_insecure, False
 
     first_error = str(error or "").strip() or "connection failed"
     if not allow_fallback or not _is_tls_or_protocol_error(first_error):
@@ -512,12 +558,18 @@ def _request_with_tls_fallback(
         diagnostic_headers = dict(fallback_headers)
         if str(error or "").strip():
             diagnostic_headers[_TRANSPORT_DIAGNOSTIC_HEADER] = f"{first_scheme}={error}"
+        lifecycle = getattr(_THREAD_LOCAL_ELASTIC_SESSION, "state", None)
+        effective_scheme = (
+            lifecycle.origin_scheme
+            if isinstance(lifecycle, ElasticLifecycleState) and lifecycle.origin_scheme in {"http", "https"}
+            else second_scheme
+        )
         return (
             fallback_status,
             fallback_payload,
             diagnostic_headers,
             fallback_error,
-            second_scheme,
+            effective_scheme,
             second_insecure,
             first_scheme == "https" and second_scheme == "http",
         )
@@ -2903,7 +2955,7 @@ def _audit_elastic_host(
             timeout,
             ca_file=ca_file,
             preferred_scheme=preferred_scheme,
-            allow_fallback=not scheme_locked,
+            allow_fallback=True,
         )
         root_transport_error = root_headers.pop(_TRANSPORT_DIAGNOSTIC_HEADER, None)
         if error and status <= 0:
@@ -2969,8 +3021,6 @@ def _audit_elastic_host(
                 "preferred_scheme": requested_scheme,
                 "ca_file": ca_file,
             }
-            if scheme_locked:
-                probe_kwargs["allow_fallback"] = False
             probe_status, probe_payload, probe_headers, probe_error, probe_scheme = _request_detect_probe(
                 host,
                 port,
@@ -3719,7 +3769,7 @@ def detect_elastic(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
     session = _make_lifecycle_session(ctx)
     state.session = session
     try:
-        with _elastic_session_scope(session):
+        with _elastic_session_scope(session, state):
             record = _audit_elastic_host(
                 str(ctx.host),
                 int(ctx.port),
@@ -3737,7 +3787,7 @@ def detect_elastic(ctx: Any, options: Mapping[str, Any]) -> dict[str, Any]:
                 preferred_scheme=preferred_scheme,
                 debug=bool(getattr(ctx.args, "debug", False)),
                 run_deep_checks=False,
-                scheme_locked=target_scheme is not None,
+                scheme_locked=False,
             )
     finally:
         if session is not None:
@@ -3768,7 +3818,7 @@ def authenticate_elastic(ctx: Any, detect_record: Any, options: Mapping[str, Any
     scheme = str(payload.get("scheme") or "https")
     insecure = bool(payload.get("insecure_effective"))
     ca_file = str(getattr(ctx.args, "ca_file", "") or "").strip() or None
-    with _elastic_session_scope(session):
+    with _elastic_session_scope(session, state):
         auth_probe = _probe_authenticate(
             str(ctx.host),
             int(ctx.port),
@@ -4069,7 +4119,7 @@ def collect_elastic_data(ctx: Any, record: Any, options: Mapping[str, Any]) -> d
     if not isinstance(state, ElasticLifecycleState):
         raise TypeError("elastic lifecycle state is unavailable")
     session = _activate_lifecycle_session(ctx, state)
-    with _elastic_session_scope(session):
+    with _elastic_session_scope(session, state):
         return _collect_elastic_data_with_session(ctx, record, options)
 
 

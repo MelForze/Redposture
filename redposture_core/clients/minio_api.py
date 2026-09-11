@@ -37,6 +37,9 @@ class MinioResponse:
     body: bytes
     error: S3Error | None = None
     transport_error: str | None = None
+    request_url: str | None = None
+    final_url: str | None = None
+    redirect_history: tuple[str, ...] = ()
 
 
 def _parse_s3_error(status: int, body: bytes) -> S3Error | None:
@@ -157,7 +160,15 @@ class MinioClient:
         except Exception as exc:  # noqa: BLE001 - transport errors normalized for callers
             return MinioResponse(http_status=0, headers={}, body=b"", transport_error=str(exc))
         if getattr(resp, "error", None):
-            return MinioResponse(http_status=0, headers={}, body=b"", transport_error=str(resp.error))
+            return MinioResponse(
+                http_status=0,
+                headers={},
+                body=b"",
+                transport_error=str(resp.error),
+                request_url=getattr(resp, "request_url", None),
+                final_url=getattr(resp, "final_url", None),
+                redirect_history=tuple(getattr(resp, "redirect_history", ()) or ()),
+            )
         status = int(resp.status)
         body = resp.body or b""
         return MinioResponse(
@@ -165,6 +176,9 @@ class MinioClient:
             headers=dict(resp.headers or {}),
             body=body,
             error=_parse_s3_error(status, body),
+            request_url=getattr(resp, "request_url", None),
+            final_url=getattr(resp, "final_url", None),
+            redirect_history=tuple(getattr(resp, "redirect_history", ()) or ()),
         )
 
     def get_service_root(self, *, signed: bool) -> MinioResponse:

@@ -25,6 +25,9 @@ class AirflowResponse:
     headers: dict[str, str]
     body: bytes
     transport_error: str | None = None
+    request_url: str | None = None
+    final_url: str | None = None
+    redirect_history: tuple[str, ...] = ()
 
     def json(self) -> Any | None:
         if self.transport_error or not self.body:
@@ -86,11 +89,22 @@ class AirflowClient:
         except Exception as exc:  # noqa: BLE001 - transport errors normalized for callers
             return AirflowResponse(http_status=0, headers={}, body=b"", transport_error=str(exc))
         if getattr(resp, "error", None):
-            return AirflowResponse(http_status=0, headers={}, body=b"", transport_error=str(resp.error))
+            return AirflowResponse(
+                http_status=0,
+                headers={},
+                body=b"",
+                transport_error=str(resp.error),
+                request_url=getattr(resp, "request_url", None),
+                final_url=getattr(resp, "final_url", None),
+                redirect_history=tuple(getattr(resp, "redirect_history", ()) or ()),
+            )
         return AirflowResponse(
             http_status=int(resp.status),
             headers=dict(resp.headers or {}),
             body=resp.body or b"",
+            request_url=getattr(resp, "request_url", None),
+            final_url=getattr(resp, "final_url", None),
+            redirect_history=tuple(getattr(resp, "redirect_history", ()) or ()),
         )
 
     def get(self, path: str, *, authed: bool = True) -> AirflowResponse:

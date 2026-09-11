@@ -11,6 +11,7 @@ from dataclasses import asdict
 from typing import Any
 from urllib.parse import quote
 
+from ...clients.http_api import http_response_origin, http_scheme_candidates
 from ...clients.http_session import HttpSessionPool
 from ...clients.rabbitmq_api import RabbitMQClient, RabbitMQResponse
 
@@ -71,29 +72,38 @@ class RabbitMQLifecycleState:
     def resolve(self) -> RabbitMQResponse:
         if self.overview is not None:
             return self.overview
-        explicit_scheme = self.scheme is not None
-        self.scheme = self.scheme or ("https" if self.port in {443, 15671} else "http")
-        response = self.client().get("/api/overview")
-        detail = (response.error or "").lower()
-        mismatch = any(
-            word in detail
-            for word in (
-                "wrong_version_number",
-                "unknown_protocol",
-                "remote end closed",
-                "remotedisconnected",
-                "badstatusline",
-                "connection reset",
-                "connectionreset",
-                "reset by peer",
-                "unknown protocol",
-                "record layer failure",
-            )
-        )
-        tls_required = self.scheme == "http" and response.status == 400 and b"https" in response.body.lower()
-        if not explicit_scheme and (mismatch or tls_required):
-            self.scheme = "http" if self.scheme == "https" else "https"
+        preferred = self.scheme
+        candidates = http_scheme_candidates(preferred, self.port, tls_ports=frozenset({443, 15671}))
+        response = RabbitMQResponse(0, error="connection failed")
+        for scheme in candidates:
+            self.scheme = scheme
             response = self.client().get("/api/overview")
+            detail = (response.error or "").lower()
+            mismatch = any(
+                word in detail
+                for word in (
+                    "wrong_version_number",
+                    "unknown_protocol",
+                    "remote end closed",
+                    "remotedisconnected",
+                    "badstatusline",
+                    "connection reset",
+                    "connectionreset",
+                    "reset by peer",
+                    "unknown protocol",
+                    "record layer failure",
+                )
+            )
+            tls_required = scheme == "http" and response.status == 400 and b"https" in response.body.lower()
+            if response.error is not None or mismatch or tls_required:
+                continue
+            self.scheme, self.host, self.port = http_response_origin(
+                response,
+                fallback_scheme=scheme,
+                fallback_host=self.host,
+                fallback_port=self.port,
+            )
+            break
         self.overview = response
         return response
 

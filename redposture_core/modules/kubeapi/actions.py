@@ -23,6 +23,7 @@ from ...clients.http_api import (
     HttpClientConfig,
     build_http_target_url,
     format_http_authority,
+    http_response_origin,
     join_http_target_path,
 )
 from ...clients.http_session import HttpSessionPool
@@ -42,6 +43,7 @@ _KUBE_AUTH_RESPONSE_CAP = 256 * 1024
 _KUBE_DATA_RESPONSE_CAP = 10 * 1024 * 1024
 _KUBE_WS_READ_TIMEOUT = 3.0
 _KUBE_WS_HANDSHAKE_TIMEOUT = 5.0
+_KUBE_EFFECTIVE_URL_HEADER = "__redposture_effective_url__"
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
 
@@ -75,6 +77,7 @@ class KubeApiLifecycleState:
     timeout: float = 5.0
     http_session: KubeApiHttpSession | None = None
     http_pool: HttpSessionPool | None = None
+    origin_resolved: bool = False
 
     def configure_transport(self, host: str, port: int, timeout: float) -> None:
         self.host = str(host)
@@ -111,6 +114,15 @@ class KubeApiLifecycleState:
             return
         self.insecure = True
         self.tls_auto_insecure = True
+        if self.http_session is not None:
+            self.http_session.close()
+            self.http_session = None
+        if self.http_pool is not None:
+            self.http_pool.close()
+            self.http_pool = None
+
+    def switch_scheme(self) -> None:
+        self.use_https = not self.use_https
         if self.http_session is not None:
             self.http_session.close()
             self.http_session = None
@@ -262,7 +274,7 @@ def _http_request(
     response_size_cap: int = _KUBE_DATA_RESPONSE_CAP,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     scheme = "https" if use_https else "http"
-    url = build_http_target_url(host, port, path, default_scheme=scheme)
+    url = build_http_target_url(host, port, path, default_scheme=scheme, override_bound_scheme=True)
     request_headers = {
         "User-Agent": "RedPosture/1.0",
         "Accept": "application/json",
@@ -285,16 +297,19 @@ def _http_request(
     if isinstance(request_client, KubeApiHttpSession):
         request_kwargs["response_size_cap"] = int(response_size_cap)
     response = request_client.request(method, url, **request_kwargs)
+    response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+    if client is not None and response.final_url:
+        response_headers[_KUBE_EFFECTIVE_URL_HEADER] = response.final_url
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
     if response.truncated:
         return (
             int(response.status),
             b"",
-            {str(k).lower(): str(v) for k, v in response.headers.items()},
+            response_headers,
             f"response exceeds {int(response_size_cap)} byte limit",
         )
-    return int(response.status), response.body, {str(k).lower(): str(v) for k, v in response.headers.items()}, None
+    return int(response.status), response.body, response_headers, None
 
 
 def _json_loads_bytes(raw: bytes) -> Any:
@@ -2566,6 +2581,22 @@ def _render_colored_kubeapi_line(console: Console, line: str) -> bool:
     return False
 
 
+def _adopt_kubeapi_origin(state: KubeApiLifecycleState, headers: dict[str, str]) -> None:
+    final_url = headers.pop(_KUBE_EFFECTIVE_URL_HEADER, None)
+    if not final_url or state.host is None or state.port is None:
+        return
+    scheme, host, port = http_response_origin(
+        SimpleNamespace(final_url=final_url),
+        fallback_scheme="https" if state.use_https else "http",
+        fallback_host=state.host,
+        fallback_port=state.port,
+    )
+    state.use_https = scheme == "https"
+    state.host = host
+    state.port = port
+    state.origin_resolved = True
+
+
 def _lifecycle_get_json_with_retries(
     ctx: Any,
     state: KubeApiLifecycleState,
@@ -2580,11 +2611,12 @@ def _lifecycle_get_json_with_retries(
     timeout = float(getattr(ctx.args, "timeout", 5.0))
     last_result: tuple[int, Any, dict[str, str], str | None] = (0, None, {}, "request failed")
     attempt = 0
+    scheme_fallback_attempted = False
     while attempt < attempts:
         client = _state_http_client_or_none(state, response_size_cap=response_size_cap)
         last_result = _api_request_json_with_retries(
-            str(ctx.host),
-            int(ctx.port),
+            str(state.host or ctx.host),
+            int(state.port or ctx.port),
             "GET",
             path,
             timeout,
@@ -2598,11 +2630,16 @@ def _lifecycle_get_json_with_retries(
             response_size_cap=response_size_cap,
             **({"client": client} if client is not None else {}),
         )
+        _adopt_kubeapi_origin(state, last_result[2])
         error = last_result[3]
         if error and state.use_https and not state.insecure and _is_tls_verify_error(error):
             state.switch_to_insecure()
             # TLS fallback retries this endpoint immediately and does not
             # consume the caller's network retry budget.
+            continue
+        if error and not scheme_fallback_attempted:
+            scheme_fallback_attempted = True
+            state.switch_scheme()
             continue
         if not _is_retryable_request_error(error):
             return last_result
@@ -2637,10 +2674,11 @@ def _lifecycle_request_json_with_retries(
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
     result: tuple[int, Any, dict[str, str], str | None] = (0, None, {}, "request failed")
     attempt = 0
+    scheme_fallback_attempted = False
     while attempt < attempts:
         result = _api_request_json_with_retries(
-            str(ctx.host),
-            int(ctx.port),
+            str(state.host or ctx.host),
+            int(state.port or ctx.port),
             method,
             path,
             float(getattr(ctx.args, "timeout", 5.0)),
@@ -2655,8 +2693,13 @@ def _lifecycle_request_json_with_retries(
             response_size_cap=response_size_cap,
             json_body=json_body,
         )
+        _adopt_kubeapi_origin(state, result[2])
         if result[3] and state.use_https and not state.insecure and _is_tls_verify_error(result[3]):
             state.switch_to_insecure()
+            continue
+        if result[3] and not scheme_fallback_attempted and not state.origin_resolved:
+            scheme_fallback_attempted = True
+            state.switch_scheme()
             continue
         if not _is_retryable_request_error(result[3]):
             return result
@@ -2747,8 +2790,8 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
         ns_error = _kube_status_message(ns_status, source_payload)
     else:
         namespace_access, ns_status, ns_error = _probe_namespace_access(
-            str(ctx.host),
-            int(ctx.port),
+            str(state.host or ctx.host),
+            int(state.port or ctx.port),
             float(getattr(ctx.args, "timeout", 5.0)),
             use_https=state.use_https,
             insecure=state.insecure,
@@ -2867,8 +2910,8 @@ def authenticate_kubeapi(ctx: Any, detect_record: Any, _options: dict[str, Any])
     if credential.token is None and credential.username is None and credential.password is None:
         return record
     namespace_access, status, error = _probe_namespace_access(
-        str(ctx.host),
-        int(ctx.port),
+        str(state.host or ctx.host),
+        int(state.port or ctx.port),
         float(getattr(ctx.args, "timeout", 5.0)),
         use_https=state.use_https,
         insecure=state.insecure,

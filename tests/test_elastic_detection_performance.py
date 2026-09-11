@@ -347,7 +347,7 @@ def test_legacy_credential_only_path_skips_privilege_and_api_key_probes(
     ("target_scheme", "expected_scheme", "scheme_locked"),
     [
         (None, "http", False),
-        ("https", "https", True),
+        ("https", "https", False),
     ],
 )
 def test_lifecycle_detection_uses_target_scheme_policy_and_closes_phase_session(

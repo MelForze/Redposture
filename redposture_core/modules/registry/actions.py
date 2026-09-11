@@ -16,7 +16,14 @@ from dataclasses import dataclass
 from dataclasses import field as dc_field
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, resolve_http_scheme
+from ...clients.http_api import (
+    HttpApiClient,
+    HttpClientConfig,
+    build_http_target_url,
+    http_response_origin,
+    http_scheme_candidates,
+    resolve_http_scheme,
+)
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...rendering import CountColorRule, format_count_value, render_colored_marker_line, render_tagged_detail_line
@@ -63,6 +70,9 @@ class RegistryLifecycleState:
     )
     http: HttpSessionPool | None = None
     scheme: str | None = None
+    host: str | None = None
+    port: int | None = None
+    origin_resolved: bool = False
 
     def close(self) -> None:
         if self.http is not None:
@@ -83,6 +93,8 @@ def registry_lifecycle_state_factory(ctx: Any) -> RegistryLifecycleState:
             proxy=getattr(ctx.args, "_proxy_config", None),
         ),
         scheme=target_scheme if target_scheme in {"http", "https"} else None,
+        host=str(getattr(ctx, "host", "") or "") or None,
+        port=int(ctx.port) if getattr(ctx, "port", None) is not None else None,
     )
 
 
@@ -267,14 +279,22 @@ def _http_request(
     state = getattr(_THREAD_LOCAL_HTTP, "state", None)
     cap = _DETECT_RESPONSE_CAP if _normalize_path(path).partition("?")[0] == "/v2/" else 10 * 1024 * 1024
     if isinstance(state, RegistryLifecycleState) and state.http is not None:
+        request_host = state.host or str(host)
+        request_port = state.port or int(port)
         schemes = (
-            (state.scheme,)
-            if state.scheme in {"http", "https"}
-            else (("https", "http") if int(port) in {443, 5001} else ("http", "https"))
+            (str(state.scheme),)
+            if state.origin_resolved and method.upper() not in {"GET", "HEAD"}
+            else http_scheme_candidates(state.scheme, request_port, tls_ports=frozenset({443, 5001}))
         )
         response = None
         for scheme in schemes:
-            url = build_http_target_url(host, port, _normalize_path(path), default_scheme=str(scheme))
+            url = build_http_target_url(
+                request_host,
+                request_port,
+                _normalize_path(path),
+                default_scheme=str(scheme),
+                override_bound_scheme=True,
+            )
             response = state.http.request(
                 method,
                 url,
@@ -284,7 +304,13 @@ def _http_request(
                 response_size_cap=cap,
             )
             if response.error is None:
-                state.scheme = str(scheme)
+                state.scheme, state.host, state.port = http_response_origin(
+                    response,
+                    fallback_scheme=str(scheme),
+                    fallback_host=request_host,
+                    fallback_port=request_port,
+                )
+                state.origin_resolved = True
                 break
         assert response is not None
     else:

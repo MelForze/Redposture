@@ -21,6 +21,9 @@ class RabbitMQResponse:
     data: Any = None
     error: str | None = None
     truncated: bool = False
+    request_url: str | None = None
+    final_url: str | None = None
+    redirect_history: tuple[str, ...] = ()
 
     @property
     def outcome(self) -> str:
@@ -89,12 +92,15 @@ class RabbitMQClient:
             except (ValueError, UnicodeError):
                 pass
         return RabbitMQResponse(
-            response.status,
-            dict(response.headers or {}),
-            body,
-            data,
-            response.error,
-            response.truncated,
+            status=response.status,
+            headers=dict(response.headers or {}),
+            body=body,
+            data=data,
+            error=response.error,
+            truncated=response.truncated,
+            request_url=getattr(response, "request_url", None),
+            final_url=getattr(response, "final_url", None),
+            redirect_history=tuple(getattr(response, "redirect_history", ()) or ()),
         )
 
     def collection(

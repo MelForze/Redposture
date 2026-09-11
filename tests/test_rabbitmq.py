@@ -325,11 +325,11 @@ def test_transport_auto_switch_and_explicit_scheme(monkeypatch):
     state.resolve()
     assert state.scheme == "https" and len(pool.calls) == 2
     assert "Authorization" not in pool.calls[0]["headers"]
-    pool.replies = [response(error="Remote end closed connection")]
+    pool.replies = [response(error="Remote end closed connection"), response(401)]
     ctx.target = SimpleNamespace(scheme="http", path="")
     state = actions.RabbitMQLifecycleState(ctx)
     state.resolve()
-    assert state.scheme == "http" and len(pool.calls) == 3
+    assert state.scheme == "https" and len(pool.calls) == 4
 
 
 def test_cli_plan_default_ports_deduplicates_guest_and_preserves_empty_password():

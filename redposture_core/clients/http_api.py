@@ -156,13 +156,58 @@ def format_http_authority(host: str, port: int) -> str:
     return f"{rendered_host}:{int(port)}"
 
 
-def build_http_target_url(host: str, port: int, path: str, *, default_scheme: str) -> str:
+def build_http_target_url(
+    host: str,
+    port: int,
+    path: str,
+    *,
+    default_scheme: str,
+    override_bound_scheme: bool = False,
+) -> str:
     binding = current_http_target_binding()
-    scheme = binding.scheme or str(default_scheme or "http").strip().lower()
+    scheme = (
+        str(default_scheme or "http").strip().lower()
+        if override_bound_scheme
+        else binding.scheme or str(default_scheme or "http").strip().lower()
+    )
     if scheme not in {"http", "https"}:
         raise ValueError(f"unsupported HTTP scheme: {scheme or '-'}")
     parsed_path = urllib.parse.urlsplit(join_http_target_path(path))
     return urllib.parse.urlunsplit((scheme, format_http_authority(host, port), parsed_path.path, parsed_path.query, ""))
+
+
+def http_scheme_candidates(preferred_scheme: str | None, port: int, *, tls_ports: frozenset[int]) -> tuple[str, str]:
+    """Return the preferred HTTP transport followed by its one-shot alternate.
+
+    A scheme supplied in a target URL controls the first attempt. It is not a
+    transport lock: audit modules may cross schemes by architecture decision.
+    """
+
+    normalized = str(preferred_scheme or "").strip().lower()
+    first = normalized if normalized in {"http", "https"} else "https" if int(port) in tls_ports else "http"
+    return first, "http" if first == "https" else "https"
+
+
+def http_response_origin(
+    response: Any,
+    *,
+    fallback_scheme: str,
+    fallback_host: str,
+    fallback_port: int,
+) -> tuple[str, str, int]:
+    """Return the final HTTP origin recorded by a transport response."""
+
+    final_url = str(getattr(response, "final_url", "") or "")
+    if final_url:
+        try:
+            parsed = urllib.parse.urlsplit(final_url)
+            scheme = parsed.scheme.lower()
+            host = parsed.hostname
+            if scheme in {"http", "https"} and host:
+                return scheme, host, parsed.port or (443 if scheme == "https" else 80)
+        except ValueError:
+            pass
+    return str(fallback_scheme), str(fallback_host), int(fallback_port)
 
 
 def _url_origin(url: str) -> tuple[str, str, int | None]:
@@ -779,6 +824,8 @@ __all__ = [
     "build_http_target_url",
     "current_http_target_binding",
     "format_http_authority",
+    "http_response_origin",
+    "http_scheme_candidates",
     "http_target_context",
     "infer_http_base_path",
     "join_http_target_path",

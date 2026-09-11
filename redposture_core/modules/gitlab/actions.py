@@ -16,7 +16,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, format_http_authority
+from ...clients.http_api import (
+    HttpApiClient,
+    HttpClientConfig,
+    build_http_target_url,
+    format_http_authority,
+    http_response_origin,
+    http_scheme_candidates,
+)
 from ...clients.http_session import HttpSessionPool
 from ...console import Console
 from ...rendering import CountColorRule, render_colored_marker_line, render_tagged_detail_line
@@ -57,6 +64,10 @@ class GitLabLifecycleState:
     token_capability: str | None = None
     deep_record: dict[str, Any] | None = None
     http: HttpSessionPool | None = None
+    scheme: str | None = None
+    host: str | None = None
+    port: int | None = None
+    origin_resolved: bool = False
 
     def close(self) -> None:
         if self.http is not None:
@@ -69,12 +80,16 @@ _DETECT_RESPONSE_CAP = 256 * 1024
 
 
 def gitlab_lifecycle_state_factory(ctx: Any) -> GitLabLifecycleState:
+    target_scheme = str(getattr(getattr(ctx, "target", None), "scheme", "") or "").lower()
     return GitLabLifecycleState(
         http=HttpSessionPool(
             timeout=float(getattr(ctx.args, "timeout", 1.0)),
             insecure=True,
             proxy=getattr(ctx.args, "_proxy_config", None),
-        )
+        ),
+        scheme=target_scheme if target_scheme in {"http", "https"} else None,
+        host=str(getattr(ctx, "host", "") or "") or None,
+        port=int(ctx.port) if getattr(ctx, "port", None) is not None else None,
     )
 
 
@@ -142,15 +157,6 @@ def _http_request(
     headers: dict[str, str] | None = None,
     body: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
-    if path.startswith("http://") or path.startswith("https://"):
-        url = path
-    else:
-        url = build_http_target_url(
-            host,
-            port,
-            _normalize_path(path),
-            default_scheme="https" if use_https else "http",
-        )
     request_headers = {"User-Agent": "RedPosture/1.0"}
     if headers:
         request_headers.update(headers)
@@ -162,17 +168,59 @@ def _http_request(
         else 10 * 1024 * 1024
     )
     if isinstance(state, GitLabLifecycleState) and state.http is not None:
-        response = state.http.request(
-            method,
-            url,
-            headers=request_headers,
-            body=body,
-            timeout=timeout,
-            response_size_cap=cap,
-            allow_cross_origin_redirects=True,
-            preserve_authorization_on_cross_origin=True,
+        absolute_url = path.startswith("http://") or path.startswith("https://")
+        request_host = state.host or str(host)
+        request_port = state.port or int(port)
+        preferred = state.scheme or ("https" if use_https else "http")
+        schemes = (
+            (preferred,)
+            if absolute_url or (state.origin_resolved and method.upper() not in {"GET", "HEAD"})
+            else http_scheme_candidates(preferred, request_port, tls_ports=frozenset({443, 8443}))
         )
+        response = None
+        for scheme in schemes:
+            url = (
+                path
+                if absolute_url
+                else build_http_target_url(
+                    request_host,
+                    request_port,
+                    _normalize_path(path),
+                    default_scheme=scheme,
+                    override_bound_scheme=True,
+                )
+            )
+            response = state.http.request(
+                method,
+                url,
+                headers=request_headers,
+                body=body,
+                timeout=timeout,
+                response_size_cap=cap,
+                allow_cross_origin_redirects=True,
+                preserve_authorization_on_cross_origin=True,
+            )
+            if response.error is None:
+                if not absolute_url:
+                    state.scheme, state.host, state.port = http_response_origin(
+                        response,
+                        fallback_scheme=scheme,
+                        fallback_host=request_host,
+                        fallback_port=request_port,
+                    )
+                    state.origin_resolved = True
+                break
+        assert response is not None
     else:
+        if path.startswith("http://") or path.startswith("https://"):
+            url = path
+        else:
+            url = build_http_target_url(
+                host,
+                port,
+                _normalize_path(path),
+                default_scheme="https" if use_https else "http",
+            )
         response = HttpApiClient(
             HttpClientConfig(
                 timeout=timeout,
@@ -1343,6 +1391,8 @@ def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             float(getattr(ctx.args, "timeout", 5.0)),
             use_https=use_https,
         )
+        if isinstance(ctx.lifecycle_state, GitLabLifecycleState) and ctx.lifecycle_state.scheme in {"http", "https"}:
+            use_https = ctx.lifecycle_state.scheme == "https"
         login_page = (
             login_error is None
             and login_status == 200

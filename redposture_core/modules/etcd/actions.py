@@ -18,6 +18,8 @@ from ...clients.http_api import (
     HttpClientConfig,
     build_http_target_url,
     current_http_target_binding,
+    http_response_origin,
+    http_scheme_candidates,
     http_target_context,
     resolve_http_scheme,
 )
@@ -72,6 +74,9 @@ _ETCD_HTTP_LOCAL = threading.local()
 class _EtcdHttpLifecycle:
     pool: HttpSessionPool
     scheme: str | None = None
+    host: str | None = None
+    port: int | None = None
+    origin_resolved: bool = False
 
 
 def _build_etcd_credential_candidates(
@@ -200,6 +205,8 @@ def _http_json_request(
     basic_auth: tuple[str, str] | None = None,
 ) -> tuple[int, str]:
     lifecycle = getattr(_ETCD_HTTP_LOCAL, "state", None)
+    request_host = lifecycle.host or str(host) if isinstance(lifecycle, _EtcdHttpLifecycle) else str(host)
+    request_port = lifecycle.port or int(port) if isinstance(lifecycle, _EtcdHttpLifecycle) else int(port)
     scheme = (
         lifecycle.scheme
         if isinstance(lifecycle, _EtcdHttpLifecycle) and lifecycle.scheme in {"http", "https"}
@@ -236,7 +243,7 @@ def _http_json_request(
     candidates = [requested_path]
     if requested_path.startswith("/v3/"):
         binding = current_http_target_binding()
-        key = (str(host), int(port), binding.scheme, binding.base_path)
+        key = (request_host, request_port, scheme or binding.scheme, binding.base_path)
         with _ETCD_V3_PREFIX_CACHE_LOCK:
             cached_prefix = _ETCD_V3_PREFIX_CACHE.get(key)
         suffix = requested_path[len("/v3") :]
@@ -250,13 +257,23 @@ def _http_json_request(
     last_text = ""
     for index, candidate_path in enumerate(candidates):
         candidate_schemes = (
-            (scheme,)
-            if scheme in {"http", "https"}
-            else (("https", "http") if int(port) in {443, 8443} else ("http", "https"))
+            (str(scheme),)
+            if (
+                isinstance(lifecycle, _EtcdHttpLifecycle)
+                and lifecycle.origin_resolved
+                and method.upper() not in {"GET", "HEAD"}
+            )
+            else http_scheme_candidates(scheme, request_port, tls_ports=frozenset({443, 8443}))
         )
         response = None
         for candidate_scheme in candidate_schemes:
-            url = build_http_target_url(host, port, candidate_path, default_scheme=str(candidate_scheme))
+            url = build_http_target_url(
+                request_host,
+                request_port,
+                candidate_path,
+                default_scheme=str(candidate_scheme),
+                override_bound_scheme=True,
+            )
             if isinstance(lifecycle, _EtcdHttpLifecycle):
                 response = lifecycle.pool.request(
                     method,
@@ -271,9 +288,17 @@ def _http_json_request(
                 assert client is not None
                 response = client.request(method, url, headers=headers, body=body_bytes, timeout=timeout)
             if response.error is None:
-                scheme = str(candidate_scheme)
+                scheme, request_host, request_port = http_response_origin(
+                    response,
+                    fallback_scheme=str(candidate_scheme),
+                    fallback_host=request_host,
+                    fallback_port=request_port,
+                )
                 if isinstance(lifecycle, _EtcdHttpLifecycle):
                     lifecycle.scheme = scheme
+                    lifecycle.host = request_host
+                    lifecycle.port = request_port
+                    lifecycle.origin_resolved = True
                 break
         assert response is not None
         if response.error:
@@ -1450,6 +1475,8 @@ def _call_audit_etcd_host_with_stage_debug(
     transport_state = _EtcdHttpLifecycle(
         pool=HttpSessionPool(timeout=timeout, insecure=True, proxy=proxy),
         scheme=target_scheme if target_scheme in {"http", "https"} else None,
+        host=str(host),
+        port=int(port),
     )
     _ETCD_HTTP_LOCAL.state = transport_state
     with http_target_context(target_spec, api_prefixes=("/version", "/v2", "/v3", "/v3beta", "/v3alpha")):

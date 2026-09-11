@@ -599,12 +599,13 @@ def test_kubeapi_transient_failure_retries_then_classifies_non_service(
         _kube_options(),
     )
 
-    # /version consumes its two transport attempts, then /api is still
-    # checked once because an endpoint-local failure is not a service verdict.
-    assert calls == 3
+    # /version first switches from the preferred HTTP scheme to HTTPS, then
+    # consumes its configured retry. /api is still checked once because an
+    # endpoint-local failure is not a service verdict.
+    assert calls == 4
     assert len(sleeps) == 1
-    assert record["status"] == "fail"
-    assert record["error"] == "connection refused"
+    assert record["status"] == "not_kubeapi"
+    assert record["error"] is None
 
 
 @pytest.mark.parametrize(

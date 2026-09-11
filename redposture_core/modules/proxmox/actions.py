@@ -17,7 +17,13 @@ from collections.abc import Callable
 from typing import Any
 
 from ...clients import transport
-from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url
+from ...clients.http_api import (
+    HttpApiClient,
+    HttpClientConfig,
+    build_http_target_url,
+    http_response_origin,
+    http_scheme_candidates,
+)
 from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
@@ -53,8 +59,9 @@ _PROXMOX_DEEP_STATUSES = {"token_ok", "weak_default_creds", "insufficient_privil
 _THREAD_LOCAL_HTTP = threading.local()
 
 
-def activate_proxmox_transport(pool: HttpSessionPool | None) -> None:
+def activate_proxmox_transport(pool: HttpSessionPool | None, origin_state: Any | None = None) -> None:
     _THREAD_LOCAL_HTTP.pool = pool
+    _THREAD_LOCAL_HTTP.origin_state = origin_state
 
 
 _SENSITIVE_KEY_TOKENS = (
@@ -216,8 +223,7 @@ def _proxmox_request_once(
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     request_method = str(method or "GET").upper()
     request_body = urllib.parse.urlencode(form or {}, doseq=True).encode("utf-8") if form else None
-    scheme = "https" if use_https else "http"
-    url = build_http_target_url(host, port, f"{_PROXMOX_API_PREFIX}{path}", default_scheme=scheme)
+    requested_scheme = "https" if use_https else "http"
     request_headers = {
         "User-Agent": "RedPosture/1.0",
         "Accept": "application/json,text/plain,*/*",
@@ -226,17 +232,50 @@ def _proxmox_request_once(
     if request_body:
         request_headers["Content-Type"] = "application/x-www-form-urlencoded"
     pool = getattr(_THREAD_LOCAL_HTTP, "pool", None)
+    origin_state = getattr(_THREAD_LOCAL_HTTP, "origin_state", None)
     if isinstance(pool, HttpSessionPool):
-        response = pool.request(
-            request_method,
-            url,
-            headers=request_headers,
-            body=request_body,
-            timeout=timeout,
-            response_size_cap=_MAX_HTTP_BODY_BYTES,
-            replay_safe=request_method in {"GET", "HEAD"},
+        request_host = str(getattr(origin_state, "host", None) or host)
+        request_port = int(getattr(origin_state, "port", None) or port)
+        preferred = str(getattr(origin_state, "scheme", None) or requested_scheme)
+        response = None
+        schemes = (
+            (preferred,)
+            if bool(getattr(origin_state, "origin_resolved", False)) and request_method not in {"GET", "HEAD"}
+            else http_scheme_candidates(preferred, request_port, tls_ports=frozenset({443, 8006}))
         )
+        for scheme in schemes:
+            url = build_http_target_url(
+                request_host,
+                request_port,
+                f"{_PROXMOX_API_PREFIX}{path}",
+                default_scheme=scheme,
+                override_bound_scheme=True,
+            )
+            response = pool.request(
+                request_method,
+                url,
+                headers=request_headers,
+                body=request_body,
+                timeout=timeout,
+                response_size_cap=_MAX_HTTP_BODY_BYTES,
+                replay_safe=request_method in {"GET", "HEAD"},
+            )
+            if response.error is None:
+                effective_scheme, effective_host, effective_port = http_response_origin(
+                    response,
+                    fallback_scheme=scheme,
+                    fallback_host=request_host,
+                    fallback_port=request_port,
+                )
+                if origin_state is not None:
+                    origin_state.scheme = effective_scheme
+                    origin_state.host = effective_host
+                    origin_state.port = effective_port
+                    origin_state.origin_resolved = True
+                break
+        assert response is not None
     else:
+        url = build_http_target_url(host, port, f"{_PROXMOX_API_PREFIX}{path}", default_scheme=requested_scheme)
         response = HttpApiClient(
             HttpClientConfig(
                 timeout=timeout,

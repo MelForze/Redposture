@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...clients.airflow_api import AirflowClient, AirflowResponse
+from ...clients.http_api import http_response_origin, http_scheme_candidates
 from ...clients.http_session import HttpSessionPool
 from .types import AirflowDetection, AnonymousResult, CredentialResult, RoleCapability
 
@@ -206,10 +207,8 @@ class AirflowLifecycleState:
         self.port = int(port)
         if scheme not in {None, "http", "https"}:
             raise ValueError("airflow supports HTTP/HTTPS targets only")
-        # An explicit scheme from the target URL is authoritative: never probed,
-        # never flipped. Without one, `resolve_scheme` probes from the port guess.
-        self.explicit_scheme: str | None = scheme
-        self.resolved_scheme: str | None = scheme
+        self.preferred_scheme: str | None = scheme
+        self.resolved_scheme: str | None = None
         self.bearer_token: str | None = None
         self.pool = HttpSessionPool(
             timeout=float(getattr(args, "timeout", 5.0) or 5.0),
@@ -222,19 +221,29 @@ class AirflowLifecycleState:
         return client.get(_ENDPOINTS["v2"]["version"], authed=False)
 
     def resolve_scheme(self) -> str:
-        """Return the transport scheme, honoring an explicit target scheme and
-        otherwise probing once from the port heuristic (flipped on a transport
-        mismatch or a plaintext ``400`` whose body says the server expected TLS)."""
+        """Resolve and retain the effective origin used by the Airflow API."""
         if self.resolved_scheme is not None:
             return self.resolved_scheme
-        guess = "https" if self.port in {443, 8443} else "http"
-        resp = self._probe_scheme(guess)
-        mismatch = bool(resp.transport_error and _transport_mismatch(guess, resp.transport_error))
-        tls_required = guess == "http" and resp.http_status == 400 and b"https" in (resp.body or b"").lower()
-        if mismatch or tls_required:
-            guess = "http" if guess == "https" else "https"
-        self.resolved_scheme = guess
-        return guess
+        candidates = http_scheme_candidates(self.preferred_scheme, self.port, tls_ports=frozenset({443, 8443}))
+        selected = candidates[0]
+        for index, candidate in enumerate(candidates):
+            resp = self._probe_scheme(candidate)
+            mismatch = bool(resp.transport_error and _transport_mismatch(candidate, resp.transport_error))
+            tls_required = candidate == "http" and resp.http_status == 400 and b"https" in (resp.body or b"").lower()
+            selected = candidate
+            if resp.transport_error and not mismatch and index == 0:
+                continue
+            if mismatch or tls_required:
+                continue
+            selected, self.host, self.port = http_response_origin(
+                resp,
+                fallback_scheme=candidate,
+                fallback_host=self.host,
+                fallback_port=self.port,
+            )
+            break
+        self.resolved_scheme = selected
+        return selected
 
     def close(self) -> None:
         self.pool.close()
@@ -267,14 +276,18 @@ def _client_for(
     if isinstance(state, AirflowLifecycleState):
         scheme = state.resolve_scheme()
         pool = state.pool
+        host = state.host
+        port = state.port
     else:
         scheme = "https" if int(ctx.port) in {443, 8443} else "http"
         pool = HttpSessionPool(timeout=float(getattr(ctx.args, "timeout", 5.0) or 5.0), insecure=True)
+        host = str(ctx.host)
+        port = int(ctx.port)
     return AirflowClient(
         pool,
         scheme=scheme,
-        host=str(ctx.host),
-        port=int(ctx.port),
+        host=host,
+        port=port,
         basic_user=basic_user,
         basic_password=basic_password,
         bearer_token=bearer_token,

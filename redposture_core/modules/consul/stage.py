@@ -109,7 +109,7 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
             strict_scheme = True
         elif target_scheme in {"http", "https"}:
             preferred_scheme = target_scheme
-            strict_scheme = True
+            strict_scheme = False
         else:
             preferred_scheme = None
             strict_scheme = False
@@ -120,6 +120,8 @@ def build_consul_spec(args: Any) -> ModuleAuditSpec:
             client_key=getattr(args, "tls_key", None),
             preferred_scheme=preferred_scheme,
             strict_scheme=strict_scheme,
+            host=str(ctx.host),
+            port=int(ctx.port),
             http=HttpSessionPool(
                 timeout=float(getattr(args, "timeout", 1.0)),
                 insecure=bool(getattr(args, "insecure", False)),

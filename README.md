@@ -311,7 +311,8 @@ redposture keeper -t 127.0.0.1 --port 19281 --insecure --show-znodes 10 --dump 1
 HTTP audit modules and exporter discovery/collection follow redirects across
 schemes, hosts and ports, retaining supplied credentials. This is intentional
 for operator-controlled audits. Redirect chains are bounded; TLS verification
-continues to use the configured settings.
+continues to use the configured settings. A scheme in a target URL selects the
+first attempt; after discovery, later checks reuse the redirect's final origin.
 
 ## License
 

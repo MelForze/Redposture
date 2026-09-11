@@ -85,28 +85,78 @@ def test_console_is_visible_without_s3_credential_attempts(monkeypatch):
     assert not any(headers.get("Authorization") for _, headers in pool.calls)
 
 
-@pytest.mark.parametrize("module", ["minio", "rabbitmq"])
-def test_explicit_http_is_not_overridden_by_tls_port(monkeypatch, module):
-    actions = minio_actions if module == "minio" else rabbit_actions
-    pool = DetectionPool(module)
-    monkeypatch.setattr(actions, "HttpSessionPool", lambda **kwargs: pool)
+def test_minio_defcreds_continue_on_https_after_explicit_http_redirect(monkeypatch):
+    class RedirectingMinioPool(DetectionPool):
+        def __init__(self):
+            super().__init__("minio")
+
+        def request(self, method, url, **kwargs):
+            headers = kwargs.get("headers", {})
+            self.calls.append((url, headers))
+            parsed = urlsplit(url)
+            if parsed.scheme == "http":
+                return HttpResponse(
+                    200,
+                    b"<html><title>MinIO Console</title></html>",
+                    {},
+                    request_url=url,
+                    final_url=f"https://{parsed.netloc}/",
+                    redirect_history=(url,),
+                )
+            if parsed.path == "/minio/health/live":
+                return HttpResponse(200, b"", {})
+            authorization = str(headers.get("Authorization") or "")
+            if parsed.path == "/" and authorization:
+                if "Credential=minioadmin/" in authorization:
+                    return HttpResponse(200, b"<ListAllMyBucketsResult><Buckets/></ListAllMyBucketsResult>", {})
+                return HttpResponse(403, b"<Error><Code>InvalidAccessKeyId</Code></Error>", {"Server": "MinIO"})
+            return HttpResponse(403, b"<Error><Code>AccessDenied</Code></Error>", {"Server": "MinIO"})
+
+    pool = RedirectingMinioPool()
+    monkeypatch.setattr(minio_actions, "HttpSessionPool", lambda **kwargs: pool)
+    args = parse_args(["minio", "-t", "http://host:8083", "--defcreds"])
+    lines: list[str] = []
+    result = AuditCommandRunner(args=args, spec=minio_stage.build_minio_spec(args), emit_line=lines.append).run_plan(
+        minio_stage.build_minio_plan(args)
+    )
+
+    assert result.detected_count == 1
+    record = result.records[0]
+    assert record["api_endpoint"] == "https://host:8083"
+    assert record["credential_state"] == "valid"
+    assert record["default_credentials"] is True
+    assert any("[+] minioadmin:minioadmin" in line for line in lines)
+    assert not any("credential verification unavailable" in line for line in lines)
+    assert [urlsplit(url).scheme for url, _headers in pool.calls].count("http") == 1
+
+
+def test_minio_explicit_http_upgrades_when_endpoint_requires_tls(monkeypatch):
+    pool = DetectionPool("minio")
+    monkeypatch.setattr(minio_actions, "HttpSessionPool", lambda **kwargs: pool)
     ctx = SimpleNamespace(
         args=SimpleNamespace(timeout=1, retries=0),
         host="host",
         port=443,
         target=SimpleNamespace(scheme="http", path=""),
     )
-    # One variable holds either lifecycle type across the two branches.
-    state: object
-    if module == "minio":
-        state = minio_actions.minio_lifecycle_state_factory(ctx)
-        assert state.resolve_scheme() == "http"
-        assert not pool.calls
-    else:
-        state = rabbit_actions.RabbitMQLifecycleState(ctx)
-        state.resolve()
-        assert state.scheme == "http"
-        assert len(pool.calls) == 1
+    state = minio_actions.minio_lifecycle_state_factory(ctx)
+    assert state.resolve_scheme() == "https"
+    assert [urlsplit(url).scheme for url, _headers in pool.calls] == ["http"]
+
+
+def test_rabbitmq_explicit_http_upgrades_when_endpoint_requires_tls(monkeypatch):
+    pool = DetectionPool("rabbitmq")
+    monkeypatch.setattr(rabbit_actions, "HttpSessionPool", lambda **kwargs: pool)
+    ctx = SimpleNamespace(
+        args=SimpleNamespace(timeout=1, retries=0),
+        host="host",
+        port=443,
+        target=SimpleNamespace(scheme="http", path=""),
+    )
+    state = rabbit_actions.RabbitMQLifecycleState(ctx)
+    state.resolve()
+    assert state.scheme == "https"
+    assert len(pool.calls) == 2
 
 
 @pytest.mark.parametrize("path", ["/rabbit/api/overview", "/rabbit/api/", "/rabbit/index.html", "/rabbit/"])

@@ -18,7 +18,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ...clients.http_api import HttpApiClient, HttpClientConfig, format_http_authority
+from ...clients.http_api import HttpApiClient, HttpClientConfig, format_http_authority, http_response_origin
 from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
@@ -54,6 +54,7 @@ _THREAD_LOCAL_LIFECYCLE = threading.local()
 @dataclass
 class ConsulLifecycleState:
     scheme: str | None = None
+    origin_scheme: str | None = None
     insecure: bool = False
     tls_auto_insecure: bool = False
     leader: str | None = None
@@ -70,6 +71,8 @@ class ConsulLifecycleState:
     preferred_scheme: str | None = None
     strict_scheme: bool = False
     http: HttpSessionPool | None = None
+    host: str | None = None
+    port: int | None = None
 
     def close(self) -> None:
         if self.http is not None:
@@ -171,6 +174,14 @@ def _http_request(
     body: bytes | None = None,
 ) -> tuple[int, bytes, dict[str, str], str | None]:
     scheme = "https" if use_https else "http"
+    replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
+    if isinstance(replay, ConsulLifecycleState):
+        host = replay.host or str(host)
+        port = replay.port or int(port)
+        effective_state_scheme = replay.origin_scheme or replay.scheme
+        if effective_state_scheme in {"http", "https"}:
+            scheme = effective_state_scheme
+            use_https = scheme == "https"
     parsed_path = urllib.parse.urlsplit(path)
     url = urllib.parse.urlunsplit(
         (scheme, format_http_authority(host, port), parsed_path.path or "/", parsed_path.query, "")
@@ -181,7 +192,6 @@ def _http_request(
     }
     if headers:
         request_headers.update(headers)
-    replay = getattr(_THREAD_LOCAL_LIFECYCLE, "state", None)
     ca_file = replay.ca_file if use_https and isinstance(replay, ConsulLifecycleState) else None
     client_cert = replay.client_cert if use_https and isinstance(replay, ConsulLifecycleState) else None
     client_key = replay.client_key if use_https and isinstance(replay, ConsulLifecycleState) else None
@@ -209,6 +219,13 @@ def _http_request(
         ).request(method, url, headers=request_headers, body=body, timeout=timeout)
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
+    if isinstance(replay, ConsulLifecycleState):
+        replay.origin_scheme, replay.host, replay.port = http_response_origin(
+            response,
+            fallback_scheme=scheme,
+            fallback_host=host,
+            fallback_port=port,
+        )
     return int(response.status), response.body, {str(k).lower(): str(v) for k, v in response.headers.items()}, None
 
 
@@ -338,6 +355,14 @@ def _probe_consul_scheme(
     last_error: str | None = None
 
     for scheme in preferred_schemes:
+        if isinstance(replay, ConsulLifecycleState):
+            # A syntactically valid response is not yet proof of Consul. Reset
+            # the candidate origin until the service-specific payload checks
+            # below accept it; redirects reached by this candidate may then
+            # replace these values.
+            replay.origin_scheme = scheme
+            replay.host = str(host)
+            replay.port = int(port)
         status, payload, response_headers, error, effective_insecure, tls_auto = _request_with_tls_fallback(
             host,
             port,
@@ -366,9 +391,12 @@ def _probe_consul_scheme(
                 _looks_like_consul_peers_payload(peer_status, peer_payload)
                 or _has_consul_response_marker(peer_headers, peer_payload)
             ):
+                effective_scheme = scheme
+                if isinstance(replay, ConsulLifecycleState) and replay.origin_scheme:
+                    effective_scheme = replay.origin_scheme
                 return (
                     True,
-                    scheme,
+                    effective_scheme,
                     peer_insecure,
                     tls_auto or peer_tls_auto,
                     _parse_consul_leader(payload),
@@ -378,7 +406,10 @@ def _probe_consul_scheme(
             continue
         if status in {401, 403}:
             if _has_consul_response_marker(response_headers, payload):
-                return True, scheme, effective_insecure, tls_auto, None, None
+                effective_scheme = scheme
+                if isinstance(replay, ConsulLifecycleState) and replay.origin_scheme:
+                    effective_scheme = replay.origin_scheme
+                return True, effective_scheme, effective_insecure, tls_auto, None, None
         if status not in {404, 400}:
             last_error = f"unexpected status={status}"
 

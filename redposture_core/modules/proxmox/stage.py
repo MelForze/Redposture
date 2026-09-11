@@ -39,6 +39,10 @@ class _ProxmoxLifecycleState:
     resolved_auth: tuple[dict[str, str], str, str | None, str | None, list[dict[str, str]]] | None = None
     deep_record: AuditRecord | None = None
     http: HttpSessionPool | None = None
+    scheme: str | None = None
+    host: str | None = None
+    port: int | None = None
+    origin_resolved: bool = False
 
     def close(self) -> None:
         if self.http is not None:
@@ -55,18 +59,28 @@ def build_proxmox_plan(args: Any) -> AuditCommandPlan:
 
 
 def _proxmox_lifecycle_state_factory(ctx: AuditHookContext) -> _ProxmoxLifecycleState:
+    target_scheme = str(getattr(ctx.target, "scheme", "") or "").lower() if ctx.target is not None else ""
     return _ProxmoxLifecycleState(
         http=HttpSessionPool(
             timeout=float(getattr(ctx.args, "timeout", 1.0)),
             insecure=bool(getattr(ctx.args, "insecure", False)),
             proxy=_proxmox_proxy(ctx.args),
-        )
+        ),
+        scheme=(
+            target_scheme
+            if target_scheme in {"http", "https"}
+            else "https"
+            if bool(getattr(ctx.args, "https", True))
+            else "http"
+        ),
+        host=str(ctx.host),
+        port=int(ctx.port),
     )
 
 
 def _activate_transport(ctx: AuditHookContext) -> None:
     state = ctx.lifecycle_state if isinstance(ctx.lifecycle_state, _ProxmoxLifecycleState) else None
-    actions.activate_proxmox_transport(state.http if state is not None else None)
+    actions.activate_proxmox_transport(state.http if state is not None else None, state)
 
 
 def _proxmox_record(payload: AuditRecord | dict[str, Any]) -> AuditRecord:
@@ -101,6 +115,9 @@ def _proxmox_host_stage_is_replaced() -> bool:
 
 
 def _proxmox_use_https(ctx: AuditHookContext) -> bool:
+    state = ctx.lifecycle_state if isinstance(ctx.lifecycle_state, _ProxmoxLifecycleState) else None
+    if state is not None and state.scheme in {"http", "https"}:
+        return state.scheme == "https"
     target_scheme = str(ctx.target.scheme or "").lower() if ctx.target is not None else ""
     if target_scheme in {"http", "https"}:
         return target_scheme == "https"
@@ -182,6 +199,7 @@ def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
         proxy=_proxmox_proxy(ctx.args),
         auth_headers={},
     )
+    use_https = _proxmox_use_https(ctx)
     detected = actions._looks_like_proxmox_response(status, payload, response_headers)
     if error:
         record_status = "fail"
@@ -341,6 +359,7 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
             proxy=_proxmox_proxy(ctx.args),
             auth_headers=auth_headers,
         )
+        payload["use_https"] = _proxmox_use_https(ctx)
         error_message = token_error or actions._extract_error_message(token_payload)
         if status not in {200, 403}:
             payload.update(
@@ -403,6 +422,7 @@ def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRec
         insecure=bool(getattr(ctx.args, "insecure", False)),
         proxy=_proxmox_proxy(ctx.args),
     )
+    payload["use_https"] = _proxmox_use_https(ctx)
     attempt = {
         "username": username,
         "password": password,

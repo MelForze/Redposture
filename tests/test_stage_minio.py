@@ -104,6 +104,102 @@ def test_resolve_scheme_flips_on_mismatch_and_caches(monkeypatch: pytest.MonkeyP
     state.close()
 
 
+def test_explicit_http_target_caches_https_redirect(monkeypatch: pytest.MonkeyPatch):
+    state = actions.MinioLifecycleState(_fake_args(), "10.0.0.9", 9000, scheme="http")
+    calls: list[str] = []
+
+    def fake_probe(scheme: str) -> MinioResponse:
+        calls.append(scheme)
+        return MinioResponse(
+            http_status=200,
+            headers={},
+            body=b"<html><title>MinIO Console</title></html>",
+            request_url="http://10.0.0.9:9000/",
+            final_url="https://storage.internal:9443/console/",
+            redirect_history=("http://10.0.0.9:9000/",),
+        )
+
+    monkeypatch.setattr(state, "_probe", fake_probe)
+    assert state.resolve_scheme() == "https"
+    assert state.resolve_scheme() == "https"
+    assert state.resolved_host == "storage.internal"
+    assert state.resolved_port == 9443
+    client = actions._client_for(
+        SimpleNamespace(
+            args=_fake_args(),
+            host="10.0.0.9",
+            port=9000,
+            lifecycle_state=state,
+        ),
+        SimpleNamespace(username="AK", password="SK"),
+    )
+    assert client.base_url == "https://storage.internal:9443"
+    assert calls == ["http"]
+    state.close()
+
+
+def test_console_on_http_upgrades_when_https_is_s3(monkeypatch: pytest.MonkeyPatch):
+    state = actions.MinioLifecycleState(_fake_args(), "10.0.0.9", 9000, scheme="http")
+    calls: list[str] = []
+
+    def fake_probe(scheme: str) -> MinioResponse:
+        calls.append(scheme)
+        if scheme == "http":
+            return MinioResponse(
+                http_status=200,
+                headers={},
+                body=b"<html><title>MinIO Console</title></html>",
+            )
+        return MinioResponse(
+            http_status=403,
+            headers={"Server": "MinIO"},
+            body=b"<Error><Code>AccessDenied</Code></Error>",
+        )
+
+    monkeypatch.setattr(state, "_probe", fake_probe)
+    assert state.resolve_scheme() == "https"
+    assert calls == ["http", "https"]
+    state.close()
+
+
+def test_auth_retries_ambiguous_http_verification_on_https(monkeypatch: pytest.MonkeyPatch):
+    state = actions.MinioLifecycleState(_fake_args(), "10.0.0.9", 9000, scheme="http")
+    probes: list[str] = []
+    verified_schemes: list[str] = []
+
+    def fake_probe(scheme: str) -> MinioResponse:
+        probes.append(scheme)
+        return MinioResponse(
+            http_status=403,
+            headers={"Server": "MinIO"},
+            body=b"<Error><Code>AccessDenied</Code></Error>",
+        )
+
+    def fake_verify(client: actions.MinioClient) -> CredentialResult:
+        scheme = str(client.scheme)
+        verified_schemes.append(scheme)
+        if scheme == "http":
+            return CredentialResult(state="verification_unavailable", access_key="AK")
+        return CredentialResult(state="valid", access_key="AK")
+
+    monkeypatch.setattr(state, "_probe", fake_probe)
+    monkeypatch.setattr(actions, "verify_credential", fake_verify)
+    ctx = SimpleNamespace(
+        args=_fake_args(),
+        host="10.0.0.9",
+        port=9000,
+        credential=SimpleNamespace(username="AK", password="SK", source="default"),
+        lifecycle_state=state,
+    )
+    record = actions.auth_record(ctx, {"detection_status": "confirmed", "auth_required": True})
+    assert record["credential_state"] == "valid"
+    assert record["provided_credentials_ok"] is True
+    assert record["default_credentials"] is True
+    assert probes == ["http", "https"]
+    assert verified_schemes == ["http", "https"]
+    state.close()
+
+
 def test_resolve_scheme_keeps_guess_when_no_mismatch(monkeypatch: pytest.MonkeyPatch):
     state = actions.MinioLifecycleState(_fake_args(), "10.0.0.9", 443)  # TLS-port heuristic -> https
     monkeypatch.setattr(state, "_probe", lambda scheme: MinioResponse(http_status=200, headers={}, body=b""))

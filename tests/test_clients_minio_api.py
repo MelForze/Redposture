@@ -26,11 +26,14 @@ class _FakePool:
 
 
 class _FakeResponse:
-    def __init__(self, status, body, headers):
+    def __init__(self, status, body, headers, *, request_url=None, final_url=None, redirect_history=()):
         self.status = status
         self.body = body
         self.headers = headers
         self.error = None
+        self.request_url = request_url
+        self.final_url = final_url
+        self.redirect_history = redirect_history
 
 
 _ACCESS_DENIED_XML = (
@@ -46,6 +49,25 @@ def test_get_service_root_parses_s3_error_code():
     assert resp.error is not None
     assert resp.error.code == "AccessDenied"
     assert pool.calls[0]["url"] == "http://10.0.0.5:9000/"
+
+
+def test_response_preserves_redirect_destination():
+    class _RedirectPool:
+        def request(self, *args, **kwargs):
+            return _FakeResponse(
+                403,
+                _ACCESS_DENIED_XML,
+                {"Server": "MinIO"},
+                request_url="http://h:9000/",
+                final_url="https://h:9000/",
+                redirect_history=("http://h:9000/",),
+            )
+
+    client = minio_api.MinioClient(_RedirectPool(), scheme="http", host="h", port=9000)
+    resp = client.get_service_root(signed=False)
+    assert resp.request_url == "http://h:9000/"
+    assert resp.final_url == "https://h:9000/"
+    assert resp.redirect_history == ("http://h:9000/",)
 
 
 def test_signed_request_attaches_authorization_header():
