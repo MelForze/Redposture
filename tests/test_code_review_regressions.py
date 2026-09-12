@@ -533,6 +533,50 @@ def test_fix2_scheme_resolver_falls_back_to_https_on_tls_error(
     assert scheme == "https"
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"Client sent an HTTP request to an HTTPS server",
+        b"Client sent an HTTP request to an HTTPS server.",
+        b"  CLIENT SENT AN HTTP REQUEST TO AN HTTPS SERVER.\n",
+    ],
+)
+def test_scheme_resolver_falls_back_on_explicit_https_required_response(
+    monkeypatch: pytest.MonkeyPatch,
+    body: bytes,
+) -> None:
+    from redposture_core.clients import http_api
+
+    http_api._SCHEME_CACHE.clear()
+    tried: list[str] = []
+
+    class _FakeResponse:
+        def __init__(self, status: int, payload: bytes) -> None:
+            self.error = None
+            self.status = status
+            self.body = payload
+            self.headers = {}
+
+    def _fake_request(self, method, url, **_kw):  # noqa: ARG001
+        tried.append(url)
+        if url.startswith("http://"):
+            return _FakeResponse(400, body)
+        return _FakeResponse(200, b"{}")
+
+    monkeypatch.setattr(http_api.HttpApiClient, "request", _fake_request)
+
+    assert http_api.resolve_http_scheme("tls-required.example.com", 5000, timeout=1.0) == "https"
+    assert [url.split(":", 1)[0] for url in tried] == ["http", "https"]
+
+
+def test_https_required_response_classifier_is_strict() -> None:
+    from redposture_core.clients.http_api import http_response_requires_https
+
+    assert http_response_requires_https(400, b"Client sent an HTTP request to an HTTPS server.") is True
+    assert http_response_requires_https(200, b"Client sent an HTTP request to an HTTPS server.") is False
+    assert http_response_requires_https(400, b"See https://docs.example.test for help") is False
+
+
 def test_fix2_scheme_resolver_memoizes_per_host_port(monkeypatch: pytest.MonkeyPatch) -> None:
     from redposture_core.clients import http_api
 

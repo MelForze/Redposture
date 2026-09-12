@@ -210,6 +210,22 @@ def http_response_origin(
     return str(fallback_scheme), str(fallback_host), int(fallback_port)
 
 
+_HTTPS_REQUIRED_RESPONSE = "client sent an http request to an https server"
+
+
+def http_response_requires_https(status: int, body: bytes | str | None) -> bool:
+    """Return whether a plaintext HTTP 400 response explicitly requires HTTPS."""
+
+    if int(status) != 400:
+        return False
+    if isinstance(body, bytes):
+        text = body.decode("utf-8", errors="replace")
+    else:
+        text = str(body or "")
+    normalized = text.strip().removesuffix(".").strip().casefold()
+    return normalized == _HTTPS_REQUIRED_RESPONSE
+
+
 def _url_origin(url: str) -> tuple[str, str, int | None]:
     parsed = urllib.parse.urlsplit(str(url or ""))
     scheme = parsed.scheme.lower()
@@ -825,6 +841,7 @@ __all__ = [
     "current_http_target_binding",
     "format_http_authority",
     "http_response_origin",
+    "http_response_requires_https",
     "http_scheme_candidates",
     "http_target_context",
     "infer_http_base_path",
@@ -904,6 +921,8 @@ def resolve_http_scheme(
             return False, str(exc)
         if response.error:
             return False, response.error
+        if scheme == "http" and http_response_requires_https(response.status, response.body):
+            return False, _HTTPS_REQUIRED_RESPONSE
         return True, ""
 
     for scheme in order:

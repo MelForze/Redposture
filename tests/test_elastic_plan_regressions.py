@@ -463,7 +463,7 @@ def test_auth_200_with_different_identity_is_not_a_valid_credential(
 @pytest.mark.parametrize(
     ("debug", "output_format", "expected_fragment"),
     [
-        (False, "txt", "No ELASTIC service detected"),
+        (False, "txt", "ELASTIC audit inconclusive"),
         (True, "txt", "connection failed"),
         (False, "json", '"transport_errors"'),
     ],

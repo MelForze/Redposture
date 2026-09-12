@@ -20,6 +20,7 @@ from ...clients.http_api import (
     HttpClientConfig,
     build_http_target_url,
     http_response_origin,
+    http_response_requires_https,
     http_scheme_candidates,
     resolve_http_scheme,
 )
@@ -146,8 +147,8 @@ def _http_request(
         request_host = state.host or str(host)
         request_port = state.port or int(port)
         schemes = (
-            (str(state.scheme),)
-            if state.origin_resolved and method.upper() not in {"GET", "HEAD"}
+            (str(state.scheme or ("https" if request_port in {443, 8443} else "http")),)
+            if method.upper() not in {"GET", "HEAD"}
             else http_scheme_candidates(state.scheme, request_port, tls_ports=frozenset({443, 8443}))
         )
         response = None
@@ -167,7 +168,12 @@ def _http_request(
                 timeout=timeout,
                 response_size_cap=cap,
             )
-            if response.error is None:
+            if response.error is None and not (
+                scheme == "http"
+                and http_response_requires_https(
+                    response.status, getattr(response, "body", getattr(response, "text", ""))
+                )
+            ):
                 state.scheme, state.host, state.port = http_response_origin(
                     response,
                     fallback_scheme=str(scheme),

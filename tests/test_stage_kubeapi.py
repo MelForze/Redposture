@@ -367,8 +367,8 @@ def test_kubeapi_auth_required_skips_requested_anonymous_resource_probes(
         assert pod_calls == [True]
         assert secret_calls == [True]
         assert exec_calls == [True]
-        assert any("auth required:False" in line for line in lines)
-        assert not any("anonymous access:limited" in line for line in lines)
+        assert any("anonymous access:limited" in line for line in lines)
+        assert not any("auth required:False" in line for line in lines)
         assert any("Namespaces" in line for line in lines)
         assert any("namespaces unavailable: anonymous access denied" in line for line in lines)
         assert not any("system:anonymous" in line for line in lines)
@@ -425,6 +425,22 @@ def test_kubeapi_resource_access_denials_are_short_normally_and_detailed_in_debu
     authenticated_lines = kube._format_detail_records(authenticated_record, "txt")
     assert any("pods unavailable: access denied" in line for line in authenticated_lines)
     assert not any("anonymous access denied" in line for line in authenticated_lines)
+
+
+def test_anonymous_limited_json_keeps_auth_and_access_fields() -> None:
+    record = {
+        "host": "127.0.0.1",
+        "port": 6443,
+        "status": "anonymous_limited",
+        "version": "v1.27.5",
+        "auth_required": False,
+        "anonymous_access": "limited",
+    }
+
+    rendered = json.loads(kube._format_detect_record(record, "json"))
+
+    assert rendered["auth_required"] is False
+    assert rendered["anonymous_access"] == "limited"
 
 
 def test_audit_kubeapi_targets_json_output_is_machine_readable(monkeypatch, tmp_path) -> None:

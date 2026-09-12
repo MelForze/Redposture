@@ -894,6 +894,12 @@ def test_classify_ssl_error_maps_common_openssl_verdicts() -> None:
         == "peer requires client certificate (mTLS) — need --tls-cert to proceed"
     )
     assert (
+        kafka._classify_ssl_error(
+            _mk("[SSL: TLSV13_ALERT_CERTIFICATE_REQUIRED] tlsv13 alert certificate required (_ssl.c:2546)")
+        )
+        == "peer requires client certificate (mTLS) — need --tls-cert to proceed"
+    )
+    assert (
         kafka._classify_ssl_error(_mk("[SSL: SSLV3_ALERT_HANDSHAKE_FAILURE] handshake failure (_ssl.c:992)"))
         == "peer rejected TLS handshake (cipher/protocol mismatch or client auth required)"
     )

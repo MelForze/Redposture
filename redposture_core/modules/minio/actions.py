@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
+from ...clients.http_api import http_response_requires_https
 from ...clients.http_session import HttpSessionPool
 from ...clients.minio_api import MinioClient, MinioResponse
 from .types import AdminCapability, AnonymousResult, CredentialResult, MinioDetection
@@ -448,7 +449,7 @@ class MinioLifecycleState:
         resp = self._probe(guess)
         final_scheme = self._remember_final_origin(resp)
         mismatch = bool(resp.transport_error and _transport_mismatch(guess, resp.transport_error))
-        tls_required = guess == "http" and resp.http_status == 400 and b"https" in (resp.body or b"").lower()
+        tls_required = guess == "http" and http_response_requires_https(resp.http_status, resp.body)
         if final_scheme in {"http", "https"} and final_scheme != guess:
             guess = final_scheme
         elif mismatch or tls_required:

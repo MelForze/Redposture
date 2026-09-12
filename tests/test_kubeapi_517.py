@@ -175,6 +175,47 @@ def test_anonymous_access_classification(
     assert record["status"] == expected_status
 
 
+def test_detected_kubeapi_locks_resolved_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _ctx()
+    monkeypatch.setattr(
+        kube,
+        "_lifecycle_get_json_with_retries",
+        lambda *_args, **_kwargs: (200, {"major": "1", "minor": "27", "gitVersion": "v1.27.5"}, {}, None),
+    )
+    monkeypatch.setattr(kube, "_probe_namespace_access", lambda *_args, **_kwargs: (False, 403, "Forbidden"))
+
+    record = kube.detect_kubeapi(ctx, _options())
+
+    assert record["status"] == "anonymous_limited"
+    assert ctx.lifecycle_state.origin_resolved is True
+
+
+def test_post_transport_error_does_not_switch_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+    ctx = _ctx()
+    state = ctx.lifecycle_state
+    state.use_https = False
+    state.configure_transport(ctx.host, ctx.port, 1.0)
+    calls: list[bool] = []
+
+    def request(*_args: Any, use_https: bool, **_kwargs: Any):
+        calls.append(use_https)
+        return 0, None, {}, "connection reset"
+
+    monkeypatch.setattr(kube, "_api_request_json_with_retries", request)
+
+    kube._lifecycle_request_json_with_retries(
+        ctx,
+        state,
+        "POST",
+        "/apis/authentication.k8s.io/v1/selfsubjectreviews",
+        response_size_cap=1024,
+        json_body={"kind": "SelfSubjectReview"},
+    )
+
+    assert calls == [False]
+    assert state.use_https is False
+
+
 def test_mixed_auth_statuses_confirm_kubeapi_without_namespace_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _ctx()
     calls: list[str] = []

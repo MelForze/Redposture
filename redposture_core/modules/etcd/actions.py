@@ -19,6 +19,7 @@ from ...clients.http_api import (
     build_http_target_url,
     current_http_target_binding,
     http_response_origin,
+    http_response_requires_https,
     http_scheme_candidates,
     http_target_context,
     resolve_http_scheme,
@@ -257,12 +258,8 @@ def _http_json_request(
     last_text = ""
     for index, candidate_path in enumerate(candidates):
         candidate_schemes = (
-            (str(scheme),)
-            if (
-                isinstance(lifecycle, _EtcdHttpLifecycle)
-                and lifecycle.origin_resolved
-                and method.upper() not in {"GET", "HEAD"}
-            )
+            (str(scheme or ("https" if request_port in {443, 8443} else "http")),)
+            if method.upper() not in {"GET", "HEAD"}
             else http_scheme_candidates(scheme, request_port, tls_ports=frozenset({443, 8443}))
         )
         response = None
@@ -287,7 +284,12 @@ def _http_json_request(
             else:
                 assert client is not None
                 response = client.request(method, url, headers=headers, body=body_bytes, timeout=timeout)
-            if response.error is None:
+            if response.error is None and not (
+                candidate_scheme == "http"
+                and http_response_requires_https(
+                    response.status, getattr(response, "body", getattr(response, "text", ""))
+                )
+            ):
                 scheme, request_host, request_port = http_response_origin(
                     response,
                     fallback_scheme=str(candidate_scheme),

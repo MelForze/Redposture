@@ -283,7 +283,16 @@ def _classify_ssl_error(exc: ssl.SSLError) -> str:
         # the TLS layer without an alert. Typical for SNI-firewalls,
         # service meshes, or LBs that vet clients before forwarding.
         return "peer closed TLS handshake without alert (SNI filter / firewall / non-Kafka listener)"
-    if "sslv3_alert_bad_certificate" in text or "bad_certificate" in text:
+    if any(
+        marker in text
+        for marker in (
+            "sslv3_alert_bad_certificate",
+            "bad_certificate",
+            "tlsv13_alert_certificate_required",
+            "certificate_required",
+            "certificate required",
+        )
+    ):
         # Peer requires a client certificate (mutual TLS) and rejected
         # our anonymous handshake. Fine — just not something the audit
         # tool can bypass without --tls-cert.

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...clients.airflow_api import AirflowClient, AirflowResponse
-from ...clients.http_api import http_response_origin, http_scheme_candidates
+from ...clients.http_api import http_response_origin, http_response_requires_https, http_scheme_candidates
 from ...clients.http_session import HttpSessionPool
 from .types import AirflowDetection, AnonymousResult, CredentialResult, RoleCapability
 
@@ -229,7 +229,7 @@ class AirflowLifecycleState:
         for index, candidate in enumerate(candidates):
             resp = self._probe_scheme(candidate)
             mismatch = bool(resp.transport_error and _transport_mismatch(candidate, resp.transport_error))
-            tls_required = candidate == "http" and resp.http_status == 400 and b"https" in (resp.body or b"").lower()
+            tls_required = candidate == "http" and http_response_requires_https(resp.http_status, resp.body)
             selected = candidate
             if resp.transport_error and not mismatch and index == 0:
                 continue

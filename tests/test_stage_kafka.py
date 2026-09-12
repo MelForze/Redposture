@@ -551,7 +551,7 @@ def test_kafka_malformed_frame_failure_does_not_abort_next_target(monkeypatch: p
     )
 
     assert totals == (2, 1, 0, 0, 1)
-    assert any("invalid Kafka frame size 1213486160" in line for line in emitted)
+    assert not any("invalid Kafka frame size 1213486160" in line for line in emitted)
     assert any("Kafka Broker (auth required:False)" in line and "\tok\t" in line for line in emitted)
     assert not any("[+] anonymous access" in line for line in emitted)
 

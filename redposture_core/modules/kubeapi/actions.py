@@ -24,6 +24,7 @@ from ...clients.http_api import (
     build_http_target_url,
     format_http_authority,
     http_response_origin,
+    http_response_requires_https,
     join_http_target_path,
 )
 from ...clients.http_session import HttpSessionPool
@@ -44,6 +45,7 @@ _KUBE_DATA_RESPONSE_CAP = 10 * 1024 * 1024
 _KUBE_WS_READ_TIMEOUT = 3.0
 _KUBE_WS_HANDSHAKE_TIMEOUT = 5.0
 _KUBE_EFFECTIVE_URL_HEADER = "__redposture_effective_url__"
+_KUBE_HTTPS_REQUIRED_ERROR = "server requires HTTPS"
 _CONNECTION_TIMEOUT_PREFIX = "connection timeout"
 _CONNECTION_REFUSED_PREFIX = "connection refused"
 
@@ -298,7 +300,7 @@ def _http_request(
         request_kwargs["response_size_cap"] = int(response_size_cap)
     response = request_client.request(method, url, **request_kwargs)
     response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
-    if client is not None and response.final_url:
+    if client is not None and response.final_url and bool(getattr(response, "redirected", False)):
         response_headers[_KUBE_EFFECTIVE_URL_HEADER] = response.final_url
     if response.error:
         return 0, b"", {}, _friendly_error_text(response.error)
@@ -386,6 +388,8 @@ def _api_request_json(
     )
     if error:
         return status, None, headers, error
+    if not use_https and method.upper() in {"GET", "HEAD"} and http_response_requires_https(status, payload):
+        return status, None, headers, _KUBE_HTTPS_REQUIRED_ERROR
     if not payload:
         return status, None, headers, None
     try:
@@ -408,6 +412,7 @@ def _is_retryable_request_error(error: str | None) -> bool:
         "cross-origin redirect blocked",
         "too many redirects",
         "invalid kubernetes",
+        _KUBE_HTTPS_REQUIRED_ERROR.casefold(),
     )
     return not text.startswith(deterministic)
 
@@ -2385,6 +2390,8 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
 
     version_text = str(record.get("version") or "-")
     auth_required_text = _bool_text(record.get("auth_required"))
+    if str(record.get("anonymous_access") or "") == "limited":
+        return f"{prefix} [*] Kubernetes API (anonymous access:limited) (version:{version_text})"
     return f"{prefix} [*] Kubernetes API (auth required:{auth_required_text}) (version:{version_text})"
 
 
@@ -2637,7 +2644,7 @@ def _lifecycle_get_json_with_retries(
             # TLS fallback retries this endpoint immediately and does not
             # consume the caller's network retry budget.
             continue
-        if error and not scheme_fallback_attempted:
+        if error and not scheme_fallback_attempted and not state.origin_resolved:
             scheme_fallback_attempted = True
             state.switch_scheme()
             continue
@@ -2674,7 +2681,6 @@ def _lifecycle_request_json_with_retries(
     attempts = max(1, int(getattr(ctx.args, "retries", 0) or 0) + 1)
     result: tuple[int, Any, dict[str, str], str | None] = (0, None, {}, "request failed")
     attempt = 0
-    scheme_fallback_attempted = False
     while attempt < attempts:
         result = _api_request_json_with_retries(
             str(state.host or ctx.host),
@@ -2696,10 +2702,6 @@ def _lifecycle_request_json_with_retries(
         _adopt_kubeapi_origin(state, result[2])
         if result[3] and state.use_https and not state.insecure and _is_tls_verify_error(result[3]):
             state.switch_to_insecure()
-            continue
-        if result[3] and not scheme_fallback_attempted and not state.origin_resolved:
-            scheme_fallback_attempted = True
-            state.switch_scheme()
             continue
         if not _is_retryable_request_error(result[3]):
             return result
@@ -2776,6 +2778,8 @@ def detect_kubeapi(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             "elapsed_ms": _elapsed_ms(state),
             "error": last_error,
         }
+
+    state.origin_resolved = True
 
     namespace_access: bool | None
     ns_status: int
@@ -2995,6 +2999,8 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
     data_client = (
         _state_http_client_or_none(state, response_size_cap=_KUBE_DATA_RESPONSE_CAP) if needs_http_data else None
     )
+    request_host = str(state.host or ctx.host)
+    request_port = int(state.port or ctx.port)
     namespaces_out: list[str] = []
     namespaces_error = state.access_namespaces_error
     namespaces_partial = False
@@ -3008,8 +3014,8 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
         if not reuse_denial:
             namespace_result = _coerce_list_result(
                 _list_namespaces(
-                    str(ctx.host),
-                    int(ctx.port),
+                    request_host,
+                    request_port,
                     float(getattr(ctx.args, "timeout", 5.0)),
                     use_https=state.use_https,
                     insecure=state.insecure,
@@ -3034,8 +3040,8 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
     if options["show_pods"] or (options["exec_pod"] and not options["namespace_filters"]):
         pods_result = _coerce_resource_result(
             _list_pods(
-                str(ctx.host),
-                int(ctx.port),
+                request_host,
+                request_port,
                 float(getattr(ctx.args, "timeout", 5.0)),
                 use_https=state.use_https,
                 insecure=state.insecure,
@@ -3055,8 +3061,8 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
     if options["show_secrets"]:
         secrets_result = _coerce_resource_result(
             _list_secrets(
-                str(ctx.host),
-                int(ctx.port),
+                request_host,
+                request_port,
                 float(getattr(ctx.args, "timeout", 5.0)),
                 use_https=state.use_https,
                 insecure=state.insecure,
@@ -3093,8 +3099,8 @@ def collect_kubeapi_data(ctx: Any, source_record: Any, options: dict[str, Any]) 
             }
         else:
             exec_result = _kube_exec_ws(
-                str(ctx.host),
-                int(ctx.port),
+                request_host,
+                request_port,
                 resolved_ns or "",
                 resolved_pod or "",
                 str(options["exec_command"]),

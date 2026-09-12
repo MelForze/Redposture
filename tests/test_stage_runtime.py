@@ -707,6 +707,9 @@ def test_audit_command_runner_large_streaming_plan_uses_windows_and_truncates_re
         default_port=1234,
         detect=detect,
         render=lambda record: [f"{record.host}:{record.port} {record.status}"],
+        # This test exercises streaming/retention rather than the normal
+        # findings-only output policy, so keep every synthetic record visible.
+        suppress_undetected_records_in_text=False,
     )
     plan = AuditCommandPlan(
         target_plan=_TinyLargeTargetPlan(),
@@ -851,6 +854,128 @@ def test_audit_command_runner_suppresses_pre_detect_noise_in_non_debug_txt() -> 
     assert result.records[0]["protocol_error"] == "unexpected EOF"
     assert is_pre_detect_network_noise(result.typed_records[0]) is True
     assert is_pre_detect_operational_failure(result.typed_records[0]) is True
+
+
+def test_default_text_output_suppresses_all_undetected_records_and_keeps_one_summary(tmp_path) -> None:
+    emitted: list[str] = []
+    errors = {
+        "wrong-http": "service is not grafana",
+        "tls-eof": "TLS/SSL connection has been closed (EOF) (_ssl.c:992)",
+        "mtls": ("[SSL: TLSV13_ALERT_CERTIFICATE_REQUIRED] tlsv13 alert certificate required (_ssl.c:2546)"),
+        "ssh": "SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u7",
+    }
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            {
+                "host": ctx.host,
+                "port": ctx.port,
+                "module": "grafana",
+                "service": "grafana",
+                "status": "fail",
+                "is_grafana": False,
+                "error": errors[ctx.host],
+            },
+            module="grafana",
+            service="grafana",
+        )
+
+    spec = ModuleAuditSpec(
+        module="grafana",
+        label="GRAFANA",
+        default_port=3000,
+        detect=detect,
+        render=lambda record: [f"{record.host}: {record.extra.get('error')}"],
+    )
+    output = tmp_path / "grafana.txt"
+    plan = AuditCommandPlan(
+        targets_by_port={3000: tuple(errors)},
+        output_format="txt",
+        output_path=str(output),
+    )
+
+    result = AuditCommandRunner(args=SimpleNamespace(debug=False), spec=spec, emit_line=emitted.append).run_plan(plan)
+
+    assert emitted == [
+        "[!] GRAFANA audit inconclusive: no service confirmed; 2/4 targets unreachable or failed before detection"
+    ]
+    assert output.read_text(encoding="utf-8").splitlines() == emitted
+    assert result.suppressed_records == 4
+    assert result.operational_failure_count == 2
+
+
+def test_undetected_records_remain_visible_in_debug_and_json() -> None:
+    error = "SSH-2.0-OpenSSH_9.2p1 Debian"
+
+    def detect(ctx) -> AuditRecord:
+        return AuditRecord.from_mapping(
+            {
+                "host": ctx.host,
+                "port": ctx.port,
+                "module": "docker",
+                "service": "docker",
+                "status": "not_docker",
+                "is_docker": False,
+                "error": error,
+            },
+            module="docker",
+            service="docker",
+        )
+
+    spec = ModuleAuditSpec(
+        module="docker",
+        label="DOCKER",
+        default_port=2375,
+        detect=detect,
+        render=lambda record: [f"{record.host}: {record.extra.get('error')}"],
+    )
+    plan = AuditCommandPlan(targets_by_port={2375: ("ssh-host",)}, output_format="txt")
+    debug_lines: list[str] = []
+
+    debug_result = AuditCommandRunner(
+        args=SimpleNamespace(debug=True), spec=spec, emit_line=debug_lines.append
+    ).run_plan(plan)
+
+    assert any(error in line for line in debug_lines)
+    assert debug_result.suppressed_records == 0
+
+    json_lines: list[str] = []
+    json_result = AuditCommandRunner(
+        args=SimpleNamespace(debug=False), spec=spec, emit_line=json_lines.append
+    ).run_plan(AuditCommandPlan(targets_by_port={2375: ("ssh-host",)}, output_format="json"))
+
+    assert any(error in line for line in json_lines)
+    assert json_result.suppressed_records == 0
+
+
+def test_module_can_opt_out_of_default_undetected_text_suppression() -> None:
+    error = "connection reset by peer"
+    spec = ModuleAuditSpec(
+        module="demo",
+        label="DEMO",
+        default_port=1234,
+        detect=lambda ctx: AuditRecord(
+            host=ctx.host,
+            port=ctx.port,
+            module="demo",
+            service="demo",
+            status="not_demo",
+            extra={"is_demo": False, "error": error},
+        ),
+        render=lambda record: [str(record.extra.get("error"))],
+        suppress_undetected_records_in_text=False,
+    )
+    emitted: list[str] = []
+
+    result = AuditCommandRunner(args=SimpleNamespace(debug=False), spec=spec, emit_line=emitted.append).run_plan(
+        AuditCommandPlan(targets_by_port={1234: ("host",)}, output_format="txt")
+    )
+
+    assert emitted == [
+        error,
+        "[!] DEMO audit inconclusive: no service confirmed; 1/1 target unreachable or failed before detection",
+    ]
+    assert result.suppressed_records == 0
 
 
 def test_credential_file_targets_are_not_tcp_prefiltered(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:

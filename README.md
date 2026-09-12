@@ -313,6 +313,22 @@ schemes, hosts and ports, retaining supplied credentials. This is intentional
 for operator-controlled audits. Redirect chains are bounded; TLS verification
 continues to use the configured settings. A scheme in a target URL selects the
 first attempt; after discovery, later checks reuse the redirect's final origin.
+During safe `GET`/`HEAD` discovery, an HTTP 400 response whose body is exactly
+`Client sent an HTTP request to an HTTPS server` also selects HTTPS. Discovery
+may accept an untrusted server certificate where the module supports automatic
+TLS detection. The resolved origin is retained before credentials or changing
+requests are sent; `POST` and other changing requests are never replayed to
+select another scheme.
+
+## Audit output
+
+Normal text output is a findings report. Per-target failures before service
+identity is confirmed (wrong service, foreign protocol banners, TLS handshake
+failures, timeouts, and similar discovery noise) are hidden from stdout and
+`-o`; `--debug` shows those diagnostics, while JSON retains the full record for
+every target. If no service is confirmed, the command emits one aggregate
+summary so an empty result is distinguishable from missing output. Errors that
+happen after a service was confirmed remain visible in normal text output.
 
 ## License
 

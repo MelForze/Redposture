@@ -216,6 +216,9 @@ def test_module_record_retention_limit_keeps_counts_and_streaming_output() -> No
             detect=detect,
             render=lambda record: (f"{record.host}:{record.port}",),
             record_retention_limit=1,
+            # This test verifies streaming and retention independently of the
+            # default findings-only text policy.
+            suppress_undetected_records_in_text=False,
         ),
         emit_line=emitted.append,
     )

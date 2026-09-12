@@ -130,6 +130,47 @@ def test_minio_defcreds_continue_on_https_after_explicit_http_redirect(monkeypat
     assert [urlsplit(url).scheme for url, _headers in pool.calls].count("http") == 1
 
 
+def test_minio_defcreds_continue_on_https_after_http_tls_required_response(monkeypatch):
+    class TlsRequiredMinioPool(DetectionPool):
+        def __init__(self):
+            super().__init__("minio")
+
+        def request(self, method, url, **kwargs):
+            headers = kwargs.get("headers", {})
+            self.calls.append((url, headers))
+            parsed = urlsplit(url)
+            if parsed.scheme == "http":
+                return HttpResponse(400, b"Client sent an HTTP request to an HTTPS server.", {})
+            if parsed.path == "/minio/health/live":
+                return HttpResponse(200, b"", {"Server": "MinIO"})
+            authorization = str(headers.get("Authorization") or "")
+            if parsed.path == "/" and authorization:
+                if "Credential=minioadmin/" in authorization:
+                    return HttpResponse(200, b"<ListAllMyBucketsResult><Buckets/></ListAllMyBucketsResult>", {})
+                return HttpResponse(403, b"<Error><Code>InvalidAccessKeyId</Code></Error>", {"Server": "MinIO"})
+            return HttpResponse(403, b"<Error><Code>AccessDenied</Code></Error>", {"Server": "MinIO"})
+
+    pool = TlsRequiredMinioPool()
+    monkeypatch.setattr(minio_actions, "HttpSessionPool", lambda **kwargs: pool)
+    args = parse_args(["minio", "-t", "http://host:8083", "--defcreds"])
+    lines: list[str] = []
+
+    result = AuditCommandRunner(args=args, spec=minio_stage.build_minio_spec(args), emit_line=lines.append).run_plan(
+        minio_stage.build_minio_plan(args)
+    )
+
+    assert result.detected_count == 1
+    record = result.records[0]
+    assert record["api_endpoint"] == "https://host:8083"
+    assert record["credential_state"] == "valid"
+    assert record["default_credentials"] is True
+    assert any("[+] minioadmin:minioadmin" in line for line in lines)
+    assert not any("S3 API:unverified" in line or "credential verification unavailable" in line for line in lines)
+    schemes = [urlsplit(url).scheme for url, _headers in pool.calls]
+    assert schemes[0] == "http"
+    assert all(scheme == "https" for scheme in schemes[1:])
+
+
 def test_minio_explicit_http_upgrades_when_endpoint_requires_tls(monkeypatch):
     pool = DetectionPool("minio")
     monkeypatch.setattr(minio_actions, "HttpSessionPool", lambda **kwargs: pool)

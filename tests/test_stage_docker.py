@@ -271,7 +271,7 @@ def test_auth_required_and_not_docker_branches(monkeypatch: pytest.MonkeyPatch) 
     assert "not Docker Engine API endpoint" in docker_stage._format_record(not_docker, "txt")
 
 
-def test_run_docker_stage_not_service_emits_explicit_line(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+def test_run_docker_stage_not_service_emits_only_summary(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     def not_docker_probe(*_args, **_kwargs):
         return None, None, None, "not Docker Engine API endpoint (status:404)", False
 
@@ -281,7 +281,8 @@ def test_run_docker_stage_not_service_emits_explicit_line(monkeypatch: pytest.Mo
 
     assert rc == 0
     stdout = capsys.readouterr().out
-    assert "not Docker Engine API endpoint" in stdout
+    assert "No DOCKER service detected on target" in stdout
+    assert "not Docker Engine API endpoint" not in stdout
     assert "Docker Engine API (auth required:unknown)" not in stdout
 
 

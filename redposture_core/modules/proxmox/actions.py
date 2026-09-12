@@ -22,6 +22,7 @@ from ...clients.http_api import (
     HttpClientConfig,
     build_http_target_url,
     http_response_origin,
+    http_response_requires_https,
     http_scheme_candidates,
 )
 from ...clients.http_session import HttpSessionPool
@@ -240,7 +241,7 @@ def _proxmox_request_once(
         response = None
         schemes = (
             (preferred,)
-            if bool(getattr(origin_state, "origin_resolved", False)) and request_method not in {"GET", "HEAD"}
+            if request_method not in {"GET", "HEAD"}
             else http_scheme_candidates(preferred, request_port, tls_ports=frozenset({443, 8006}))
         )
         for scheme in schemes:
@@ -260,7 +261,12 @@ def _proxmox_request_once(
                 response_size_cap=_MAX_HTTP_BODY_BYTES,
                 replay_safe=request_method in {"GET", "HEAD"},
             )
-            if response.error is None:
+            if response.error is None and not (
+                scheme == "http"
+                and http_response_requires_https(
+                    response.status, getattr(response, "body", getattr(response, "text", ""))
+                )
+            ):
                 effective_scheme, effective_host, effective_port = http_response_origin(
                     response,
                     fallback_scheme=scheme,

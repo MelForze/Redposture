@@ -11,7 +11,7 @@ from dataclasses import asdict
 from typing import Any
 from urllib.parse import quote
 
-from ...clients.http_api import http_response_origin, http_scheme_candidates
+from ...clients.http_api import http_response_origin, http_response_requires_https, http_scheme_candidates
 from ...clients.http_session import HttpSessionPool
 from ...clients.rabbitmq_api import RabbitMQClient, RabbitMQResponse
 
@@ -94,7 +94,7 @@ class RabbitMQLifecycleState:
                     "record layer failure",
                 )
             )
-            tls_required = scheme == "http" and response.status == 400 and b"https" in response.body.lower()
+            tls_required = scheme == "http" and http_response_requires_https(response.status, response.body)
             if response.error is not None or mismatch or tls_required:
                 continue
             self.scheme, self.host, self.port = http_response_origin(

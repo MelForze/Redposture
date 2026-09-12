@@ -104,6 +104,26 @@ def test_resolve_scheme_flips_on_mismatch_and_caches(monkeypatch: pytest.MonkeyP
     state.close()
 
 
+def test_resolve_scheme_upgrades_on_https_required_http_response(monkeypatch: pytest.MonkeyPatch):
+    state = actions.MinioLifecycleState(_fake_args(), "10.0.0.9", 8083, scheme="http")
+    calls: list[str] = []
+
+    def fake_probe(scheme: str) -> MinioResponse:
+        calls.append(scheme)
+        return MinioResponse(
+            http_status=400,
+            headers={},
+            body=b"Client sent an HTTP request to an HTTPS server.",
+        )
+
+    monkeypatch.setattr(state, "_probe", fake_probe)
+    assert state.resolve_scheme() == "https"
+    assert state.resolve_scheme() == "https"
+    assert calls == ["http"]
+    assert state.pool.insecure is True
+    state.close()
+
+
 def test_explicit_http_target_caches_https_redirect(monkeypatch: pytest.MonkeyPatch):
     state = actions.MinioLifecycleState(_fake_args(), "10.0.0.9", 9000, scheme="http")
     calls: list[str] = []

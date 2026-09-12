@@ -22,6 +22,7 @@ from ...clients.http_api import (
     build_http_target_url,
     format_http_authority,
     http_response_origin,
+    http_response_requires_https,
     http_scheme_candidates,
 )
 from ...clients.http_session import HttpSessionPool
@@ -174,7 +175,7 @@ def _http_request(
         preferred = state.scheme or ("https" if use_https else "http")
         schemes = (
             (preferred,)
-            if absolute_url or (state.origin_resolved and method.upper() not in {"GET", "HEAD"})
+            if absolute_url or method.upper() not in {"GET", "HEAD"}
             else http_scheme_candidates(preferred, request_port, tls_ports=frozenset({443, 8443}))
         )
         response = None
@@ -200,7 +201,13 @@ def _http_request(
                 allow_cross_origin_redirects=True,
                 preserve_authorization_on_cross_origin=True,
             )
-            if response.error is None:
+            if response.error is None and not (
+                not absolute_url
+                and scheme == "http"
+                and http_response_requires_https(
+                    response.status, getattr(response, "body", getattr(response, "text", ""))
+                )
+            ):
                 if not absolute_url:
                     state.scheme, state.host, state.port = http_response_origin(
                         response,

@@ -492,9 +492,10 @@ class ModuleAuditSpec:
     # credentials. The detect record must expose
     # credential_verification_status="unavailable".
     skip_credentials_without_verifier: bool = False
-    # Opt-in text-output policy for discovery-oriented modules. The runner
-    # retains matching records for callbacks, debug output, and JSON.
-    suppress_undetected_records_in_text: bool = False
+    # Normal audit text is a findings report: records that did not confirm the
+    # requested service stay available to callbacks, --debug, and JSON, but do
+    # not produce one failure line per target. Specialised callers may opt out.
+    suppress_undetected_records_in_text: bool = True
     # A module may distinguish successful identity verification from a record
     # that merely remains usable through anonymous access.
     credential_gate: Callable[[AuditCredentialRun, AuditRecord], tuple[bool, str]] | None = None
@@ -1381,6 +1382,7 @@ _PRE_DETECT_NOISE_MARKERS = (
     "timed out",
     "timeout",
     "unexpected eof",
+    "connection has been closed (eof)",
     "protocol closed before",
     "closed before",
     "remote end closed",
@@ -1415,6 +1417,9 @@ _PRE_DETECT_NOISE_MARKERS = (
     "peer answered plaintext to tls",
     "peer closed tls handshake",
     "peer requires client certificate",
+    "certificate required",
+    "certificate_required",
+    "tlsv13_alert_certificate_required",
     "peer rejected tls handshake",
     "wrong_version_number",
     "unexpected_eof_while_reading",
@@ -1431,6 +1436,7 @@ _PRE_DETECT_OPERATIONAL_MARKERS = (
     "timed out",
     "timeout",
     "unexpected eof",
+    "connection has been closed (eof)",
     "protocol closed before",
     "closed before",
     "remote end closed",
@@ -1449,6 +1455,9 @@ _PRE_DETECT_OPERATIONAL_MARKERS = (
     "tunnel failed",
     "certificate verify failed",
     "peer requires client certificate",
+    "certificate required",
+    "certificate_required",
+    "tlsv13_alert_certificate_required",
     "tlsv1 alert unknown ca",
 )
 
@@ -1841,12 +1850,10 @@ class AuditCommandRunner:
         return []
 
     def _suppress_in_normal_text(self, record: AuditRecord) -> bool:
-        if is_pre_detect_network_noise(record):
-            return True
         if not self.spec.suppress_undetected_records_in_text or self._is_detected(record):
             return False
         status = str(record.status or "").strip().lower()
-        return status == "fail" or status.startswith("not_")
+        return not status or status == "fail" or status.startswith(("not_", "unknown"))
 
     def run_plan(self, plan: AuditCommandPlan) -> AuditCommandResult:
         if self.console is not None and hasattr(self.console, "set_structured_output"):

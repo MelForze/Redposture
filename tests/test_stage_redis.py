@@ -815,7 +815,7 @@ def test_audit_redis_targets_suppresses_pre_detect_connection_noise(
     assert all("Connection refused" not in line for line in emitted)
 
 
-def test_audit_redis_targets_keeps_non_refused_fail_lines_when_suppression_enabled(
+def test_audit_redis_targets_suppresses_all_undetected_fail_lines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     records = iter(
@@ -874,7 +874,7 @@ def test_audit_redis_targets_keeps_non_refused_fail_lines_when_suppression_enabl
     )
 
     assert totals == (1, 0, 0, 0, 0, 1)
-    assert any("protocol mismatch" in line for line in emitted)
+    assert emitted == ["[*] No REDIS service detected on target"]
 
 
 @pytest.mark.parametrize("debug", [False, True])
