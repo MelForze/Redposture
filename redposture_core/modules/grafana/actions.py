@@ -389,6 +389,26 @@ def _fetch_datasources(
     return None, f"/api/datasources returned status {status}", status
 
 
+def _infer_grafana_auth_required(
+    host: str, port: int, timeout: float, *, health_status: int, health_api_ok: bool
+) -> bool | None:
+    if health_api_ok:
+        return False
+    if health_status in {401, 403}:
+        return True
+    # A Grafana login page identifies the service, but it does not prove that
+    # anonymous API access is disabled. Probe an API resource before deciding.
+    try:
+        datasources, _error, status = _fetch_datasources(host, port, timeout)
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return None
+    if status in {401, 403}:
+        return True
+    if status == 200 and datasources is not None:
+        return False
+    return None
+
+
 def _normalize_ssrf_path(path_str: str | None) -> tuple[str, str] | None:
     raw = (path_str or "").strip()
     if not raw:
@@ -808,13 +828,9 @@ def _audit_grafana_host(
                     "error": "service is not grafana",
                 }
 
-            auth_required: bool | None
-            if health_api_ok:
-                auth_required = False
-            elif health_status in {401, 403}:
-                auth_required = True
-            else:
-                auth_required = None
+            auth_required = _infer_grafana_auth_required(
+                host, port, timeout, health_status=health_status, health_api_ok=health_api_ok
+            )
 
             errors: list[str] = []
             candidates = _build_credential_candidates(username, password, defcreds)
@@ -1447,17 +1463,24 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                     "check_results": None,
                     "error": "service is not grafana",
                 }
+            auth_required = _infer_grafana_auth_required(
+                str(ctx.host),
+                int(ctx.port),
+                float(getattr(ctx.args, "timeout", 5.0)),
+                health_status=health_status,
+                health_api_ok=health_api_ok,
+            )
             return {
                 "timestamp": utc_now_iso(),
                 "host": str(ctx.host),
                 "port": int(ctx.port),
                 "is_grafana": True,
                 "status": "open_no_auth"
-                if health_api_ok
+                if auth_required is False
                 else "auth_required"
-                if health_status in {401, 403}
+                if auth_required is True
                 else "unknown_auth",
-                "auth_required": False if health_api_ok else True if health_status in {401, 403} else None,
+                "auth_required": auth_required,
                 "server_version": version,
                 "provided_credentials": False,
                 "provided_username": None,

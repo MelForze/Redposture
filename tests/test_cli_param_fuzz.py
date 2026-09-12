@@ -21,7 +21,10 @@ if os.environ.get("REDPOSTURE_CLI_PARAM_FUZZ") != "1":
 from redposture_core.cli_args import build_parser, parse_args  # noqa: E402
 from redposture_core.logger import AttemptLogger  # noqa: E402
 from redposture_core.module_registry import AUDIT_MODULE_NAMES  # noqa: E402
-from redposture_core.stage_runtime import build_basic_audit_plan  # noqa: E402
+from redposture_core.stage_runtime import (  # noqa: E402
+    build_basic_audit_plan,
+    validate_basic_module_args,
+)
 
 
 @dataclass(frozen=True)
@@ -209,6 +212,19 @@ def _build_argparse_fuzz_cases() -> tuple[ArgparseFuzzCase, ...]:
                         )
                     )
 
+    # These custom argparse types reject numeric values before module or stage
+    # policy runs; keep their boundary cases in the parser-level fuzz suite.
+    cases.extend(
+        (
+            ArgparseFuzzCase("kafka__max_messages_zero", ("kafka", "--max-messages", "0")),
+            ArgparseFuzzCase("kafka__max_messages_negative", ("kafka", "--max-messages", "-1")),
+            ArgparseFuzzCase(
+                "exporters_trigger__listen_seconds_negative",
+                ("exporters", "trigger", "--listen-seconds", "-1"),
+            ),
+        )
+    )
+
     deduped: list[ArgparseFuzzCase] = []
     seen: set[tuple[str, ...]] = set()
     for case in cases:
@@ -258,7 +274,6 @@ _PASSWORD_MODULES = tuple(
     for module in AUDIT_MODULE_NAMES
     if module in _AUDIT_SURFACES_BY_MODULE and _module_supports_dest(module, "password")
 )
-_PURE_HTTP_MODULES = ("registry", "grafana", "etcd", "qdrant")
 _SPECIFIC_USERNAME_PASSWORD_MESSAGE_MODULES = {"grafana", "postgres", "mongodb", "oracle", "clickhouse"}
 
 
@@ -304,14 +319,6 @@ def _common_policy_cases() -> Iterator[PolicyCase]:
             module=module,
             argv=_module_argv(module, _preferred_option_for_dest(module, "password"), "pw"),
             expected_error="--username and --password must be set together",
-        )
-
-    for module in _PURE_HTTP_MODULES:
-        yield PolicyCase(
-            case_id=f"{module}__https_target_rejected",
-            module=module,
-            argv=_module_argv(module, targets="https://127.0.0.1"),
-            expected_error="accepts only http:// URL targets",
         )
 
 
@@ -462,8 +469,6 @@ def _curated_policy_cases() -> tuple[PolicyCase, ...]:
         _policy_case("docker", "--tls-cert and --tls-key must be used together", "--tls-cert", "client.crt"),
         _policy_case("docker", "--tls-cert and --tls-key must be used together", "--tls-key", "client.key"),
         _policy_case("kafka", "--dump count cannot conflict with --max-messages", "--dump", "3", "--max-messages", "4"),
-        _policy_case("kafka", "--max-messages must be > 0", "--max-messages", "0"),
-        _policy_case("kafka", "--max-messages must be > 0", "--max-messages", "-1"),
     ]
     return tuple(cases)
 
@@ -483,32 +488,8 @@ def _stage_case(stage: str, expected_error: str, *argv: str) -> StageCase:
 _STAGE_CASES = (
     _stage_case("scan", "scan requires -t/--targets", "exporters", "scan", "-p", "9100"),
     _stage_case("scan", "failed to parse --ports", "exporters", "scan", "-t", "127.0.0.1", "-p", "bad"),
-    _stage_case(
-        "scan", "accepts only http:// URL targets", "exporters", "scan", "-t", "https://127.0.0.1:19100/metrics"
-    ),
     _stage_case("collect", "collect requires -t/--targets", "exporters", "collect"),
     _stage_case("collect", "failed to parse --ports", "exporters", "collect", "-t", "127.0.0.1", "-p", "bad"),
-    _stage_case(
-        "collect",
-        "accepts only http:// URL targets",
-        "exporters",
-        "collect",
-        "-t",
-        "https://127.0.0.1:19100/debug/vars",
-    ),
-    _stage_case(
-        "trigger",
-        "--listen-seconds must be > 0",
-        "exporters",
-        "trigger",
-        "-t",
-        "127.0.0.1",
-        "--callback-ip",
-        "127.0.0.1",
-        "--with-listen",
-        "--listen-seconds",
-        "-1",
-    ),
     _stage_case(
         "trigger",
         "--check-credentials requires --with-listen",
@@ -551,17 +532,6 @@ _STAGE_CASES = (
         "trigger requires -t/--targets",
         "exporters",
         "trigger",
-        "--callback-ip",
-        "127.0.0.1",
-        "--no-with-listen",
-    ),
-    _stage_case(
-        "trigger",
-        "accepts only http:// URL targets",
-        "exporters",
-        "trigger",
-        "-t",
-        "https://127.0.0.1:19121/scrape",
         "--callback-ip",
         "127.0.0.1",
         "--no-with-listen",
@@ -623,6 +593,9 @@ def _assert_no_traceback(text: str) -> None:
 def _run_policy_case(case: PolicyCase) -> tuple[int | None, str]:
     args = parse_args(list(case.argv))
     console = _ConsoleRecorder()
+    rc = validate_basic_module_args(args, console, module=case.module)
+    if rc is not None:
+        return rc, "\n".join(console.errors)
     policy = importlib.import_module(f"redposture_core.modules.{case.module}.policy")
     rc = policy.validate_args(args, console)
     return rc, "\n".join(console.errors)

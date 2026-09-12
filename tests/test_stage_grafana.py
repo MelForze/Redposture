@@ -18,6 +18,7 @@ from redposture_core.stage_grafana import (
     _format_datasources_detail_records,
     _format_record,
     _header_lookup,
+    _infer_grafana_auth_required,
     _load_json_dict,
     _load_json_list,
     _looks_like_grafana_health,
@@ -150,6 +151,60 @@ def test_grafana_helper_parsers_and_auth_helpers() -> None:
         ("user", "password", "default"),
         ("user", "user", "default"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [(401, "{}", True), (403, "{}", True), (200, "[]", False), (200, "<html>login</html>", None), (503, "", None)],
+)
+def test_grafana_unknown_health_uses_anonymous_api_evidence(
+    monkeypatch: pytest.MonkeyPatch, status: int, body: str, expected: bool | None
+) -> None:
+    def fake_http_request(_host: str, _port: int, path: str, _timeout: float, **_kwargs):
+        assert path == "/api/datasources"
+        return status, body, {}
+
+    monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http_request)
+    assert _infer_grafana_auth_required("127.0.0.1", 3000, 1.0, health_status=200, health_api_ok=False) is expected
+
+
+def test_grafana_unknown_health_keeps_unknown_when_auth_probe_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_http_request(_host: str, _port: int, _path: str, _timeout: float, **_kwargs):
+        raise TimeoutError("still loading")
+
+    monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http_request)
+    assert _infer_grafana_auth_required("127.0.0.1", 3000, 1.0, health_status=503, health_api_ok=False) is None
+
+
+def test_grafana_login_with_nonstandard_health_and_protected_api_requires_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths: list[str] = []
+
+    def fake_http_request(_host: str, _port: int, path: str, _timeout: float, **_kwargs):
+        paths.append(path)
+        if path == "/api/health":
+            return 200, '{"database":"ok"}', {}
+        if path == "/login":
+            return 200, "<title>Grafana</title>", {}
+        if path == "/api/datasources":
+            return 401, '{"message":"Unauthorized"}', {}
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http_request)
+    context = SimpleNamespace(
+        host="127.0.0.1", port=3000, args=SimpleNamespace(timeout=1.0, retries=0), lifecycle_state=None
+    )
+    detected = grafana_stage.detect_grafana(context, {"show_datasources": False, "check_urls": []})
+    assert detected["status"] == "auth_required"
+    assert detected["auth_required"] is True
+    assert paths == ["/api/health", "/login", "/api/datasources"]
+
+    paths.clear()
+    audited = _audit_grafana_host("127.0.0.1", 3000, 1.0, 0, None, None, False, None)
+    assert audited["status"] == "auth_required"
+    assert audited["auth_required"] is True
+    assert paths == ["/api/health", "/login", "/api/datasources"]
 
 
 def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.MonkeyPatch) -> None:

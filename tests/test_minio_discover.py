@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import threading
+import time
+
 from redposture_core.clients.minio_api import MinioResponse, S3Error
 from redposture_core.modules.minio import discover
 from redposture_core.modules.minio.enumerate import ObjectInfo
+from redposture_core.scheduler import SharedNestedScheduler
 
 
 class _Client:
@@ -149,3 +153,38 @@ def test_full_listing_within_budget_is_complete():
     res = discover.discover_secrets(client, [_obj("a.txt"), _obj("b.txt")], budget=discover.Budget(max_objects=100))
     assert res.coverage_complete is True
     assert res.partial_reasons == []
+
+
+def test_discover_scans_eight_objects_in_parallel_and_merges_in_input_order():
+    class ParallelClient:
+        def __init__(self) -> None:
+            self.active = 0
+            self.peak = 0
+            self.lock = threading.Lock()
+
+        def get_object_range(self, bucket, key, *, start=0, length, signed):
+            with self.lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            time.sleep(0.02)
+            with self.lock:
+                self.active -= 1
+            body = f"password=SecretValue-{key}".encode()
+            return MinioResponse(http_status=200, headers={}, body=body[start : start + length])
+
+    client = ParallelClient()
+    scheduler = SharedNestedScheduler(max_workers=16)
+    try:
+        objects = [_obj(f"{index:02d}.env") for index in range(12)]
+        result = discover.discover_secrets(
+            client,
+            objects,
+            nested_scheduler=scheduler,
+            scheduler_key=("minio", "target"),
+        )
+    finally:
+        scheduler.close()
+
+    assert client.peak == 8
+    assert [item["key"] for item in result.candidates] == [f"{index:02d}.env" for index in range(12)]
+    assert [item["key"] for item in result.findings] == [f"{index:02d}.env" for index in range(12)]

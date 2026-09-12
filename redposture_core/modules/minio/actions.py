@@ -407,6 +407,7 @@ class MinioLifecycleState:
             timeout=float(getattr(args, "timeout", 5.0) or 5.0),
             insecure=True,
             retries=int(getattr(args, "retries", 0) or 0),
+            max_idle_per_origin=8 if bool(getattr(args, "discover", False)) else 4,
         )
 
     def _probe(self, scheme: str) -> MinioResponse:
@@ -843,7 +844,22 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
                     live_emit([_render.format_finding_line(ctx.host, ctx.port, finding)])
                     emitted += 1
 
-            result = _discover.discover_secrets(client, scan_iter, budget=budget, on_finding=on_finding)
+            debug_emit = getattr(ctx, "debug_emit", None)
+            nested_scheduler = getattr(ctx, "nested_scheduler", None)
+            if debug_emit is not None:
+                debug_emit(
+                    f"{ctx.host}:{ctx.port} minio discover workers="
+                    f"{min(_discover.DISCOVER_WORKERS, int(getattr(ctx.args, '_audit_nested_workers', 1) or 1))}"
+                )
+            discover_kwargs: dict[str, Any] = {"budget": budget, "on_finding": on_finding}
+            if nested_scheduler is not None:
+                discover_kwargs.update(
+                    {
+                        "nested_scheduler": nested_scheduler,
+                        "scheduler_key": ("minio-discover", ctx.host, ctx.port),
+                    }
+                )
+            result = _discover.discover_secrets(client, scan_iter, **discover_kwargs)
             candidates_count = len(result.candidates)
             # Coverage = share of interesting-by-name objects actually inspected.
             # 100% on a complete run; when a budget cap truncated the scan the

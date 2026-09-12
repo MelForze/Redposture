@@ -65,7 +65,7 @@ def test_mass_profile_applies_only_to_implicit_cli_defaults(monkeypatch: pytest.
     monkeypatch.setattr(elastic_stage, "_safe_mass_worker_limit", lambda ceiling: min(123, ceiling))
     small_args = parse_args(["elastic", "-t", "192.0.2.10"])
     small_plan = elastic_stage.build_elastic_plan(small_args)
-    assert small_plan.workers == 50
+    assert small_plan.workers == 64
     assert small_args.retries == 0
     assert small_args._elastic_effective_profile["automatic_fields"] == ("retries",)
 
@@ -74,8 +74,8 @@ def test_mass_profile_applies_only_to_implicit_cli_defaults(monkeypatch: pytest.
     plan = elastic_stage.build_elastic_plan(args)
 
     assert plan.target_count >= 10_000
-    assert plan.workers == 50
-    assert args.workers == 50
+    assert plan.workers == 128
+    assert args.workers == 128
     assert args.retries == 0
     assert args.timeout == 1.0
     assert args._elastic_effective_profile["automatic_fields"] == ("retries", "timeout")
@@ -137,7 +137,7 @@ def test_mass_profile_proxy_cap_and_safe_fd_budget(monkeypatch: pytest.MonkeyPat
     )
     plan = elastic_stage.build_elastic_plan(args)
     assert ceilings == []
-    assert plan.workers == 50
+    assert plan.workers == 128
 
     monkeypatch.setattr(resource, "getrlimit", lambda _kind: (256, 256))
     assert real_safe_limit(200) == 96
@@ -370,7 +370,7 @@ def test_debug_emits_effective_mass_profile(monkeypatch: pytest.MonkeyPatch) -> 
     assert len(profile_lines) == 1
     assert "endpoints=" in profile_lines[0]
     assert "ports=9200,19200,29200" in profile_lines[0]
-    assert "workers=50" in profile_lines[0]
+    assert "workers=128" in profile_lines[0]
     assert "retries=0" in profile_lines[0]
     assert "automatic=retries,timeout" in profile_lines[0]
 

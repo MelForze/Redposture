@@ -7,7 +7,9 @@ import threading
 import time
 from pathlib import Path
 
-from redposture_core.scheduler import BoundedScheduler
+import pytest
+
+from redposture_core.scheduler import BoundedScheduler, SharedNestedScheduler
 
 
 def test_bounded_scheduler_preserves_input_order() -> None:
@@ -172,3 +174,147 @@ except KeyboardInterrupt:
         if process.poll() is None:
             process.kill()
             process.wait(timeout=2)
+
+
+def test_shared_nested_scheduler_bounds_each_producer_window() -> None:
+    scheduler = SharedNestedScheduler(max_workers=8)
+    consumed: list[int] = []
+    release = threading.Event()
+
+    def source():
+        for value in range(100):
+            consumed.append(value)
+            yield value
+
+    def worker(value: int) -> int:
+        release.wait(timeout=2)
+        return value
+
+    iterator = scheduler.iter_completed(source(), worker, key="target", per_key_limit=2)
+    completed: list[tuple[int, int]] = []
+    thread = threading.Thread(target=lambda: completed.append(next(iterator)))
+    thread.start()
+    deadline = time.monotonic() + 1
+    while len(consumed) < 4 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert consumed == [0, 1, 2, 3]
+
+    release.set()
+    thread.join(timeout=1)
+    iterator.close()
+    scheduler.close()
+    assert completed
+
+
+def test_shared_nested_scheduler_runs_dynamic_follow_up_work() -> None:
+    scheduler = SharedNestedScheduler(max_workers=4)
+    completed: list[int] = []
+
+    def on_completed(item: int, result: int):
+        completed.append(result)
+        return (item + 1,) if item < 4 else ()
+
+    try:
+        scheduler.run_dynamic([1], lambda item: item, on_completed, key="target", per_key_limit=2)
+    finally:
+        scheduler.close()
+
+    assert completed == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("worker_limit", [32, 64])
+def test_shared_nested_scheduler_enforces_command_wide_peak(worker_limit: int) -> None:
+    scheduler = SharedNestedScheduler(max_workers=worker_limit)
+    release = threading.Event()
+    full_peak = threading.Event()
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    def worker(value: int) -> int:
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == worker_limit:
+                full_peak.set()
+        release.wait(timeout=3)
+        with lock:
+            active -= 1
+        return value
+
+    thread = threading.Thread(target=lambda: list(scheduler.iter_completed(range(worker_limit * 2), worker)))
+    thread.start()
+    try:
+        assert full_peak.wait(timeout=2)
+        assert peak == worker_limit
+    finally:
+        release.set()
+        thread.join(timeout=3)
+        scheduler.close()
+    assert not thread.is_alive()
+
+
+def test_shared_nested_scheduler_does_not_starve_another_target() -> None:
+    scheduler = SharedNestedScheduler(max_workers=8)
+    first_release = threading.Event()
+    first_started = threading.Event()
+    second_started = threading.Event()
+    lock = threading.Lock()
+    first_active = 0
+
+    def first_worker(value: int) -> int:
+        nonlocal first_active
+        with lock:
+            first_active += 1
+            if first_active == 2:
+                first_started.set()
+        first_release.wait(timeout=3)
+        return value
+
+    def second_worker(value: int) -> int:
+        second_started.set()
+        return value
+
+    first_thread = threading.Thread(
+        target=lambda: list(scheduler.iter_completed(range(20), first_worker, key="first", per_key_limit=2))
+    )
+    second_thread = threading.Thread(
+        target=lambda: list(scheduler.iter_completed([1], second_worker, key="second", per_key_limit=1))
+    )
+    first_thread.start()
+    assert first_started.wait(timeout=1)
+    second_thread.start()
+    try:
+        assert second_started.wait(timeout=1)
+    finally:
+        first_release.set()
+        first_thread.join(timeout=3)
+        second_thread.join(timeout=3)
+        scheduler.close()
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+
+
+def test_shared_nested_scheduler_cancels_queued_work_when_iterator_closes() -> None:
+    scheduler = SharedNestedScheduler(max_workers=2)
+    release = threading.Event()
+    started: list[int] = []
+    lock = threading.Lock()
+
+    def worker(value: int) -> int:
+        with lock:
+            started.append(value)
+        if value:
+            release.wait(timeout=3)
+        return value
+
+    iterator = scheduler.iter_completed(range(20), worker, key="target", per_key_limit=2)
+    assert next(iterator) == (0, 0)
+    iterator.close()
+    started_before_release = set(started)
+    release.set()
+    time.sleep(0.1)
+    scheduler.close()
+
+    assert set(started) == started_before_release

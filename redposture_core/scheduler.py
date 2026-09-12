@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import queue
 import threading
+from collections import deque
 from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -242,6 +243,7 @@ class _SharedTask:
     worker: Callable[[Any], Any]
     completion: queue.Queue[_Outcome[Any, Any]]
     limiter: threading.Semaphore | None
+    cancelled: threading.Event
 
 
 class SharedNestedScheduler:
@@ -293,17 +295,25 @@ class SharedNestedScheduler:
                 if queued is _STOP:
                     return
                 task = cast(_SharedTask, queued)
+                if task.cancelled.is_set():
+                    continue
                 try:
                     with self.slot():
+                        if task.cancelled.is_set():
+                            continue
                         if task.limiter is None:
                             value = task.worker(task.item)
                         else:
                             with task.limiter:
+                                if task.cancelled.is_set():
+                                    continue
                                 value = task.worker(task.item)
                 except BaseException as exc:  # noqa: BLE001
-                    task.completion.put(_Outcome(index=task.index, item=task.item, error=exc))
+                    if not task.cancelled.is_set():
+                        task.completion.put(_Outcome(index=task.index, item=task.item, error=exc))
                 else:
-                    task.completion.put(_Outcome(index=task.index, item=task.item, value=value))
+                    if not task.cancelled.is_set():
+                        task.completion.put(_Outcome(index=task.index, item=task.item, value=value))
             finally:
                 self._tasks.task_done()
 
@@ -327,24 +337,49 @@ class SharedNestedScheduler:
     ) -> Iterator[tuple[T, R]]:
         self._ensure_started()
         completion: queue.Queue[_Outcome[T, R]] = queue.Queue()
-        count = 0
         limiter = self._limiter(key, per_key_limit)
-        for index, item in enumerate(items):
-            self._tasks.put(
-                _SharedTask(
-                    index=index,
-                    item=item,
-                    worker=cast(Callable[[Any], Any], worker),
-                    completion=cast(queue.Queue[_Outcome[Any, Any]], completion),
-                    limiter=limiter,
+        cancelled = threading.Event()
+        source = enumerate(items)
+        exhausted = False
+        in_flight = 0
+        effective_limit = self.max_workers if per_key_limit is None else min(self.max_workers, int(per_key_limit))
+        # Bound each caller independently. A target with thousands of nested
+        # items can no longer fill the command queue ahead of every other target.
+        local_window = max(1, effective_limit) * 2
+
+        def _fill() -> None:
+            nonlocal exhausted, in_flight
+            while not exhausted and in_flight < local_window:
+                try:
+                    index, item = next(source)
+                except StopIteration:
+                    exhausted = True
+                    break
+                self._tasks.put(
+                    _SharedTask(
+                        index=index,
+                        item=item,
+                        worker=cast(Callable[[Any], Any], worker),
+                        completion=cast(queue.Queue[_Outcome[Any, Any]], completion),
+                        limiter=limiter,
+                        cancelled=cancelled,
+                    )
                 )
-            )
-            count += 1
-        for _ in range(count):
-            outcome = completion.get()
-            if outcome.error is not None:
-                raise outcome.error
-            yield outcome.item, cast(R, outcome.value)
+                in_flight += 1
+
+        try:
+            _fill()
+            while in_flight:
+                outcome = completion.get()
+                in_flight -= 1
+                if outcome.error is not None:
+                    raise outcome.error
+                yield outcome.item, cast(R, outcome.value)
+                _fill()
+        finally:
+            # Queued work from an abandoned iterator is skipped by the shared
+            # workers. Active calls remain daemonized and cannot hold CLI exit.
+            cancelled.set()
 
     def map_ordered(
         self,
@@ -365,6 +400,78 @@ class SharedNestedScheduler:
         ):
             results[indexed_item[0]] = value
         return [results[index] for index in range(len(ordered_items))]
+
+    def run_dynamic(
+        self,
+        items: Iterable[T],
+        worker: Callable[[T], R],
+        on_completed: Callable[[T, R], Iterable[T] | None],
+        *,
+        key: Any | None = None,
+        per_key_limit: int | None = None,
+    ) -> None:
+        """Run bounded work whose completed items may enqueue follow-up work.
+
+        ``on_completed`` always runs in the caller thread. This keeps shared
+        budgets, checkpoints, and result aggregation deterministic while the
+        expensive operation runs in the nested pool.
+        """
+
+        self._ensure_started()
+        completion: queue.Queue[_Outcome[T, R]] = queue.Queue()
+        limiter = self._limiter(key, per_key_limit)
+        cancelled = threading.Event()
+        source = iter(items)
+        follow_up: deque[T] = deque()
+        source_exhausted = False
+        in_flight = 0
+        sequence = itertools.count()
+        effective_limit = self.max_workers if per_key_limit is None else min(self.max_workers, int(per_key_limit))
+        local_window = max(1, effective_limit) * 2
+
+        def _next_item() -> T:
+            nonlocal source_exhausted
+            if not source_exhausted:
+                try:
+                    return next(source)
+                except StopIteration:
+                    source_exhausted = True
+            if follow_up:
+                return follow_up.popleft()
+            raise StopIteration
+
+        def _fill() -> None:
+            nonlocal in_flight
+            while in_flight < local_window:
+                try:
+                    item = _next_item()
+                except StopIteration:
+                    break
+                self._tasks.put(
+                    _SharedTask(
+                        index=next(sequence),
+                        item=item,
+                        worker=cast(Callable[[Any], Any], worker),
+                        completion=cast(queue.Queue[_Outcome[Any, Any]], completion),
+                        limiter=limiter,
+                        cancelled=cancelled,
+                    )
+                )
+                in_flight += 1
+
+        try:
+            _fill()
+            while in_flight:
+                outcome = completion.get()
+                in_flight -= 1
+                if outcome.error is not None:
+                    raise outcome.error
+                generated = on_completed(outcome.item, cast(R, outcome.value))
+                if generated is not None:
+                    follow_up.extend(generated)
+                _fill()
+        finally:
+            cancelled.set()
 
     def close(self) -> None:
         with self._lock:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,6 +23,7 @@ from redposture_core.modules.clickhouse.discover.inventory import (
 )
 from redposture_core.modules.clickhouse.discover.models import ScanChunk
 from redposture_core.modules.clickhouse.discover.reader import build_chunk_query, read_chunk
+from redposture_core.scheduler import SharedNestedScheduler
 from redposture_core.secret_detection import detector_names, fingerprint, mask_secret, scan_value
 
 
@@ -248,6 +251,101 @@ def test_discovery_inventory_scan_checkpoint_and_resume(tmp_path: Path) -> None:
     )
     assert resumed["finding_count"] == report["finding_count"]
     assert resumed_session.client.queries == []
+
+
+def test_discovery_uses_four_independent_table_sessions() -> None:
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class ParallelClient:
+        def execute_iter(self, _query: str):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            yield ("password=ParallelSecret123",)
+
+    def inventory_query(query: str):
+        if "FROM system.tables" in query:
+            return [["app", f"table_{index}", "MergeTree", "", "", "", 1, 128] for index in range(8)], None
+        if "FROM system.columns" in query:
+            return [["app", f"table_{index}", "payload", "String", 1, 128, 128] for index in range(8)], None
+        if "FROM system.parts_columns" in query:
+            return [["app", f"table_{index}", "payload", 128, 128] for index in range(8)], None
+        if "FROM system.parts" in query:
+            return [["app", f"table_{index}", "all", 1, 128, 1, 1] for index in range(8)], None
+        raise AssertionError(query)
+
+    sessions = tuple(SimpleNamespace(protocol="native", client=ParallelClient()) for _index in range(4))
+    scheduler = SharedNestedScheduler(max_workers=8)
+    try:
+        report = run_discovery(
+            sessions[0],
+            host="127.0.0.1",
+            port=9000,
+            config=DiscoverConfig(chunk_rows=1, detectors=("password",)),
+            query_rows=inventory_query,
+            sessions=sessions,
+            nested_scheduler=scheduler,
+            scheduler_key=("clickhouse", "target"),
+        )
+    finally:
+        scheduler.close()
+
+    assert report["tables_scanned"] == 8
+    assert peak == 4
+
+
+def test_discovery_parallelizes_independent_chunks_of_one_large_table() -> None:
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class ParallelClient:
+        def execute_iter(self, _query: str):
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            yield ("plain value",)
+
+    def inventory_query(query: str):
+        if "FROM system.tables" in query:
+            return [["app", "large_table", "MergeTree", "", "", "", 8, 1024]], None
+        if "FROM system.columns" in query:
+            return [["app", "large_table", "payload", "String", 1, 1024, 1024]], None
+        if "FROM system.parts_columns" in query:
+            return [["app", "large_table", "payload", 1024, 1024]], None
+        if "FROM system.parts" in query:
+            return [["app", "large_table", "all", 8, 1024, 1, 1]], None
+        raise AssertionError(query)
+
+    sessions = tuple(SimpleNamespace(protocol="native", client=ParallelClient()) for _index in range(4))
+    scheduler = SharedNestedScheduler(max_workers=8)
+    try:
+        report = run_discovery(
+            sessions[0],
+            host="127.0.0.1",
+            port=9000,
+            config=DiscoverConfig(chunk_rows=1),
+            query_rows=inventory_query,
+            sessions=sessions,
+            nested_scheduler=scheduler,
+            scheduler_key=("clickhouse", "target"),
+        )
+    finally:
+        scheduler.close()
+
+    assert report["tables_scanned"] == 1
+    assert report["coverage"]["app.large_table.payload"]["completed_chunks"] == 8
+    assert peak == 4
 
 
 def test_checkpoint_is_target_aware_and_atomic(tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import re
+import threading
 import time
 import urllib.parse
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -33,6 +34,7 @@ MAX_QUERY_CLAUSES = 24
 MAPPING_BATCH_SIZE = 20
 MAX_PAGINATION_CONTEXT_RECOVERIES = 1
 MAX_LEGACY_SEARCH_ADJUSTMENTS = 5
+DISCOVER_WORKERS = 8
 
 _STRONG_FIELDS = {
     "password",
@@ -985,6 +987,7 @@ class FindingAccumulator:
         self._items: dict[str, Finding] = {}
         self.limit_reached = False
         self.locations_dropped = 0
+        self._lock = threading.RLock()
 
     @staticmethod
     def fingerprint(secret_type: str, value: str) -> str:
@@ -994,39 +997,42 @@ class FindingAccumulator:
     def add(self, detection: DetectedSecret, location: FindingLocation) -> bool:
         if not detection.available or detection.score < 55:
             return False
-        fingerprint = self.fingerprint(detection.secret_type, detection.value)
-        existing = self._items.get(fingerprint)
-        if existing is not None:
-            existing.score = max(existing.score, detection.score)
-            existing.confidence = _confidence(existing.score)
-            existing.detectors = sorted(set(existing.detectors) | set(detection.detectors))
-            if location not in existing.locations:
-                existing.occurrence_count += 1
-                if len(existing.locations) < self.max_locations:
-                    existing.locations.append(location)
-                else:
-                    self.locations_dropped += 1
+        with self._lock:
+            fingerprint = self.fingerprint(detection.secret_type, detection.value)
+            existing = self._items.get(fingerprint)
+            if existing is not None:
+                existing.score = max(existing.score, detection.score)
+                existing.confidence = _confidence(existing.score)
+                existing.detectors = sorted(set(existing.detectors) | set(detection.detectors))
+                if location not in existing.locations:
+                    existing.occurrence_count += 1
+                    if len(existing.locations) < self.max_locations:
+                        existing.locations.append(location)
+                    else:
+                        self.locations_dropped += 1
+                return True
+            if len(self._items) >= self.max_findings:
+                self.limit_reached = True
+                return False
+            self._items[fingerprint] = Finding(
+                fingerprint=fingerprint,
+                value=detection.value,
+                secret_type=detection.secret_type,
+                confidence=_confidence(detection.score),
+                score=detection.score,
+                detectors=sorted(set(detection.detectors)),
+                occurrence_count=1,
+                locations=[location],
+            )
             return True
-        if len(self._items) >= self.max_findings:
-            self.limit_reached = True
-            return False
-        self._items[fingerprint] = Finding(
-            fingerprint=fingerprint,
-            value=detection.value,
-            secret_type=detection.secret_type,
-            confidence=_confidence(detection.score),
-            score=detection.score,
-            detectors=sorted(set(detection.detectors)),
-            occurrence_count=1,
-            locations=[location],
-        )
-        return True
 
     def findings(self) -> list[Finding]:
-        return sorted(self._items.values(), key=lambda item: (-item.score, item.secret_type, item.fingerprint))
+        with self._lock:
+            return sorted(self._items.values(), key=lambda item: (-item.score, item.secret_type, item.fingerprint))
 
     def __len__(self) -> int:
-        return len(self._items)
+        with self._lock:
+            return len(self._items)
 
 
 def _json_pointer_escape(value: str) -> str:
@@ -1214,6 +1220,7 @@ class DiscoveryBudget:
         self.documents = 0
         self.source_bytes = 0
         self.reasons: list[str] = []
+        self._lock = threading.RLock()
 
     def _add_reason(self, reason: str) -> None:
         if reason not in self.reasons:
@@ -1222,48 +1229,53 @@ class DiscoveryBudget:
     def stop(self, reason: str) -> None:
         """Stop future work after a target-wide limit is proven exhausted."""
 
-        self._add_reason(reason)
+        with self._lock:
+            self._add_reason(reason)
 
     def check(self, *, findings: int = 0) -> bool:
-        if self.documents > self.options.max_documents:
-            self._add_reason("max_documents")
-        if self.source_bytes > self.options.max_source_bytes:
-            self._add_reason("max_source_bytes")
-        if self._monotonic() - self.started_at >= self.options.max_seconds:
-            self._add_reason("max_seconds")
-        if findings > self.options.max_findings:
-            self._add_reason("max_findings")
-        return not self.reasons
+        with self._lock:
+            if self.documents > self.options.max_documents:
+                self._add_reason("max_documents")
+            if self.source_bytes > self.options.max_source_bytes:
+                self._add_reason("max_source_bytes")
+            if self._monotonic() - self.started_at >= self.options.max_seconds:
+                self._add_reason("max_seconds")
+            if findings > self.options.max_findings:
+                self._add_reason("max_findings")
+            return not self.reasons
 
     def consume_document(self, source_bytes: int, *, findings: int = 0) -> bool:
-        if not self.check(findings=findings):
-            return False
-        proposed_bytes = self.source_bytes + max(0, int(source_bytes))
-        if self.documents + 1 > self.options.max_documents:
-            self._add_reason("max_documents")
-            return False
-        if proposed_bytes > self.options.max_source_bytes:
-            self._add_reason("max_source_bytes")
-            return False
-        self.documents += 1
-        self.source_bytes = proposed_bytes
-        return True
+        with self._lock:
+            if not self.check(findings=findings):
+                return False
+            proposed_bytes = self.source_bytes + max(0, int(source_bytes))
+            if self.documents + 1 > self.options.max_documents:
+                self._add_reason("max_documents")
+                return False
+            if proposed_bytes > self.options.max_source_bytes:
+                self._add_reason("max_source_bytes")
+                return False
+            self.documents += 1
+            self.source_bytes = proposed_bytes
+            return True
 
     def consume_source_bytes(self, source_bytes: int, *, findings: int = 0) -> bool:
         """Account richer re-fetches of an already counted unique document."""
 
-        if not self.check(findings=findings):
-            return False
-        proposed_bytes = self.source_bytes + max(0, int(source_bytes))
-        if proposed_bytes > self.options.max_source_bytes:
-            self._add_reason("max_source_bytes")
-            return False
-        self.source_bytes = proposed_bytes
-        return True
+        with self._lock:
+            if not self.check(findings=findings):
+                return False
+            proposed_bytes = self.source_bytes + max(0, int(source_bytes))
+            if proposed_bytes > self.options.max_source_bytes:
+                self._add_reason("max_source_bytes")
+                return False
+            self.source_bytes = proposed_bytes
+            return True
 
     @property
     def stopped(self) -> bool:
-        return bool(self.reasons)
+        with self._lock:
+            return bool(self.reasons)
 
 
 def _normalize_request_result(result: RawRequestResult) -> DiscoverResponse:
@@ -1516,6 +1528,8 @@ class DiscoverEngine:
         vendor: str = "compatible",
         options: DiscoverOptions | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        nested_scheduler: Any | None = None,
+        scheduler_key: Any | None = None,
     ) -> None:
         self.request_callback = request
         self.vendor = vendor.strip().lower()
@@ -1523,6 +1537,8 @@ class DiscoverEngine:
             self.vendor = "compatible"
         self.options = options or DiscoverOptions()
         self.monotonic = monotonic
+        self.nested_scheduler = nested_scheduler
+        self.scheduler_key = scheduler_key
         self.budget = DiscoveryBudget(self.options, monotonic=monotonic)
         self.coverage = DiscoverCoverage(
             limits={
@@ -1563,6 +1579,38 @@ class DiscoverEngine:
         self._documents_missing_source: set[tuple[str, str]] = set()
         self._candidate_documents: set[tuple[str, str]] = set()
         self._legacy_by_index: dict[str, JsonObject] = {}
+
+    @staticmethod
+    def _merge_index_coverage(target: DiscoverCoverage, source: DiscoverCoverage) -> None:
+        target.pages_scanned += source.pages_scanned
+        target.query_candidates += source.query_candidates
+        target.shard_failures.extend(source.shard_failures)
+        target.missing_source_documents += source.missing_source_documents
+        target.duplicate_documents += source.duplicate_documents
+        target.suppressed_indicators += source.suppressed_indicators
+        target.timed_out = target.timed_out or source.timed_out
+        for reason in source.truncated_reasons:
+            target.mark_truncated(reason)
+
+    def _scan_index_isolated(
+        self, item: tuple[str, tuple[MappedField, ...]]
+    ) -> tuple[str, JsonObject, DiscoverCoverage, bool, bool]:
+        index, fields = item
+        child = DiscoverEngine(
+            self.request_callback,
+            vendor=self.vendor,
+            options=self.options,
+            monotonic=self.monotonic,
+        )
+        child.budget = self.budget
+        child.accumulator = self.accumulator
+        attempted = not child.budget.stopped
+        if not attempted:
+            return index, {}, child.coverage, False, False
+        child._scan_index(index, fields)
+        legacy = child._legacy_result(index)
+        scanned = bool(child._seen_documents) or int(legacy.get("total_hits") or 0) == 0
+        return index, legacy, child.coverage, scanned, True
 
     def _request(
         self,
@@ -2570,12 +2618,28 @@ class DiscoverEngine:
             if mapped_field.index in fields_by_index:
                 fields_by_index[mapped_field.index].append(mapped_field)
 
+        index_items = [(index, tuple(fields_by_index.get(index, []))) for index in open_indices]
+        if self.nested_scheduler is None:
+            completed_indices = ((item, self._scan_index_isolated(item)) for item in index_items)
+        else:
+            completed_indices = self.nested_scheduler.iter_completed(
+                index_items,
+                self._scan_index_isolated,
+                key=self.scheduler_key,
+                per_key_limit=DISCOVER_WORKERS,
+            )
+        indexed_results: dict[str, tuple[JsonObject, DiscoverCoverage, bool]] = {}
+        for _item, (index, legacy, index_coverage, scanned, attempted) in completed_indices:
+            if attempted:
+                indexed_results[index] = (legacy, index_coverage, scanned)
+
         for index in open_indices:
-            if self.budget.stopped:
-                break
-            before = self.budget.documents
-            self._scan_index(index, fields_by_index.get(index, []))
-            legacy = self._legacy_result(index)
+            outcome = indexed_results.get(index)
+            if outcome is None:
+                continue
+            legacy, index_coverage, scanned = outcome
+            self._legacy_by_index[index] = legacy
+            self._merge_index_coverage(self.coverage, index_coverage)
             if legacy.get("error"):
                 detail = legacy.get("error_detail")
                 status = int(detail.get("status") or 0) if isinstance(detail, Mapping) else 0
@@ -2583,7 +2647,7 @@ class DiscoverEngine:
                     self.coverage.indices_denied += 1
                 else:
                     self.coverage.indices_failed += 1
-            elif self.budget.documents > before or int(legacy.get("total_hits") or 0) == 0:
+            elif scanned:
                 self.coverage.indices_scanned += 1
 
         report = self._finalize()
@@ -2603,6 +2667,8 @@ def run_discovery(
     vendor: str = "compatible",
     options: DiscoverOptions | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    nested_scheduler: Any | None = None,
+    scheduler_key: Any | None = None,
 ) -> DiscoverReport:
     """Convenience entry point used by the Elastic stage."""
 
@@ -2611,6 +2677,8 @@ def run_discovery(
         vendor=vendor,
         options=options,
         monotonic=monotonic,
+        nested_scheduler=nested_scheduler,
+        scheduler_key=scheduler_key,
     ).run()
 
 
@@ -2620,6 +2688,7 @@ __all__ = [
     "DEFAULT_MAX_SECONDS",
     "DEFAULT_MAX_SOURCE_BYTES",
     "DEFAULT_PAGE_SIZE",
+    "DISCOVER_WORKERS",
     "DiscoverCoverage",
     "DiscoverEngine",
     "DiscoverOptions",

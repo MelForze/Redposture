@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from redposture_core.cli_args import parse_args
 from redposture_core.stage_runtime import (
     AuditCommandPlan,
     AuditCommandResult,
@@ -67,6 +68,90 @@ class _ConsoleRecorder:
 
     def error(self, message: str) -> None:
         self.errors.append(message)
+
+
+def test_cli_audit_worker_profile_uses_expanded_endpoint_count() -> None:
+    small_args = parse_args(["redis", "-t", "10.0.0.1-10.0.3.231", "--port", "6379"])
+    small_plan = build_basic_audit_plan(small_args, default_port=6379)
+    assert small_plan.target_count == 999
+    assert small_plan.workers == 64
+    assert small_args.workers == 64
+
+    large_args = parse_args(["redis", "-t", "10.0.0.1-10.0.3.232", "--port", "6379"])
+    large_plan = build_basic_audit_plan(large_args, default_port=6379)
+    assert large_plan.target_count == 1000
+    assert large_plan.workers == 128
+    assert large_args.workers == 128
+
+    explicit_args = parse_args(["redis", "-t", "10.0.0.1-10.0.3.232", "--port", "6379", "-w", "7"])
+    explicit_plan = build_basic_audit_plan(explicit_args, default_port=6379)
+    assert explicit_plan.workers == 7
+    assert explicit_args.workers == 7
+
+    multi_port_args = parse_args(["redis", "-t", "10.0.0.1-10.0.1.244", "--port", "6379,6380"])
+    multi_port_plan = build_basic_audit_plan(multi_port_args, default_port=6379)
+    assert multi_port_plan.target_count == 1000
+    assert multi_port_plan.workers == 128
+
+    programmatic_args = parse_args(["redis", "-t", "127.0.0.1", "--port", "6379"])
+    del programmatic_args._workers_option_provided
+    programmatic_args.workers = 19
+    programmatic_plan = build_basic_audit_plan(programmatic_args, default_port=6379)
+    assert programmatic_plan.workers == 19
+
+
+@pytest.mark.parametrize(
+    ("target_count", "workers", "expected_nested"),
+    [(999, 64, 32), (1000, 128, 64), (1000, 5, 5)],
+)
+def test_audit_runner_selects_command_nested_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    target_count: int,
+    workers: int,
+    expected_nested: int,
+) -> None:
+    args = SimpleNamespace(debug=False)
+    runner = AuditCommandRunner(
+        args=args,
+        spec=ModuleAuditSpec(module="demo", label="DEMO", default_port=1234),
+        emit_line=lambda _line: None,
+    )
+    plan = AuditCommandPlan(targets_by_port={1234: ("host",) * target_count}, workers=workers)
+    monkeypatch.setattr(
+        runner,
+        "_run_prepared_plan",
+        lambda _plan, _sink: AuditCommandResult(records=[], detected_count=0, emitted_lines=0, typed_records=[]),
+    )
+
+    runner.run_plan(plan)
+
+    assert args._audit_nested_workers == expected_nested
+
+
+def test_audit_runner_reports_effective_worker_profile_in_debug() -> None:
+    debug_events: list[str] = []
+    args = SimpleNamespace(debug=True, debug_emit=debug_events.append, workers=5)
+    runner = AuditCommandRunner(
+        args=args,
+        spec=ModuleAuditSpec(
+            module="demo",
+            label="DEMO",
+            default_port=1234,
+            detect=lambda ctx: AuditRecord(
+                host=ctx.host,
+                port=ctx.port,
+                module="demo",
+                service="demo",
+                status="open_no_auth",
+                extra={"is_demo": True},
+            ),
+        ),
+        emit_line=lambda _line: None,
+    )
+
+    runner.run_plan(AuditCommandPlan(targets_by_port={1234: ("host",)}, workers=5))
+
+    assert "worker profile: targets=1 workers=5 nested_workers=5" in debug_events
 
 
 def test_merge_audit_credential_runs_splits_orders_and_deduplicates() -> None:

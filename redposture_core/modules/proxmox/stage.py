@@ -529,6 +529,10 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         on_discovered_url=options["on_discovered_url"],
         on_credential_finding=options["on_credential_finding"],
         _resolved_auth=state.resolved_auth,
+        _nested_scheduler=ctx.nested_scheduler,
+        _transport_pool=state.http,
+        _origin_state=state,
+        _debug_emit=ctx.debug_emit,
     )
     return _proxmox_apply_credential_source(
         _proxmox_record(

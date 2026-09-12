@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
+import time
 from hashlib import sha256
 from typing import Any
 
@@ -30,6 +32,7 @@ from redposture_core.modules.elastic.discover import (
     run_discovery,
     scan_value_tree,
 )
+from redposture_core.scheduler import SharedNestedScheduler
 
 
 def _walk_strings(value: Any) -> list[str]:
@@ -2175,3 +2178,39 @@ def test_nonempty_inventory_does_not_repeat_inventory_status_in_coverage_line() 
 
     assert "indices=2/2" in coverage_line
     assert "inventory=" not in coverage_line
+
+
+def test_discover_engine_limits_parallel_index_scans_to_eight(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler = SharedNestedScheduler(max_workers=16)
+    engine = DiscoverEngine(
+        lambda _request: DiscoverResponse(status=200, payload=b"{}"),
+        nested_scheduler=scheduler,
+        scheduler_key=("elastic", "target"),
+    )
+    indices = [elastic_discover.IndexInfo(name=f"index-{index}") for index in range(12)]
+    monkeypatch.setattr(engine, "_inventory", lambda: (indices, None, None))
+    monkeypatch.setattr(engine, "_fetch_index_resource", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(engine, "_scan_remote_surface", lambda *_args, **_kwargs: None)
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def scan_index(item):
+        nonlocal active, peak
+        index, _fields = item
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return index, engine._new_legacy_result(index), DiscoverCoverage(), True, True
+
+    monkeypatch.setattr(engine, "_scan_index_isolated", scan_index)
+    try:
+        report = engine.run()
+    finally:
+        scheduler.close()
+
+    assert peak == 8
+    assert report.coverage.indices_scanned == 12

@@ -76,6 +76,7 @@ def is_candidate_key(key: str) -> str | None:
 _CHUNK_OVERLAP = 512
 # Internal ranged-read size — kept memory-bounded and deliberately NOT a CLI flag.
 _DEFAULT_CHUNK = 8 * 1024 * 1024
+DISCOVER_WORKERS = 8
 
 
 @dataclass
@@ -188,33 +189,74 @@ def discover_secrets(
     *,
     budget: Budget | None = None,
     on_finding: Callable[[dict[str, Any]], None] | None = None,
+    nested_scheduler: Any | None = None,
+    scheduler_key: Any | None = None,
 ) -> DiscoverResult:
     """Scan candidate objects for secrets, streaming and bounded; large objects are
     read in chunks rather than skipped. `on_finding`, if given, is called with each
     finding as it is discovered (used for real-time output)."""
     budget = budget or Budget()
     result = DiscoverResult()
-    seen: set[tuple[Any, ...]] = set()
     obj_iter: Iterator[ObjectInfo] = iter(objects)
     enumerated = 0
-    for obj in obj_iter:
-        # `max_objects` bounds how many objects are *examined* (enumerated). Callers
-        # stream `max_objects + 1` so hitting this cap means the listing was
-        # truncated -> honest partial coverage.
-        if enumerated >= budget.max_objects:
-            result._partial("object_limit")
-            break
-        enumerated += 1
-        reason = is_candidate_key(obj.key)
-        if reason is None:
-            continue
-        result.candidates.append({"bucket": obj.bucket, "key": obj.key, "reason": reason})
-        if budget.expired():
-            result._partial("timeout")
-            break
-        if not _read_and_scan(client, obj, budget, result, seen, on_finding):
-            break  # time budget exhausted
+
+    def candidates() -> Iterator[tuple[int, ObjectInfo]]:
+        nonlocal enumerated
+        candidate_index = 0
+        for obj in obj_iter:
+            # `max_objects` bounds how many objects are *examined* (enumerated).
+            if enumerated >= budget.max_objects:
+                result._partial("object_limit")
+                return
+            enumerated += 1
+            reason = is_candidate_key(obj.key)
+            if reason is None:
+                continue
+            result.candidates.append({"bucket": obj.bucket, "key": obj.key, "reason": reason})
+            if budget.expired():
+                result._partial("timeout")
+                return
+            yield candidate_index, obj
+            candidate_index += 1
+
+    def scan_object(item: tuple[int, ObjectInfo]) -> DiscoverResult:
+        _index, obj = item
+        local = DiscoverResult()
+        _read_and_scan(client, obj, budget, local, set(), None)
+        return local
+
+    def merge(local: DiscoverResult) -> None:
+        result.objects_scanned += local.objects_scanned
+        result.bytes_read += local.bytes_read
+        for reason in local.partial_reasons:
+            result._partial(reason)
+        for finding in local.findings:
+            result.findings.append(finding)
+            if on_finding is not None:
+                on_finding(finding)
+
+    if nested_scheduler is None:
+        for item in candidates():
+            merge(scan_object(item))
+            if budget.expired():
+                result._partial("timeout")
+                break
+        return result
+
+    pending: dict[int, DiscoverResult] = {}
+    next_index = 0
+    for item, local in nested_scheduler.iter_completed(
+        candidates(),
+        scan_object,
+        key=scheduler_key,
+        per_key_limit=DISCOVER_WORKERS,
+    ):
+        index, _obj = item
+        pending[index] = local
+        while next_index in pending:
+            merge(pending.pop(next_index))
+            next_index += 1
     return result
 
 
-__all__ = ["Budget", "DiscoverResult", "discover_secrets", "is_candidate_key"]
+__all__ = ["Budget", "DISCOVER_WORKERS", "DiscoverResult", "discover_secrets", "is_candidate_key"]

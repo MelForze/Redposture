@@ -13,7 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from ...clients import transport
@@ -1086,6 +1086,10 @@ def _audit_proxmox_host(
     on_discovered_url: Callable[[str], None] | None = None,
     on_credential_finding: Callable[[dict[str, str]], None] | None = None,
     _resolved_auth: tuple[dict[str, str], str, str | None, str | None, list[dict[str, str]]] | None = None,
+    _nested_scheduler: Any | None = None,
+    _transport_pool: HttpSessionPool | None = None,
+    _origin_state: Any | None = None,
+    _debug_emit: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     endpoint_results: list[dict[str, Any]] = []
     findings: list[dict[str, str]] = []
@@ -1096,6 +1100,7 @@ def _audit_proxmox_host(
     requested_add_user = str(add_user or "").strip()
     requested_grant_role = str(grant_role or "").strip()
     requested_grant_path = str(grant_path or "/").strip() or "/"
+    result_lock = threading.RLock()
     if _resolved_auth is None:
         auth_headers, auth_method, auth_username, auth_password, auth_attempts = _resolve_proxmox_auth_headers(
             host,
@@ -1134,12 +1139,12 @@ def _audit_proxmox_host(
                 if isinstance(finding, dict):
                     on_credential_finding(finding)
 
-    def fetch(
+    def perform_request(
         path: str,
         *,
         method: str = "GET",
         form: dict[str, Any] | None = None,
-    ) -> tuple[int, bytes, str | None]:
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
         request_method = str(method or "GET").upper()
         request_kwargs: dict[str, Any] = {
             "pve_api_token": pve_api_token,
@@ -1172,25 +1177,112 @@ def _audit_proxmox_host(
                 retries,
                 **request_kwargs,
             )
-        endpoint_results.append(
-            {
-                "path": path,
-                "status": status,
-                "error": error,
-                "method": request_method,
-                "truncated": response_headers.get("x-redposture-truncated") == "true",
-            }
+        return status, payload, response_headers, error
+
+    def record_response(
+        path: str,
+        *,
+        method: str,
+        status: int,
+        payload: bytes,
+        response_headers: dict[str, str],
+        error: str | None,
+    ) -> None:
+        request_method = str(method or "GET").upper()
+        with result_lock:
+            endpoint_results.append(
+                {
+                    "path": path,
+                    "status": status,
+                    "error": error,
+                    "method": request_method,
+                    "truncated": response_headers.get("x-redposture-truncated") == "true",
+                }
+            )
+            if (
+                discover_creds
+                and request_method == "GET"
+                and status == 200
+                and payload
+                and len(findings) < _MAX_FINDINGS_PER_TARGET
+            ):
+                _scan_endpoint_payload(path, payload, findings, findings_seen)
+                if len(findings) > _MAX_FINDINGS_PER_TARGET:
+                    del findings[_MAX_FINDINGS_PER_TARGET:]
+            flush_stream_buffers()
+
+    def fetch(
+        path: str,
+        *,
+        method: str = "GET",
+        form: dict[str, Any] | None = None,
+    ) -> tuple[int, bytes, str | None]:
+        status, payload, response_headers, error = perform_request(path, method=method, form=form)
+        record_response(
+            path,
+            method=method,
+            status=status,
+            payload=payload,
+            response_headers=response_headers,
+            error=error,
         )
-        if (
-            discover_creds
-            and request_method == "GET"
-            and status == 200
-            and payload
-            and len(findings) < _MAX_FINDINGS_PER_TARGET
-        ):
-            _scan_endpoint_payload(path, payload, findings, findings_seen)
-        flush_stream_buffers()
         return status, payload, error
+
+    def fetch_paths(paths: Iterable[str]) -> list[tuple[str, tuple[int, bytes, str | None]]]:
+        path_list = list(dict.fromkeys(paths))
+        if not path_list:
+            return []
+
+        def fetch_nested(path: str) -> tuple[int, bytes, dict[str, str], str | None]:
+            with result_lock:
+                if len(findings) >= _MAX_FINDINGS_PER_TARGET:
+                    return 0, b"", {}, "finding limit reached"
+            if _transport_pool is not None:
+                activate_proxmox_transport(_transport_pool, _origin_state)
+            try:
+                return perform_request(path)
+            finally:
+                if _transport_pool is not None:
+                    activate_proxmox_transport(None, None)
+
+        raw_results: dict[str, tuple[int, bytes, dict[str, str], str | None]] = {}
+
+        def accept(path: str, value: tuple[int, bytes, dict[str, str], str | None]) -> None:
+            status, payload, response_headers, error = value
+            raw_results[path] = value
+            if error != "finding limit reached":
+                record_response(
+                    path,
+                    method="GET",
+                    status=status,
+                    payload=payload,
+                    response_headers=response_headers,
+                    error=error,
+                )
+
+        if _nested_scheduler is None:
+            for path in path_list:
+                accept(path, fetch_nested(path))
+        else:
+            path_indices = {path: index for index, path in enumerate(path_list)}
+            pending: dict[int, tuple[str, tuple[int, bytes, dict[str, str], str | None]]] = {}
+            next_index = 0
+            for completed_path, value in _nested_scheduler.iter_completed(
+                path_list,
+                fetch_nested,
+                key=("proxmox-discover", host, port),
+                per_key_limit=8,
+            ):
+                pending[path_indices[completed_path]] = (completed_path, value)
+                while next_index in pending:
+                    ordered_path, ordered_value = pending.pop(next_index)
+                    accept(ordered_path, ordered_value)
+                    next_index += 1
+        ordered: list[tuple[str, tuple[int, bytes, str | None]]] = []
+        for path in path_list:
+            status, payload, response_headers, error = raw_results[path]
+            ordered.append((path, (status, payload, error)))
+        return ordered
 
     def attach_completeness(result: dict[str, Any]) -> dict[str, Any]:
         truncated_count = sum(bool(item.get("truncated")) for item in endpoint_results)
@@ -1506,70 +1598,57 @@ def _audit_proxmox_host(
             nodes_error = f"unexpected HTTP {nodes_status} from /nodes"
 
     if discover_creds_crawl:
-        for node in nodes:
-            if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-                break
-            node_id = urllib.parse.quote(node, safe="")
-            fetch(f"/nodes/{node_id}/syslog")
-            if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-                break
-            fetch(f"/nodes/{node_id}/report")
-            if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-                break
-            fetch(f"/nodes/{node_id}/tasks")
-            if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-                break
+        if _debug_emit is not None:
+            nested_budget = int(getattr(_nested_scheduler, "max_workers", 1) or 1)
+            _debug_emit(f"{host}:{port} proxmox discover workers={min(8, nested_budget)}")
 
-            qemu_status, qemu_payload, _qemu_error = fetch(f"/nodes/{node_id}/qemu")
+        node_ids = [urllib.parse.quote(node, safe="") for node in nodes]
+        root_paths = [
+            f"/nodes/{node_id}/{suffix}"
+            for node_id in node_ids
+            for suffix in ("syslog", "report", "tasks", "qemu", "lxc", "storage")
+        ]
+        root_results = dict(fetch_paths(root_paths))
+
+        detail_paths: list[str] = []
+        storage_bases: list[str] = []
+        for node_id in node_ids:
+            qemu_status, qemu_payload, _error = root_results.get(f"/nodes/{node_id}/qemu", (0, b"", None))
             if qemu_status == 200:
-                for vmid in _collect_vmids(qemu_payload):
-                    if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-                        break
-                    vmid_id = urllib.parse.quote(vmid, safe="")
-                    fetch(f"/nodes/{node_id}/qemu/{vmid_id}/config")
-
-            lxc_status, lxc_payload, _lxc_error = fetch(f"/nodes/{node_id}/lxc")
+                detail_paths.extend(
+                    f"/nodes/{node_id}/qemu/{urllib.parse.quote(vmid, safe='')}/config"
+                    for vmid in _collect_vmids(qemu_payload)
+                )
+            lxc_status, lxc_payload, _error = root_results.get(f"/nodes/{node_id}/lxc", (0, b"", None))
             if lxc_status == 200:
-                for vmid in _collect_vmids(lxc_payload):
-                    if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-                        break
-                    vmid_id = urllib.parse.quote(vmid, safe="")
-                    fetch(f"/nodes/{node_id}/lxc/{vmid_id}/config")
+                detail_paths.extend(
+                    f"/nodes/{node_id}/lxc/{urllib.parse.quote(vmid, safe='')}/config"
+                    for vmid in _collect_vmids(lxc_payload)
+                )
+            storage_status, storage_payload, _error = root_results.get(f"/nodes/{node_id}/storage", (0, b"", None))
+            if storage_status == 200:
+                storage_bases.extend(
+                    f"/nodes/{node_id}/storage/{urllib.parse.quote(storage_id, safe='')}"
+                    for storage_id in _collect_storage_ids(storage_payload)
+                )
 
-            storages_status, storages_payload, _storages_error = fetch(f"/nodes/{node_id}/storage")
-            if storages_status == 200:
-                for storage_id in _collect_storage_ids(storages_payload):
-                    if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-                        break
-                    storage_q = urllib.parse.quote(storage_id, safe="")
-                    base_path = f"/nodes/{node_id}/storage/{storage_q}"
-                    content_status, content_payload, _content_error = fetch(f"{base_path}/content")
-                    backup_status, backup_payload, _backup_error = fetch(f"{base_path}/content?content=backup")
+        content_paths = [
+            path for base in storage_bases for path in (f"{base}/content", f"{base}/content?content=backup")
+        ]
+        content_results = dict(fetch_paths([*detail_paths, *content_paths]))
+        volume_paths: list[str] = []
+        for base in storage_bases:
+            volids: list[str] = []
+            for content_path in (f"{base}/content", f"{base}/content?content=backup"):
+                content_status, content_payload, _error = content_results.get(content_path, (0, b"", None))
+                if content_status == 200:
+                    volids.extend(_collect_volids(content_payload))
+            for volid in dict.fromkeys(volids):
+                volume_paths.append(f"{base}/content/{urllib.parse.quote(volid, safe='')}")
+                query = urllib.parse.urlencode({"volumeid": volid})
+                volume_paths.append(f"{base}/download?{query}")
 
-                    volids: list[str] = []
-                    if content_status == 200:
-                        volids.extend(_collect_volids(content_payload))
-                    if backup_status == 200:
-                        volids.extend(_collect_volids(backup_payload))
-
-                    seen_volids: set[str] = set()
-                    for volid in volids:
-                        if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-                            break
-                        if volid in seen_volids:
-                            continue
-                        seen_volids.add(volid)
-                        volid_q = urllib.parse.quote(volid, safe="")
-                        fetch(f"{base_path}/content/{volid_q}")
-                        if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-                            break
-                        query = urllib.parse.urlencode({"volumeid": volid})
-                        fetch(f"{base_path}/download?{query}")
-
-        if len(findings) < _MAX_FINDINGS_PER_TARGET:
-            fetch("/sdn")
-        if len(findings) < _MAX_FINDINGS_PER_TARGET:
-            fetch("/cluster/backup")
+        fetch_paths([*volume_paths, "/sdn", "/cluster/backup"])
 
     successful_endpoints = sum(1 for item in endpoint_results if int(item.get("status") or 0) == 200)
     result = {

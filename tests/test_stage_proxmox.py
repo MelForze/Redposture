@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ from redposture_core.audit_models import AuditRecord
 from redposture_core.modules.proxmox import policy as proxmox_policy
 from redposture_core.modules.proxmox import stage as proxmox_module_stage
 from redposture_core.network_proxy import ProxyConfig
+from redposture_core.scheduler import SharedNestedScheduler
 from redposture_core.stage_proxmox import (
     _PROXMOX_DEFAULT_CREDENTIALS,
     _audit_proxmox_host,
@@ -1241,6 +1243,59 @@ def test_audit_proxmox_stream_callbacks_receive_urls_and_findings(monkeypatch) -
     assert "/nodes/pve1/syslog" in discovered_paths
     assert streamed_findings
     assert any("password" in str(item.get("reason") or "").lower() for item in streamed_findings)
+
+
+def test_audit_proxmox_discovery_limits_parallel_gets_to_eight(monkeypatch) -> None:
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
+        nonlocal active, peak
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 1}}}), {}, None
+        if path == "/nodes":
+            return 200, _json_payload([{"node": "pve1"}, {"node": "pve2"}]), {}, None
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        if path.endswith(("/qemu", "/lxc", "/storage")):
+            return 200, _json_payload([]), {}, None
+        return 200, _json_payload({}), {}, None
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    scheduler = SharedNestedScheduler(max_workers=16)
+    try:
+        record = _audit_proxmox_host(
+            host="127.0.0.1",
+            port=8006,
+            timeout=1.0,
+            retries=0,
+            pve_api_token="",
+            use_https=True,
+            insecure=True,
+            proxy=None,
+            discover_creds=True,
+            _resolved_auth=({}, "anonymous", None, None, []),
+            _nested_scheduler=scheduler,
+        )
+    finally:
+        scheduler.close()
+
+    assert record["status"] == "open_no_auth"
+    assert peak == 8
+    paths = [item["path"] for item in record["endpoint_results"]]
+    root_start = paths.index("/nodes/pve1/syslog")
+    assert paths[root_start : root_start + 12] == [
+        f"/nodes/{node}/{suffix}"
+        for node in ("pve1", "pve2")
+        for suffix in ("syslog", "report", "tasks", "qemu", "lxc", "storage")
+    ]
 
 
 def test_audit_proxmox_denylist_ignores_csrfpreventiontoken(monkeypatch) -> None:

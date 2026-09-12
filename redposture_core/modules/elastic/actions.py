@@ -17,6 +17,7 @@ from dataclasses import field as dataclass_field
 from typing import Any
 
 from ...clients.http_api import HttpApiClient, HttpClientConfig, build_http_target_url, http_response_origin
+from ...clients.http_session import HttpSessionPool
 from ...clients.tls_cache import shared_client_ssl_context
 from ...console import Console
 from ...rendering import BooleanColorRule, render_colored_marker_line, render_tagged_detail_line
@@ -2268,24 +2269,51 @@ def _collect_discover_report(
     ca_file: str | None,
     auth_headers: dict[str, str],
     vendor: str | None = None,
+    http_pool: HttpSessionPool | None = None,
+    nested_scheduler: Any | None = None,
+    scheduler_key: Any | None = None,
 ) -> DiscoverReport:
     """Run the v2 discovery engine while preserving the module HTTP policy."""
 
     def _request(request: DiscoverRequest) -> DiscoverResponse:
         request_headers = dict(auth_headers)
         request_headers.update(request.headers)
-        status, payload, response_headers, error = _elastic_request(
-            host,
-            port,
-            request.path,
-            timeout,
-            use_https=scheme == "https",
-            insecure=insecure,
-            ca_file=ca_file,
-            method=request.method,
-            headers=request_headers,
-            data=request.body,
-        )
+        if http_pool is not None:
+            url = build_http_target_url(
+                host,
+                port,
+                request.path,
+                default_scheme=scheme,
+                override_bound_scheme=True,
+            )
+            response = http_pool.request(
+                request.method,
+                url,
+                headers={"User-Agent": "RedPosture/1.0", **request_headers},
+                body=request.body,
+                timeout=timeout,
+                response_size_cap=10 * 1024 * 1024,
+                replay_safe=True,
+            )
+            status = int(response.status)
+            payload = response.body
+            response_headers = dict(response.headers)
+            error = str(response.error) if response.error else None
+            if response.truncated:
+                response_headers[_RESPONSE_TRUNCATED_HEADER] = "true"
+        else:
+            status, payload, response_headers, error = _elastic_request(
+                host,
+                port,
+                request.path,
+                timeout,
+                use_https=scheme == "https",
+                insecure=insecure,
+                ca_file=ca_file,
+                method=request.method,
+                headers=request_headers,
+                data=request.body,
+            )
         normalized_headers = dict(response_headers)
         truncated = normalized_headers.pop(_RESPONSE_TRUNCATED_HEADER, "").strip().lower() == "true"
         return DiscoverResponse(
@@ -2296,7 +2324,10 @@ def _collect_discover_report(
             truncated=truncated,
         )
 
-    return run_discovery(_request, vendor=_normalize_vendor(vendor))
+    discover_kwargs: dict[str, Any] = {"vendor": _normalize_vendor(vendor)}
+    if nested_scheduler is not None:
+        discover_kwargs.update({"nested_scheduler": nested_scheduler, "scheduler_key": scheduler_key})
+    return run_discovery(_request, **discover_kwargs)
 
 
 def _collect_discover_results(
@@ -4026,16 +4057,33 @@ def _collect_elastic_data_with_session(
             vendor=str(payload.get("vendor") or "compatible"),
         )
     if bool(options["discover"]):
-        discover_report = _collect_discover_report(
-            host,
-            port,
-            timeout,
-            scheme=scheme,
+        nested_scheduler = getattr(ctx, "nested_scheduler", None)
+        nested_limit = min(8, int(getattr(ctx.args, "_audit_nested_workers", 1) or 1))
+        if getattr(ctx, "debug_emit", None) is not None:
+            ctx.debug_emit(f"{ctx.host}:{ctx.port} elastic discover workers={nested_limit}")
+        discover_pool = HttpSessionPool(
+            timeout=timeout,
             insecure=insecure,
             ca_file=ca_file,
-            auth_headers=auth_headers,
-            vendor=str(payload.get("vendor") or "compatible"),
+            proxy=getattr(ctx.args, "_proxy_config", None),
+            max_idle_per_origin=8,
         )
+        try:
+            discover_report = _collect_discover_report(
+                host,
+                port,
+                timeout,
+                scheme=scheme,
+                insecure=insecure,
+                ca_file=ca_file,
+                auth_headers=auth_headers,
+                vendor=str(payload.get("vendor") or "compatible"),
+                http_pool=discover_pool,
+                nested_scheduler=nested_scheduler,
+                scheduler_key=("elastic-discover", host, port),
+            )
+        finally:
+            discover_pool.close()
         serialized_discover_report = discover_report.to_dict()
         discover_results = list(serialized_discover_report.get("discover_results") or [])
         discover_error = discover_report.error

@@ -2047,7 +2047,34 @@ def collect_clickhouse_data(
         if bool(options.get("discover")) and discover_report is None:
             raw_checkpoint = options.get("discover_checkpoint")
             checkpoint = Path(str(raw_checkpoint)) if raw_checkpoint else None
+            nested_scheduler = getattr(ctx, "nested_scheduler", None)
+            nested_budget = int(getattr(ctx.args, "_audit_nested_workers", 1) or 1)
+            discover_worker_count = min(4, nested_budget) if nested_scheduler is not None else 1
+            discover_sessions = [session]
+            extra_sessions: list[_ChSession] = []
             try:
+                for _index in range(1, discover_worker_count):
+                    extra_session, extra_error = _open_operational_session(
+                        session.protocol,
+                        str(ctx.host),
+                        int(ctx.port),
+                        float(getattr(ctx.args, "timeout", 5.0)),
+                        session.username,
+                        session.password,
+                        session.database,
+                        **_ch_transport_kwargs(tls_config, proxy),
+                    )
+                    if extra_session is None:
+                        if getattr(ctx, "debug_emit", None) is not None:
+                            ctx.debug_emit(
+                                f"{ctx.host}:{ctx.port} clickhouse discover worker unavailable: "
+                                f"{extra_error or 'connection failed'}"
+                            )
+                        continue
+                    extra_sessions.append(extra_session)
+                    discover_sessions.append(extra_session)
+                if getattr(ctx, "debug_emit", None) is not None:
+                    ctx.debug_emit(f"{ctx.host}:{ctx.port} clickhouse discover workers={len(discover_sessions)}")
                 discover_report = run_discovery(
                     session,
                     host=str(ctx.host),
@@ -2066,6 +2093,9 @@ def collect_clickhouse_data(
                         redact=bool(options.get("discover_redact", False)),
                     ),
                     query_rows=lambda query: _query_rows(session, query),
+                    sessions=tuple(discover_sessions),
+                    nested_scheduler=nested_scheduler,
+                    scheduler_key=("clickhouse-discover", ctx.host, ctx.port),
                 )
             except (OSError, ValueError) as exc:
                 discover_report = {
@@ -2078,6 +2108,9 @@ def collect_clickhouse_data(
                     "tables_scanned": 0,
                     "scan_errors": [{"kind": "discovery_error", "error": str(exc)}],
                 }
+            finally:
+                for extra_session in extra_sessions:
+                    _close_client(extra_session.protocol, extra_session.client)
             state.discovery_report = discover_report
         if bool(options.get("discover")):
             discover_status = str((discover_report or {}).get("status") or "error")

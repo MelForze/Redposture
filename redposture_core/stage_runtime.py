@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from . import audit_models as _audit_models
@@ -49,6 +49,11 @@ _RUNTIME_COMPAT_EXPORTS = (
     filter_open_tcp_hosts_for_credential_file,
 )
 DEFAULT_RECORD_RETENTION_LIMIT = 100_000
+_LARGE_AUDIT_PLAN_ENDPOINTS = 1_000
+_DEFAULT_AUDIT_WORKERS = 64
+_LARGE_AUDIT_WORKERS = 128
+_DEFAULT_NESTED_WORKERS = 32
+_LARGE_NESTED_WORKERS = 64
 
 
 def _merge_debug_events(*records: dict[str, Any]) -> list[str]:
@@ -851,7 +856,7 @@ def build_basic_audit_plan(
     credential_runs = build_basic_credential_runs(args)
     port_tuple = tuple(int(port) for port in ports)
 
-    return AuditCommandPlan(
+    plan = AuditCommandPlan(
         target_plan=target_plan,
         ports=port_tuple,
         credential_runs=credential_runs,
@@ -859,6 +864,26 @@ def build_basic_audit_plan(
         output_format=cfg.output_format,
         workers=cfg.workers,
     )
+    # CLI defaults are adaptive. Explicit -w/--workers values and programmatic
+    # Namespace callers without provenance remain untouched.
+    if getattr(args, "_workers_option_provided", None) is False:
+        effective_workers = (
+            _LARGE_AUDIT_WORKERS if plan.target_count >= _LARGE_AUDIT_PLAN_ENDPOINTS else _DEFAULT_AUDIT_WORKERS
+        )
+        args.workers = effective_workers
+        plan = replace(plan, workers=effective_workers)
+        args._audit_worker_profile = {
+            "endpoint_count": plan.target_count,
+            "workers": effective_workers,
+            "automatic": True,
+        }
+    else:
+        args._audit_worker_profile = {
+            "endpoint_count": plan.target_count,
+            "workers": int(plan.workers),
+            "automatic": False,
+        }
+    return plan
 
 
 def build_basic_credential_runs(args: Any) -> tuple[AuditCredentialRun, ...]:
@@ -1830,9 +1855,7 @@ class AuditCommandRunner:
         self._transport_stats_lock = threading.Lock()
         self._transport_pool_ids: set[int] = set()
         self._transport_stats = {"connections": 0, "reused": 0, "requests": 0, "retries": 0}
-        self._nested_scheduler = SharedNestedScheduler(
-            max_workers=min(max(1, int(getattr(args, "workers", 50) or 50)), 20)
-        )
+        self._nested_scheduler: SharedNestedScheduler | None = None
         if emit_line is not None:
             self.emit_line = emit_line
         elif console is not None:
@@ -1856,6 +1879,16 @@ class AuditCommandRunner:
         return not status or status == "fail" or status.startswith(("not_", "unknown"))
 
     def run_plan(self, plan: AuditCommandPlan) -> AuditCommandResult:
+        nested_default = (
+            _LARGE_NESTED_WORKERS if plan.target_count >= _LARGE_AUDIT_PLAN_ENDPOINTS else _DEFAULT_NESTED_WORKERS
+        )
+        self._nested_scheduler = SharedNestedScheduler(max_workers=min(max(1, int(plan.workers or 1)), nested_default))
+        try:
+            self.args._audit_nested_workers = self._nested_scheduler.max_workers
+        except AttributeError:
+            # Minimal programmatic callers may pass an opaque sentinel instead
+            # of an argparse-style mutable Namespace.
+            pass
         if self.console is not None and hasattr(self.console, "set_structured_output"):
             self.console.set_structured_output(plan.output_format == "json")
         sink = LineOutputSink(plan.output_path, self.emit_line, append=plan.append)
@@ -1867,7 +1900,8 @@ class AuditCommandRunner:
             return self._run_prepared_plan(plan, sink)
         finally:
             self._close_all_lifecycle_states()
-            self._nested_scheduler.close()
+            if self._nested_scheduler is not None:
+                self._nested_scheduler.close()
             sink.close()
             if self.console is not None and bool(getattr(self.args, "debug", False)):
                 tls_stats = tls_context_cache_stats()
@@ -1943,6 +1977,8 @@ class AuditCommandRunner:
         debug_emit = _debug_emit if callable(raw_debug_emit) else None
         if debug_emit is not None:
             debug_emit(format_pass_marker(1, "detect", "start", total=target_count, mode="pipeline"))
+            nested_workers = self._nested_scheduler.max_workers if self._nested_scheduler is not None else 0
+            debug_emit(f"worker profile: targets={target_count} workers={worker_count} nested_workers={nested_workers}")
 
         def _emit_record(record: AuditRecord) -> None:
             nonlocal emitted_lines, suppressed_records

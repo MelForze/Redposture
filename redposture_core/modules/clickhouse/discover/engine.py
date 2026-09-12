@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import fnmatch
+import queue
 import time
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +32,7 @@ class DiscoverConfig:
 
 
 _SYSTEM_DATABASES = {"system", "information_schema", "INFORMATION_SCHEMA"}
+DISCOVER_WORKERS = 4
 
 
 def _excluded(patterns: tuple[str, ...], *names: str) -> bool:
@@ -144,7 +145,17 @@ def _error_kind(error: str) -> str:
     return "query_error"
 
 
-def run_discovery(session: Any, *, host: str, port: int, config: DiscoverConfig, query_rows: Any) -> dict[str, Any]:
+def run_discovery(
+    session: Any,
+    *,
+    host: str,
+    port: int,
+    config: DiscoverConfig,
+    query_rows: Any,
+    sessions: tuple[Any, ...] | None = None,
+    nested_scheduler: Any | None = None,
+    scheduler_key: Any | None = None,
+) -> dict[str, Any]:
     started = time.monotonic()
     enabled = config.detectors or detector_names()
     unknown = sorted(set(enabled) - set(detector_names()))
@@ -167,7 +178,7 @@ def run_discovery(session: Any, *, host: str, port: int, config: DiscoverConfig,
     inventory, inventory_errors = collect_inventory(query_rows)
     inventory_payload = [table.to_dict() for table in inventory]
     scan_errors: list[dict[str, Any]] = []
-    tables_scanned = 0
+    table_jobs: list[tuple[TableInventory, tuple[str, ...]]] = []
 
     for table in inventory:
         table_name = table.full_name
@@ -205,9 +216,8 @@ def run_discovery(session: Any, *, host: str, port: int, config: DiscoverConfig,
                 )
         if not content_columns:
             continue
-        tables_scanned += 1
         columns = tuple(content_columns)
-        work = deque(_planned_chunks(table, columns, max(1, config.chunk_rows)))
+        work = _planned_chunks(table, columns, max(1, config.chunk_rows))
         for column_name in columns:
             item = coverage[_coverage_key(table.database, table.name, column_name)]
             if not config.resume or not item.get("total_chunks"):
@@ -217,118 +227,155 @@ def run_discovery(session: Any, *, host: str, port: int, config: DiscoverConfig,
                 item = coverage[_coverage_key(table.database, table.name, column_name)]
                 item["status"] = "complete"
                 item["coverage_percent"] = 100.0
-        while work:
-            chunk = work.popleft()
-            if store.is_complete(chunk.chunk_id):
-                continue
-            query = build_chunk_query(
-                chunk,
-                max_query_time=config.max_query_time,
-                max_query_rows=config.max_query_rows,
-                max_query_bytes=config.max_query_bytes,
-                max_memory=config.max_memory,
-                max_threads=config.max_threads,
-            )
-            result = read_chunk(session, query)
-            if result.error:
-                kind = _error_kind(result.error)
-                if kind in {"timeout", "memory_limit", "resource_limit"} and chunk.limit > 1:
-                    left_size = max(1, chunk.limit // 2)
-                    right_size = chunk.limit - left_size
-                    work.appendleft(
-                        ScanChunk(
-                            chunk.database,
-                            chunk.table,
-                            chunk.columns,
-                            chunk.partition_id,
-                            chunk.offset + left_size,
-                            right_size,
-                        )
-                    )
-                    work.appendleft(
-                        ScanChunk(
-                            chunk.database, chunk.table, chunk.columns, chunk.partition_id, chunk.offset, left_size
-                        )
-                    )
-                    for column_name in chunk.columns:
-                        coverage[_coverage_key(chunk.database, chunk.table, column_name)]["total_chunks"] += 1
-                    store.update(
-                        chunk_id=chunk.chunk_id,
-                        chunk={
-                            "database": chunk.database,
-                            "table": chunk.table,
-                            "columns": list(chunk.columns),
-                            "partition": chunk.partition_id,
-                            "offset": chunk.offset,
-                            "limit": chunk.limit,
-                            "status": "split",
-                            "error_kind": kind,
-                            "error": result.error,
-                        },
-                        findings=findings,
-                        coverage=coverage,
-                    )
-                    continue
-                error_entry = {
-                    "database": chunk.database,
-                    "table": chunk.table,
-                    "columns": list(chunk.columns),
-                    "partition": chunk.partition_id,
-                    "offset": chunk.offset,
-                    "kind": kind,
-                    "error": result.error,
-                }
-                scan_errors.append(error_entry)
-                for column_name in chunk.columns:
-                    item = coverage[_coverage_key(chunk.database, chunk.table, column_name)]
-                    item["status"] = kind
-                    item["failed_chunks"] += 1
-                store.update(
-                    chunk_id=chunk.chunk_id,
-                    chunk={**error_entry, "status": "error"},
-                    findings=findings,
-                    coverage=coverage,
-                )
-                continue
+        table_jobs.append((table, columns))
 
-            _scan_rows(result.rows, chunk, findings, coverage, enabled=enabled, redact=config.redact)
-            for column_name in chunk.columns:
-                item = coverage[_coverage_key(chunk.database, chunk.table, column_name)]
-                item["completed_chunks"] += 1
-                if item["completed_chunks"] >= item["total_chunks"] and item["failed_chunks"] == 0:
-                    item["status"] = "complete"
-            chunk_payload = {
-                "database": chunk.database,
-                "table": chunk.table,
-                "columns": list(chunk.columns),
-                "partition": chunk.partition_id,
-                "offset": chunk.offset,
-                "limit": chunk.limit,
-                "status": "complete",
-                "rows_scanned": len(result.rows),
-                "bytes_scanned": result.bytes_read,
-            }
-            store.update(
-                chunk_id=chunk.chunk_id,
-                chunk=chunk_payload,
-                findings=findings,
-                coverage=coverage,
-                inventory=inventory_payload,
-            )
-            # Unknown-size fallback continues until the server returns a short page.
-            if table.total_rows is None and not table.partitions and len(result.rows) == chunk.limit:
-                for column_name in chunk.columns:
-                    coverage[_coverage_key(chunk.database, chunk.table, column_name)]["total_chunks"] += 1
-                work.append(
+    available_sessions = tuple(sessions or (session,))
+    session_queue: queue.Queue[Any] = queue.Queue()
+    for available_session in available_sessions:
+        session_queue.put(available_session)
+    tables_by_name = {(table.database, table.name): table for table, _columns in table_jobs}
+
+    def initial_chunks():
+        for table, columns in table_jobs:
+            for chunk in _planned_chunks(table, columns, max(1, config.chunk_rows)):
+                if not store.is_complete(chunk.chunk_id):
+                    yield chunk
+
+    def read_one(chunk: ScanChunk):
+        query = build_chunk_query(
+            chunk,
+            max_query_time=config.max_query_time,
+            max_query_rows=config.max_query_rows,
+            max_query_bytes=config.max_query_bytes,
+            max_memory=config.max_memory,
+            max_threads=config.max_threads,
+        )
+        current_session = session_queue.get()
+        try:
+            return read_chunk(current_session, query)
+        finally:
+            session_queue.put(current_session)
+
+    def record_result(chunk: ScanChunk, result: Any) -> tuple[ScanChunk, ...]:
+        if result.error:
+            kind = _error_kind(result.error)
+            if kind in {"timeout", "memory_limit", "resource_limit"} and chunk.limit > 1:
+                left_size = max(1, chunk.limit // 2)
+                right_size = chunk.limit - left_size
+                children = (
+                    ScanChunk(chunk.database, chunk.table, chunk.columns, chunk.partition_id, chunk.offset, left_size),
                     ScanChunk(
                         chunk.database,
                         chunk.table,
                         chunk.columns,
                         chunk.partition_id,
-                        chunk.offset + chunk.limit,
-                        chunk.limit,
-                    )
+                        chunk.offset + left_size,
+                        right_size,
+                    ),
                 )
+                for column_name in chunk.columns:
+                    coverage[_coverage_key(chunk.database, chunk.table, column_name)]["total_chunks"] += 1
+                store.update(
+                    chunk_id=chunk.chunk_id,
+                    chunk={
+                        "database": chunk.database,
+                        "table": chunk.table,
+                        "columns": list(chunk.columns),
+                        "partition": chunk.partition_id,
+                        "offset": chunk.offset,
+                        "limit": chunk.limit,
+                        "status": "split",
+                        "error_kind": kind,
+                        "error": result.error,
+                    },
+                    findings=findings,
+                    coverage=coverage,
+                )
+                return children
+            error_entry = {
+                "database": chunk.database,
+                "table": chunk.table,
+                "columns": list(chunk.columns),
+                "partition": chunk.partition_id,
+                "offset": chunk.offset,
+                "kind": kind,
+                "error": result.error,
+            }
+            scan_errors.append(error_entry)
+            for column_name in chunk.columns:
+                item = coverage[_coverage_key(chunk.database, chunk.table, column_name)]
+                item["status"] = kind
+                item["failed_chunks"] += 1
+            store.update(
+                chunk_id=chunk.chunk_id,
+                chunk={**error_entry, "status": "error"},
+                findings=findings,
+                coverage=coverage,
+            )
+            return ()
+
+        _scan_rows(result.rows, chunk, findings, coverage, enabled=enabled, redact=config.redact)
+        for column_name in chunk.columns:
+            item = coverage[_coverage_key(chunk.database, chunk.table, column_name)]
+            item["completed_chunks"] += 1
+            if item["completed_chunks"] >= item["total_chunks"] and item["failed_chunks"] == 0:
+                item["status"] = "complete"
+        chunk_payload = {
+            "database": chunk.database,
+            "table": chunk.table,
+            "columns": list(chunk.columns),
+            "partition": chunk.partition_id,
+            "offset": chunk.offset,
+            "limit": chunk.limit,
+            "status": "complete",
+            "rows_scanned": len(result.rows),
+            "bytes_scanned": result.bytes_read,
+        }
+        store.update(
+            chunk_id=chunk.chunk_id,
+            chunk=chunk_payload,
+            findings=findings,
+            coverage=coverage,
+            inventory=inventory_payload,
+        )
+        table = tables_by_name[(chunk.database, chunk.table)]
+        if table.total_rows is None and not table.partitions and len(result.rows) == chunk.limit:
+            for column_name in chunk.columns:
+                coverage[_coverage_key(chunk.database, chunk.table, column_name)]["total_chunks"] += 1
+            return (
+                ScanChunk(
+                    chunk.database,
+                    chunk.table,
+                    chunk.columns,
+                    chunk.partition_id,
+                    chunk.offset + chunk.limit,
+                    chunk.limit,
+                ),
+            )
+        return ()
+
+    if nested_scheduler is None or len(available_sessions) == 1:
+        work = list(initial_chunks())
+        while work:
+            chunk = work.pop(0)
+            work[0:0] = record_result(chunk, read_one(chunk))
+    else:
+        nested_scheduler.run_dynamic(
+            initial_chunks(),
+            read_one,
+            record_result,
+            key=scheduler_key,
+            per_key_limit=min(DISCOVER_WORKERS, len(available_sessions)),
+        )
+
+    scan_errors.sort(
+        key=lambda item: (
+            str(item.get("database") or ""),
+            str(item.get("table") or ""),
+            str(item.get("partition") or ""),
+            int(item.get("offset") or 0),
+        )
+    )
 
     for item in coverage.values():
         total_chunks = int(item.get("total_chunks") or 0)
@@ -363,7 +410,7 @@ def run_discovery(session: Any, *, host: str, port: int, config: DiscoverConfig,
         "inventory": inventory_payload,
         "inventory_errors": inventory_errors,
         "tables_inventory_count": len(inventory),
-        "tables_scanned": tables_scanned,
+        "tables_scanned": len(table_jobs),
         "findings": sorted(findings.values(), key=lambda item: (str(item.get("type")), str(item.get("fingerprint")))),
         "finding_count": len(findings),
         "occurrence_count": sum(int(item.get("occurrences") or 0) for item in findings.values()),
@@ -378,4 +425,4 @@ def run_discovery(session: Any, *, host: str, port: int, config: DiscoverConfig,
     return report
 
 
-__all__ = ["DiscoverConfig", "run_discovery"]
+__all__ = ["DISCOVER_WORKERS", "DiscoverConfig", "run_discovery"]

@@ -118,6 +118,18 @@ Common flags used by most modules:
 --no-color          Disable ANSI colors
 ```
 
+For audit modules, the default worker count is selected after target and port
+expansion: 64 workers below 1000 `host:port` tasks and 128 workers from 1000
+tasks onward. An explicit `-w/--workers` value always wins. Exporter workflows
+keep their own concurrency profiles.
+
+Commands share one lazy pool for nested work. Its limit is 32 below 1000 tasks
+and 64 from 1000 tasks onward, capped by the effective main worker count. The
+per-target discovery limits are MinIO 8, Elasticsearch/OpenSearch 8, Proxmox 8,
+and ClickHouse 4. ClickHouse `--discover-max-threads` remains a separate
+server-side limit for each discovery query. Debug output reports the effective
+main and nested limits.
+
 Target examples:
 
 ```bash
