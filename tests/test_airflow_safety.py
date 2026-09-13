@@ -166,8 +166,15 @@ def test_credential_gate_opens_only_on_exact_true(value, opened):
 
 def test_airflow_audit_is_read_only():
     spec = stage.build_airflow_spec(parse_args(["airflow", "-t", "127.0.0.1"]))
-    assert spec.data is None  # no enumeration/mutation hook
+    assert spec.data is not None  # optional read-only DAG log discovery
     assert actions.host_stage is None
+
+
+def test_airflow_discovery_does_not_run_without_flag(monkeypatch):
+    monkeypatch.setattr(actions, "_client_for", lambda *_args, **_kwargs: pytest.fail("unexpected HTTP request"))
+    prior = {"detection_status": "confirmed", "api_generation": "v1"}
+    ctx = SimpleNamespace(args=SimpleNamespace(discover=False))
+    assert actions.discover_record(ctx, prior) == prior
 
 
 def test_lifecycle_pool_accepts_tls_by_design(monkeypatch):

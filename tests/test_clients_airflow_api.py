@@ -13,7 +13,15 @@ class _FakePool:
         self.calls: list[dict] = []
 
     def request(self, method, url, *, headers=None, body=None, timeout=None, response_size_cap=10 * 1024 * 1024):
-        self.calls.append({"method": method, "url": url, "headers": headers or {}, "body": body})
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "headers": headers or {},
+                "body": body,
+                "response_size_cap": response_size_cap,
+            }
+        )
         return _Resp(self._status, self._body, self._headers)
 
 
@@ -75,3 +83,15 @@ def test_transport_error_normalized():
     assert resp.http_status == 0
     assert resp.transport_error and "connection refused" in resp.transport_error
     assert resp.json() is None
+
+
+def test_get_log_passes_accept_header_and_response_cap():
+    pool = _FakePool(200, b'{"content":"log"}')
+    client = airflow_api.AirflowClient(pool, scheme="http", host="h", port=8080)
+    client.get(
+        "/api/v1/dags/d/dagRuns/r/taskInstances/t/logs/1",
+        extra_headers={"Accept": "application/json"},
+        response_size_cap=512,
+    )
+    assert pool.calls[0]["headers"]["Accept"] == "application/json"
+    assert pool.calls[0]["response_size_cap"] == 512

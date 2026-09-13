@@ -575,7 +575,7 @@ def test_proxmox_real_stage_propagates_actions_and_url_scheme_priority(
             "root@pam!audit=secret",
             "--https",
             "--insecure",
-            "--discover-creds",
+            "--discover",
             "--nodes",
             "--users",
             "--add-user",

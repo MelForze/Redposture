@@ -7,6 +7,7 @@ from typing import Any
 from ...clients.airflow_api import AirflowClient, AirflowResponse
 from ...clients.http_api import http_response_origin, http_response_requires_https, http_scheme_candidates
 from ...clients.http_session import HttpSessionPool
+from .discover import DiscoverConfig, discover_task_logs
 from .types import AirflowDetection, AnonymousResult, CredentialResult, RoleCapability
 
 # Модуль использует detect/auth хуки, а не монолитный host_stage; None корректно и
@@ -210,6 +211,7 @@ class AirflowLifecycleState:
         self.preferred_scheme: str | None = scheme
         self.resolved_scheme: str | None = None
         self.bearer_token: str | None = None
+        self.bearer_tokens: dict[tuple[str, str], str] = {}
         self.pool = HttpSessionPool(
             timeout=float(getattr(args, "timeout", 5.0) or 5.0),
             insecure=True,
@@ -322,6 +324,15 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         anon = classify_anonymous(client, detection.api_generation)
         record["anonymous_role"] = anon.role
         record["auth_required"] = anon.auth_required
+    if bool(getattr(getattr(ctx, "args", None), "discover", False)):
+        record["discover_requested"] = True
+        if detection.status != "confirmed":
+            record["discover_report"] = {
+                "status": "unavailable",
+                "finding_count": 0,
+                "findings": [],
+                "partial_reasons": ["api_generation_unconfirmed"],
+            }
     return record
 
 
@@ -341,6 +352,7 @@ def auth_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     state = getattr(ctx, "lifecycle_state", None)
     if result.bearer_token and isinstance(state, AirflowLifecycleState):
         state.bearer_token = result.bearer_token
+        state.bearer_tokens[(str(username), str(password))] = result.bearer_token
     anonymous_role = str(prior.get("anonymous_role") or "").strip().lower()
     anonymous_open = prior.get("auth_required") is False or anonymous_role not in {"", "none", "unknown"}
     credential_state = result.state
@@ -372,7 +384,11 @@ def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     credential = ctx.credential
     if generation == "v2":
         state = getattr(ctx, "lifecycle_state", None)
-        token = state.bearer_token if isinstance(state, AirflowLifecycleState) else None
+        token = (
+            state.bearer_tokens.get((str(credential.username), str(credential.password)), state.bearer_token)
+            if isinstance(state, AirflowLifecycleState)
+            else None
+        )
         client = _client_for(ctx, bearer_token=token)
     else:
         client = _client_for(
@@ -381,6 +397,46 @@ def capabilities_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
     cap = classify_role(client, generation)
     merged["role"] = cap.role
     merged["role_evidence"] = cap.evidence
+    return merged
+
+
+def discover_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(prior)
+    if not bool(getattr(ctx.args, "discover", False)):
+        return merged
+    merged["discover_requested"] = True
+    generation = str(prior.get("api_generation") or "")
+    if prior.get("detection_status") != "confirmed" or generation not in {"v1", "v2"}:
+        return merged
+    credential = ctx.credential
+    credential_ok = prior.get("provided_credentials_ok") is True
+    if generation == "v2":
+        state = getattr(ctx, "lifecycle_state", None)
+        token = (
+            state.bearer_tokens.get((str(credential.username), str(credential.password)))
+            if isinstance(state, AirflowLifecycleState) and credential_ok
+            else None
+        )
+        if credential_ok and token is None:
+            merged["discover_report"] = {
+                "status": "unavailable",
+                "finding_count": 0,
+                "findings": [],
+                "partial_reasons": ["bearer_token_unavailable"],
+            }
+            return merged
+        client = _client_for(ctx, bearer_token=token)
+    else:
+        client = _client_for(
+            ctx,
+            basic_user=str(credential.username) if credential_ok else None,
+            basic_password=str(credential.password) if credential_ok else None,
+        )
+    config = DiscoverConfig(
+        max_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
+        max_seconds=getattr(ctx.args, "discover_time", None),
+    )
+    merged["discover_report"] = discover_task_logs(client, generation, config)
     return merged
 
 
@@ -410,6 +466,7 @@ __all__ = [
     "detect_record",
     "auth_record",
     "capabilities_record",
+    "discover_record",
     "AirflowLifecycleState",
     "airflow_lifecycle_state_factory",
     "host_stage",

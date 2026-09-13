@@ -6,6 +6,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ...audit_config import AuditConfig
+from ...discovery_options import validate_discovery_budget
 from ...secret_detection import detector_names
 from ...stage_runtime import build_basic_audit_plan, validate_basic_module_args
 from .actions import _normalize_column_names, _normalize_table_targets
@@ -65,19 +66,9 @@ def validate_args(args: Any, console: Any) -> int | None:
     if getattr(args, "checkpoint", None) and not discover_enabled:
         console.error("--checkpoint requires --discover")
         return 2
-    for name in (
-        "discover_chunk_rows",
-        "max_query_rows",
-        "max_query_bytes",
-        "max_query_memory",
-        "discover_max_threads",
-    ):
-        if int(getattr(args, name, 1) or 0) <= 0:
-            console.error(f"--{name.replace('_', '-')} must be greater than zero")
-            return 2
-    if float(getattr(args, "max_query_time", 1.0) or 0.0) <= 0:
-        console.error("--max-query-time must be greater than zero")
-        return 2
+    discovery_rc = validate_discovery_budget(args, console)
+    if discovery_rc is not None:
+        return discovery_rc
     selected_detectors = {item.strip() for item in str(getattr(args, "detectors", "") or "").split(",") if item.strip()}
     unknown_detectors = sorted(selected_detectors - set(detector_names()))
     if unknown_detectors:

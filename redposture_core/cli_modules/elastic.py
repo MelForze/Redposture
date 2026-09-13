@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..discovery_options import add_discovery_budget_flags
+
 
 def configure_elastic_parser(
     parser: argparse.ArgumentParser,
@@ -114,6 +116,7 @@ def configure_elastic_parser(
         action="store_true",
         help="Audit accessible indices and configurations for potential secret leaks.",
     )
+    add_discovery_budget_flags(actions, default_time=300.0, default_bytes=50 * 1024 * 1024)
 
 
 __all__ = ["configure_elastic_parser"]

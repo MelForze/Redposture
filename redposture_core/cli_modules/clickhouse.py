@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from ..discovery_options import add_discovery_budget_flags
 from ..show_limits import optional_dump_count_kwargs, optional_show_count_kwargs
 
 
@@ -159,6 +160,7 @@ def configure_clickhouse_parser(
         action="store_true",
         help="Exhaustively inventory readable tables and scan every content-capable column for secrets.",
     )
+    add_discovery_budget_flags(discover, default_time=None, default_bytes=50 * 1024 * 1024)
     discover.add_argument(
         "--resume",
         action="store_true",
@@ -171,53 +173,7 @@ def configure_clickhouse_parser(
         help="Durable JSON checkpoint for resumable discovery (opt-in; runs in-memory with no file when omitted).",
     )
     discover.add_argument(
-        "--discover-chunk-rows",
-        type=int,
-        default=1000,
-        metavar="count",
-        help="Initial rows per discovery query; resource failures split chunks automatically (default: 1000).",
-    )
-    discover.add_argument(
-        "--max-query-time",
-        type=float,
-        default=10.0,
-        metavar="seconds",
-        help="ClickHouse max_execution_time for each discovery chunk (default: 10).",
-    )
-    discover.add_argument(
-        "--max-query-rows",
-        type=int,
-        default=100000,
-        metavar="count",
-        help="Maximum rows ClickHouse may read for an individual discovery query (default: 100000).",
-    )
-    discover.add_argument(
-        "--max-query-bytes",
-        type=int,
-        default=67108864,
-        metavar="bytes",
-        help="Maximum bytes ClickHouse may read for an individual discovery query (default: 67108864).",
-    )
-    discover.add_argument(
-        "--max-query-memory",
-        "--max-memory",
-        type=int,
-        default=268435456,
-        metavar="bytes",
-        help="Maximum ClickHouse memory for an individual discovery query (default: 268435456).",
-    )
-    discover.add_argument(
-        "--discover-max-threads",
-        type=int,
-        default=1,
-        metavar="count",
-        help="ClickHouse max_threads used inside each discovery query (default: 1).",
-    )
-    discover.add_argument(
         "--discover-exclude",
-        "--exclude-db",
-        "--exclude-table",
-        "--exclude-column",
         action="append",
         default=None,
         metavar="glob",

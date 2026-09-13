@@ -56,6 +56,10 @@ def build_airflow_spec(args: Any) -> ModuleAuditSpec:
         prior = record.to_dict() if hasattr(record, "to_dict") else dict(record)
         return AuditRecord.from_mapping(actions.capabilities_record(ctx, prior), module="airflow", service="airflow")
 
+    def _data(ctx: Any, record: Any) -> AuditRecord:
+        prior = record.to_dict() if hasattr(record, "to_dict") else dict(record)
+        return AuditRecord.from_mapping(actions.discover_record(ctx, prior), module="airflow", service="airflow")
+
     return ModuleAuditSpec(
         module="airflow",
         label="AIRFLOW",
@@ -63,6 +67,7 @@ def build_airflow_spec(args: Any) -> ModuleAuditSpec:
         detect=_detect,
         auth=_auth,
         capabilities=_capabilities,
+        data=_data,
         lifecycle_state_factory=actions.airflow_lifecycle_state_factory,
         lifecycle_state_close=lambda state: state.close(),
         render_module=render,

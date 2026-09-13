@@ -1,12 +1,13 @@
 """Two-stage MinIO secret discovery: object-name prioritisation + bounded
 content inspection, feeding the shared secret_detection engine.
 
-Bounded by object size, per-object bytes, total bytes, object count and a time
-budget. Never reads unbounded object storage; partial coverage is reported.
+Bounded by inspected bytes and an optional time budget. Object listings are
+streamed; partial coverage is reported when a budget is reached.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
@@ -81,18 +82,47 @@ DISCOVER_WORKERS = 8
 
 @dataclass
 class Budget:
-    # Two operator-facing knobs: how many objects to inspect (`max_objects`) and how
-    # many bytes to read from each (`max_object_size`, read in `chunk_size` ranged
-    # reads — larger objects are scanned in chunks, never skipped). `chunk_size` is an
-    # internal memory bound, not a CLI flag.
-    max_object_size: int = 100 * 1024 * 1024
-    max_objects: int = 1000
-    time_budget: float = 30.0
+    # Objects are read in bounded ranged chunks; the target-wide byte budget
+    # controls the total amount of content inspected.
+    max_object_size: int | None = None
+    max_objects: int | None = None
+    time_budget: float | None = None
+    max_total_bytes: int | None = 50 * 1024 * 1024
     chunk_size: int = _DEFAULT_CHUNK
     _started: float = field(default_factory=time.monotonic)
+    _claimed_bytes: int = 0
+    _active_claims: int = 0
+    _condition: threading.Condition = field(default_factory=threading.Condition, repr=False)
 
     def expired(self) -> bool:
-        return (time.monotonic() - self._started) >= self.time_budget
+        return self.time_budget is not None and (time.monotonic() - self._started) >= self.time_budget
+
+    def claim(self, length: int) -> int:
+        with self._condition:
+            if self.max_total_bytes is None:
+                return length
+            while self._claimed_bytes >= self.max_total_bytes and self._active_claims:
+                self._condition.wait()
+            allowed = min(length, max(0, self.max_total_bytes - self._claimed_bytes))
+            self._claimed_bytes += allowed
+            if allowed:
+                self._active_claims += 1
+            return allowed
+
+    def release(self, length: int) -> None:
+        if self.max_total_bytes is not None:
+            with self._condition:
+                self._claimed_bytes -= length
+                self._active_claims -= 1
+                self._condition.notify_all()
+
+    def byte_limit_reached(self) -> bool:
+        if self.max_total_bytes is None:
+            return False
+        with self._condition:
+            while self._claimed_bytes >= self.max_total_bytes and self._active_claims:
+                self._condition.wait()
+            return self._claimed_bytes >= self.max_total_bytes
 
 
 @dataclass
@@ -126,24 +156,41 @@ def _read_and_scan(
     object_read = 0
     carry = ""
     read_any = False
-    while object_read < budget.max_object_size:
+    while budget.max_object_size is None or object_read < budget.max_object_size:
         if budget.expired():
             result._partial("timeout")
             return False
-        length = min(budget.chunk_size, budget.max_object_size - object_read)
-        resp = client.get_object_range(obj.bucket, obj.key, start=offset, length=length, signed=True)
+        length = budget.claim(
+            min(budget.chunk_size, budget.max_object_size - object_read)
+            if budget.max_object_size is not None
+            else budget.chunk_size
+        )
+        if length <= 0:
+            result._partial("max_bytes")
+            return False
+        try:
+            resp = client.get_object_range(obj.bucket, obj.key, start=offset, length=length, signed=True)
+        except Exception:  # noqa: BLE001 - one failed object must not retain the shared reservation
+            budget.release(length)
+            result._partial("read_failure")
+            return True
         if resp.transport_error:
+            budget.release(length)
             result._partial("read_failure")
             return True  # skip this object, keep scanning others
         if resp.http_status in {401, 403} or (resp.error is not None and resp.error.code == "AccessDenied"):
+            budget.release(length)
             result._partial("permission_denied")
             return True
         if resp.http_status == 416 or (resp.error is not None and resp.error.code == "InvalidRange"):
+            budget.release(length)
             break  # requested range is past the object end -> done reading it
         if resp.http_status not in {200, 206}:
+            budget.release(length)
             result._partial("read_failure")
             return True
-        body = resp.body or b""
+        body = (resp.body or b"")[:length]
+        budget.release(length - len(body))
         if not body:
             break  # end of object reached
         read_any = True
@@ -204,8 +251,11 @@ def discover_secrets(
         nonlocal enumerated
         candidate_index = 0
         for obj in obj_iter:
+            if budget.byte_limit_reached():
+                result._partial("max_bytes")
+                return
             # `max_objects` bounds how many objects are *examined* (enumerated).
-            if enumerated >= budget.max_objects:
+            if budget.max_objects is not None and enumerated >= budget.max_objects:
                 result._partial("object_limit")
                 return
             enumerated += 1

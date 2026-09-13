@@ -46,8 +46,6 @@ _is_connection_timeout_error = transport.is_connection_timeout
 
 _PROXMOX_API_PREFIX = "/api2/json"
 _MAX_HTTP_BODY_BYTES = 262_144
-_MAX_FINDINGS_PER_TARGET = 200
-_MAX_FINDINGS_PER_ENDPOINT = 40
 _ADD_USER_PASSWORD_LENGTH = 20
 _ADD_USER_PASSWORD_ALPHABET = string.ascii_letters + string.digits
 _ADD_USER_PRIV_ROLE = "Administrator"
@@ -855,8 +853,6 @@ def _add_finding(
     path: str,
     sample: str,
 ) -> None:
-    if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-        return
     sample_text = _clip(_clean_value_text(sample), 100)
     key = (endpoint, reason, path, sample_text)
     if key in seen:
@@ -879,12 +875,12 @@ def _collect_text_findings(
     seen: set[tuple[str, str, str, str]],
     *,
     path: str,
-    limit: int,
+    limit: int | None,
     depth: int = 0,
 ) -> None:
     added = 0
     for match in _TEXT_SECRET_RE.finditer(text):
-        if added >= limit:
+        if limit is not None and added >= limit:
             break
         key = str(match.group(1) or "")
         value_raw = match.group(2) or match.group(3) or match.group(4) or ""
@@ -982,7 +978,7 @@ def _collect_text_findings(
             findings,
             seen,
             path=f"{path}.base64",
-            limit=max(4, limit // 2),
+            limit=max(4, limit // 2) if limit is not None else None,
             depth=depth + 1,
         )
 
@@ -995,8 +991,6 @@ def _collect_json_findings(
     *,
     path: str = "$",
 ) -> None:
-    if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-        return
 
     if isinstance(payload, dict):
         for key, value in payload.items():
@@ -1019,7 +1013,7 @@ def _collect_json_findings(
                     findings,
                     seen,
                     path=sub_path,
-                    limit=_MAX_FINDINGS_PER_ENDPOINT,
+                    limit=None,
                 )
             _collect_json_findings(value, endpoint, findings, seen, path=sub_path)
         return
@@ -1034,7 +1028,7 @@ def _collect_json_findings(
                     findings,
                     seen,
                     path=sub_path,
-                    limit=_MAX_FINDINGS_PER_ENDPOINT,
+                    limit=None,
                 )
             _collect_json_findings(value, endpoint, findings, seen, path=sub_path)
 
@@ -1052,7 +1046,7 @@ def _scan_endpoint_payload(
         findings,
         seen,
         path="$text",
-        limit=_MAX_FINDINGS_PER_ENDPOINT,
+        limit=None,
     )
 
     parsed = _parse_json_payload(payload)
@@ -1090,6 +1084,8 @@ def _audit_proxmox_host(
     _transport_pool: HttpSessionPool | None = None,
     _origin_state: Any | None = None,
     _debug_emit: Callable[[str], None] | None = None,
+    _discover_time: float | None = None,
+    _discover_max_bytes: int | None = None,
 ) -> dict[str, Any]:
     endpoint_results: list[dict[str, Any]] = []
     findings: list[dict[str, str]] = []
@@ -1101,6 +1097,10 @@ def _audit_proxmox_host(
     requested_grant_role = str(grant_role or "").strip()
     requested_grant_path = str(grant_path or "/").strip() or "/"
     result_lock = threading.RLock()
+    started = time.monotonic()
+    discover_deadline = started + _discover_time if _discover_time is not None else None
+    discover_bytes_scanned = 0
+    discover_limit_reason: str | None = None
     if _resolved_auth is None:
         auth_headers, auth_method, auth_username, auth_password, auth_attempts = _resolve_proxmox_auth_headers(
             host,
@@ -1188,6 +1188,7 @@ def _audit_proxmox_host(
         response_headers: dict[str, str],
         error: str | None,
     ) -> None:
+        nonlocal discover_bytes_scanned, discover_limit_reason
         request_method = str(method or "GET").upper()
         with result_lock:
             endpoint_results.append(
@@ -1199,16 +1200,22 @@ def _audit_proxmox_host(
                     "truncated": response_headers.get("x-redposture-truncated") == "true",
                 }
             )
-            if (
-                discover_creds
-                and request_method == "GET"
-                and status == 200
-                and payload
-                and len(findings) < _MAX_FINDINGS_PER_TARGET
-            ):
-                _scan_endpoint_payload(path, payload, findings, findings_seen)
-                if len(findings) > _MAX_FINDINGS_PER_TARGET:
-                    del findings[_MAX_FINDINGS_PER_TARGET:]
+            if discover_creds and request_method == "GET" and status == 200 and payload:
+                if discover_deadline is not None and time.monotonic() >= discover_deadline:
+                    discover_limit_reason = "discover_time"
+                elif _discover_max_bytes is not None and discover_bytes_scanned >= _discover_max_bytes:
+                    discover_limit_reason = "discover_max_bytes"
+                elif discover_limit_reason is None:
+                    remaining = (
+                        _discover_max_bytes - discover_bytes_scanned
+                        if _discover_max_bytes is not None
+                        else len(payload)
+                    )
+                    inspected = payload[:remaining]
+                    discover_bytes_scanned += len(inspected)
+                    _scan_endpoint_payload(path, inspected, findings, findings_seen)
+                    if len(payload) > len(inspected):
+                        discover_limit_reason = "discover_max_bytes"
             flush_stream_buffers()
 
     def fetch(
@@ -1234,9 +1241,16 @@ def _audit_proxmox_host(
             return []
 
         def fetch_nested(path: str) -> tuple[int, bytes, dict[str, str], str | None]:
+            nonlocal discover_limit_reason
             with result_lock:
-                if len(findings) >= _MAX_FINDINGS_PER_TARGET:
-                    return 0, b"", {}, "finding limit reached"
+                if discover_limit_reason is not None or (
+                    discover_deadline is not None and time.monotonic() >= discover_deadline
+                ):
+                    discover_limit_reason = discover_limit_reason or "discover_time"
+                    return 0, b"", {}, "discover budget reached"
+                if _discover_max_bytes is not None and discover_bytes_scanned >= _discover_max_bytes:
+                    discover_limit_reason = "discover_max_bytes"
+                    return 0, b"", {}, "discover budget reached"
             if _transport_pool is not None:
                 activate_proxmox_transport(_transport_pool, _origin_state)
             try:
@@ -1250,7 +1264,7 @@ def _audit_proxmox_host(
         def accept(path: str, value: tuple[int, bytes, dict[str, str], str | None]) -> None:
             status, payload, response_headers, error = value
             raw_results[path] = value
-            if error != "finding limit reached":
+            if error != "discover budget reached":
                 record_response(
                     path,
                     method="GET",
@@ -1287,14 +1301,16 @@ def _audit_proxmox_host(
     def attach_completeness(result: dict[str, Any]) -> dict[str, Any]:
         truncated_count = sum(bool(item.get("truncated")) for item in endpoint_results)
         result["responses_truncated"] = truncated_count
-        result["partial"] = truncated_count > 0
-        if truncated_count:
+        result["discover_bytes_scanned"] = discover_bytes_scanned
+        result["partial"] = truncated_count > 0 or discover_limit_reason is not None
+        if discover_limit_reason is not None:
+            result["partial_error"] = discover_limit_reason
+        elif truncated_count:
             result["partial_error"] = f"{truncated_count} endpoint response(s) exceeded the body limit"
         else:
             result["partial_error"] = None
         return result
 
-    started = time.monotonic()
     access_status, access_payload, access_error = fetch("/access")
     if access_error:
         result = {
@@ -1797,15 +1813,19 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
 
 
 def _format_partial_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
-    """Make response truncation explicit in the human-readable result stream."""
+    """Make incomplete discovery explicit in the human-readable result stream."""
     if output_format != "txt" or not bool(record.get("partial")):
         return []
     count = int(record.get("responses_truncated") or 0)
     error = _clip(str(record.get("partial_error") or "response body limit exceeded"), 120)
+    if count == 0:
+        return [f"{_nxc_prefix(record)} [!] partial results err={error}"]
     return [f"{_nxc_prefix(record)} [!] partial results responses_truncated={count} err={error}"]
 
 
 def _format_findings_detail_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format == "txt" and record.get("_discover_findings_streamed"):
+        return []
     findings = record.get("findings")
     if not isinstance(findings, list) or not findings:
         return []
@@ -1929,8 +1949,9 @@ def _format_discovered_urls_detail_records(
     lines.append(f"{prefix} [*] Discovered URL")
     for path, url in urls:
         lines.append(f"{prefix} [*] {url}")
-        for finding in findings_by_endpoint.get(path, []):
-            lines.append(_format_single_finding_detail_line(record, finding))
+        if not record.get("_discover_findings_streamed"):
+            for finding in findings_by_endpoint.get(path, []):
+                lines.append(_format_single_finding_detail_line(record, finding))
     return lines
 
 

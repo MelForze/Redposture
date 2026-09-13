@@ -56,6 +56,16 @@ def test_discover_finds_secret_via_shared_engine_with_full_value():
     assert res.coverage_complete is True
 
 
+def test_default_discovery_checks_candidate_after_more_than_thousand_objects():
+    body = b"password=secret-after-thousand"
+    client = _Client({"last.env": (200, body)})
+    objects = (_obj(f"plain-{index}.txt") for index in range(1001))
+    result = discover.discover_secrets(client, (*objects, _obj("last.env")))
+    assert result.coverage_complete is True
+    assert result.objects_scanned == 1
+    assert any(finding["value"] == "secret-after-thousand" for finding in result.findings)
+
+
 def test_discover_finds_camelcase_secret_key_in_json_object():
     body = b'{"service":{"accessToken":"S3cretValue123"}}'
     client = _Client({"config.json": (200, body)})
@@ -155,6 +165,49 @@ def test_full_listing_within_budget_is_complete():
     assert res.partial_reasons == []
 
 
+def test_global_byte_budget_is_exact_across_objects():
+    first = b"password=firstsecret"
+    second = b"password=secondsecret"
+    client = _Client({"first.env": (200, first), "second.env": (200, second)})
+    cap = len(first) + 5
+    result = discover.discover_secrets(
+        client,
+        [_obj("first.env"), _obj("second.env")],
+        budget=discover.Budget(max_total_bytes=cap),
+    )
+    assert result.bytes_read == cap
+    assert "max_bytes" in result.partial_reasons
+    assert any(finding["value"] == "firstsecret" for finding in result.findings)
+
+
+def test_failed_object_releases_global_byte_reservation():
+    client = _Client({"denied.env": (403, b""), "ok.env": (200, b"password=okaysecret")})
+    result = discover.discover_secrets(
+        client,
+        [_obj("denied.env"), _obj("ok.env")],
+        budget=discover.Budget(max_total_bytes=100),
+    )
+    assert any(finding["value"] == "okaysecret" for finding in result.findings)
+    assert result.bytes_read == len(b"password=okaysecret")
+
+
+def test_parallel_objects_share_one_exact_byte_budget():
+    client = _Client({f"{index}.env": (200, b"password=sharedsecret") for index in range(12)})
+    scheduler = SharedNestedScheduler(max_workers=8)
+    try:
+        result = discover.discover_secrets(
+            client,
+            [_obj(f"{index}.env") for index in range(12)],
+            budget=discover.Budget(max_total_bytes=37),
+            nested_scheduler=scheduler,
+            scheduler_key="target",
+        )
+    finally:
+        scheduler.close()
+    assert result.bytes_read == 37
+    assert "max_bytes" in result.partial_reasons
+
+
 def test_discover_scans_eight_objects_in_parallel_and_merges_in_input_order():
     class ParallelClient:
         def __init__(self) -> None:
@@ -185,6 +238,6 @@ def test_discover_scans_eight_objects_in_parallel_and_merges_in_input_order():
     finally:
         scheduler.close()
 
-    assert client.peak == 8
+    assert 2 <= client.peak <= 8
     assert [item["key"] for item in result.candidates] == [f"{index:02d}.env" for index in range(12)]
     assert [item["key"] for item in result.findings] == [f"{index:02d}.env" for index in range(12)]

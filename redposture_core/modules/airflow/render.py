@@ -9,6 +9,7 @@ renderers emit nothing for `json`.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -99,6 +100,38 @@ def _format_credential_attempts_records(record: dict[str, Any], output_format: s
     return lines
 
 
+def _format_discover_records(record: dict[str, Any], output_format: str) -> list[str]:
+    if output_format != "txt" or not record.get("discover_requested"):
+        return []
+    report = record.get("discover_report")
+    if not isinstance(report, dict):
+        report = {"status": "unavailable", "findings": [], "partial_reasons": ["discovery_not_run"]}
+    status = str(report.get("status") or "unavailable")
+    raw_findings = report.get("findings")
+    findings: list[Any] = raw_findings if isinstance(raw_findings, list) else []
+    prefix = _prefix(record)
+    lines = [
+        f"{prefix} [*] Discover Secrets (status:{status}) "
+        f"(findings:{len(findings)}) (logs:{int(report.get('logs_scanned') or 0)}) "
+        f"(bytes:{int(report.get('bytes_scanned') or 0)})"
+    ]
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        value = json.dumps(str(finding.get("value") or ""), ensure_ascii=False)
+        place = json.dumps(
+            f"{finding.get('dag_id', '?')}/{finding.get('dag_run_id', '?')}/"
+            f"{finding.get('task_id', '?')}/try:{finding.get('try_number', '?')}"
+            f"/map:{finding.get('map_index', -1)}{finding.get('object_path', '$')}",
+            ensure_ascii=False,
+        )
+        lines.append(f"{prefix} [+] {finding.get('type', 'secret')} value={value} place={place}")
+    reasons = report.get("partial_reasons")
+    if isinstance(reasons, list) and reasons:
+        lines.append(f"{prefix} [!] Discover {status}: {','.join(str(item) for item in reasons)}")
+    return lines
+
+
 def _airflow_role_spans(_marker: str, payload: str) -> list[tuple[int, int, str]]:
     spans: list[tuple[int, int, str]] = []
     for match in _ROLE_RE.finditer(payload):
@@ -130,5 +163,6 @@ __all__ = [
     "_format_detect_record",
     "_format_record",
     "_format_credential_attempts_records",
+    "_format_discover_records",
     "_render_colored_airflow_line",
 ]

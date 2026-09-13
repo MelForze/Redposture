@@ -1629,7 +1629,7 @@ def test_proxmox_flags_are_parsed() -> None:
             "monitor@pve!audit=super-secret-token",
             "--proxy",
             "socks5h://audit:token@127.0.0.1:1080",
-            "--discover-creds",
+            "--discover",
             "--nodes",
             "--users",
             "-add-user",
@@ -1651,7 +1651,7 @@ def test_proxmox_flags_are_parsed() -> None:
     assert args.insecure is True
     assert args.pve_api_token == "monitor@pve!audit=super-secret-token"
     assert args.proxy == "socks5h://audit:token@127.0.0.1:1080"
-    assert args.discover_creds is True
+    assert args.discover is True
     assert args.nodes is True
     assert args.users is True
     assert args.add_user == "scanner-bot"
@@ -1681,7 +1681,7 @@ def test_proxmox_username_password_and_defcreds_are_parsed() -> None:
 
 def test_proxmox_discover_creds_default_is_disabled() -> None:
     args = parse_args(["proxmox", "-t", "10.0.0.21", "--pveapitoken", "monitor@pve!audit=token"])
-    assert args.discover_creds is False
+    assert args.discover is False
 
 
 def test_proxmox_add_user_default_is_none() -> None:

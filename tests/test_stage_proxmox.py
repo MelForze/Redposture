@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from redposture_core.audit_models import AuditRecord
+from redposture_core.modules.proxmox import actions as proxmox_actions
 from redposture_core.modules.proxmox import policy as proxmox_policy
 from redposture_core.modules.proxmox import stage as proxmox_module_stage
 from redposture_core.network_proxy import ProxyConfig
@@ -58,6 +59,31 @@ from redposture_core.stage_proxmox import (
 )
 from redposture_core.stage_runtime import AuditCommandPlan, AuditCommandRunner, AuditCredentialRun
 from tests.stage_runtime_helpers import patch_module_host_stage_for_test, run_module_targets_for_test
+
+
+def test_discovery_keeps_findings_beyond_previous_200_item_cap() -> None:
+    findings: list[dict[str, str]] = []
+    payload = json.dumps({"data": [{"password": f"LongSecretValue{index:04d}"} for index in range(220)]}).encode()
+    proxmox_actions._scan_endpoint_payload("/nodes/pve/config", payload, findings, set())
+    assert len(findings) >= 220
+    assert any("LongSecretValue0219" in finding["sample"] for finding in findings)
+
+
+def test_streamed_proxmox_findings_are_not_repeated_at_final_render() -> None:
+    finding = {"endpoint": "/nodes/pve/config", "reason": "json_password", "path": "$.password", "sample": "secret"}
+    record = {
+        "host": "127.0.0.1",
+        "port": 8006,
+        "discover_creds": True,
+        "use_https": True,
+        "findings": [finding],
+        "endpoint_results": [{"path": finding["endpoint"], "status": 200}],
+        "_discover_findings_streamed": True,
+    }
+    assert _format_findings_detail_records(record, "txt") == []
+    lines = _format_discovered_urls_detail_records(record, "txt")
+    assert any("/nodes/pve/config" in line for line in lines)
+    assert not any("credential candidate" in line for line in lines)
 
 
 @pytest.mark.parametrize(
@@ -1177,6 +1203,65 @@ def test_audit_proxmox_skips_discovery_crawl_when_caps_are_false(monkeypatch) ->
     assert requested_paths == ["/access", "/access/permissions?path=/"]
     assert int(record.get("checked_endpoints") or 0) == 2
     assert int(record.get("credential_hits") or 0) == 0
+
+
+def test_discover_global_byte_budget_marks_proxmox_partial(monkeypatch) -> None:
+    access_payload = _json_payload({"clustername": "lab"})
+    permissions_payload = _json_payload({"permissions": {"/": {"Sys.Audit": 0}}})
+
+    def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
+        if path == "/access":
+            return 200, access_payload, {}, None
+        if path == "/access/permissions?path=/":
+            return 200, permissions_payload, {}, None
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    cap = len(access_payload) + 5
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+        _discover_max_bytes=cap,
+    )
+    assert record["is_proxmox"] is True
+    assert record["discover_bytes_scanned"] == cap
+    assert record["partial"] is True
+    assert record["partial_error"] == "discover_max_bytes"
+    assert "partial results err=discover_max_bytes" in _format_partial_detail_records(record, "txt")[0]
+
+
+def test_discover_time_budget_marks_proxmox_partial(monkeypatch) -> None:
+    def fake_request(_host, _port, path, _timeout, _retries, **_kwargs):
+        if path == "/access":
+            return 200, _json_payload({"clustername": "lab"}), {}, None
+        if path == "/access/permissions?path=/":
+            return 200, _json_payload({"permissions": {"/": {"Sys.Audit": 0}}}), {}, None
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_proxmox._proxmox_request", fake_request)
+    record = _audit_proxmox_host(
+        host="127.0.0.1",
+        port=8006,
+        timeout=1.0,
+        retries=0,
+        pve_api_token="monitor@pve!audit=token",
+        use_https=True,
+        insecure=True,
+        proxy=None,
+        discover_creds=True,
+        _discover_time=1e-9,
+    )
+    assert record["is_proxmox"] is True
+    assert record["partial"] is True
+    assert record["partial_error"] == "discover_time"
+    assert record["discover_bytes_scanned"] == 0
 
 
 def test_audit_proxmox_stream_callbacks_receive_urls_and_findings(monkeypatch) -> None:

@@ -35,6 +35,30 @@ from redposture_core.modules.elastic.discover import (
 from redposture_core.scheduler import SharedNestedScheduler
 
 
+def test_elastic_discovery_adapter_forwards_shared_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    supplied = DiscoverOptions(max_seconds=12.5, max_source_bytes=4096)
+    captured: dict[str, Any] = {}
+    sentinel = object()
+
+    def fake_discovery(_request: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(elastic_actions, "run_discovery", fake_discovery)
+    result = elastic_actions._collect_discover_report(
+        "127.0.0.1",
+        9200,
+        1.0,
+        scheme="http",
+        insecure=True,
+        ca_file=None,
+        auth_headers={},
+        options=supplied,
+    )
+    assert result is sentinel
+    assert captured["options"] is supplied
+
+
 def _walk_strings(value: Any) -> list[str]:
     strings: list[str] = []
     if isinstance(value, str):

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...discovery_options import validate_discovery_budget
+
 
 def validate_args(args: Any, console: Any) -> int | None:
     port = getattr(args, "port", None)
@@ -32,7 +34,7 @@ def validate_args(args: Any, console: Any) -> int | None:
     if (getattr(args, "dump", False) or getattr(args, "download", False)) and not (bucket or obj):
         console.error("--dump/--download require --object bucket/key or --bucket name")
         return 2
-    return None
+    return validate_discovery_budget(args, console)
 
 
 __all__ = ["validate_args"]

@@ -87,7 +87,7 @@ kafka       Kafka auth, topic visibility, bounded message dumps
 zookeeper   Apache ZooKeeper identity, TLS, auth, health, and znode visibility
 keeper      ClickHouse Keeper identity, TLS, auth, quorum, and znode visibility
 minio       MinIO detection, anonymous access, credential/default-credential/admin checks, write-probe, streamed enumeration, secret discovery, object dump/download
-airflow     Airflow REST API detection, anonymous role, auth/default-credential and role checks
+airflow     Airflow REST API detection, auth/role checks, and bounded secret discovery in DAG task logs
 rabbitmq    RabbitMQ Management auth, tags, permissions, and queue/exchange/vhost topology
 ```
 
@@ -126,9 +126,30 @@ keep their own concurrency profiles.
 Commands share one lazy pool for nested work. Its limit is 32 below 1000 tasks
 and 64 from 1000 tasks onward, capped by the effective main worker count. The
 per-target discovery limits are MinIO 8, Elasticsearch/OpenSearch 8, Proxmox 8,
-and ClickHouse 4. ClickHouse `--discover-max-threads` remains a separate
-server-side limit for each discovery query. Debug output reports the effective
+and ClickHouse 4. ClickHouse uses a fixed server-side `max_threads=1` for each
+discovery query. Debug output reports the effective
 main and nested limits.
+
+Airflow, MinIO, Elasticsearch/OpenSearch, ClickHouse, and Proxmox share
+`--discover`, `--discover-time`, and `--discover-max-bytes`. The default content
+budget is 50 MiB per target. Airflow and MinIO have no default time limit or
+item-count limit; Elasticsearch/OpenSearch retains its 300-second time limit.
+ClickHouse and Proxmox have no default time or item-count limit. Set
+`--discover-time` to bound the elapsed time explicitly.
+
+| Module | Default `--discover-time` | Default `--discover-max-bytes` | Counted content |
+| --- | ---: | ---: | --- |
+| Airflow | Unlimited | 50 MiB | DAG task-log text |
+| MinIO | Unlimited | 50 MiB | Object content |
+| Elasticsearch/OpenSearch | 300 s | 50 MiB | Document source content |
+| ClickHouse | Unlimited | 50 MiB | Returned row values |
+| Proxmox | Unlimited | 50 MiB | Successful GET response bodies |
+
+When a limit interrupts discovery, the result is marked partial. ClickHouse
+`--resume` continues a partially read chunk from its checkpoint. Time limits
+are cooperative: requests already in flight may finish after the deadline. The
+50 MiB limit is a total per target, not a per-chunk quota; increase
+`--discover-max-bytes` when a larger target must be fully inspected.
 
 Target examples:
 
@@ -202,6 +223,18 @@ redposture registry -t 127.0.0.1 --port 5000 --docker --repository redposture/de
 ```bash
 redposture grafana -t 127.0.0.1 --defcreds --show-datasources
 ```
+
+**Airflow** — search task-instance logs for secrets using anonymous access or verified credentials:
+
+```bash
+redposture airflow -t https://airflow.internal:8080 --discover -u auditor -p 'password' -o airflow_results.txt
+```
+
+`--discover` uses read-only Airflow REST API v1/v2 endpoints. DAGs, runs, task
+instances, and all recorded attempts are paged without count limits. Log text
+is inspected up to the 50 MiB per-target content budget by default; an optional
+`--discover-time` sets a time limit. TXT and JSON include discovered values and
+their DAG/run/task locations. An incomplete scan reports its reason.
 
 **GitLab** — public + token-backed:
 
@@ -285,7 +318,7 @@ redposture minio -t 127.0.0.1                                            # detec
 redposture minio -t 127.0.0.1 --defcreds                                # try default credentials
 redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --show-buckets --show-objects
 redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --show-buckets --probe-write
-redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --bucket data --discover --max-objects 200
+redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --bucket data --discover
 redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.env --dump
 redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.env --download /tmp/rp-dl
 ```
@@ -296,13 +329,16 @@ redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.en
   detection line shows the server version (`(version:…)`) when an authenticated Admin API read exposes it.
 - **Enumeration** (`--show-buckets`/`--show-objects`/`--bucket`/`--prefix`) is unbounded but memory-safe — objects
   are streamed (no `--limit`; JSON is emitted as NDJSON). `--discover` scans interesting-by-name objects for secrets
-  and prints each finding **in real time** as it is found (large objects are read in chunks, not skipped), then a
-  clickhouse-style `[*] Discover Secrets` summary. Secret values are shown in full; bounded by
-  `--max-objects` / `--max-object-size` / `--discover-time`.
+  and prints findings after each scanned object (large objects are read in chunks, not skipped), then a
+  clickhouse-style `[*] Discover Secrets` summary. Secret values are shown in full; the
+  object count is not capped. The 50 MiB per-target content budget is enforced across
+  all objects; use `--discover-max-bytes` to change it. Findings are emitted after
+  each scanned object, while ClickHouse and Proxmox emit findings after each completed
+  chunk or endpoint. A partial result identifies a budget or read limit reached.
 - **`--probe-write`** is the only mutating action: a canary object is PUT then DELETEd per bucket, reporting
   `(write:True/False)`. Otherwise every operation is GET/HEAD only.
-- **`--object <bucket>/<key>`** with `--dump` prints content or `--download <dir>` saves it (read-only, capped by
-  `--max-object-size`).
+- **`--object <bucket>/<key>`** with `--dump` prints content or `--download <dir>` saves it
+  (read-only, capped at 100 MiB per object).
 
 ### ZooKeeper and ClickHouse Keeper
 

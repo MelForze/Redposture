@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..discovery_options import add_discovery_budget_flags
+
 
 def configure_airflow_parser(
     airflow_parser: argparse.ArgumentParser,
@@ -18,6 +20,7 @@ def configure_airflow_parser(
 ) -> None:
     common = airflow_parser.add_argument_group("Common")
     auth = airflow_parser.add_argument_group("Auth")
+    discover = airflow_parser.add_argument_group("Discovery")
     add_output_flags(common)
     add_log_flag(common)
     add_scan_host_flags(common, include_profiles=False)
@@ -61,6 +64,10 @@ def configure_airflow_parser(
         action="store_true",
         help="Try a curated catalog of Airflow default credentials (incl. airflow:airflow).",
     )
+    discover.add_argument(
+        "--discover", action="store_true", help="Search DAG task-instance logs for secrets (read-only)."
+    )
+    add_discovery_budget_flags(discover, default_time=None, default_bytes=50 * 1024 * 1024)
     # Transport is automatic (scheme probed per target; TLS certificates always
     # accepted) — no --https/--insecure/--ca-file flags.
 

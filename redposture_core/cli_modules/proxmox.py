@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..discovery_options import add_discovery_budget_flags
+
 
 def configure_proxmox_parser(
     parser: argparse.ArgumentParser,
@@ -75,10 +77,11 @@ def configure_proxmox_parser(
         help="Try the curated Proxmox realm-qualified credential set after API token, provided, or file credentials.",
     )
     actions.add_argument(
-        "--discover-creds",
+        "--discover",
         action="store_true",
         help="Enable extended endpoint crawl and credential discovery in API responses.",
     )
+    add_discovery_budget_flags(actions, default_time=None, default_bytes=50 * 1024 * 1024)
     actions.add_argument("--nodes", action="store_true", help="Show discovered Proxmox node names.")
     actions.add_argument("--users", action="store_true", help="Show users returned by /access/users.")
     actions.add_argument(

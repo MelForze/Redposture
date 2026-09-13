@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 
+from ..discovery_options import add_discovery_budget_flags
+
 
 def configure_minio_parser(
     minio_parser: argparse.ArgumentParser,
@@ -82,9 +84,7 @@ def configure_minio_parser(
     # exposure, not establishing trust). No --https/--insecure/--ca-file flags.
 
     enum = minio_parser.add_argument_group("Enumeration / Discovery")
-    enum.add_argument(
-        "--show-buckets", dest="show_buckets", action="store_true", help="List buckets (bounded by --limit)."
-    )
+    enum.add_argument("--show-buckets", dest="show_buckets", action="store_true", help="List buckets.")
     enum.add_argument(
         "--bucket",
         dest="bucket",
@@ -96,7 +96,7 @@ def configure_minio_parser(
         "--show-objects",
         dest="show_objects",
         action="store_true",
-        help="List objects in --bucket (streaming, bounded by --limit).",
+        help="List objects in --bucket (streaming, no object-count limit).",
     )
     enum.add_argument(
         "--object",
@@ -123,33 +123,7 @@ def configure_minio_parser(
         action="store_true",
         help="Secret discovery: bounded content inspection of candidate objects.",
     )
-    enum.add_argument(
-        "--max-object-size",
-        dest="max_object_size",
-        type=int,
-        default=100 * 1024 * 1024,
-        metavar="bytes",
-        help=(
-            "Max bytes read per object for discovery / --dump / --download; larger objects are "
-            "scanned in chunks, not skipped (default 100MiB)."
-        ),
-    )
-    enum.add_argument(
-        "--max-objects",
-        dest="max_objects",
-        type=int,
-        default=1000,
-        metavar="n",
-        help="Max objects inspected during discovery (default 1000).",
-    )
-    enum.add_argument(
-        "--discover-time",
-        dest="discover_time",
-        type=float,
-        default=30.0,
-        metavar="seconds",
-        help="Time budget for discovery (default 30s).",
-    )
+    add_discovery_budget_flags(enum, default_time=None, default_bytes=50 * 1024 * 1024)
 
 
 __all__ = ["configure_minio_parser"]

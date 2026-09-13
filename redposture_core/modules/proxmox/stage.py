@@ -134,7 +134,7 @@ def _proxmox_requested_action_fields(args: Any) -> dict[str, Any]:
     """Fields that describe the requested CLI actions, even when auth gates them."""
 
     return {
-        "discover_creds": bool(getattr(args, "discover_creds", False)),
+        "discover_creds": bool(getattr(args, "discover", getattr(args, "discover_creds", False))),
         "show_nodes": bool(getattr(args, "nodes", False) or getattr(args, "show_nodes", False)),
         "show_users": bool(getattr(args, "users", False) or getattr(args, "show_users", False)),
         "add_user": str(getattr(args, "add_user", "") or "").strip() or None,
@@ -478,6 +478,15 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
     cfg = AuditConfig.from_namespace(ctx.args)
     options = _build_proxmox_host_stage_options(ctx.args)
     started = time.monotonic()
+    live_emit = getattr(ctx, "live_emit", None) if options["discover_creds"] else None
+    finding_callback = options["on_credential_finding"]
+
+    def emit_finding(finding: dict[str, str]) -> None:
+        if finding_callback is not None:
+            finding_callback(finding)
+        if live_emit is not None:
+            live_emit([actions._format_single_finding_detail_line({"host": ctx.host, "port": ctx.port}, finding)])
+
     if actions._audit_proxmox_host is not _PROXMOX_AUDIT_HOST_IMPL:
         raw_record = _resolved_proxmox_host_stage()(
             host=ctx.host,
@@ -527,13 +536,17 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
         grant_propagate=options["grant_propagate"],
         on_status_ready=options["on_status_ready"],
         on_discovered_url=options["on_discovered_url"],
-        on_credential_finding=options["on_credential_finding"],
+        on_credential_finding=emit_finding if live_emit is not None else finding_callback,
         _resolved_auth=state.resolved_auth,
         _nested_scheduler=ctx.nested_scheduler,
         _transport_pool=state.http,
         _origin_state=state,
         _debug_emit=ctx.debug_emit,
+        _discover_time=getattr(ctx.args, "discover_time", None),
+        _discover_max_bytes=getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024),
     )
+    if live_emit is not None:
+        raw_record["_discover_findings_streamed"] = True
     return _proxmox_apply_credential_source(
         _proxmox_record(
             actions._attach_proxmox_stage_telemetry(

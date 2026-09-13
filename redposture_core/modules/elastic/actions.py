@@ -25,7 +25,7 @@ from ...utils import (
     is_signature_compat_typeerror,
     utc_now_iso,
 )
-from .discover import DiscoverReport, DiscoverRequest, DiscoverResponse, run_discovery
+from .discover import DiscoverOptions, DiscoverReport, DiscoverRequest, DiscoverResponse, run_discovery
 from .http_session import ElasticHttpSession
 
 _ELASTIC_TAG = "ELASTIC"
@@ -2272,6 +2272,7 @@ def _collect_discover_report(
     http_pool: HttpSessionPool | None = None,
     nested_scheduler: Any | None = None,
     scheduler_key: Any | None = None,
+    options: DiscoverOptions | None = None,
 ) -> DiscoverReport:
     """Run the v2 discovery engine while preserving the module HTTP policy."""
 
@@ -2325,6 +2326,8 @@ def _collect_discover_report(
         )
 
     discover_kwargs: dict[str, Any] = {"vendor": _normalize_vendor(vendor)}
+    if options is not None:
+        discover_kwargs["options"] = options
     if nested_scheduler is not None:
         discover_kwargs.update({"nested_scheduler": nested_scheduler, "scheduler_key": scheduler_key})
     return run_discovery(_request, **discover_kwargs)
@@ -4081,6 +4084,10 @@ def _collect_elastic_data_with_session(
                 http_pool=discover_pool,
                 nested_scheduler=nested_scheduler,
                 scheduler_key=("elastic-discover", host, port),
+                options=DiscoverOptions(
+                    max_seconds=float(getattr(ctx.args, "discover_time", 300.0)),
+                    max_source_bytes=int(getattr(ctx.args, "discover_max_bytes", 50 * 1024 * 1024)),
+                ),
             )
         finally:
             discover_pool.close()

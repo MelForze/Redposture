@@ -62,7 +62,7 @@ def _fake_bucket_objects(monkeypatch, *keys):
 def test_data_record_dump_single_object(monkeypatch):
     client = _install_client(monkeypatch, MinioResponse(http_status=200, headers={}, body=b"hello\nworld"))
     out = actions.data_record(_ctx(object="bulk/creds.env", dump=True), {"detection_status": "confirmed"})
-    assert client.calls == [("bulk", "creds.env", 10 * 1024 * 1024)]
+    assert client.calls == [("bulk", "creds.env", 100 * 1024 * 1024)]
     assert out["object_dumps"] == [{"bucket": "bulk", "key": "creds.env", "size": 11, "content": "hello\nworld"}]
     assert out["object_dumps_labeled"] is False  # single object -> no === header
 

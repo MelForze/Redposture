@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import queue
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from ....secret_detection import detector_names, fingerprint, mask_secret, scan_
 from .checkpoint import CheckpointStore, InMemoryCheckpointStore
 from .inventory import collect_inventory, is_content_type
 from .models import ScanChunk, TableInventory
-from .reader import build_chunk_query, read_chunk
+from .reader import ReadResult, build_chunk_query, read_chunk
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,8 @@ class DiscoverConfig:
     exclusions: tuple[str, ...] = ()
     detectors: tuple[str, ...] = ()
     redact: bool = True
+    max_seconds: float | None = None
+    max_total_bytes: int | None = None
 
 
 _SYSTEM_DATABASES = {"system", "information_schema", "INFORMATION_SCHEMA"}
@@ -155,6 +158,7 @@ def run_discovery(
     sessions: tuple[Any, ...] | None = None,
     nested_scheduler: Any | None = None,
     scheduler_key: Any | None = None,
+    on_chunk_findings: Callable[[ScanChunk, list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
     enabled = config.detectors or detector_names()
@@ -178,6 +182,10 @@ def run_discovery(
     inventory, inventory_errors = collect_inventory(query_rows)
     inventory_payload = [table.to_dict() for table in inventory]
     scan_errors: list[dict[str, Any]] = []
+    inspected_bytes = 0
+    budget_reason: str | None = None
+    deadline = started + config.max_seconds if config.max_seconds is not None else None
+    resumed_parents: dict[str, str] = {}
     table_jobs: list[tuple[TableInventory, tuple[str, ...]]] = []
 
     for table in inventory:
@@ -238,10 +246,32 @@ def run_discovery(
     def initial_chunks():
         for table, columns in table_jobs:
             for chunk in _planned_chunks(table, columns, max(1, config.chunk_rows)):
-                if not store.is_complete(chunk.chunk_id):
-                    yield chunk
+                if budget_reason is not None:
+                    return
+                if store.is_complete(chunk.chunk_id):
+                    continue
+                saved = (state.get("chunks") or {}).get(chunk.chunk_id)
+                if isinstance(saved, dict) and saved.get("status") == "budget_partial":
+                    next_offset = saved.get("next_offset")
+                    if isinstance(next_offset, int) and chunk.offset < next_offset < chunk.offset + chunk.limit:
+                        remaining = ScanChunk(
+                            chunk.database,
+                            chunk.table,
+                            chunk.columns,
+                            chunk.partition_id,
+                            next_offset,
+                            chunk.offset + chunk.limit - next_offset,
+                        )
+                        resumed_parents[remaining.chunk_id] = chunk.chunk_id
+                        yield remaining
+                        continue
+                yield chunk
 
     def read_one(chunk: ScanChunk):
+        if deadline is not None and time.monotonic() >= deadline:
+            return ReadResult([], 0, "discover_time")
+        if config.max_total_bytes is not None and inspected_bytes >= config.max_total_bytes:
+            return ReadResult([], 0, "discover_max_bytes")
         query = build_chunk_query(
             chunk,
             max_query_time=config.max_query_time,
@@ -257,6 +287,12 @@ def run_discovery(
             session_queue.put(current_session)
 
     def record_result(chunk: ScanChunk, result: Any) -> tuple[ScanChunk, ...]:
+        nonlocal inspected_bytes, budget_reason
+        if budget_reason is not None:
+            return ()
+        if result.error in {"discover_time", "discover_max_bytes"}:
+            budget_reason = str(result.error)
+            return ()
         if result.error:
             kind = _error_kind(result.error)
             if kind in {"timeout", "memory_limit", "resource_limit"} and chunk.limit > 1:
@@ -314,7 +350,41 @@ def run_discovery(
             )
             return ()
 
-        _scan_rows(result.rows, chunk, findings, coverage, enabled=enabled, redact=config.redact)
+        rows = result.rows
+        bytes_read = result.bytes_read
+        if config.max_total_bytes is not None and inspected_bytes + bytes_read > config.max_total_bytes:
+            remaining = config.max_total_bytes - inspected_bytes
+            accepted: list[list[Any]] = []
+            bytes_read = 0
+            for row in rows:
+                row_bytes = sum(len(str(value).encode("utf-8", errors="replace")) for value in row if value is not None)
+                if bytes_read + row_bytes > remaining:
+                    break
+                accepted.append(row)
+                bytes_read += row_bytes
+            rows = accepted
+            budget_reason = "discover_max_bytes"
+        previous_keys = set(findings) if on_chunk_findings is not None else set()
+        _scan_rows(rows, chunk, findings, coverage, enabled=enabled, redact=config.redact)
+        inspected_bytes += bytes_read
+        if on_chunk_findings is not None:
+            discovered = [dict(finding) for key, finding in findings.items() if key not in previous_keys]
+            if discovered:
+                on_chunk_findings(chunk, discovered)
+        if budget_reason is not None:
+            scan_errors.append(
+                {"database": chunk.database, "table": chunk.table, "offset": chunk.offset, "kind": budget_reason}
+            )
+            for column_name in chunk.columns:
+                coverage[_coverage_key(chunk.database, chunk.table, column_name)]["status"] = "partial"
+            store.update(
+                chunk_id=resumed_parents.get(chunk.chunk_id, chunk.chunk_id),
+                chunk={"status": "budget_partial", "next_offset": chunk.offset + len(rows)},
+                findings=findings,
+                coverage=coverage,
+                inventory=inventory_payload,
+            )
+            return ()
         for column_name in chunk.columns:
             item = coverage[_coverage_key(chunk.database, chunk.table, column_name)]
             item["completed_chunks"] += 1
@@ -328,8 +398,8 @@ def run_discovery(
             "offset": chunk.offset,
             "limit": chunk.limit,
             "status": "complete",
-            "rows_scanned": len(result.rows),
-            "bytes_scanned": result.bytes_read,
+            "rows_scanned": len(rows),
+            "bytes_scanned": bytes_read,
         }
         store.update(
             chunk_id=chunk.chunk_id,
@@ -338,6 +408,9 @@ def run_discovery(
             coverage=coverage,
             inventory=inventory_payload,
         )
+        parent_id = resumed_parents.get(chunk.chunk_id)
+        if parent_id is not None:
+            store.update(chunk_id=parent_id, chunk={"status": "complete"}, findings=findings, coverage=coverage)
         table = tables_by_name[(chunk.database, chunk.table)]
         if table.total_rows is None and not table.partitions and len(result.rows) == chunk.limit:
             for column_name in chunk.columns:
@@ -356,7 +429,7 @@ def run_discovery(
 
     if nested_scheduler is None or len(available_sessions) == 1:
         work = list(initial_chunks())
-        while work:
+        while work and budget_reason is None:
             chunk = work.pop(0)
             work[0:0] = record_result(chunk, read_one(chunk))
     else:
@@ -391,7 +464,7 @@ def run_discovery(
         )
         if item["coverage_percent"] == 100.0 and int(item.get("failed_chunks") or 0) == 0:
             item["status"] = "complete"
-    incomplete = bool(inventory_errors or scan_errors)
+    incomplete = bool(inventory_errors or scan_errors or budget_reason)
     searchable = [item for item in coverage.values() if item.get("status") not in {"excluded", "unsupported_type"}]
     total_chunks = sum(int(item.get("total_chunks") or 0) for item in searchable)
     completed_chunks = sum(int(item.get("completed_chunks") or 0) for item in searchable)
@@ -417,6 +490,8 @@ def run_discovery(
         "coverage": coverage,
         "coverage_percent": coverage_percent,
         "scan_errors": scan_errors,
+        "bytes_scanned": inspected_bytes,
+        "partial_reasons": [budget_reason] if budget_reason else [],
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "redacted": config.redact,
         "detectors": list(enabled),

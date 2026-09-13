@@ -450,12 +450,12 @@ def test_enumeration_flags_parse():
             "--bucket",
             "b",
             "--discover",
-            "--max-objects",
+            "--discover-max-bytes",
             "7",
         ]
     )
     assert args.show_buckets and args.show_objects and args.discover
-    assert args.bucket == "b" and args.max_objects == 7
+    assert args.bucket == "b" and args.discover_max_bytes == 7
     assert not hasattr(args, "prefix")  # --prefix removed
 
 

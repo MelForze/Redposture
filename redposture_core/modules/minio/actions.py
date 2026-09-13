@@ -775,7 +775,7 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             bucket=bucket,
             want_dump=want_dump,
             want_download=want_download,
-            max_bytes=int(getattr(args, "max_object_size", 10 * 1024 * 1024)),
+            max_bytes=100 * 1024 * 1024,
         )
 
     bucket_infos: list[Any] | None = None
@@ -815,11 +815,10 @@ def data_record(ctx: Any, prior: dict[str, Any]) -> dict[str, Any]:
             merged["_stream_lines_file"] = stream_path
         if want_discover:
             budget = _discover.Budget(
-                max_object_size=int(getattr(args, "max_object_size", 100 * 1024 * 1024)),
-                max_objects=int(getattr(args, "max_objects", 1000)),
-                time_budget=float(getattr(args, "discover_time", 30.0)),
+                time_budget=getattr(args, "discover_time", None),
+                max_total_bytes=getattr(args, "discover_max_bytes", 50 * 1024 * 1024),
             )
-            scan_iter = _enum.iter_objects_multi(client, target_buckets, limit=budget.max_objects + 1)
+            scan_iter = _enum.iter_objects_multi(client, target_buckets)
 
             # Real-time output: when TXT and a live sink is available (and we are not
             # also streaming an object listing), emit the target's static lines now,

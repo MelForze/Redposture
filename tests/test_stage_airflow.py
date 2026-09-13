@@ -9,7 +9,7 @@ def test_build_airflow_spec_wires_hooks():
     spec = stage.build_airflow_spec(parse_args(["airflow", "-t", "127.0.0.1"]))
     assert spec.module == "airflow" and spec.label == "AIRFLOW"
     assert spec.detect is not None and spec.auth is not None and spec.capabilities is not None
-    assert spec.data is None  # Phase 1 has no enumeration
+    assert spec.data is not None  # Discovery is gated by --discover inside the data hook.
     assert "credential_password" in spec.structured_output_redact_fields
 
 

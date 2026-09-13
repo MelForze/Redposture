@@ -28,6 +28,7 @@ class AirflowResponse:
     request_url: str | None = None
     final_url: str | None = None
     redirect_history: tuple[str, ...] = ()
+    truncated: bool = False
 
     def json(self) -> Any | None:
         if self.transport_error or not self.body:
@@ -78,13 +79,14 @@ class AirflowClient:
         authed: bool,
         body: bytes | None = None,
         extra_headers: dict[str, str] | None = None,
+        response_size_cap: int = _RESPONSE_CAP,
     ) -> AirflowResponse:
         headers: dict[str, str] = dict(extra_headers or {})
         if authed:
             headers.update(self._auth_header())
         try:
             resp = self._pool.request(
-                method, f"{self.base_url}{path}", headers=headers, body=body, response_size_cap=_RESPONSE_CAP
+                method, f"{self.base_url}{path}", headers=headers, body=body, response_size_cap=response_size_cap
             )
         except Exception as exc:  # noqa: BLE001 - transport errors normalized for callers
             return AirflowResponse(http_status=0, headers={}, body=b"", transport_error=str(exc))
@@ -105,10 +107,20 @@ class AirflowClient:
             request_url=getattr(resp, "request_url", None),
             final_url=getattr(resp, "final_url", None),
             redirect_history=tuple(getattr(resp, "redirect_history", ()) or ()),
+            truncated=bool(getattr(resp, "truncated", False)),
         )
 
-    def get(self, path: str, *, authed: bool = True) -> AirflowResponse:
-        return self._request("GET", path, authed=authed)
+    def get(
+        self,
+        path: str,
+        *,
+        authed: bool = True,
+        extra_headers: dict[str, str] | None = None,
+        response_size_cap: int = _RESPONSE_CAP,
+    ) -> AirflowResponse:
+        return self._request(
+            "GET", path, authed=authed, extra_headers=extra_headers, response_size_cap=response_size_cap
+        )
 
     def post_json(self, path: str, payload: dict[str, Any], *, authed: bool = False) -> AirflowResponse:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")

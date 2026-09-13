@@ -123,6 +123,8 @@ def _build_clickhouse_host_stage_options(args: Any) -> dict[str, Any]:
         "discover_exclusions": exclusions,
         "discover_detectors": detectors,
         "discover_redact": bool(getattr(args, "discover_redact", False)),
+        "discover_max_seconds": getattr(args, "discover_time", None),
+        "discover_max_total_bytes": getattr(args, "discover_max_bytes", 50 * 1024 * 1024),
     }
 
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...discovery_options import validate_discovery_budget
+
 
 def validate_args(args: Any, console: Any) -> int | None:
     port = getattr(args, "port", None)
@@ -21,7 +23,7 @@ def validate_args(args: Any, console: Any) -> int | None:
     if username is None and password is not None:
         console.error("--username and --password must be set together: -u/--username is missing")
         return 2
-    return None
+    return validate_discovery_budget(args, console)
 
 
 __all__ = ["validate_args"]

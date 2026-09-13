@@ -253,6 +253,91 @@ def test_discovery_inventory_scan_checkpoint_and_resume(tmp_path: Path) -> None:
     assert resumed_session.client.queries == []
 
 
+def test_discovery_emits_new_findings_after_each_completed_chunk() -> None:
+    values = [("password=first-secret-value",), ("password=second-secret-value",)]
+
+    class OffsetClient:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def execute_iter(self, query: str):
+            self.queries.append(query)
+            offset = int(re.search(r"OFFSET (\d+)", query).group(1))
+            yield values[offset]
+
+    client = OffsetClient()
+    emitted: list[tuple[int, int, str]] = []
+
+    def on_chunk(chunk: ScanChunk, findings: list[dict[str, Any]]) -> None:
+        emitted.extend((chunk.offset, len(client.queries), str(item["value"])) for item in findings)
+
+    report = run_discovery(
+        SimpleNamespace(protocol="native", client=client),
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(chunk_rows=1, redact=False),
+        query_rows=_inventory_query,
+        on_chunk_findings=on_chunk,
+    )
+    assert report["status"] == "complete"
+    assert emitted == [(0, 1, "first-secret-value"), (1, 2, "second-secret-value")]
+
+
+def test_global_byte_budget_is_exact_and_resume_continues_partial_chunk(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "budget.json"
+    values = [("password=firstsecret",), ("password=secondsecret",)]
+
+    class OffsetClient:
+        def execute_iter(self, query: str):
+            limit = int(re.search(r"LIMIT (\d+)", query).group(1))
+            offset = int(re.search(r"OFFSET (\d+)", query).group(1))
+            yield from values[offset : offset + limit]
+
+    session = SimpleNamespace(protocol="native", client=OffsetClient())
+    cap = len(values[0][0].encode()) + 3
+    first = run_discovery(
+        session,
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(checkpoint=checkpoint, chunk_rows=2, max_total_bytes=cap, redact=False),
+        query_rows=_inventory_query,
+    )
+    assert first["status"] == "partial"
+    assert first["bytes_scanned"] <= cap
+    assert first["partial_reasons"] == ["discover_max_bytes"]
+    assert any(finding["value"] == "firstsecret" for finding in first["findings"])
+    state = CheckpointStore(checkpoint, "127.0.0.1:9000", resume=True).target_state()
+    assert any(
+        chunk.get("status") == "budget_partial" and chunk.get("next_offset") == 1 for chunk in state["chunks"].values()
+    )
+
+    second = run_discovery(
+        session,
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(checkpoint=checkpoint, resume=True, chunk_rows=2, redact=False),
+        query_rows=_inventory_query,
+    )
+    assert second["status"] == "complete"
+    assert any(finding["value"] == "firstsecret" for finding in second["findings"])
+    assert any(finding["value"] == "secondsecret" for finding in second["findings"])
+    assert second["coverage_percent"] == 100.0
+
+
+def test_global_time_budget_stops_clickhouse_before_reading_rows() -> None:
+    session = _session([("password=secret123",)])
+    report = run_discovery(
+        session,
+        host="127.0.0.1",
+        port=9000,
+        config=DiscoverConfig(max_seconds=1e-9),
+        query_rows=_inventory_query,
+    )
+    assert report["status"] == "partial"
+    assert report["partial_reasons"] == ["discover_time"]
+    assert session.client.queries == []
+
+
 def test_discovery_uses_four_independent_table_sessions() -> None:
     active = 0
     peak = 0

@@ -2075,6 +2075,17 @@ def collect_clickhouse_data(
                     discover_sessions.append(extra_session)
                 if getattr(ctx, "debug_emit", None) is not None:
                     ctx.debug_emit(f"{ctx.host}:{ctx.port} clickhouse discover workers={len(discover_sessions)}")
+                live_discover_emit = getattr(ctx, "live_emit", None)
+
+                def on_chunk_findings(_chunk: Any, discovered: list[dict[str, Any]]) -> None:
+                    if live_discover_emit is not None:
+                        live_discover_emit(
+                            [
+                                _format_discover_finding_line({"host": ctx.host, "port": ctx.port}, item)
+                                for item in discovered
+                            ]
+                        )
+
                 discover_report = run_discovery(
                     session,
                     host=str(ctx.host),
@@ -2091,11 +2102,14 @@ def collect_clickhouse_data(
                         exclusions=tuple(options.get("discover_exclusions") or ()),
                         detectors=tuple(options.get("discover_detectors") or ()),
                         redact=bool(options.get("discover_redact", False)),
+                        max_seconds=options.get("discover_max_seconds"),
+                        max_total_bytes=options.get("discover_max_total_bytes"),
                     ),
                     query_rows=lambda query: _query_rows(session, query),
                     sessions=tuple(discover_sessions),
                     nested_scheduler=nested_scheduler,
                     scheduler_key=("clickhouse-discover", ctx.host, ctx.port),
+                    on_chunk_findings=on_chunk_findings if live_discover_emit is not None else None,
                 )
             except (OSError, ValueError) as exc:
                 discover_report = {
@@ -2175,6 +2189,7 @@ def collect_clickhouse_data(
             "error": "; ".join(dict.fromkeys(errors)) if errors else None,
             "discover_requested": bool(options.get("discover")),
             "discover_report": discover_report,
+            "_discover_findings_streamed": bool(options.get("discover") and getattr(ctx, "live_emit", None)),
         }
     )
     payload["partial"] = bool(payload["partial_reasons"])
@@ -3200,26 +3215,11 @@ def _format_discover_detail_records(record: dict[str, Any], output_format: str) 
         f"(tables:{int(report.get('tables_scanned') or 0)})"
     ]
     findings = report.get("findings")
-    if isinstance(findings, list):
+    if isinstance(findings, list) and not record.get("_discover_findings_streamed"):
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
-            locations = finding.get("locations")
-            first_location = locations[0] if isinstance(locations, list) and locations else {}
-            if not isinstance(first_location, dict):
-                first_location = {}
-            location = ".".join(str(first_location.get(key) or "?") for key in ("database", "table", "column"))
-            object_path = str(first_location.get("object_path") or "$")
-            shown_value = finding.get("value")
-            if shown_value is None:
-                shown_value = finding.get("masked_value")
-            if shown_value is None:
-                shown_value = "<redacted>"
-            encoded_value = json.dumps(str(shown_value), ensure_ascii=False, separators=(",", ":"))
-            encoded_place = json.dumps(f"{location}{object_path}", ensure_ascii=False, separators=(",", ":"))
-            lines.append(
-                f"{prefix} [+] {str(finding.get('type') or 'secret')} value={encoded_value} place={encoded_place}"
-            )
+            lines.append(_format_discover_finding_line(record, finding))
     errors = report.get("scan_errors")
     if isinstance(errors, list) and errors:
         lines.append(f"{prefix} [!] Discover incomplete chunks:{len(errors)}; resume with --resume")
@@ -3227,6 +3227,25 @@ def _format_discover_detail_records(record: dict[str, Any], output_format: str) 
     if checkpoint_path:
         lines.append(f"{prefix} [*] Checkpoint {checkpoint_path}")
     return lines
+
+
+def _format_discover_finding_line(record: dict[str, Any], finding: dict[str, Any]) -> str:
+    locations = finding.get("locations")
+    first_location = locations[0] if isinstance(locations, list) and locations else {}
+    if not isinstance(first_location, dict):
+        first_location = {}
+    location = ".".join(str(first_location.get(key) or "?") for key in ("database", "table", "column"))
+    object_path = str(first_location.get("object_path") or "$")
+    shown_value = finding.get("value")
+    if shown_value is None:
+        shown_value = finding.get("masked_value")
+    if shown_value is None:
+        shown_value = "<redacted>"
+    encoded_value = json.dumps(str(shown_value), ensure_ascii=False, separators=(",", ":"))
+    encoded_place = json.dumps(f"{location}{object_path}", ensure_ascii=False, separators=(",", ":"))
+    return (
+        f"{_nxc_prefix(record)} [+] {str(finding.get('type') or 'secret')} value={encoded_value} place={encoded_place}"
+    )
 
 
 _DISCOVER_STATUS_RE = re.compile(r"\(status:([^)]*)\)")
