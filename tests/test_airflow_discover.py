@@ -55,7 +55,7 @@ def test_default_discovery_walks_more_than_one_hundred_dags_without_count_limit(
                 return _response({"dag_runs": [], "total_entries": 0})
             raise AssertionError(path)
 
-    report = discover_task_logs(ManyDagsClient(), "v1", DiscoverConfig())  # type: ignore[arg-type]
+    report = discover_task_logs(ManyDagsClient(), "v1", DiscoverConfig())
     assert report["status"] == "complete"
     assert report["dags_scanned"] == 101
     assert report["partial_reasons"] == []
