@@ -13,8 +13,9 @@ import json
 import re
 from typing import Any
 
+from ...auth_detection import auth_required_text
 from ...console import Console
-from ...rendering import BooleanColorRule, render_colored_marker_line, render_tagged_detail_line
+from ...rendering import BooleanColorRule, LiteralColorRule, render_colored_marker_line, render_tagged_detail_line
 
 _UNDETECTED = {"not_airflow", "transport_failure", ""}
 # admin/op are exposure -> red/yellow; viewer/none benign -> green; unknown -> yellow.
@@ -24,10 +25,6 @@ _ROLE_RE = re.compile(r"\((anon|role):([a-z]+)\)")
 
 def _prefix(record: dict[str, Any]) -> str:
     return f"AIRFLOW\t{record.get('host') or '?'}\t{int(record.get('port') or 0)}\t"
-
-
-def _bool_text(value: Any) -> str:
-    return "True" if value is True else "False" if value is False else "unknown"
 
 
 def _password_text(password: Any) -> str:
@@ -44,7 +41,10 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
         return ""
     if str(record.get("detection_status") or "") in _UNDETECTED:
         return ""
-    line = f"{_prefix(record)} [*] Airflow (auth required:{_bool_text(record.get('auth_required'))})"
+    auth_text = auth_required_text(record.get("auth_required"), record.get("auth_method"))
+    line = f"{_prefix(record)} [*] Airflow (auth required:{auth_text})"
+    if auth_text == "sso" and record.get("sso_provider"):
+        line += f" (provider:{record['sso_provider']})"
     if record.get("auth_required") is False and record.get("anonymous_role") not in (None, "none", "unknown"):
         line += f" (anon:{record['anonymous_role']})"
     if record.get("version"):
@@ -150,6 +150,10 @@ def _render_colored_airflow_line(console: Console, line: str) -> bool:
             # auth required:True == server enforces auth (good) -> green;
             # False == open/anonymous (exposure) -> red.
             BooleanColorRule("auth required", true_color="bright_green", false_color="true_red"),
+        ),
+        literals=(
+            LiteralColorRule("auth required:sso", "bright_green"),
+            LiteralColorRule("provider:keycloak", "cyan"),
         ),
         extra_spans=_airflow_role_spans,
     ):

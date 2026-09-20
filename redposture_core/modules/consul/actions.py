@@ -705,6 +705,14 @@ def _scope_counts_suffix(scopes: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
+def _detect_scope_counts_suffix(scopes: dict[str, Any]) -> str:
+    """Compact anonymous inventory for the primary detection line."""
+    labels = (("kv", "kv"), ("services", "services"), ("agents", "agent"))
+    return " ".join(
+        f"({label}:{format_count_value((scopes.get(scope) or {}).get('count'))})" for scope, label in labels
+    )
+
+
 def _all_scope_counts_zero(scopes: dict[str, Any]) -> bool:
     for name in _CONSUL_SCOPE_NAMES:
         entry = scopes.get(name) or {}
@@ -3458,7 +3466,8 @@ def _detect_line(record: dict[str, Any], output_format: str) -> str:
     anon_scopes = as_dict(record.get("anonymous_scopes"))
     auth_required = (not _all_scopes_ok(anon_scopes)) or _anonymous_acl_denied_with_filtered_empty(record, anon_scopes)
     version = str(record.get("version") or "-")
-    return f"{prefix} [*] Consul Agent (auth required:{_bool_text(auth_required)}) (version:{version})"
+    inventory = f" {_detect_scope_counts_suffix(anon_scopes)}" if auth_required is False else ""
+    return f"{prefix} [*] Consul Agent (auth required:{_bool_text(auth_required)}){inventory} (version:{version})"
 
 
 def _summary_line(record: dict[str, Any]) -> str | None:
@@ -3979,6 +3988,7 @@ def _render_colored_consul_line(console: Console, line: str) -> bool:
         counts=(
             CountColorRule("kv", "red"),
             CountColorRule("services", "orange"),
+            CountColorRule("agent", "orange"),
             CountColorRule("agents", "orange"),
         ),
     ):

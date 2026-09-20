@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...auth_detection import detect_browser_sso
 from ...clients.airflow_api import AirflowClient, AirflowResponse
 from ...clients.http_api import http_response_origin, http_response_requires_https, http_scheme_candidates
 from ...clients.http_session import HttpSessionPool
@@ -39,8 +40,21 @@ _DEFAULT_CREDENTIALS: tuple[tuple[str, str], ...] = (
     ("airflow", "airflow"),  # real Airflow default
     ("admin", "admin"),
     ("admin", "airflow"),
+    ("airflow", "admin"),
     ("airflow", "password"),
+    ("airflow", "changeme"),
+    ("airflow", "airflow123"),
     ("admin", "password"),
+    ("admin", "changeme"),
+    ("admin", "airflow123"),
+    ("root", "root"),
+    ("root", "password"),
+    ("user", "user"),
+    ("user", "password"),
+    ("test", "test"),
+    ("dev", "dev"),
+    ("service", "service"),
+    ("guest", "guest"),
 )
 
 
@@ -122,10 +136,26 @@ def classify_anonymous(client: AirflowClient, generation: str) -> AnonymousResul
     enforced."""
     endpoints = _ENDPOINTS.get(generation, _ENDPOINTS["v1"])
     viewer = client.get(endpoints["viewer"], authed=False)
+    sso = detect_browser_sso(
+        final_url=viewer.final_url,
+        redirect_history=viewer.redirect_history,
+        headers=viewer.headers,
+        body=viewer.body,
+    )
+    if sso is not None:
+        return AnonymousResult(
+            reachable=True,
+            auth_required=True,
+            role="none",
+            auth_method="sso",
+            sso_provider=sso.provider,
+            sso_protocol=sso.protocol,
+            sso_evidence=sso.evidence,
+        )
     if viewer.transport_error:
         return AnonymousResult(reachable=False)
     if viewer.http_status in {401, 403}:
-        return AnonymousResult(reachable=True, auth_required=True, role="none")
+        return AnonymousResult(reachable=True, auth_required=True, role="none", auth_method="native")
     if viewer.http_status != 200:
         return AnonymousResult(reachable=True, auth_required=None, role="unknown")
     role = "viewer"
@@ -133,7 +163,7 @@ def classify_anonymous(client: AirflowClient, generation: str) -> AnonymousResul
         resp = client.get(endpoints[rung], authed=False)
         if not resp.transport_error and resp.http_status == 200:
             role = rung
-    return AnonymousResult(reachable=True, auth_required=False, role=role)
+    return AnonymousResult(reachable=True, auth_required=False, role=role, auth_method="anonymous")
 
 
 # --- credentials -----------------------------------------------------------
@@ -324,6 +354,26 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         anon = classify_anonymous(client, detection.api_generation)
         record["anonymous_role"] = anon.role
         record["auth_required"] = anon.auth_required
+        record["auth_method"] = anon.auth_method
+        if anon.auth_required is False:
+            # A public Viewer endpoint returns the same successful response with
+            # or without Basic credentials.  Treating that response as proof of
+            # a password would create false positives for every --defcreds pair.
+            record["status"] = "open_no_auth"
+            record["credential_verification_status"] = "unavailable"
+        if anon.sso_provider:
+            record["sso_provider"] = anon.sso_provider
+            record["sso_protocol"] = anon.sso_protocol
+            record["sso_evidence"] = list(anon.sso_evidence)
+            # A default Basic/JWT catalog cannot verify a browser SSO flow.
+            # Explicit credentials remain available for installations that
+            # expose native API auth alongside the browser login.
+            args = getattr(ctx, "args", None)
+            explicit_auth = bool(
+                getattr(args, "username", None) is not None or getattr(args, "password", None) is not None
+            )
+            if not explicit_auth:
+                record["credential_verification_status"] = "unavailable"
     if bool(getattr(getattr(ctx, "args", None), "discover", False)):
         record["discover_requested"] = True
         if detection.status != "confirmed":

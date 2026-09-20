@@ -15,6 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from ...auth_detection import SsoDetection, auth_required_text, detect_browser_sso
 from ...clients.http_api import (
     HttpApiClient,
     HttpClientConfig,
@@ -229,6 +230,10 @@ def _looks_like_grafana_login(status: int, body: str, headers: dict[str, str]) -
     if "grafana_session" in set_cookie:
         return True
     return bool(re.search(r"<title[^>]*>[^<]*\bgrafana\b[^<]*</title\s*>", text))
+
+
+def _grafana_sso_response(body: str, headers: dict[str, str]) -> SsoDetection | None:
+    return detect_browser_sso(headers=headers, body=body)
 
 
 def _grafana_health_payload(body: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -828,9 +833,22 @@ def _audit_grafana_host(
                     "error": "service is not grafana",
                 }
 
+            # A confirmed Grafana may expose /api/health publicly while its UI
+            # redirects to an external IdP. Inspect /login even in that case.
+            if not login_body and is_grafana:
+                try:
+                    login_status, login_body, login_headers = _http_request(host, port, "/login", timeout)
+                except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+                    # The service is already confirmed by /api/health. A slow
+                    # IdP must not turn that positive detection into a failure.
+                    login_status, login_body, login_headers = 0, "", {}
+            sso = _grafana_sso_response(login_body, login_headers)
             auth_required = _infer_grafana_auth_required(
                 host, port, timeout, health_status=health_status, health_api_ok=health_api_ok
             )
+            auth_method = "sso" if sso is not None else None
+            if sso is not None:
+                auth_required = True
 
             errors: list[str] = []
             candidates = _build_credential_candidates(username, password, defcreds)
@@ -923,7 +941,11 @@ def _audit_grafana_host(
                 elif token_error:
                     errors.append(token_error)
 
-            if candidates and (auth_required is True or auth_required is None or provided_credentials or defcreds):
+            if (
+                candidates
+                and (auth_method != "sso" or provided_credentials)
+                and (auth_required is True or auth_required is None or provided_credentials or defcreds)
+            ):
                 _try_candidates()
 
             datasources: list[dict[str, str]] | None = None
@@ -999,6 +1021,10 @@ def _audit_grafana_host(
                 "is_grafana": True,
                 "status": status,
                 "auth_required": auth_required,
+                "auth_method": auth_method,
+                "sso_provider": sso.provider if sso is not None else None,
+                "sso_protocol": sso.protocol if sso is not None else None,
+                "sso_evidence": list(sso.evidence) if sso is not None else [],
                 "server_version": version,
                 "provided_credentials": provided_credentials,
                 "provided_username": username,
@@ -1071,9 +1097,7 @@ def _with_optional_datasources(record: dict[str, Any], message: str) -> str:
 
 def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     auth_required_value = record.get("auth_required")
-    auth_required_text = (
-        "True" if auth_required_value is True else "False" if auth_required_value is False else "unknown"
-    )
+    auth_text = auth_required_text(auth_required_value, record.get("auth_method"))
     if output_format == "json":
         return json.dumps(
             {
@@ -1084,11 +1108,15 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
                 "service": "grafana",
                 "detected": bool(record.get("is_grafana")),
                 "auth_required": auth_required_value,
+                "auth_method": record.get("auth_method"),
+                "sso_provider": record.get("sso_provider"),
+                "sso_protocol": record.get("sso_protocol"),
                 "version": record.get("server_version"),
             },
             ensure_ascii=False,
         )
-    return f"{_nxc_prefix(record)} [*] Grafana Service (auth required:{auth_required_text})"
+    suffix = f" (provider:{record['sso_provider']})" if auth_text == "sso" and record.get("sso_provider") else ""
+    return f"{_nxc_prefix(record)} [*] Grafana Service (auth required:{auth_text}){suffix}"
 
 
 def _format_record(record: dict[str, Any], output_format: str) -> str:
@@ -1320,6 +1348,7 @@ def _render_colored_grafana_line(console: Console, line: str) -> bool:
         console,
         line,
         tag="GRAFANA",
+        literals=(("auth required:sso", "bright_green"), ("provider:keycloak", "cyan")),
         counts=(CountColorRule("datasources", "red"),),
     ):
         return True
@@ -1439,6 +1468,8 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             )
             health_api_ok = _is_grafana_health_api_response(health_status, health_body)
             is_grafana, version = _looks_like_grafana_health(health_status, health_body)
+            login_body = ""
+            login_headers: dict[str, str] = {}
             if not health_api_ok or health_status in {401, 403}:
                 login_status, login_body, login_headers = _http_request(
                     str(ctx.host), int(ctx.port), "/login", float(getattr(ctx.args, "timeout", 5.0))
@@ -1463,12 +1494,30 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                     "check_results": None,
                     "error": "service is not grafana",
                 }
+            if not login_body:
+                try:
+                    _login_status, login_body, login_headers = _http_request(
+                        str(ctx.host), int(ctx.port), "/login", float(getattr(ctx.args, "timeout", 5.0))
+                    )
+                except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+                    # /api/health already proved Grafana. SSO enrichment is a
+                    # best-effort probe and cannot invalidate that result.
+                    login_body, login_headers = "", {}
+            sso = _grafana_sso_response(login_body, login_headers)
             auth_required = _infer_grafana_auth_required(
                 str(ctx.host),
                 int(ctx.port),
                 float(getattr(ctx.args, "timeout", 5.0)),
                 health_status=health_status,
                 health_api_ok=health_api_ok,
+            )
+            auth_method = "sso" if sso is not None else None
+            if sso is not None:
+                auth_required = True
+            explicit_auth = bool(
+                str(getattr(ctx.args, "apitoken", "") or "").strip()
+                or getattr(ctx.args, "password", None) is not None
+                or getattr(ctx.args, "username", None) is not None
             )
             return {
                 "timestamp": utc_now_iso(),
@@ -1481,6 +1530,13 @@ def detect_grafana(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                 if auth_required is True
                 else "unknown_auth",
                 "auth_required": auth_required,
+                "auth_method": auth_method,
+                "sso_provider": sso.provider if sso is not None else None,
+                "sso_protocol": sso.protocol if sso is not None else None,
+                "sso_evidence": list(sso.evidence) if sso is not None else [],
+                "credential_verification_status": (
+                    "unavailable" if sso is not None and not explicit_auth else "available"
+                ),
                 "server_version": version,
                 "provided_credentials": False,
                 "provided_username": None,

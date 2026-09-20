@@ -243,6 +243,35 @@ def _proxmox_detect(ctx: AuditHookContext) -> AuditRecord:
     return record
 
 
+def _proxmox_version_for_context(
+    ctx: AuditHookContext,
+    state: _ProxmoxLifecycleState | None,
+) -> str | None:
+    if not bool(getattr(ctx.args, "enum_cve", False)) or state is None or state.resolved_auth is None:
+        return None
+    cfg = AuditConfig.from_namespace(ctx.args)
+    auth_headers = state.resolved_auth[0]
+    status, payload, _headers, error = actions._proxmox_request(
+        ctx.host,
+        ctx.port,
+        "/version",
+        cfg.timeout,
+        cfg.retries,
+        pve_api_token="",
+        use_https=_proxmox_use_https(ctx),
+        insecure=bool(getattr(ctx.args, "insecure", False)),
+        proxy=_proxmox_proxy(ctx.args),
+        auth_headers=auth_headers,
+    )
+    if error or status != 200 or not isinstance(payload, dict):
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    version = str(data.get("version") or "").strip()
+    return version or None
+
+
 def _proxmox_auth(ctx: AuditHookContext, detect_record: AuditRecord) -> AuditRecord:
     _activate_transport(ctx)
     cfg = AuditConfig.from_namespace(ctx.args)
@@ -514,7 +543,13 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
             on_discovered_url=options["on_discovered_url"],
             on_credential_finding=options["on_credential_finding"],
         )
-        return _proxmox_apply_credential_source(_proxmox_record(raw_record), ctx.credential)
+        enriched = _proxmox_apply_credential_source(_proxmox_record(raw_record), ctx.credential)
+        version = _proxmox_version_for_context(ctx, state)
+        if version:
+            payload = enriched.to_dict()
+            payload["version"] = version
+            enriched = _proxmox_record(payload)
+        return enriched
     raw_record = actions._audit_proxmox_host(
         ctx.host,
         ctx.port,
@@ -547,6 +582,9 @@ def _proxmox_data(ctx: AuditHookContext, record: AuditRecord) -> AuditRecord:
     )
     if live_emit is not None:
         raw_record["_discover_findings_streamed"] = True
+    version = _proxmox_version_for_context(ctx, state)
+    if version:
+        raw_record["version"] = version
     return _proxmox_apply_credential_source(
         _proxmox_record(
             actions._attach_proxmox_stage_telemetry(

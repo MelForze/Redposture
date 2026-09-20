@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from redposture_core.clients.kafka import _KAFKA_DEFAULT_CREDENTIALS
+from redposture_core.modules.airflow.actions import _DEFAULT_CREDENTIALS as _AIRFLOW_DEFAULT_CREDENTIALS
 from redposture_core.modules.clickhouse.actions import _build_credential_candidates as clickhouse_credentials
 from redposture_core.modules.elastic.actions import _ELASTIC_DEFAULT_CREDENTIALS
 from redposture_core.modules.etcd.actions import _ETCD_DEFAULT_CREDS
@@ -40,6 +41,7 @@ def test_readme_default_credentials_table_matches_runtime_catalogs() -> None:
         "Kafka": list(_KAFKA_DEFAULT_CREDENTIALS),
         "ZooKeeper": list(_ZOOKEEPER_DEFAULT_CREDENTIALS),
         "Keeper": list(_KEEPER_DEFAULT_CREDENTIALS),
+        "Airflow": list(_AIRFLOW_DEFAULT_CREDENTIALS),
     }
 
     for module, pairs in catalogs.items():

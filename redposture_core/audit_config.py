@@ -32,6 +32,7 @@ class AuditConfig:
     password: str | None = None
     token: str | None = None
     defcreds: bool = False
+    enum_cve: bool = False
     database: str | None = None
     # tls
     cert_file: str | None = None
@@ -78,6 +79,7 @@ class AuditConfig:
             password=getattr(args, "password", None),
             token=token,
             defcreds=bool(getattr(args, "defcreds", False)),
+            enum_cve=bool(getattr(args, "enum_cve", False)),
             database=getattr(args, "database", None),
             cert_file=getattr(args, "cert_file", None),
             key_file=getattr(args, "key_file", None),

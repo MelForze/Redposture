@@ -79,6 +79,71 @@ def test_detect_login_page() -> None:
     assert gitlab._detect_login_page("Welcome") is False
 
 
+def test_gitlab_confirmed_version_with_keycloak_login_reports_sso(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_http_request(
+        _host: str,
+        _port: int,
+        _method: str,
+        path: str,
+        _timeout: float,
+        **_kwargs: object,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        if path == "/users/sign_in":
+            return 200, b'<html><form id="kc-form-login"></form></html>', {}, None
+        if path == "/api/v4/version":
+            return 200, b'{"version":"17.8.1","revision":"abc123"}', {}, None
+        raise AssertionError(path)
+
+    monkeypatch.setattr(gitlab, "_http_request", fake_http_request)
+    context = SimpleNamespace(
+        host="127.0.0.1",
+        port=8080,
+        target=SimpleNamespace(scheme="http"),
+        args=SimpleNamespace(timeout=1.0, retries=0, https=False),
+        lifecycle_state=None,
+    )
+    record = gitlab.detect_gitlab(
+        context,
+        {"project_filters": [], "clone": False, "clone_dir": "/tmp/gitlab", "workers": 1},
+    )
+    assert record["is_gitlab"] is True
+    assert record["auth_required"] is True
+    assert record["auth_method"] == "sso"
+    assert record["sso_provider"] == "keycloak"
+    assert "GitLab Service (auth required:sso) (provider:keycloak)" in gitlab._format_record(record, "txt")
+
+
+def test_keycloak_page_without_gitlab_evidence_is_not_misidentified(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_http_request(
+        _host: str,
+        _port: int,
+        _method: str,
+        path: str,
+        _timeout: float,
+        **_kwargs: object,
+    ) -> tuple[int, bytes, dict[str, str], str | None]:
+        if path == "/users/sign_in":
+            return 200, b'<html><form id="kc-form-login"></form></html>', {}, None
+        if path == "/api/v4/version":
+            return 401, b'{"message":"401 Unauthorized"}', {}, None
+        raise AssertionError(path)
+
+    monkeypatch.setattr(gitlab, "_http_request", fake_http_request)
+    context = SimpleNamespace(
+        host="127.0.0.1",
+        port=8080,
+        target=SimpleNamespace(scheme="http"),
+        args=SimpleNamespace(timeout=1.0, retries=0, https=False),
+        lifecycle_state=None,
+    )
+    record = gitlab.detect_gitlab(
+        context,
+        {"project_filters": [], "clone": False, "clone_dir": "/tmp/gitlab", "workers": 1},
+    )
+    assert record["is_gitlab"] is False
+    assert record["status"] == "not_gitlab"
+
+
 def test_normalize_project_filters_deduplicates_and_splits() -> None:
     values = ["group/app,group/app", "42", "  "]
     assert gitlab._normalize_project_filters(values) == ["group/app", "42"]

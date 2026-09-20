@@ -111,6 +111,7 @@ Common flags used by most modules:
 -w, --workers       Worker count
 -r, --retries       Retry attempts
 --proxy             http(s), socks4(a), or socks5(h) proxy URL
+--enum-cve          Match the detected version against the bundled CVE catalog
 -o, --output        Write output to file
 -f, --format        txt or json
 -log, --log         Tee console output to a log file
@@ -194,7 +195,7 @@ redposture elastic -t http://elastic.internal:9200 --proxy http://127.0.0.1:8080
 | Kafka | `admin:admin`, `admin:admin-secret`, `admin:changeme`, `admin:kafka`, `admin:password`, `broker:broker`, `broker:brokerpass`, `client:client`, `kafka:admin`, `kafka:changeme`, `kafka:kafka`, `kafka:password`, `kafka:zookeeper`, `service:password`, `service:service`, `user:password`, `user:user` |
 | ZooKeeper | `admin:admin`, `admin:changeme`, `admin:kafka`, `admin:password`, `admin:zookeeper`, `broker:broker`, `broker:brokerpass`, `client:client`, `dev:dev`, `guest:guest`, `hadoop:hadoop`, `kafka:changeme`, `kafka:kafka`, `kafka:password`, `kafka:zookeeper`, `root:admin`, `root:password`, `root:root`, `root:rootpass`, `root:zookeeper`, `service:password`, `service:service`, `solr:solr`, `super:super`, `test:test`, `user:password`, `user:user`, `user1:12345`, `zk:password`, `zk:zk`, `zk:zookeeper`, `zookeeper:admin`, `zookeeper:password`, `zookeeper:zookeeper` |
 | Keeper | `admin:admin`, `admin:changeme`, `admin:clickhouse`, `admin:keeper`, `admin:password`, `clickhouse:changeme`, `clickhouse:clickhouse`, `clickhouse:keeper`, `clickhouse:password`, `default:<empty>`, `default:changeme`, `default:clickhouse`, `default:default`, `default:password`, `keeper:changeme`, `keeper:clickhouse`, `keeper:keeper`, `keeper:password`, `root:clickhouse`, `root:keeper`, `root:password`, `root:root`, `service:password`, `service:service`, `user:password`, `user:user` |
-| Airflow | `airflow:airflow`, `admin:admin`, `admin:airflow`, `airflow:password`, `admin:password` |
+| Airflow | `airflow:airflow`, `admin:admin`, `admin:airflow`, `airflow:admin`, `airflow:password`, `airflow:changeme`, `airflow:airflow123`, `admin:password`, `admin:changeme`, `admin:airflow123`, `root:root`, `root:password`, `user:user`, `user:password`, `test:test`, `dev:dev`, `service:service`, `guest:guest` |
 | RabbitMQ | `admin:admin`, `admin:changeme`, `admin:password`, `admin:rabbitmq`, `guest:guest`, `guest:password`, `rabbitmq:admin`, `rabbitmq:password`, `rabbitmq:rabbitmq`, `root:password`, `root:root`, `service:password`, `service:service`, `test:test`, `user:password`, `user:user` |
 
 ## Module Examples
@@ -230,6 +231,24 @@ redposture grafana -t 127.0.0.1 --defcreds --show-datasources
 redposture airflow -t https://airflow.internal:8080 --discover -u auditor -p 'password' -o airflow_results.txt
 ```
 
+When a protected browser flow redirects to a recognized OIDC/SAML identity
+provider, Airflow, Grafana, and an independently confirmed GitLab instance use
+`(auth required:sso)` in TXT. A detected provider is added as
+`(provider:keycloak)`, for example. JSON keeps `auth_required: true` for schema
+compatibility and adds `auth_method: "sso"`, `sso_provider`, `sso_protocol`, and
+non-sensitive evidence labels. A plain Bearer challenge, mTLS request, generic
+login form, or the word `oauth` alone is not classified as SSO. Airflow skips
+`--defcreds` when its API is protected only by a browser SSO flow.
+
+The reproducible Airflow-to-Keycloak QA fixture uses the official Keycloak
+container and a small Airflow 2.11.1-compatible gateway:
+
+```bash
+docker compose -f tests/fixtures/airflow_sso_lab/docker-compose.yml up -d --wait
+redposture airflow -t http://127.0.0.1:18081 --defcreds
+docker compose -f tests/fixtures/airflow_sso_lab/docker-compose.yml down -v
+```
+
 `--discover` uses read-only Airflow REST API v1/v2 endpoints. DAGs, runs, task
 instances, and all recorded attempts are paged without count limits. Log text
 is inspected up to the 50 MiB per-target content budget by default; an optional
@@ -249,6 +268,9 @@ redposture gitlab -t 127.0.0.1 --port 18080 --token glpat-example --project grou
 redposture consul -t 127.0.0.1 --keys --services --agents --checks --nodes --dump 25
 redposture consul -t https://consul.internal --tls-ca ca.pem --tls-cert client.pem --tls-key client.key --services
 ```
+
+When anonymous KV, catalog, and agent access is available, the detection line includes
+`(kv:N) (services:N) (agent:N)`. These counts are omitted when authentication prevents enumeration.
 
 **KubeAPI** — Kubernetes API visibility (a token that gets 403 is verified with a non-persistent `SelfSubjectReview`):
 
@@ -311,6 +333,10 @@ redposture grpc -t 127.0.0.1 --port 50051 --invoke /grpc.health.v1.Health/Check 
 redposture grpc -t 127.0.0.1 --port 50051 --openapi
 ```
 
+An authentication-protected Elasticsearch/OpenSearch target is reported once on the detection line; a duplicate
+`authentication required` detail line is omitted when no credentials were supplied. A version is shown from an
+anonymous response body or explicit product-version header; servers that hide it behind authentication show `-`.
+
 ### MinIO
 
 ```bash
@@ -327,6 +353,11 @@ redposture minio -t 127.0.0.1 -u minioadmin -p minioadmin --object bulk/creds.en
   (no `--https`/`--insecure`/`--ca-file`). Credentials use the S3 model (`-u` access key, `-p` secret key,
   `--session-token`); a valid signature that gets `AccessDenied` is `valid_but_restricted`, never invalid. The
   detection line shows the server version (`(version:…)`) when an authenticated Admin API read exposes it.
+  A redirect from the S3 listener to the Console does not replace the S3 origin. When a target points only to
+  the Console and credentials were requested, the module also checks HTTP and HTTPS on port 9000 of the same
+  host using unsigned discovery requests. Credentials are tested only after confirming the S3 API. If the API
+  is on another host or a different port, include its URL in the targets file. MinIO Admin API JSON errors and
+  the Console's canonical `S3 API Requests must be made to API port` response are handled during verification.
 - **Enumeration** (`--show-buckets`/`--show-objects`/`--bucket`/`--prefix`) is unbounded but memory-safe — objects
   are streamed (no `--limit`; JSON is emitted as NDJSON). `--discover` scans interesting-by-name objects for secrets
   and prints findings after each scanned object (large objects are read in chunks, not skipped), then a
@@ -377,6 +408,79 @@ failures, timeouts, and similar discovery noise) are hidden from stdout and
 every target. If no service is confirmed, the command emits one aggregate
 summary so an empty result is distinguishable from missing output. Errors that
 happen after a service was confirmed remain visible in normal text output.
+
+## Offline CVE enumeration
+
+Every service audit module accepts `--enum-cve`. The option matches a confirmed
+product and its exact detected version against the CVE catalog bundled with the
+installed Redposture release. It never contacts NVD, a vendor, DNS, or another
+external lookup service, and it does not attempt exploitation. The catalog is a
+reviewed snapshot rather than a complete or live vulnerability feed.
+
+The catalog includes only High and Critical findings with CVSS `AV:N`,
+`PR:N` or `PR:L`, and `UI:N` whose documented impact is remote code/command execution,
+authentication bypass or account takeover, arbitrary file read/write, or SSRF.
+Pure denial-of-service findings and advisories without a reliable
+affected-version range are excluded. A version match is reported as
+`potentially affected` because deployment configuration and vendor backports
+cannot be proven from a banner alone.
+
+`PR:N` findings are matched from the confirmed product and version alone.
+`PR:L` findings are emitted only when the target reports
+`auth required:False`, or when the audit was started with explicitly supplied
+application credentials such as `-u/--username` and `-p/--password` (token and
+API-key forms count as credentials as well). A `--defcreds` sweep by itself
+does not enable `PR:L` findings. Structured findings record `PR:N`/`PR:L` in
+`privileges_required` and the decision in `access_basis`. Matching findings are
+printed by CVE identifier from newest to oldest (descending year and sequence).
+
+```text
+GRAFANA         10.0.0.1        3000  [*] Grafana Service (auth required:False) (version:8.2.6)
+GRAFANA         10.0.0.1        3000  [!] CVE-2021-43798 potentially affected (HIGH 7.5) Unauthenticated path traversal and arbitrary file read
+```
+
+Product/version resolution is available for Airflow, ClickHouse, Consul,
+Docker Engine, Elasticsearch, OpenSearch, etcd, GitLab, Grafana, Kubernetes,
+MinIO, MongoDB, Oracle Database, PostgreSQL, Proxmox VE, Qdrant, RabbitMQ,
+Redis, Valkey, ZooKeeper, ClickHouse Keeper, Harbor, and Nexus Repository.
+Kafka `ApiVersions` does not identify an exact broker release, generic gRPC
+reflection does not identify the application product, and a generic OCI/Docker
+Registry does not identify its implementation; these cases are marked
+`unsupported` in JSON/debug output. A confirmed product whose exact version is
+not readable is marked `version_unknown`. Normal TXT stays quiet for
+`no_matches`, `version_unknown`, and `unsupported` results.
+
+The bundled `2026-09-20` catalog contains 186 reviewed product/CVE records:
+
+| Product | CVEs | Product | CVEs |
+|---|---:|---|---:|
+| GitLab | 72 | Redis | 23 |
+| PostgreSQL | 22 | Airflow | 11 |
+| Grafana | 10 | Elasticsearch | 6 |
+| MongoDB | 6 | MinIO | 4 |
+| Nexus Repository | 5 | Qdrant | 5 |
+| RabbitMQ | 4 | ClickHouse | 3 |
+| Valkey | 3 | ZooKeeper | 2 |
+| Harbor | 2 | Oracle Database | 2 |
+| OpenSearch | 1 | Proxmox VE | 1 |
+| Consul | 1 | Docker Engine | 1 |
+| etcd | 1 | Kubernetes | 1 |
+| **Total** | **186** | | |
+
+ClickHouse Keeper currently has no bundled entry that passes every catalog
+condition. It still resolves product/version normally and returns `no_matches`;
+Redposture does not transfer Apache ZooKeeper or ClickHouse Server findings to
+Keeper without an advisory explicitly covering Keeper.
+
+Qdrant's specialized `CVE-2026-25628` `/logger` probe remains available as
+additional endpoint evidence. Its version finding follows the same `PR:L`
+access rule as the rest of the catalog.
+
+With `-f json`, the target record contains `cve_enumeration` with the catalog
+version, resolved products, status, and structured findings including the CVE,
+CVSS vector, detected version, affected range, fixed version, impact, and source
+references. Without `--enum-cve`, TXT and JSON records keep their existing
+shape.
 
 ## License
 

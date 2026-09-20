@@ -20,6 +20,10 @@ class AnonymousResult:
     reachable: bool
     auth_required: bool | None = None
     role: str = "unknown"  # none | viewer | op | admin | unknown
+    auth_method: str | None = None  # native | sso
+    sso_provider: str | None = None
+    sso_protocol: str | None = None
+    sso_evidence: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

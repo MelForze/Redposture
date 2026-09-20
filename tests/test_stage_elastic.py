@@ -184,6 +184,8 @@ def test_detect_and_discover_helpers() -> None:
     ]
 
     assert elastic_stage._extract_version_hint(b'{"nodes":{"n1":{"version":"8.17.3"}}}') == "8.17.3"
+    assert elastic_stage._extract_version_hint(b"", {"X-OpenSearch-Version": "2.19.1"}) == "2.19.1"
+    assert elastic_stage._extract_version_hint(b"", {"Server": "OpenSearch/2.18.0"}) == "2.18.0"
 
 
 def test_classify_detect_probe_accepts_opensearch_markers() -> None:
@@ -2824,7 +2826,7 @@ def test_elastic_record_and_renderer_variants() -> None:
         "txt",
     )
 
-    assert "authentication required" in _format_record({"host": "h", "port": 1, "status": "auth_required"}, "txt")
+    assert _format_record({"host": "h", "port": 1, "status": "auth_required"}, "txt") == ""
     assert "credentials invalid" in _format_record(
         {"host": "h", "port": 1, "status": "auth_required", "provided_credentials": True},
         "txt",

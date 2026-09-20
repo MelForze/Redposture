@@ -37,6 +37,13 @@ def test_detect_line_no_anon_when_auth_required():
     assert "(anon:" not in line
 
 
+def test_detect_line_sso_keeps_boolean_in_record_but_renders_method():
+    line = render._format_detect_record(
+        _record(auth_required=True, auth_method="sso", sso_provider="keycloak", version="2.11.1"), "txt"
+    )
+    assert line == f"{_PFX} [*] Airflow (auth required:sso) (provider:keycloak) (version:2.11.1)"
+
+
 def test_detect_suppressed_for_non_airflow_and_json():
     assert render._format_detect_record(_record(detection_status="not_airflow"), "txt") == ""
     assert render._format_detect_record(_record(), "json") == ""

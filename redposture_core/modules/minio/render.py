@@ -50,6 +50,9 @@ def _format_detect_record(record: dict[str, Any], output_format: str) -> str:
     version = record.get("version")
     if version:
         line += f" (version:{version})"
+    api_endpoint = record.get("api_endpoint")
+    if record.get("console_endpoint") and api_endpoint and api_endpoint != record.get("console_endpoint"):
+        line += f" (S3 API:{api_endpoint})"
     return line
 
 

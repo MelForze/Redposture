@@ -130,3 +130,48 @@ def test_transient_on_transport_error():
 def test_verification_unavailable_on_unparseable():
     result = actions.verify_credential(_StubClient(_resp(500)))
     assert result.state == "verification_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("admin_response", "expected"),
+    [
+        (_resp(200, body=b'{"servers":[]}'), "valid"),
+        (_resp(200, body=b"<html><title>Login</title></html>"), "verification_unavailable"),
+        (_resp(403, S3Error(403, "AccessDenied", "")), "valid_but_restricted"),
+        (_resp(403, S3Error(403, "InvalidAccessKeyId", "")), "invalid"),
+        (_resp(404), "verification_unavailable"),
+    ],
+)
+def test_signed_root_redirect_to_console_uses_admin_verifier(admin_response: MinioResponse, expected: str) -> None:
+    class RedirectClient(_StubClient):
+        def admin_info(self, *, signed: bool) -> MinioResponse:
+            assert signed is True
+            return admin_response
+
+    console = _resp(200, body=b"<html><title>MinIO Console</title></html>")
+    assert actions.verify_credential(RedirectClient(console)).state == expected
+
+
+@pytest.mark.parametrize(
+    ("admin_response", "expected"),
+    [
+        (_resp(200, body=b'{"mode":"online","servers":[]}'), "valid"),
+        (_resp(403, S3Error(403, "InvalidAccessKeyId", "")), "invalid"),
+    ],
+)
+def test_console_wrong_port_error_uses_admin_verifier(admin_response: MinioResponse, expected: str) -> None:
+    class RedirectClient(_StubClient):
+        def admin_info(self, *, signed: bool) -> MinioResponse:
+            assert signed is True
+            return admin_response
+
+    wrong_port = _resp(
+        400,
+        S3Error(400, "InvalidArgument", "S3 API Requests must be made to API port."),
+    )
+    assert actions.verify_credential(RedirectClient(wrong_port)).state == expected
+
+
+def test_unrelated_invalid_argument_remains_unverified() -> None:
+    response = _resp(400, S3Error(400, "InvalidArgument", "unrelated"))
+    assert actions.verify_credential(_StubClient(response)).state == "verification_unavailable"

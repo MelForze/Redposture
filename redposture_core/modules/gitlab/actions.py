@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from ...auth_detection import auth_required_text, detect_browser_sso
 from ...clients.http_api import (
     HttpApiClient,
     HttpClientConfig,
@@ -835,13 +836,14 @@ def _audit_gitlab_host(
         clone_scope: str | None = None
 
         try:
-            login_status, login_payload, _login_headers, login_error = _http_request(
+            login_status, login_payload, login_headers, login_error = _http_request(
                 host, port, "GET", "/users/sign_in", timeout, use_https=use_https
             )
             if login_error:
                 raise ValueError(login_error)
             login_body = login_payload.decode("utf-8", errors="replace")
             login_page = login_status == 200 and _detect_login_page(login_body)
+            sso = detect_browser_sso(headers=login_headers, body=login_body)
 
             version_status, version_payload, _version_headers, version_error = _http_request(
                 host, port, "GET", "/api/v4/version", timeout, use_https=use_https
@@ -1025,6 +1027,11 @@ def _audit_gitlab_host(
                 "is_gitlab": is_gitlab,
                 "status": computed_status,
                 "login_page": login_page,
+                "auth_required": True if sso is not None and is_gitlab else None,
+                "auth_method": "sso" if sso is not None and is_gitlab else None,
+                "sso_provider": sso.provider if sso is not None and is_gitlab else None,
+                "sso_protocol": sso.protocol if sso is not None and is_gitlab else None,
+                "sso_evidence": list(sso.evidence) if sso is not None and is_gitlab else [],
                 "version": version,
                 "open_endpoints": open_endpoints,
                 "public_projects": public_projects,
@@ -1129,6 +1136,10 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
 
     login_page_text = _bool_text(record.get("login_page"))
     version_text = str(record.get("version") or "-")
+    auth_text = auth_required_text(record.get("auth_required"), record.get("auth_method"))
+    if auth_text == "sso":
+        provider = str(record.get("sso_provider") or "sso")
+        return f"{prefix} [*] GitLab Service (auth required:sso) (provider:{provider}) (version:{version_text})"
     return f"{prefix} [*] GitLab Service (login page:{login_page_text}) (version:{version_text})"
 
 
@@ -1268,6 +1279,7 @@ def _render_colored_gitlab_line(console: Console, line: str) -> bool:
         literals=(
             ("(login page:True)", "bright_green"),
             ("(login page:False)", "yellow"),
+            ("(auth required:sso)", "bright_green"),
             ("(repo:True)", "red"),
             ("(issues:True)", "red"),
             ("(members:True)", "red"),
@@ -1382,7 +1394,7 @@ def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
     last_error: str | None = None
     for attempt in range(attempts):
         started = time.monotonic()
-        login_status, login_payload, _login_headers, login_error = _http_request(
+        login_status, login_payload, login_headers, login_error = _http_request(
             str(ctx.host),
             int(ctx.port),
             "GET",
@@ -1405,6 +1417,8 @@ def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
             and login_status == 200
             and _detect_login_page(login_payload.decode("utf-8", errors="replace"))
         )
+        login_body = login_payload.decode("utf-8", errors="replace") if login_error is None else ""
+        sso = detect_browser_sso(headers=login_headers, body=login_body)
         version: str | None = None
         if version_error is None and version_status == 200:
             try:
@@ -1421,6 +1435,11 @@ def detect_gitlab(ctx: Any, options: dict[str, Any]) -> dict[str, Any]:
                 "is_gitlab": True,
                 "status": "detected",
                 "login_page": login_page,
+                "auth_required": True if sso is not None else None,
+                "auth_method": "sso" if sso is not None else None,
+                "sso_provider": sso.provider if sso is not None else None,
+                "sso_protocol": sso.protocol if sso is not None else None,
+                "sso_evidence": list(sso.evidence) if sso is not None else [],
                 "version": version,
                 "open_endpoints": [],
                 "public_projects": [],

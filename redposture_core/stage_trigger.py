@@ -185,6 +185,7 @@ def _render_trigger_check_row(
         ("(auth required:True)", "bright_green"),
         ("(auth required:False)", "red"),
         ("(auth required:unknown)", "yellow"),
+        ("(auth required:sso)", "bright_green"),
         ("(superuser:True)", "red"),
         ("(execute:True)", "red"),
         ("(read:True)", "red"),

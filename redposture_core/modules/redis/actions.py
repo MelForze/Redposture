@@ -152,6 +152,36 @@ def _redis_info_fingerprint(response_type: str, response_value: Any) -> bool:
     return "redis_version" in fields or "valkey_version" in fields
 
 
+def _redis_server_identity(response_type: str, response_value: Any) -> tuple[str | None, str | None]:
+    if response_type != "bulk":
+        return None, None
+    text = (
+        response_value.decode("utf-8", errors="replace")
+        if isinstance(response_value, bytes)
+        else str(response_value or "")
+    )
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition(":")
+        if separator:
+            fields[key.strip().lower()] = value.strip()
+    if fields.get("valkey_version"):
+        return "valkey", fields["valkey_version"]
+    if fields.get("redis_version"):
+        return "redis", fields["redis_version"]
+    return None, None
+
+
+def _capture_redis_server_identity(state: RedisAuditLifecycleState) -> None:
+    if state.sock is None:
+        return
+    response_type, response_value = _send_cmd(state.sock, "INFO", "SERVER")
+    implementation, version = _redis_server_identity(response_type, response_value)
+    if implementation and version:
+        state.implementation = implementation
+        state.server_version = version
+
+
 def _confirm_redis_error_response(sock: socket.socket, message: str) -> tuple[bool, bool | None]:
     if _is_noauth_error(message):
         return True, True
@@ -542,6 +572,8 @@ class RedisAuditLifecycleState:
     tls_cert: str | None = None
     tls_key: str | None = None
     transport_mode: str = "plaintext"
+    implementation: str | None = None
+    server_version: str | None = None
 
 
 class _RedisAuthenticationRejected(Exception):
@@ -648,6 +680,10 @@ def _redis_lifecycle_record(state: RedisAuditLifecycleState, *, include_data: bo
         "elapsed_ms": elapsed_ms,
         "error": state.error,
         "transport_mode": state.transport_mode,
+        "implementation": state.implementation,
+        "server_version": state.server_version,
+        "redis_version": state.server_version if state.implementation == "redis" else None,
+        "valkey_version": state.server_version if state.implementation == "valkey" else None,
         "tls_client_cert_used": bool(state.use_tls and state.tls_cert and state.tls_key),
     }
     attempts = max(1, state.retries + 1)
@@ -698,6 +734,8 @@ def redis_detect_hook(ctx: Any) -> AuditRecord:
                 state.auth_required = False
                 state.status = "open_no_auth"
                 state.error = None
+                if bool(getattr(ctx.args, "enum_cve", False)):
+                    _capture_redis_server_identity(state)
                 return _redis_lifecycle_record(state, include_data=False)
             if ping_type == "error":
                 confirmed, auth_required = _confirm_redis_error_response(state.sock, str(ping_value))
@@ -763,6 +801,8 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
                 if default_ok:
                     state.status = "weak_default_creds"
                     state.error = None
+                    if bool(getattr(ctx.args, "enum_cve", False)):
+                        _capture_redis_server_identity(state)
                     if not exhaustive_credentials:
                         state.active_username = credential.username
                         state.active_password = credential.password
@@ -795,6 +835,8 @@ def redis_auth_hook(ctx: Any, _detect_record: AuditRecord) -> AuditRecord:
             if provided_ok:
                 state.status = "valid_credentials"
                 state.error = None
+                if bool(getattr(ctx.args, "enum_cve", False)):
+                    _capture_redis_server_identity(state)
                 if not exhaustive_credentials:
                     state.active_username = credential.username
                     state.active_password = credential.password

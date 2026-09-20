@@ -112,6 +112,7 @@ def build_grafana_spec(args: Any) -> ModuleAuditSpec:
         render_module=render,
         colorize=render._render_colored_grafana_line,
         credential_gate=_grafana_credential_gate,
+        skip_credentials_without_verifier=True,
         continue_after_credential_error=bool(getattr(args, "defcreds", False)),
         continue_after_credential_success=bool(getattr(args, "defcreds", False)),
     )

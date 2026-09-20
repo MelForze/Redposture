@@ -18,6 +18,7 @@ from . import audit_models as _audit_models
 from .audit_config import AuditConfig
 from .audit_models import StageTrace
 from .clients.tls_cache import tls_context_cache_stats
+from .cve import CveCatalog, ProductResolver, enumerate_record, load_catalog, render_finding_lines
 from .progress import CommandProgressOwner, NoOpProgress, ProgressHandle
 from .rendering import sanitize_report_line
 from .scheduler import BoundedScheduler, SharedNestedScheduler
@@ -530,6 +531,9 @@ class ModuleAuditSpec:
     # Minimum time between TTY progress renders. ``None`` preserves immediate
     # refresh behavior for existing modules.
     progress_refresh_interval_s: float | None = None
+    # Optional module-specific product/version resolver for offline CVE
+    # enumeration. The shared resolver covers standard record fields.
+    cve_product_resolver: ProductResolver | None = None
 
 
 @dataclass(frozen=True)
@@ -1856,6 +1860,7 @@ class AuditCommandRunner:
         self._transport_pool_ids: set[int] = set()
         self._transport_stats = {"connections": 0, "reused": 0, "requests": 0, "retries": 0}
         self._nested_scheduler: SharedNestedScheduler | None = None
+        self._cve_catalog: CveCatalog | None = None
         if emit_line is not None:
             self.emit_line = emit_line
         elif console is not None:
@@ -1867,10 +1872,45 @@ class AuditCommandRunner:
         self, record: AuditRecord, render_plan: RenderPlan | None, output_format: str, debug: bool
     ) -> list[str]:
         if self.spec.render is not None:
-            return [line for line in self.spec.render(record) if line]
-        if render_plan is not None:
-            return render_with_plan(render_plan, record.to_dict(), output_format, debug=debug)
-        return []
+            lines = [line for line in self.spec.render(record) if line]
+        elif render_plan is not None:
+            lines = render_with_plan(render_plan, record.to_dict(), output_format, debug=debug)
+        else:
+            lines = []
+        if output_format != "txt":
+            return lines
+        cve_lines = render_finding_lines(record.to_dict(), label=self.spec.label, host=record.host, port=record.port)
+        if cve_lines:
+            return [*lines[:1], *cve_lines, *lines[1:]]
+        return lines
+
+    def _with_cve_enumeration(self, record: AuditRecord) -> AuditRecord:
+        if self._cve_catalog is None:
+            return record
+        payload = record.to_dict()
+        payload["cve_enumeration"] = enumerate_record(
+            self.spec.module,
+            payload,
+            catalog=self._cve_catalog,
+            confirmed=self._is_detected(record),
+            resolver=self.spec.cve_product_resolver,
+            credentials_provided=self._cve_credentials_provided(),
+        )
+        return AuditRecord.from_mapping(payload, module=self.spec.module, service=record.service)
+
+    def _cve_credentials_provided(self) -> bool:
+        """Whether the operator explicitly supplied application credentials.
+
+        PR:L catalog entries are relevant when an authenticated audit was
+        requested.  Default-credential sweeps are intentionally excluded: an
+        entry is enabled by explicit credentials or by confirmed anonymous
+        access on the target record.
+        """
+
+        return any(
+            getattr(self.args, field, None) is not None
+            for field in ("username", "password", "token", "api_token", "apitoken", "api_key", "pve_api_token")
+        )
 
     def _suppress_in_normal_text(self, record: AuditRecord) -> bool:
         if not self.spec.suppress_undetected_records_in_text or self._is_detected(record):
@@ -1879,6 +1919,8 @@ class AuditCommandRunner:
         return not status or status == "fail" or status.startswith(("not_", "unknown"))
 
     def run_plan(self, plan: AuditCommandPlan) -> AuditCommandResult:
+        if bool(getattr(self.args, "enum_cve", False)):
+            self._cve_catalog = load_catalog()
         nested_default = (
             _LARGE_NESTED_WORKERS if plan.target_count >= _LARGE_AUDIT_PLAN_ENDPOINTS else _DEFAULT_NESTED_WORKERS
         )
@@ -2001,6 +2043,11 @@ class AuditCommandRunner:
                     # A data hook already streamed this record's TXT lines live
                     # (real-time discovery); do not render it again.
                     emitted_lines += int(record.extra.get("_self_emitted_lines") or 0)
+                    cve_lines = render_finding_lines(
+                        record.to_dict(), label=self.spec.label, host=record.host, port=record.port
+                    )
+                    emitted_lines += len(cve_lines)
+                    sink.emit_many(cve_lines)
                     return
                 if self.spec.render is None and self.spec.render_module is None:
                     return
@@ -2021,6 +2068,24 @@ class AuditCommandRunner:
 
         def _finalize_record(record: AuditRecord) -> None:
             nonlocal operational_failure_count, record_count
+            record = self._with_cve_enumeration(record)
+            if debug_emit is not None and self._cve_catalog is not None:
+                cve_result = record.extra.get("cve_enumeration")
+                if isinstance(cve_result, dict):
+                    products = (
+                        ",".join(
+                            f"{item.get('product_key')}:{item.get('normalized_version') or '-'}"
+                            for item in cve_result.get("products", [])
+                            if isinstance(item, dict)
+                        )
+                        or "-"
+                    )
+                    debug_emit(
+                        f"cve enumeration: host={record.host} port={record.port} "
+                        f"catalog={cve_result.get('catalog_version')} status={cve_result.get('status')} "
+                        f"products={products} evidence={len(cve_result.get('additional_evidence') or [])} "
+                        f"reason={cve_result.get('reason') or '-'}"
+                    )
             record_count += 1
             operational_failure_count += int(is_pre_detect_operational_failure(record))
             status = str(record.status or "")

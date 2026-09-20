@@ -211,6 +211,7 @@ class ClickHouseLifecycleState:
     anonymous_access_limited: bool = False
     credential_limited: set[tuple[str | None, str | None, str]] = field(default_factory=set)
     discovery_report: dict[str, Any] | None = None
+    server_version: str | None = None
 
     def take_session(self, username: str | None, password: str | None, source: str) -> _ChSession | None:
         return self.credential_sessions.pop((username, password, source), None)
@@ -570,6 +571,14 @@ def _query_rows(session: _ChSession, query: str) -> tuple[list[list[Any]] | None
             else:
                 rows.append([row])
     return rows, None
+
+
+def _read_clickhouse_version(session: _ChSession) -> str | None:
+    rows, error = _query_rows(session, "SELECT version()")
+    if error or not rows or not rows[0]:
+        return None
+    value = str(rows[0][0] or "").strip()
+    return value or None
 
 
 def _connect_and_probe(
@@ -1649,6 +1658,7 @@ def _clickhouse_lifecycle_payload(
         "host": str(ctx.host),
         "port": int(ctx.port),
         "protocol": protocol,
+        "server_version": getattr(ctx.lifecycle_state, "server_version", None),
         "is_clickhouse": status not in {"fail", "not_clickhouse"},
         "status": status,
         "auth_required": auth_required,
@@ -1788,6 +1798,8 @@ def detect_clickhouse(
     state.selected_protocol = selected_protocol
     if probe.session is not None:
         state.anonymous_session = probe.session
+        if bool(getattr(ctx.args, "enum_cve", False)):
+            state.server_version = _read_clickhouse_version(probe.session)
         state.anonymous_access_limited = probe.access_limited
         state.auth_required = False
         return _clickhouse_lifecycle_payload(
@@ -1882,6 +1894,9 @@ def authenticate_clickhouse(
         time.sleep(_retry_delay(attempt))
     ok = session is not None
     if session is not None:
+        if bool(getattr(ctx.args, "enum_cve", False)) and state.server_version is None:
+            state.server_version = _read_clickhouse_version(session)
+            payload["server_version"] = state.server_version
         session_key = (credential.username, credential.password, source)
         state.credential_sessions[session_key] = session
         if access_limited:

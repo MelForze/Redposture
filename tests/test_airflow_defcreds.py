@@ -3,9 +3,18 @@ from __future__ import annotations
 from redposture_core.modules.airflow import actions
 
 
-def test_default_catalog_leads_with_real_default():
+def test_default_catalog_is_broad_unique_and_leads_with_real_default():
     assert actions._DEFAULT_CREDENTIALS[0] == ("airflow", "airflow")
-    assert ("admin", "admin") in actions._DEFAULT_CREDENTIALS
+    assert len(actions._DEFAULT_CREDENTIALS) == 18
+    assert len(set(actions._DEFAULT_CREDENTIALS)) == len(actions._DEFAULT_CREDENTIALS)
+    assert {
+        ("admin", "admin"),
+        ("airflow", "admin"),
+        ("airflow", "airflow123"),
+        ("root", "root"),
+        ("service", "service"),
+        ("guest", "guest"),
+    }.issubset(actions._DEFAULT_CREDENTIALS)
 
 
 def test_candidates_provided_first_then_defaults_deduped():

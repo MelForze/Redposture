@@ -1,0 +1,5245 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026-09-20",
+  "entries": [
+    {
+      "id": "CVE-2017-15720",
+      "product": "apache_airflow",
+      "title": "Airflow remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "last_affected": "1.8.2"
+        }
+      ],
+      "references": [
+        "https://lists.apache.org/thread.html/ade4d54ebf614f68dc81a08891755e60ea58ba88e0209233eeea5f57%40%3Cdev.airflow.apache.org%3E",
+        "https://nvd.nist.gov/vuln/detail/CVE-2017-15720"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-11978",
+      "product": "apache_airflow",
+      "title": "Airflow command execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "command_execution",
+      "affected": [
+        {
+          "fixed": "1.10.11"
+        }
+      ],
+      "references": [
+        "https://lists.apache.org/thread.html/r7255cf0be3566f23a768e2a04b40fb09e52fcd1872695428ba9afe91%40%3Cusers.airflow.apache.org%3E",
+        "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2020-11978",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-11978"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-38540",
+      "product": "apache_airflow",
+      "title": "Airflow unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "2.0.0",
+          "fixed": "2.1.3"
+        }
+      ],
+      "references": [
+        "https://lists.apache.org/thread.html/rac2ed9118f64733e47b4f1e82ddc8c8020774698f13328ca742b03a2%40%3Cannounce.apache.org%3E",
+        "https://lists.apache.org/thread.html/rb34c3dd1a815456355217eef34060789f771b6f77c3a3dec77de2064%40%3Cusers.airflow.apache.org%3E",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-38540"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-24288",
+      "product": "apache_airflow",
+      "title": "Airflow command execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "command_execution",
+      "affected": [
+        {
+          "fixed": "2.2.4"
+        }
+      ],
+      "references": [
+        "https://lists.apache.org/thread/dbw5ozcmr0h0lhs0yjph7xdc64oht23t",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-24288"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-40127",
+      "product": "apache_airflow",
+      "title": "Airflow command execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "command_execution",
+      "affected": [
+        {
+          "fixed": "2.4.0"
+        }
+      ],
+      "references": [
+        "https://github.com/apache/airflow/pull/25960",
+        "https://lists.apache.org/thread/cf132hgm6jvzvsbpsozl3plf1r4cwysy",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-40127"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-39877",
+      "product": "apache_airflow",
+      "title": "Airflow scheduler remote code execution requiring DAG-author privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "2.4.0",
+          "fixed": "2.9.3"
+        }
+      ],
+      "references": [
+        "https://github.com/apache/airflow/pull/40522",
+        "https://lists.apache.org/thread/1xhj9dkp37d6pzn24ll2mf94wbqnb2y1",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-39877"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-45034",
+      "product": "apache_airflow",
+      "title": "Airflow remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "2.10.1"
+        }
+      ],
+      "references": [
+        "https://github.com/apache/airflow/pull/41672",
+        "https://lists.apache.org/thread/b4fcw33vh60yfg9990n5vmc7sy2dcgjx",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-45034"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-45498",
+      "product": "apache_airflow",
+      "title": "Airflow command execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "command_execution",
+      "affected": [
+        {
+          "introduced": "2.10.0",
+          "last_affected": "2.10.0"
+        }
+      ],
+      "references": [
+        "https://github.com/apache/airflow/pull/41873",
+        "https://lists.apache.org/thread/tl7lzczcqdmqj2pcpbvtjdpd2tb9561n",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-45498"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-33858",
+      "product": "apache_airflow",
+      "title": "Airflow remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "3.1.8",
+          "fixed": "3.2.0"
+        }
+      ],
+      "references": [
+        "https://github.com/apache/airflow/pull/64148",
+        "https://lists.apache.org/thread/1npt3o2x81s0gw9tmfcv4n7p1z9hdmy0",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-33858"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-58076",
+      "product": "apache_airflow",
+      "title": "Airflow remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "3.3.0",
+          "fixed": "3.3.1"
+        }
+      ],
+      "references": [
+        "https://github.com/apache/airflow/pull/68511",
+        "https://lists.apache.org/thread/t81p688t15jozxsng8521o60nh2kfsos",
+        "https://www.cve.org/CVERecord?id=CVE-2026-33264",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-58076"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-67587",
+      "product": "apache_airflow",
+      "title": "Airflow remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "3.3.0",
+          "fixed": "3.3.1"
+        }
+      ],
+      "references": [
+        "https://github.com/apache/airflow/pull/70704",
+        "https://lists.apache.org/thread/o00ww4n69qojvsckb464dtwd2nhzy6t0",
+        "https://www.cve.org/CVERecord?id=CVE-2026-58076",
+        "https://www.cve.org/CVERecord?id=CVE-2026-67260",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-67587"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-8012",
+      "product": "apache_zookeeper",
+      "title": "ZooKeeper unauthenticated authentication bypass",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "fixed": "3.4.10"
+        },
+        {
+          "introduced": "3.5.0-alpha",
+          "last_affected": "3.5.3-beta"
+        }
+      ],
+      "references": [
+        "https://lists.apache.org/thread.html/053d9ce4d579b02203db18545fee5e33f35f2932885459b74d1e4272%40%3Cissues.activemq.apache.org%3E",
+        "https://lists.apache.org/thread.html/bcce5a9c532b386c68dab2f6b3ce8b0cc9b950ec551766e76391caa3%40%3Ccommits.nifi.apache.org%3E",
+        "https://lists.apache.org/thread.html/c75147028c1c79bdebd4f8fa5db2b77da85de2b05ecc0d54d708b393%40%3Cdev.zookeeper.apache.org%3E",
+        "https://lists.apache.org/thread.html/r73daf1fc5d85677d9a854707e1908d14e174b7bbb0c603709c0ab33f%40%3Coak-commits.jackrabbit.apache.org%3E",
+        "https://lists.apache.org/thread.html/r8f0d920805af93033c488af89104e2d682662bacfb8406db865d5e14%40%3Cdev.jackrabbit.apache.org%3E",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-8012"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-44981",
+      "product": "apache_zookeeper",
+      "title": "ZooKeeper unauthenticated authentication bypass",
+      "severity": "CRITICAL",
+      "score": 9.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "fixed": "3.7.2"
+        },
+        {
+          "introduced": "3.8.0",
+          "fixed": "3.8.3"
+        },
+        {
+          "introduced": "3.9.0",
+          "fixed": "3.9.1"
+        }
+      ],
+      "references": [
+        "https://lists.apache.org/thread/wf0yrk84dg1942z1o74kd8nycg6pgm5b",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-44981"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-14671",
+      "product": "clickhouse",
+      "title": "ClickHouse unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "18.10.3"
+        }
+      ],
+      "references": [
+        "https://clickhouse.yandex/docs/en/security_changelog/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-14671"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-16535",
+      "product": "clickhouse",
+      "title": "ClickHouse unauthenticated native-protocol remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "19.14"
+        }
+      ],
+      "references": [
+        "https://clickhouse.yandex/docs/en/security_changelog/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-16535"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-6873",
+      "product": "clickhouse",
+      "title": "Unauthenticated native-protocol memory corruption",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:L/I:L/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "23.8.0",
+          "fixed": "23.8.15.35"
+        },
+        {
+          "introduced": "24.3.0",
+          "fixed": "24.3.4.147"
+        },
+        {
+          "introduced": "24.4.0",
+          "fixed": "24.4.2.141"
+        },
+        {
+          "introduced": "24.5.0",
+          "fixed": "24.5.1.1763"
+        },
+        {
+          "introduced": "24.6.0",
+          "fixed": "24.6.1.4423"
+        }
+      ],
+      "references": [
+        "https://github.com/ClickHouse/ClickHouse/security/advisories/GHSA-432f-r822-j66f",
+        "https://www.cve.org/CVERecord?id=CVE-2024-6873",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-6873"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-12608",
+      "product": "docker_engine",
+      "title": "Docker Engine unauthenticated authentication bypass",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "fixed": "17.06.0"
+        }
+      ],
+      "references": [
+        "https://github.com/moby/moby/pull/33182",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-12608"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2014-3120",
+      "product": "elasticsearch",
+      "title": "Elasticsearch remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "1.2.0"
+        }
+      ],
+      "references": [
+        "https://www.elastic.co/blog/logstash-1-4-3-released",
+        "https://www.elastic.co/community/security/",
+        "https://www.found.no/foundation/elasticsearch-security/#staying-safe-while-developing-with-elasticsearch",
+        "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2014-3120",
+        "https://nvd.nist.gov/vuln/detail/CVE-2014-3120"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2015-1427",
+      "product": "elasticsearch",
+      "title": "Elasticsearch unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "1.3.8"
+        },
+        {
+          "introduced": "1.4.0",
+          "fixed": "1.4.3"
+        }
+      ],
+      "references": [
+        "https://www.elastic.co/community/security/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2015-1427"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2015-5377",
+      "product": "elasticsearch",
+      "title": "Elasticsearch unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "1.6.1"
+        }
+      ],
+      "references": [
+        "https://discuss.elastic.co/t/elasticsearch-remote-code-execution-cve-2015-5377/25736",
+        "https://github.com/elastic/elasticsearch/commit/bf3052d14c874aead7da8855c5fcadf5428a43f2",
+        "https://nvd.nist.gov/vuln/detail/CVE-2015-5377"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-72642",
+      "product": "elasticsearch",
+      "title": "Elasticsearch remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "8.19.0",
+          "fixed": "8.19.20"
+        },
+        {
+          "introduced": "9.4.0",
+          "fixed": "9.4.5"
+        },
+        {
+          "introduced": "9.5.0",
+          "fixed": "9.5.1"
+        }
+      ],
+      "references": [
+        "https://discuss.elastic.co/t/elasticsearch-8-19-20-9-4-5-9-5-1-security-update-esa-2026-123/389504",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-72642"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-72649",
+      "product": "elasticsearch",
+      "title": "Elasticsearch remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.19.20"
+        },
+        {
+          "introduced": "9.0.0",
+          "fixed": "9.4.5"
+        },
+        {
+          "introduced": "9.5.0",
+          "last_affected": "9.5.0"
+        }
+      ],
+      "references": [
+        "https://discuss.elastic.co/t/elasticsearch-8-19-20-9-4-5-9-5-1-security-update-esa-2026-114/390087",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-72649"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-78607",
+      "product": "elasticsearch",
+      "title": "Elasticsearch server-side request forgery requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:L/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.19.19"
+        },
+        {
+          "introduced": "9.0.0",
+          "fixed": "9.3.8"
+        },
+        {
+          "introduced": "9.4.0",
+          "fixed": "9.4.4"
+        },
+        {
+          "introduced": "9.5.0",
+          "last_affected": "9.5.0"
+        }
+      ],
+      "references": [
+        "https://discuss.elastic.co/t/elasticsearch-8-19-19-9-3-8-9-4-4-9-5-1-security-update-esa-2026-143/390094",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-78607"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-33413",
+      "product": "etcd",
+      "title": "etcd unauthenticated authentication bypass",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:L/VI:L/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "fixed": "3.4.42"
+        },
+        {
+          "introduced": "3.5.0",
+          "fixed": "3.5.28"
+        },
+        {
+          "introduced": "3.6.0",
+          "fixed": "3.6.9"
+        }
+      ],
+      "references": [
+        "https://github.com/etcd-io/etcd/security/advisories/GHSA-q8m4-xhhv-38mg",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-33413"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2017-0915",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "10.2.4",
+          "last_affected": "10.2.4"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2017/CVE-2017-0915.json",
+        "https://about.gitlab.com/2018/01/16/gitlab-10-dot-3-dot-4-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2017-0915"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2017-0916",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "10.3.0",
+          "fixed": "10.3.4"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2017/CVE-2017-0916.json",
+        "https://about.gitlab.com/2018/01/16/gitlab-10-dot-3-dot-4-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2017-0916"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-14364",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "10.7.7"
+        },
+        {
+          "introduced": "10.8.0",
+          "fixed": "10.8.6"
+        },
+        {
+          "introduced": "11.0",
+          "fixed": "11.0.4"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2018/CVE-2018-14364.json",
+        "https://about.gitlab.com/2018/07/17/critical-security-release-gitlab-11-dot-0-dot-4-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/49133",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-14364"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-17452",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "fixed": "11.1.7"
+        },
+        {
+          "introduced": "11.2.0",
+          "fixed": "11.2.4"
+        },
+        {
+          "introduced": "11.3.0",
+          "last_affected": "11.3.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2018/CVE-2018-17452.json",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://about.gitlab.com/releases/2018/10/01/security-release-gitlab-11-dot-3-dot-1-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-17452"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-18646",
+      "product": "gitlab",
+      "title": "GitLab server-side request forgery requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "5.3",
+          "fixed": "11.2.7"
+        },
+        {
+          "introduced": "11.3.0",
+          "fixed": "11.3.8"
+        },
+        {
+          "introduced": "11.4.0",
+          "fixed": "11.4.3"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2018/CVE-2018-18646.json",
+        "https://about.gitlab.com/2018/10/29/security-release-gitlab-11-dot-4-dot-3-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/51142",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-18646"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-18649",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "11.3.0",
+          "fixed": "11.3.8"
+        },
+        {
+          "introduced": "11.4.0",
+          "fixed": "11.4.3"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2018/CVE-2018-18649.json",
+        "https://about.gitlab.com/2018/10/29/security-release-gitlab-11-dot-4-dot-3-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/53072",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-18649"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-18843",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "11.0.0",
+          "fixed": "11.2.8"
+        },
+        {
+          "introduced": "11.3.0",
+          "fixed": "11.3.9"
+        },
+        {
+          "introduced": "11.4.0",
+          "fixed": "11.4.4"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2018/CVE-2018-18843.json",
+        "https://about.gitlab.com/2018/11/01/critical-security-release-gitlab-11-dot-4-dot-4-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/53158",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-18843"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-19571",
+      "product": "gitlab",
+      "title": "GitLab server-side request forgery requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.7,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "8.18.0",
+          "fixed": "11.3.11"
+        },
+        {
+          "introduced": "11.4.0",
+          "fixed": "11.4.8"
+        },
+        {
+          "introduced": "11.5.0",
+          "fixed": "11.5.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2018/CVE-2018-19571.json",
+        "https://about.gitlab.com/2018/11/28/security-release-gitlab-11-dot-5-dot-1-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/53242",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-19571"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-19856",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "fixed": "11.3.12"
+        },
+        {
+          "introduced": "11.4.0",
+          "fixed": "11.4.10"
+        },
+        {
+          "introduced": "11.5.0",
+          "fixed": "11.5.3"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2018/CVE-2018-19856.json",
+        "https://about.gitlab.com/2018/12/06/critical-security-release-gitlab-11-dot-5-dot-3-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/54857",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-19856"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-20229",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "fixed": "11.3.14"
+        },
+        {
+          "introduced": "11.4.0",
+          "fixed": "11.4.12"
+        },
+        {
+          "introduced": "11.5.0",
+          "fixed": "11.5.5"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2018/CVE-2018-20229.json",
+        "https://about.gitlab.com/2018/12/20/critical-security-release-gitlab-11-dot-5-dot-5-released/",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-20229"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-20499",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "HIGH",
+      "score": 7.2,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:L/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "11.0.0",
+          "fixed": "11.4.13"
+        },
+        {
+          "introduced": "11.5.0",
+          "fixed": "11.5.6"
+        },
+        {
+          "introduced": "11.6.0",
+          "fixed": "11.6.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2018/CVE-2018-20499.json",
+        "https://about.gitlab.com/2018/12/31/security-release-gitlab-11-dot-6-dot-1-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/55439",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-20499"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-8971",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "last_affected": "10.3.8"
+        },
+        {
+          "introduced": "10.4.0",
+          "last_affected": "10.4.5"
+        },
+        {
+          "introduced": "10.5.0",
+          "last_affected": "10.5.5"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2018/CVE-2018-8971.json",
+        "https://about.gitlab.com/2018/03/20/critical-security-release-gitlab-10-dot-5-dot-6-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-8971"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-12428",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "6.8.0",
+          "last_affected": "11.11.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-12428.json",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://about.gitlab.com/releases/2019/06/03/security-release-gitlab-11-dot-11-dot-1-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-12428"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-12430",
+      "product": "gitlab",
+      "title": "GitLab command execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "command_execution",
+      "affected": [
+        {
+          "introduced": "11.11.0",
+          "last_affected": "11.11.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-12430.json",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://about.gitlab.com/releases/2019/06/03/security-release-gitlab-11-dot-11-dot-1-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-12430"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-12443",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "10.2.0",
+          "last_affected": "11.11.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-12443.json",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://about.gitlab.com/releases/2019/06/03/security-release-gitlab-11-dot-11-dot-1-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-12443"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-13121",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "10.6.0",
+          "last_affected": "12.0.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-13121.json",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://about.gitlab.com/releases/2019/07/03/security-release-gitlab-12-dot-0-dot-3-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-13121"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-15575",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated remote code execution",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "12.1.12"
+        },
+        {
+          "introduced": "12.2.0",
+          "fixed": "12.2.6"
+        },
+        {
+          "introduced": "12.3.0",
+          "fixed": "12.3.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-15575.json",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-15575"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-15585",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "12.1.0",
+          "fixed": "12.1.12"
+        },
+        {
+          "introduced": "12.2.0",
+          "fixed": "12.2.6"
+        },
+        {
+          "introduced": "12.3.0",
+          "fixed": "12.3.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-15585.json",
+        "https://about.gitlab.com/blog/2019/09/30/security-release-gitlab-12-dot-3-dot-2-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-15585"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-15728",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "10.1.0",
+          "fixed": "12.0.8"
+        },
+        {
+          "introduced": "12.1.0",
+          "fixed": "12.1.8"
+        },
+        {
+          "introduced": "12.2.0",
+          "fixed": "12.2.3"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-15728.json",
+        "https://about.gitlab.com/2019/08/29/security-release-gitlab-12-dot-2-dot-3-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/61314",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-15728"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-15730",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "8.14.0",
+          "fixed": "12.0.8"
+        },
+        {
+          "introduced": "12.1.0",
+          "fixed": "12.1.8"
+        },
+        {
+          "introduced": "12.2.0",
+          "fixed": "12.2.3"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-15730.json",
+        "https://about.gitlab.com/2019/08/29/security-release-gitlab-12-dot-2-dot-3-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/61349",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-15730"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-19088",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "11.3.0",
+          "fixed": "12.5.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-19088.json",
+        "https://about.gitlab.com/blog/2019/11/27/security-release-gitlab-12-5-1-released/",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-19088"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-19628",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "11.3.0",
+          "last_affected": "12.3.8"
+        },
+        {
+          "introduced": "12.4.0",
+          "last_affected": "12.4.5"
+        },
+        {
+          "introduced": "12.5.0",
+          "last_affected": "12.5.3"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-19628.json",
+        "https://about.gitlab.com/blog/2019/12/10/critical-security-release-gitlab-12-5-4-released/",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-19628"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-5464",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "10.2.0",
+          "fixed": "11.11.7"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-5464.json",
+        "https://about.gitlab.com/releases/2019/07/29/security-release-gitlab-12-dot-1-dot-2-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/63959",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-5464"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-5486",
+      "product": "gitlab",
+      "title": "GitLab authentication bypass requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "fixed": "12.1.10"
+        },
+        {
+          "introduced": "12.2.0",
+          "fixed": "12.2.6"
+        },
+        {
+          "introduced": "12.3.0",
+          "fixed": "12.3.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-5486.json",
+        "https://hackerone.com/reports/617896",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-5486"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-6240",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "fixed": "11.4.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-6240.json",
+        "https://about.gitlab.com/2019/01/16/critical-security-release-gitlab-11-dot-6-dot-4-released/",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-6240"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-6783",
+      "product": "gitlab",
+      "title": "GitLab remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "8.3.0",
+          "fixed": "11.5.8"
+        },
+        {
+          "introduced": "11.6.0",
+          "fixed": "11.6.6"
+        },
+        {
+          "introduced": "11.7.0",
+          "fixed": "11.7.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-6783.json",
+        "https://about.gitlab.com/2019/01/31/security-release-gitlab-11-dot-7-dot-3-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/55827",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-6783"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-6793",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "HIGH",
+      "score": 7.0,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:H/A:L",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "10.0.0",
+          "fixed": "11.5.8"
+        },
+        {
+          "introduced": "11.6.0",
+          "fixed": "11.6.6"
+        },
+        {
+          "introduced": "11.7.0",
+          "fixed": "11.7.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-6793.json",
+        "https://about.gitlab.com/2019/01/31/security-release-gitlab-11-dot-7-dot-3-released/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/50748",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-6793"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-9174",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "fixed": "11.6.10"
+        },
+        {
+          "introduced": "11.7.0",
+          "fixed": "11.7.6"
+        },
+        {
+          "introduced": "11.8.0",
+          "fixed": "11.8.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2019/CVE-2019-9174.json",
+        "https://about.gitlab.com/2019/03/04/security-release-gitlab-11-dot-8-dot-1-released/",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://gitlab.com/gitlab-org/gitlab-ce/issues/55468",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-9174"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-10074",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "10.1.0",
+          "last_affected": "12.8.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-10074.json",
+        "https://about.gitlab.com/releases/2020/03/04/gitlab-12-dot-8-dot-2-released/",
+        "https://about.gitlab.com/releases/2020/03/04/gitlab-12-dot-8-dot-2-released/index.html",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-10074"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-10077",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "3.0.0",
+          "last_affected": "12.8.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-10077.json",
+        "https://about.gitlab.com/releases/2020/03/04/gitlab-12-dot-8-dot-2-released/",
+        "https://about.gitlab.com/releases/2020/03/04/gitlab-12-dot-8-dot-2-released/index.html",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-10077"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-10953",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "11.7.0",
+          "last_affected": "12.9"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-10953.json",
+        "https://about.gitlab.com/releases/2020/03/26/security-release-12-dot-9-dot-1-released/",
+        "https://about.gitlab.com/releases/categories/releases/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-10953"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-10956",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "8.10.0",
+          "fixed": "12.9.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-10956.json",
+        "https://about.gitlab.com/releases/2020/03/26/security-release-12-dot-9-dot-1-released/",
+        "https://about.gitlab.com/releases/categories/releases/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-10956"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-10980",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "8.0.0",
+          "last_affected": "12.9"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-10980.json",
+        "https://about.gitlab.com/releases/2020/03/26/security-release-12-dot-9-dot-1-released/",
+        "https://about.gitlab.com/releases/categories/releases/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-10980"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-11505",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "fixed": "12.7.9"
+        },
+        {
+          "introduced": "12.8.0",
+          "fixed": "12.8.9"
+        },
+        {
+          "introduced": "12.9.0",
+          "fixed": "12.9.3"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-11505.json",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://about.gitlab.com/releases/2020/04/14/critical-security-release-gitlab-12-dot-9-dot-3-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-11505"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-11506",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "10.7.0",
+          "fixed": "12.7.9"
+        },
+        {
+          "introduced": "12.8.0",
+          "fixed": "12.8.9"
+        },
+        {
+          "introduced": "12.9.0",
+          "fixed": "12.9.3"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-11506.json",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://about.gitlab.com/releases/2020/04/14/critical-security-release-gitlab-12-dot-9-dot-3-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-11506"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-13309",
+      "product": "gitlab",
+      "title": "GitLab server-side request forgery requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "fixed": "13.1.10"
+        },
+        {
+          "introduced": "13.2.0",
+          "fixed": "13.2.8"
+        },
+        {
+          "introduced": "13.3.0",
+          "fixed": "13.3.4"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-13309.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/215879",
+        "https://hackerone.com/reports/860196",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-13309"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-13355",
+      "product": "gitlab",
+      "title": "GitLab arbitrary file write requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
+      "impact": "file_write",
+      "affected": [
+        {
+          "introduced": "8.14.0",
+          "fixed": "13.3.9"
+        },
+        {
+          "introduced": "13.4.0",
+          "fixed": "13.4.5"
+        },
+        {
+          "introduced": "13.5.0",
+          "fixed": "13.5.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-13355.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/255886",
+        "https://hackerone.com/reports/990800",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-13355"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-13356",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 8.2,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "8.8.9",
+          "fixed": "13.3.9"
+        },
+        {
+          "introduced": "13.4.0",
+          "fixed": "13.4.5"
+        },
+        {
+          "introduced": "13.5.0",
+          "fixed": "13.5.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-13356.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/230878",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-13356"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-26405",
+      "product": "gitlab",
+      "title": "GitLab arbitrary file write requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:L",
+      "impact": "file_write",
+      "affected": [
+        {
+          "introduced": "12.8.0",
+          "fixed": "13.3.9"
+        },
+        {
+          "introduced": "13.4.0",
+          "fixed": "13.4.5"
+        },
+        {
+          "introduced": "13.5.0",
+          "fixed": "13.5.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-26405.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/247371",
+        "https://hackerone.com/reports/835427",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-26405"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-6833",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "11.3.0",
+          "fixed": "12.5.9"
+        },
+        {
+          "introduced": "12.6.0",
+          "fixed": "12.6.6"
+        },
+        {
+          "introduced": "12.7.2",
+          "fixed": "12.7.4"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-6833.json",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://about.gitlab.com/releases/2020/01/30/security-release-gitlab-12-7-4-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-6833"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-7966",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "11.11.0",
+          "fixed": "12.5.9"
+        },
+        {
+          "introduced": "12.6.0",
+          "fixed": "12.6.6"
+        },
+        {
+          "introduced": "12.7.0",
+          "last_affected": "12.7.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2020/CVE-2020-7966.json",
+        "https://about.gitlab.com/blog/categories/releases/",
+        "https://about.gitlab.com/releases/2020/01/30/security-release-gitlab-12-7-4-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-7966"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-22175",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "10.5.0",
+          "fixed": "13.6.7"
+        },
+        {
+          "introduced": "13.7.0",
+          "fixed": "13.7.7"
+        },
+        {
+          "introduced": "13.8.0",
+          "fixed": "13.8.4"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2021/CVE-2021-22175.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/294178",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-22175"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-22190",
+      "product": "gitlab",
+      "title": "GitLab arbitrary file read requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.5,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "13.7.0",
+          "fixed": "13.7.8"
+        },
+        {
+          "introduced": "13.8.0",
+          "fixed": "13.8.5"
+        },
+        {
+          "introduced": "13.9.0",
+          "fixed": "13.9.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2021/CVE-2021-22190.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/300281",
+        "https://hackerone.com/reports/1040786",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-22190"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-22192",
+      "product": "gitlab",
+      "title": "GitLab remote code execution requiring low privileges",
+      "severity": "CRITICAL",
+      "score": 9.9,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "13.2.0",
+          "fixed": "13.7.9"
+        },
+        {
+          "introduced": "13.8.0",
+          "fixed": "13.8.6"
+        },
+        {
+          "introduced": "13.9.0",
+          "fixed": "13.9.4"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2021/CVE-2021-22192.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/324452",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-22192"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-22203",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "13.7.9",
+          "fixed": "13.8.7"
+        },
+        {
+          "introduced": "13.9.0",
+          "fixed": "13.9.5"
+        },
+        {
+          "introduced": "13.10.0",
+          "last_affected": "13.10.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2021/CVE-2021-22203.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/320919",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-22203"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-22205",
+      "product": "gitlab",
+      "title": "Unauthenticated remote command execution via image parsing",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "11.9.0",
+          "fixed": "13.8.8"
+        },
+        {
+          "introduced": "13.9.0",
+          "fixed": "13.9.6"
+        },
+        {
+          "introduced": "13.10.0",
+          "fixed": "13.10.3"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2021/CVE-2021-22205.json",
+        "https://about.gitlab.com/blog/action-needed-in-response-to-cve2021-22205/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-22205"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-22214",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "HIGH",
+      "score": 8.6,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "10.5",
+          "fixed": "13.10.5"
+        },
+        {
+          "introduced": "13.11",
+          "fixed": "13.11.5"
+        },
+        {
+          "introduced": "13.12",
+          "fixed": "13.12.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2021/CVE-2021-22214.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/322926",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-22214"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-22234",
+      "product": "gitlab",
+      "title": "GitLab arbitrary file read requiring low privileges",
+      "severity": "CRITICAL",
+      "score": 9.6,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "13.11.0",
+          "fixed": "13.11.7"
+        },
+        {
+          "introduced": "13.12.0",
+          "fixed": "13.12.8"
+        },
+        {
+          "introduced": "14.0.0",
+          "fixed": "14.0.4"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2021/CVE-2021-22234.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/335205",
+        "https://hackerone.com/reports/1212067",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-22234"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-39867",
+      "product": "gitlab",
+      "title": "GitLab server-side request forgery requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "8.15.0",
+          "fixed": "14.1.7"
+        },
+        {
+          "introduced": "14.2.0",
+          "fixed": "14.2.5"
+        },
+        {
+          "introduced": "14.3.0",
+          "fixed": "14.3.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2021/CVE-2021-39867.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/214401",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-39867"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-0136",
+      "product": "gitlab",
+      "title": "GitLab server-side request forgery requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "10.5.0",
+          "last_affected": "14.5.4"
+        },
+        {
+          "introduced": "14.6",
+          "last_affected": "14.6.4"
+        },
+        {
+          "introduced": "14.7.0",
+          "last_affected": "14.7.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2022/CVE-2022-0136.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/28561",
+        "https://hackerone.com/reports/560658",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-0136"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-0244",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read through group import",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "14.5.0",
+          "fixed": "14.5.3"
+        },
+        {
+          "introduced": "14.6.0",
+          "fixed": "14.6.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2022/CVE-2022-0244.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/349524",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-0244"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-0249",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 9.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "12.0",
+          "last_affected": "14.5.4"
+        },
+        {
+          "introduced": "14.6",
+          "last_affected": "14.6.4"
+        },
+        {
+          "introduced": "14.7",
+          "last_affected": "14.7.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2022/CVE-2022-0249.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/29395",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-0249"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-0425",
+      "product": "gitlab",
+      "title": "GitLab server-side request forgery requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.6,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:L/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "7.9.0",
+          "last_affected": "14.7.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2022/CVE-2022-0425.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/22350",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-0425"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-1162",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "14.7.0",
+          "fixed": "14.7.7"
+        },
+        {
+          "introduced": "14.8.0",
+          "fixed": "14.8.5"
+        },
+        {
+          "introduced": "14.9.0",
+          "fixed": "14.9.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2022/CVE-2022-1162.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/357210",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-1162"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-1423",
+      "product": "gitlab",
+      "title": "GitLab remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "1.0.2",
+          "fixed": "14.8.6"
+        },
+        {
+          "introduced": "14.9.0",
+          "fixed": "14.9.4"
+        },
+        {
+          "introduced": "14.10.0",
+          "last_affected": "14.10.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2022/CVE-2022-1423.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/330047",
+        "https://hackerone.com/reports/1182375",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-1423"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-1680",
+      "product": "gitlab",
+      "title": "GitLab credential or account takeover requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "11.10.0",
+          "fixed": "14.9.5"
+        },
+        {
+          "introduced": "14.10.0",
+          "fixed": "14.10.4"
+        },
+        {
+          "introduced": "15.0.0",
+          "last_affected": "15.0.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2022/CVE-2022-1680.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/363058",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-1680"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-2185",
+      "product": "gitlab",
+      "title": "GitLab remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0.0",
+          "fixed": "14.10.5"
+        },
+        {
+          "introduced": "15.0.0",
+          "fixed": "15.0.4"
+        },
+        {
+          "introduced": "15.1.0",
+          "last_affected": "15.1.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2022/CVE-2022-2185.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/366088",
+        "https://hackerone.com/reports/1609965",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-2185"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-2884",
+      "product": "gitlab",
+      "title": "GitLab remote code execution requiring low privileges",
+      "severity": "CRITICAL",
+      "score": 9.9,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "11.3.4",
+          "fixed": "15.1.5"
+        },
+        {
+          "introduced": "15.2",
+          "fixed": "15.2.3"
+        },
+        {
+          "introduced": "15.3",
+          "fixed": "15.3.1"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2022/CVE-2022-2884.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/371098",
+        "https://hackerone.com/reports/1672388",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-2884"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-2992",
+      "product": "gitlab",
+      "title": "GitLab remote code execution requiring low privileges",
+      "severity": "CRITICAL",
+      "score": 9.9,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "11.10",
+          "fixed": "15.1.6"
+        },
+        {
+          "introduced": "15.2",
+          "fixed": "15.2.4"
+        },
+        {
+          "introduced": "15.3",
+          "fixed": "15.3.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2022/CVE-2022-2992.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/371884",
+        "https://hackerone.com/reports/1679624",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-2992"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-2825",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "16.0.0",
+          "last_affected": "16.0.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2023/CVE-2023-2825.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/412371",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-2825"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-7028",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "16.1.0",
+          "fixed": "16.1.6"
+        },
+        {
+          "introduced": "16.2.0",
+          "fixed": "16.2.9"
+        },
+        {
+          "introduced": "16.3.0",
+          "fixed": "16.3.7"
+        },
+        {
+          "introduced": "16.4.0",
+          "fixed": "16.4.5"
+        },
+        {
+          "introduced": "16.5.0",
+          "fixed": "16.5.6"
+        },
+        {
+          "introduced": "16.6.0",
+          "fixed": "16.6.4"
+        },
+        {
+          "introduced": "16.7.0",
+          "fixed": "16.7.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2023/CVE-2023-7028.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/436084",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-7028"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-0402",
+      "product": "gitlab",
+      "title": "GitLab arbitrary file write requiring low privileges",
+      "severity": "CRITICAL",
+      "score": 9.9,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "file_write",
+      "affected": [
+        {
+          "introduced": "16.0.0",
+          "fixed": "16.5.8"
+        },
+        {
+          "introduced": "16.6.0",
+          "fixed": "16.6.6"
+        },
+        {
+          "introduced": "16.7.0",
+          "fixed": "16.7.4"
+        },
+        {
+          "introduced": "16.8.0",
+          "last_affected": "16.8.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2024/CVE-2024-0402.json",
+        "https://about.gitlab.com/releases/2024/01/25/critical-security-release-gitlab-16-8-1-released/",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/437819",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-0402"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-2434",
+      "product": "gitlab",
+      "title": "GitLab arbitrary file read requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:H",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "16.9.0",
+          "fixed": "16.9.6"
+        },
+        {
+          "introduced": "16.10.0",
+          "fixed": "16.10.4"
+        },
+        {
+          "introduced": "16.11.0",
+          "last_affected": "16.11.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2024/CVE-2024-2434.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/450303",
+        "https://hackerone.com/reports/2401952",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-2434"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-4024",
+      "product": "gitlab",
+      "title": "GitLab credential or account takeover requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "7.8.0",
+          "fixed": "16.9.6"
+        },
+        {
+          "introduced": "16.10.0",
+          "fixed": "16.10.4"
+        },
+        {
+          "introduced": "16.11.0",
+          "last_affected": "16.11.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2024/CVE-2024-4024.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/452426",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-4024"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-8635",
+      "product": "gitlab",
+      "title": "GitLab server-side request forgery requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.7,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "16.8.0",
+          "fixed": "17.1.7"
+        },
+        {
+          "introduced": "17.2.0",
+          "fixed": "17.2.5"
+        },
+        {
+          "introduced": "17.3.0",
+          "fixed": "17.3.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2024/CVE-2024-8635.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/455273",
+        "https://about.gitlab.com/releases/2024/09/11/patch-release-gitlab-17-3-2-released/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-8635"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-8977",
+      "product": "gitlab",
+      "title": "GitLab server-side request forgery requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "15.10",
+          "fixed": "17.2.9"
+        },
+        {
+          "introduced": "17.3.0",
+          "fixed": "17.3.5"
+        },
+        {
+          "introduced": "17.4.0",
+          "fixed": "17.4.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2024/CVE-2024-8977.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/491060",
+        "https://hackerone.com/reports/2697456",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-8977"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2025-7659",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "18.2.0",
+          "fixed": "18.6.6"
+        },
+        {
+          "introduced": "18.7.0",
+          "fixed": "18.7.4"
+        },
+        {
+          "introduced": "18.8.0",
+          "fixed": "18.8.4"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2025/CVE-2025-7659.json",
+        "https://about.gitlab.com/releases/2026/02/10/patch-release-gitlab-18-8-4-released/",
+        "https://gitlab.com/gitlab-org/gitlab/-/issues/555440",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-7659"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-10053",
+      "product": "gitlab",
+      "title": "GitLab remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "18.8.0",
+          "fixed": "19.0.6"
+        },
+        {
+          "introduced": "19.1.0",
+          "fixed": "19.1.4"
+        },
+        {
+          "introduced": "19.2.0",
+          "fixed": "19.2.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2026/CVE-2026-10053.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/work_items/601596",
+        "https://hackerone.com/reports/3754194",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-10053"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-1724",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated credential or account takeover",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "18.5.0",
+          "fixed": "18.8.7"
+        },
+        {
+          "introduced": "18.9.0",
+          "fixed": "18.9.3"
+        },
+        {
+          "introduced": "18.10.0",
+          "last_affected": "18.10.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2026/CVE-2026-1724.json",
+        "https://about.gitlab.com/releases/2026/03/25/patch-release-gitlab-18-10-1-released/",
+        "https://gitlab.com/gitlab-org/gitlab/-/work_items/588334",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-1724"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-2370",
+      "product": "gitlab",
+      "title": "GitLab credential or account takeover requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "14.3.0",
+          "fixed": "18.8.7"
+        },
+        {
+          "introduced": "18.9.0",
+          "fixed": "18.9.3"
+        },
+        {
+          "introduced": "18.10.0",
+          "last_affected": "18.10.0"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2026/CVE-2026-2370.json",
+        "https://about.gitlab.com/releases/2026/03/25/patch-release-gitlab-18-10-1-released/",
+        "https://gitlab.com/gitlab-org/gitlab/-/work_items/589635",
+        "https://hackerone.com/reports/3522829",
+        "https://access.redhat.com/security/cve/CVE-2026-2370",
+        "https://bugzilla.redhat.com/show_bug.cgi?id=2452920",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-2370"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-75871",
+      "product": "gitlab",
+      "title": "GitLab server-side request forgery requiring low privileges",
+      "severity": "CRITICAL",
+      "score": 9.6,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "18.10.0",
+          "fixed": "19.0.12"
+        },
+        {
+          "introduced": "19.1.0",
+          "fixed": "19.1.7"
+        },
+        {
+          "introduced": "19.2.0",
+          "fixed": "19.2.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2026/CVE-2026-75871.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/work_items/616990",
+        "https://hackerone.com/reports/3945100",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-75871"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-85706",
+      "product": "gitlab",
+      "title": "GitLab unauthenticated arbitrary file read",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "18.7.0",
+          "fixed": "19.1.8"
+        },
+        {
+          "introduced": "19.2.0",
+          "fixed": "19.2.6"
+        },
+        {
+          "introduced": "19.3.0",
+          "fixed": "19.3.2"
+        }
+      ],
+      "references": [
+        "https://gitlab.com/gitlab-org/cves/-/blob/master/2026/CVE-2026-85706.json",
+        "https://gitlab.com/gitlab-org/gitlab/-/work_items/627748",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-85706"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-15727",
+      "product": "grafana",
+      "title": "Grafana unauthenticated authentication bypass",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "2.0.0",
+          "last_affected": "2.1.2"
+        },
+        {
+          "introduced": "3.0.0",
+          "last_affected": "3.1.1"
+        },
+        {
+          "introduced": "4.0.0",
+          "fixed": "4.6.4"
+        },
+        {
+          "introduced": "5.0.0",
+          "fixed": "5.2.3"
+        }
+      ],
+      "references": [
+        "https://grafana.com/blog/2018/08/29/grafana-5.2.3-and-4.6.4-released-with-important-security-fix/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-15727"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-13379",
+      "product": "grafana",
+      "title": "Grafana unauthenticated server-side request forgery",
+      "severity": "HIGH",
+      "score": 8.2,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "3.0.1",
+          "last_affected": "7.0.1"
+        }
+      ],
+      "references": [
+        "https://community.grafana.com/t/grafana-7-0-2-and-6-7-4-security-update/31408",
+        "https://community.grafana.com/t/release-notes-v6-7-x/27119",
+        "https://community.grafana.com/t/release-notes-v7-0-x/29381",
+        "https://grafana.com/blog/2020/06/03/grafana-6.7.4-and-7.0.2-released-with-important-security-fix/",
+        "https://lists.apache.org/thread.html/r0928ee574281f8b6156e0a6d0291bfc27100a9dd3f9b0177ece24ae4%40%3Cdev.ambari.apache.org%3E",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-13379"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-43798",
+      "product": "grafana",
+      "title": "Unauthenticated path traversal and arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.7"
+        },
+        {
+          "introduced": "8.1.0",
+          "fixed": "8.1.8"
+        },
+        {
+          "introduced": "8.2.0",
+          "fixed": "8.2.7"
+        },
+        {
+          "introduced": "8.3.0",
+          "fixed": "8.3.1"
+        }
+      ],
+      "references": [
+        "https://github.com/grafana/grafana/security/advisories/GHSA-8pjx-jj86-j47p",
+        "https://grafana.com/blog/an-update-on-0day-cve-2021-43798-grafana-directory-traversal/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-43798"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-31130",
+      "product": "grafana",
+      "title": "Grafana unauthenticated credential or account takeover",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "fixed": "8.5.14"
+        },
+        {
+          "introduced": "9.0.0",
+          "fixed": "9.1.8"
+        }
+      ],
+      "references": [
+        "https://github.com/grafana/grafana/commit/4dd56e4dabce10007bf4ba1059bf54178c35b177",
+        "https://github.com/grafana/grafana/commit/9da278c044ba605eb5a1886c48df9a2cb0d3885f",
+        "https://github.com/grafana/grafana/releases/tag/v9.1.8",
+        "https://github.com/grafana/grafana/security/advisories/GHSA-jv32-5578-pxjc",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-31130"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-39328",
+      "product": "grafana",
+      "title": "Grafana unauthenticated authentication bypass",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "9.2.0",
+          "fixed": "9.2.4"
+        }
+      ],
+      "references": [
+        "https://github.com/grafana/grafana/security/advisories/GHSA-vqc4-mpj8-jxch",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-39328"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-1387",
+      "product": "grafana",
+      "title": "Grafana unauthenticated credential or account takeover",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "9.1.0",
+          "fixed": "9.2.17"
+        },
+        {
+          "introduced": "9.3.0",
+          "fixed": "9.3.13"
+        },
+        {
+          "introduced": "9.4.0",
+          "fixed": "9.4.9"
+        }
+      ],
+      "references": [
+        "https://github.com/grafana/bugbounty/security/advisories/GHSA-5585-m9r5-p86j",
+        "https://grafana.com/security/security-advisories/cve-2023-1387/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-1387"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-3128",
+      "product": "grafana",
+      "title": "Grafana unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "6.7.0",
+          "fixed": "8.5.27"
+        },
+        {
+          "introduced": "9.2.0",
+          "fixed": "9.2.20"
+        },
+        {
+          "introduced": "9.3.0",
+          "fixed": "9.3.16"
+        },
+        {
+          "introduced": "9.4.0",
+          "fixed": "9.4.13"
+        },
+        {
+          "introduced": "9.5.0",
+          "fixed": "9.5.4"
+        }
+      ],
+      "references": [
+        "https://github.com/grafana/bugbounty/security/advisories/GHSA-gxh2-6vvc-rrgp",
+        "https://grafana.com/security/security-advisories/cve-2023-3128/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-3128"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-1442",
+      "product": "grafana",
+      "title": "Grafana data-source authorization bypass requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "8.5.0",
+          "fixed": "9.5.17"
+        },
+        {
+          "introduced": "10.0.0",
+          "fixed": "10.0.12"
+        },
+        {
+          "introduced": "10.1.0",
+          "fixed": "10.1.8"
+        },
+        {
+          "introduced": "10.2.0",
+          "fixed": "10.2.5"
+        },
+        {
+          "introduced": "10.3.0",
+          "fixed": "10.3.4"
+        }
+      ],
+      "references": [
+        "https://grafana.com/security/security-advisories/cve-2024-1442/",
+        "https://grafana.com/blog/2024/03/08/grafana-security-release-medium-severity-security-fix-for-cve-2024-1442/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-1442"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-9264",
+      "product": "grafana",
+      "title": "Grafana command execution requiring low privileges",
+      "severity": "CRITICAL",
+      "score": 9.4,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:H/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "impact": "command_execution",
+      "affected": [
+        {
+          "introduced": "11.0.0",
+          "fixed": "11.0.5"
+        },
+        {
+          "introduced": "11.1.0",
+          "fixed": "11.1.6"
+        },
+        {
+          "introduced": "11.2.0",
+          "fixed": "11.2.1"
+        }
+      ],
+      "references": [
+        "https://grafana.com/security/security-advisories/cve-2024-9264/",
+        "https://security.netapp.com/advisory/ntap-20250314-0007/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-9264"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-14199",
+      "product": "grafana",
+      "title": "Grafana credential or account takeover requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "fixed": "11.0.0"
+        },
+        {
+          "introduced": "12.4.10",
+          "fixed": "13.0.0"
+        },
+        {
+          "introduced": "13.0.8",
+          "fixed": "13.1.0"
+        },
+        {
+          "introduced": "13.1.5",
+          "fixed": "13.2.0"
+        }
+      ],
+      "references": [
+        "https://grafana.com/security/security-advisories/cve-2026-14199",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14199"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2017-17697",
+      "product": "harbor",
+      "title": "Harbor unauthenticated server-side request forgery",
+      "severity": "HIGH",
+      "score": 8.6,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "fixed": "1.3.0"
+        }
+      ],
+      "references": [
+        "https://github.com/vmware/harbor/issues/3755",
+        "https://nvd.nist.gov/vuln/detail/CVE-2017-17697"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-16097",
+      "product": "harbor",
+      "title": "Harbor unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "1.7.0",
+          "fixed": "1.7.6"
+        },
+        {
+          "introduced": "1.8.0",
+          "fixed": "1.8.3"
+        }
+      ],
+      "references": [
+        "https://github.com/goharbor/harbor/security/advisories/GHSA-fqvr-xx6w-m6m7",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-16097"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-29153",
+      "product": "hashicorp_consul",
+      "title": "Consul unauthenticated server-side request forgery",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "fixed": "1.9.17"
+        },
+        {
+          "introduced": "1.10.0",
+          "fixed": "1.10.10"
+        },
+        {
+          "introduced": "1.11.0",
+          "fixed": "1.11.5"
+        }
+      ],
+      "references": [
+        "https://discuss.hashicorp.com",
+        "https://discuss.hashicorp.com/t/hcsec-2022-10-consul-s-http-health-check-may-allow-server-side-request-forgery/",
+        "https://discuss.hashicorp.com/t/hcsec-2022-10-consul-s-http-health-check-may-allow-server-side-request-forgery/38393",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-29153"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-1002105",
+      "product": "kubernetes",
+      "title": "API server connection upgrade authentication bypass",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "1.0.0",
+          "fixed": "1.10.11"
+        },
+        {
+          "introduced": "1.11.0",
+          "fixed": "1.11.5"
+        },
+        {
+          "introduced": "1.12.0",
+          "fixed": "1.12.3"
+        }
+      ],
+      "references": [
+        "https://discuss.kubernetes.io/t/kubernetes-security-announcement-v1-10-11-v1-11-5-v1-12-3-released-to-address-cve-2018-1002105/3700",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-1002105"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-21287",
+      "product": "minio",
+      "title": "MinIO server-side request forgery requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.7,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "fixed": "2021-01-30t00-20-58z",
+          "scheme": "minio_release"
+        }
+      ],
+      "references": [
+        "https://github.com/minio/minio/commit/eb6871ecd960d570f70698877209e6db181bf276",
+        "https://github.com/minio/minio/pull/11337",
+        "https://github.com/minio/minio/releases/tag/RELEASE.2021-01-30T00-20-58Z",
+        "https://github.com/minio/minio/security/advisories/GHSA-m4qq-5f7c-693q",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-21287"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-24842",
+      "product": "minio",
+      "title": "MinIO credential or account takeover requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "2021-12-09t06-19-41z",
+          "fixed": "2022-04-12t06-55-35z",
+          "scheme": "minio_release"
+        }
+      ],
+      "references": [
+        "https://github.com/minio/minio/commit/66b14a0d32684d527ae8018dc6d9d46ccce58ae3",
+        "https://github.com/minio/minio/pull/14729",
+        "https://github.com/minio/minio/security/advisories/GHSA-2j69-jjmg-534q",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-24842"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-28432",
+      "product": "minio",
+      "title": "Unauthenticated disclosure of MinIO environment credentials",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "scheme": "minio_release",
+          "introduced": "RELEASE.2021-08-31T05-46-54Z",
+          "fixed": "RELEASE.2023-03-20T20-16-18Z"
+        }
+      ],
+      "references": [
+        "https://github.com/minio/minio/security/advisories/GHSA-6xvq-wj2x-3h3q",
+        "https://www.min.io/blog/security-advisory-stackedcves",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-28432"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-28434",
+      "product": "minio",
+      "title": "MinIO authentication bypass requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "fixed": "2023-03-20t20-16-18z",
+          "scheme": "minio_release"
+        }
+      ],
+      "references": [
+        "https://github.com/minio/minio/commit/67f4ba154a27a1b06e48bfabda38355a010dfca5",
+        "https://github.com/minio/minio/pull/16849",
+        "https://github.com/minio/minio/security/advisories/GHSA-2pxw-r47w-4p8c",
+        "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2023-28434",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-28434"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2015-7882",
+      "product": "mongodb",
+      "title": "MongoDB unauthenticated authentication bypass",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.0/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "3.0.0",
+          "last_affected": "3.0.6"
+        }
+      ],
+      "references": [
+        "https://jira.mongodb.org/browse/SERVER-20691",
+        "https://nvd.nist.gov/vuln/detail/CVE-2015-7882"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-13078",
+      "product": "mongodb",
+      "title": "MongoDB arbitrary file read requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.7,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "7.0.0",
+          "fixed": "7.0.39"
+        },
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.28"
+        },
+        {
+          "introduced": "8.2.0",
+          "fixed": "8.2.12"
+        },
+        {
+          "introduced": "8.3.0",
+          "fixed": "8.3.7"
+        }
+      ],
+      "references": [
+        "https://jira.mongodb.org/browse/SERVER-128832",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-13078"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-8053",
+      "product": "mongodb",
+      "title": "MongoDB remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.7,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "5.0.0",
+          "fixed": "5.0.33"
+        },
+        {
+          "introduced": "6.0.0",
+          "fixed": "6.0.28"
+        },
+        {
+          "introduced": "7.0.0",
+          "fixed": "7.0.34"
+        },
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.23"
+        },
+        {
+          "introduced": "8.2.0",
+          "fixed": "8.2.9"
+        },
+        {
+          "introduced": "8.3.0",
+          "fixed": "8.3.2"
+        }
+      ],
+      "references": [
+        "https://jira.mongodb.org/browse/SERVER-126021",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-8053"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-82067",
+      "product": "mongodb",
+      "title": "MongoDB unauthenticated authentication bypass",
+      "severity": "CRITICAL",
+      "score": 9.2,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "7.0.0",
+          "fixed": "7.0.41"
+        },
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.30"
+        },
+        {
+          "introduced": "8.3.0",
+          "fixed": "8.3.9"
+        }
+      ],
+      "references": [
+        "https://www.mongodb.com/resources/products/alerts",
+        "https://jira.mongodb.org/browse/SERVER-131229",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-82067"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-82070",
+      "product": "mongodb",
+      "title": "MongoDB credential or account takeover requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.1,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "7.0.0",
+          "fixed": "7.0.40"
+        },
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.29"
+        },
+        {
+          "introduced": "8.2.0",
+          "last_affected": "8.2.12"
+        },
+        {
+          "introduced": "8.3.0",
+          "fixed": "8.3.8"
+        },
+        {
+          "introduced": "9.0.0",
+          "last_affected": "9.0.0"
+        },
+        {
+          "introduced": "9.1.0",
+          "last_affected": "9.1.0"
+        }
+      ],
+      "references": [
+        "https://jira.mongodb.org/browse/SERVER-131423",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-82070"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-82071",
+      "product": "mongodb",
+      "title": "MongoDB remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.2,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:N/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "8.3.0",
+          "fixed": "8.3.9"
+        }
+      ],
+      "references": [
+        "https://jira.mongodb.org/browse/SERVER-131860",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-82071"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2019-7238",
+      "product": "nexus_repository",
+      "title": "Nexus Repository unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "3.0.0",
+          "fixed": "3.15.0"
+        }
+      ],
+      "references": [
+        "https://support.sonatype.com/hc/en-us/articles/360017310793-CVE-2019-7238-Nexus-Repository-Manager-3-Missing-Access-Controls-and-Remote-Code-Execution-February-5th-2019",
+        "https://www.cisa.gov/known-exploited-vulnerabilities-catalog?field_cve=CVE-2019-7238",
+        "https://nvd.nist.gov/vuln/detail/CVE-2019-7238"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2020-15012",
+      "product": "nexus_repository",
+      "title": "Nexus Repository unauthenticated arbitrary file read",
+      "severity": "HIGH",
+      "score": 8.6,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "2.0",
+          "fixed": "2.14.19"
+        }
+      ],
+      "references": [
+        "https://support.sonatype.com/hc/en-us/articles/360051068253",
+        "https://nvd.nist.gov/vuln/detail/CVE-2020-15012"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-4956",
+      "product": "nexus_repository",
+      "title": "Nexus Repository unauthenticated path traversal and arbitrary file read",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "3.0.0",
+          "fixed": "3.68.1"
+        }
+      ],
+      "references": [
+        "https://support.sonatype.com/hc/en-us/articles/29416509323923-CVE-2024-4956-Nexus-Repository-3-Path-Traversal-2024-05-16",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-4956"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-3199",
+      "product": "nexus_repository",
+      "title": "Nexus Repository task-management remote code execution requiring low privileges",
+      "severity": "CRITICAL",
+      "score": 9.4,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:L",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "3.22.1",
+          "fixed": "3.91.0"
+        }
+      ],
+      "references": [
+        "https://support.sonatype.com/hc/en-us/articles/50615414548499-CVE-2026-3199-Nexus-Repository-3-Authenticated-Remote-Code-Execution-2026-04-08",
+        "https://help.sonatype.com/en/sonatype-nexus-repository-3-91-0-release-notes.html",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-3199"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-5189",
+      "product": "nexus_repository",
+      "title": "Nexus Repository unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.2,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "3.0.0",
+          "fixed": "3.71.0"
+        }
+      ],
+      "references": [
+        "https://help.sonatype.com/en/sonatype-nexus-repository-3-71-0-release-notes.html",
+        "https://support.sonatype.com/hc/en-us/articles/50817138825491",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-5189"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-23612",
+      "product": "opensearch",
+      "title": "OpenSearch authentication bypass requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "1.0.0",
+          "fixed": "1.3.8"
+        },
+        {
+          "introduced": "2.0.0",
+          "fixed": "2.5.0"
+        }
+      ],
+      "references": [
+        "https://github.com/opensearch-project/OpenSearch/releases/tag/2.5.0",
+        "https://github.com/opensearch-project/security/security/advisories/GHSA-864v-6qj7-62qj",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-23612"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2018-3259",
+      "product": "oracle_database",
+      "title": "Oracle Database unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "11.2.0.4",
+          "last_affected": "11.2.0.4",
+          "scheme": "oracle"
+        },
+        {
+          "introduced": "12.1.0.2",
+          "last_affected": "12.1.0.2",
+          "scheme": "oracle"
+        },
+        {
+          "introduced": "12.2.0.1",
+          "last_affected": "12.2.0.1",
+          "scheme": "oracle"
+        },
+        {
+          "introduced": "18.0.0.0",
+          "last_affected": "18.0.0.0",
+          "scheme": "oracle"
+        }
+      ],
+      "references": [
+        "https://www.oracle.com/security-alerts/cpuoct2018.html",
+        "https://nvd.nist.gov/vuln/detail/CVE-2018-3259"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-46833",
+      "product": "oracle_database",
+      "title": "Oracle Database unauthenticated credential or account takeover",
+      "severity": "CRITICAL",
+      "score": 9.0,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "23.4.0",
+          "last_affected": "23.26.2",
+          "scheme": "oracle"
+        }
+      ],
+      "references": [
+        "https://www.oracle.com/security-alerts/cspumay2026.html",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-46833"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2017-7546",
+      "product": "postgresql",
+      "title": "PostgreSQL unauthenticated authentication bypass",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "fixed": "9.2.22"
+        },
+        {
+          "introduced": "9.3.0",
+          "fixed": "9.3.18"
+        },
+        {
+          "introduced": "9.4.0",
+          "fixed": "9.4.13"
+        },
+        {
+          "introduced": "9.5.0",
+          "fixed": "9.5.8"
+        },
+        {
+          "introduced": "9.6.0",
+          "fixed": "9.6.4"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/about/news/1772/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2017-7546"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-5869",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "11.0",
+          "fixed": "11.22"
+        },
+        {
+          "introduced": "12.0",
+          "fixed": "12.17"
+        },
+        {
+          "introduced": "13.0",
+          "fixed": "13.13"
+        },
+        {
+          "introduced": "14.0",
+          "fixed": "14.10"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.5"
+        },
+        {
+          "introduced": "16.0",
+          "last_affected": "16.0"
+        }
+      ],
+      "references": [
+        "https://access.redhat.com/errata/RHSA-2023:7545",
+        "https://access.redhat.com/errata/RHSA-2023:7579",
+        "https://access.redhat.com/errata/RHSA-2023:7580",
+        "https://access.redhat.com/errata/RHSA-2023:7581",
+        "https://access.redhat.com/errata/RHSA-2023:7616",
+        "https://access.redhat.com/errata/RHSA-2023:7656",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-5869"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-10979",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "12.0",
+          "fixed": "12.21"
+        },
+        {
+          "introduced": "13.0",
+          "fixed": "13.17"
+        },
+        {
+          "introduced": "14.0",
+          "fixed": "14.14"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.9"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.5"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.1"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2024-10979/",
+        "https://github.com/fmora50591/postgresql-env-vuln/blob/main/README.md",
+        "https://lists.debian.org/debian-lts-announce/2024/11/msg00011.html",
+        "https://security.netapp.com/advisory/ntap-20250110-0003/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-10979"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-14662",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-14662/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14662"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-14664",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-14664/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14664"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-14669",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-14669/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14669"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-14670",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-14670/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14670"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-14671",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-14671/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14671"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-14676",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-14676/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14676"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-14677",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-14677/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14677"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-14680",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-14680/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-14680"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-15742",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-15742/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-15742"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-16238",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-16238/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-16238"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-16239",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-16239/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-16239"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-19385",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.24"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.19"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.15"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.11"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.5"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-19385/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-19385"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-2004",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.21"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.16"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.12"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.8"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.2"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-2004/",
+        "https://access.redhat.com/errata/RHSA-2026:19009",
+        "https://access.redhat.com/errata/RHSA-2026:19010",
+        "https://access.redhat.com/errata/RHSA-2026:3730",
+        "https://access.redhat.com/errata/RHSA-2026:3887",
+        "https://access.redhat.com/errata/RHSA-2026:3896",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-2004"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-2005",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.21"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.16"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.12"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.8"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.2"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-2005/",
+        "https://access.redhat.com/errata/RHSA-2026:19009",
+        "https://access.redhat.com/errata/RHSA-2026:19010",
+        "https://access.redhat.com/errata/RHSA-2026:3730",
+        "https://access.redhat.com/errata/RHSA-2026:3887",
+        "https://access.redhat.com/errata/RHSA-2026:3896",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-2005"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-2006",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.21"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.16"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.12"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.8"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.2"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-2006/",
+        "https://access.redhat.com/errata/RHSA-2026:19009",
+        "https://access.redhat.com/errata/RHSA-2026:19010",
+        "https://access.redhat.com/errata/RHSA-2026:3730",
+        "https://access.redhat.com/errata/RHSA-2026:3887",
+        "https://access.redhat.com/errata/RHSA-2026:3896",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-2006"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-6473",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "14.23"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.18"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.14"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.10"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.4"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-6473/",
+        "https://access.redhat.com/errata/RHSA-2026:22878",
+        "https://access.redhat.com/errata/RHSA-2026:26181",
+        "https://access.redhat.com/errata/RHSA-2026:26203",
+        "https://access.redhat.com/errata/RHSA-2026:26204",
+        "https://access.redhat.com/errata/RHSA-2026:26524",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-6473"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-6478",
+      "product": "postgresql",
+      "title": "PostgreSQL unauthenticated credential or account takeover",
+      "severity": "HIGH",
+      "score": 8.2,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:L/A:N",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "14.0",
+          "fixed": "14.23"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.18"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.14"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.10"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.4"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-6478/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-6478"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-6637",
+      "product": "postgresql",
+      "title": "PostgreSQL remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "14.23"
+        },
+        {
+          "introduced": "15.0",
+          "fixed": "15.18"
+        },
+        {
+          "introduced": "16.0",
+          "fixed": "16.14"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.10"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.4"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-6637/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-6637"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-6638",
+      "product": "postgresql",
+      "title": "PostgreSQL command execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "command_execution",
+      "affected": [
+        {
+          "introduced": "16.0",
+          "fixed": "16.14"
+        },
+        {
+          "introduced": "17.0",
+          "fixed": "17.10"
+        },
+        {
+          "introduced": "18.0",
+          "fixed": "18.4"
+        }
+      ],
+      "references": [
+        "https://www.postgresql.org/support/security/CVE-2026-6638/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-6638"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-43320",
+      "product": "proxmox_ve",
+      "title": "Proxmox VE credential or account takeover requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "5.4",
+          "last_affected": "8.0"
+        }
+      ],
+      "references": [
+        "https://bugzilla.proxmox.com/show_bug.cgi?id=4579",
+        "https://bugzilla.proxmox.com/show_bug.cgi?id=4584",
+        "https://github.com/proxmox/proxmox-rs/commit/50b793db8d3421bbfe2bce060a486263f18a90cb",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-43320"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-2221",
+      "product": "qdrant",
+      "title": "Qdrant unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "1.7.4",
+          "last_affected": "1.7.4"
+        }
+      ],
+      "references": [
+        "https://github.com/qdrant/qdrant/commit/e6411907f0ecf3c2f8ba44ab704b9e4597d9705d",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-2221"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-3078",
+      "product": "qdrant",
+      "title": "Qdrant unauthenticated arbitrary file read",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "file_read",
+      "affected": [
+        {
+          "last_affected": "1.6.1"
+        },
+        {
+          "introduced": "1.7.0",
+          "last_affected": "1.7.4"
+        },
+        {
+          "introduced": "1.8.0",
+          "fixed": "1.8.3"
+        }
+      ],
+      "references": [
+        "https://github.com/qdrant/qdrant/commit/3ab5172e9c8f14fa1f7b24e7147eac74e2412b62",
+        "https://github.com/qdrant/qdrant/pull/3856",
+        "https://github.com/qdrant/qdrant/releases/tag/v1.8.3",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-3078"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-3584",
+      "product": "qdrant",
+      "title": "Qdrant unauthenticated arbitrary file write",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:H/A:N",
+      "impact": "file_write",
+      "affected": [
+        {
+          "introduced": "1.9.0-dev",
+          "last_affected": "1.9.0-dev"
+        }
+      ],
+      "references": [
+        "https://github.com/qdrant/qdrant/commit/15479a45ffa3b955485ae516696f7e933a8cce8a",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-3584"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-3829",
+      "product": "qdrant",
+      "title": "Qdrant unauthenticated arbitrary file read",
+      "severity": "CRITICAL",
+      "score": 9.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",
+      "impact": "file_read",
+      "affected": [
+        {
+          "introduced": "1.9.0-dev",
+          "last_affected": "1.9.0-dev"
+        }
+      ],
+      "references": [
+        "https://github.com/qdrant/qdrant/commit/ee7a31ec3459a6a4219200234615c1817ab82260",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-3829"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-25628",
+      "product": "qdrant",
+      "title": "Qdrant arbitrary file write requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "file_write",
+      "affected": [
+        {
+          "introduced": "1.9.3",
+          "fixed": "1.15.6"
+        }
+      ],
+      "references": [
+        "https://github.com/qdrant/qdrant/blob/48203e414e4e7f639a6d394fb6e4df695f808e51/src/actix/api/service_api.rs#L195",
+        "https://github.com/qdrant/qdrant/commit/32b7fdfb7f542624ecd1f7c8d3e2b13c4e36a2c1",
+        "https://github.com/qdrant/qdrant/security/advisories/GHSA-f632-vm87-2m2f",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-25628"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2016-9877",
+      "product": "rabbitmq",
+      "title": "RabbitMQ unauthenticated authentication bypass",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.0/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "fixed": "3.5.8"
+        },
+        {
+          "introduced": "3.6.0",
+          "fixed": "3.6.6"
+        }
+      ],
+      "references": [
+        "https://pivotal.io/security/cve-2016-9877",
+        "https://nvd.nist.gov/vuln/detail/CVE-2016-9877"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-57211",
+      "product": "rabbitmq",
+      "title": "RabbitMQ unauthenticated server-side request forgery",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "ssrf",
+      "affected": [
+        {
+          "introduced": "4.1.0",
+          "fixed": "4.1.11"
+        },
+        {
+          "introduced": "4.2.0",
+          "fixed": "4.2.6"
+        }
+      ],
+      "references": [
+        "https://github.com/rabbitmq/rabbitmq-server/commit/39c3a8e9c71da0403d8dfc13f700e60c936e3682",
+        "https://github.com/rabbitmq/rabbitmq-server/commit/6730797f6a34b4e8308cea60adf1243857e70204",
+        "https://github.com/rabbitmq/rabbitmq-server/pull/15803",
+        "https://github.com/rabbitmq/rabbitmq-server/releases/tag/v4.2.6",
+        "https://github.com/rabbitmq/rabbitmq-server/security/advisories/GHSA-7v84-m3g5-vxq6",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-57211"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-57216",
+      "product": "rabbitmq",
+      "title": "RabbitMQ unauthenticated authentication bypass",
+      "severity": "CRITICAL",
+      "score": 10.0,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "auth_bypass",
+      "affected": [
+        {
+          "introduced": "3.13.0",
+          "fixed": "3.13.15"
+        },
+        {
+          "introduced": "4.0.0",
+          "fixed": "4.0.20"
+        },
+        {
+          "introduced": "4.1.0",
+          "fixed": "4.1.11"
+        },
+        {
+          "introduced": "4.2.0",
+          "fixed": "4.2.6"
+        }
+      ],
+      "references": [
+        "https://github.com/rabbitmq/rabbitmq-server/commit/7273c9eb6920abcde17b892dbe97ccaf906ead47",
+        "https://github.com/rabbitmq/rabbitmq-server/commit/9f8c39fcf0acbc43080ee7017a62a02832114112",
+        "https://github.com/rabbitmq/rabbitmq-server/pull/15936",
+        "https://github.com/rabbitmq/rabbitmq-server/pull/15940",
+        "https://github.com/rabbitmq/rabbitmq-server/releases/tag/v4.2.6",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-57216"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-57219",
+      "product": "rabbitmq",
+      "title": "RabbitMQ unauthenticated credential or account takeover",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+      "impact": "account_takeover",
+      "affected": [
+        {
+          "introduced": "3.13.0",
+          "fixed": "3.13.15"
+        },
+        {
+          "introduced": "4.0.0",
+          "fixed": "4.0.20"
+        },
+        {
+          "introduced": "4.1.0",
+          "fixed": "4.1.11"
+        },
+        {
+          "introduced": "4.2.0",
+          "fixed": "4.2.6"
+        }
+      ],
+      "references": [
+        "https://github.com/rabbitmq/rabbitmq-server/commit/98b1daf740237c85941e8addcbea6e74f4a2743c",
+        "https://github.com/rabbitmq/rabbitmq-server/commit/aa387c4451e7b674df3e3ba89df86a99d697cc7f",
+        "https://github.com/rabbitmq/rabbitmq-server/pull/16083",
+        "https://github.com/rabbitmq/rabbitmq-server/pull/16086",
+        "https://github.com/rabbitmq/rabbitmq-server/releases/tag/v4.2.6",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-57219"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2016-8339",
+      "product": "redis",
+      "title": "Redis unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "3.2.0",
+          "last_affected": "3.2.0"
+        },
+        {
+          "introduced": "3.2.1",
+          "last_affected": "3.2.1"
+        },
+        {
+          "introduced": "3.2.2",
+          "last_affected": "3.2.2"
+        },
+        {
+          "introduced": "3.2.3",
+          "last_affected": "3.2.3"
+        }
+      ],
+      "references": [
+        "https://github.com/antirez/redis/commit/6d9f8e2462fc2c426d48c941edeb78e5df7d2977",
+        "https://nvd.nist.gov/vuln/detail/CVE-2016-8339"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-21309",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "4.0",
+          "fixed": "5.0.11"
+        },
+        {
+          "introduced": "6.0.0",
+          "fixed": "6.0.11"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/commit/c992857618db99776917f10bf4f2345a5fdc78b0",
+        "https://github.com/redis/redis/pull/8522",
+        "https://github.com/redis/redis/security/advisories/GHSA-hgj8-vff2-7cjf",
+        "https://security.gentoo.org/glsa/202103-02",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-21309"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-29477",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "6.0.0",
+          "fixed": "6.0.13"
+        },
+        {
+          "introduced": "6.2.0",
+          "fixed": "6.2.3"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/security/advisories/GHSA-vqxj-26vj-996g",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/BHWOF7CBVUGDK3AN6H3BN3VNTH2TDUZZ/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/BPWBIZXA67JFIB63W2CNVVILCGIC2ME5/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/EZJ6JGQ2ETZB2DWTQSGCOGG7EF3ILV4V/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/SN7INTZFE34MIQJO7WDDTIY5LIBGN6GI/",
+        "https://redis.io/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-29477"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-29478",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "6.2.0",
+          "fixed": "6.2.3"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/security/advisories/GHSA-qh52-crrg-44g3",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/BPWBIZXA67JFIB63W2CNVVILCGIC2ME5/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/EZJ6JGQ2ETZB2DWTQSGCOGG7EF3ILV4V/",
+        "https://redis.io/",
+        "https://security.gentoo.org/glsa/202107-20",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-29478"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-32625",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "6.0.0",
+          "fixed": "6.0.14"
+        },
+        {
+          "introduced": "6.2.0",
+          "fixed": "6.2.4"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/releases/tag/6.0.14",
+        "https://github.com/redis/redis/releases/tag/6.2.4",
+        "https://github.com/redis/redis/security/advisories/GHSA-46cp-x4x9-6pfq",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/BHWOF7CBVUGDK3AN6H3BN3VNTH2TDUZZ/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/SN7INTZFE34MIQJO7WDDTIY5LIBGN6GI/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-32625"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-32626",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "2.6",
+          "fixed": "5.0.14"
+        },
+        {
+          "introduced": "6.0.0",
+          "fixed": "6.0.16"
+        },
+        {
+          "introduced": "6.2.0",
+          "fixed": "6.2.6"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/commit/666ed7facf4524bf6d19b11b20faa2cf93fdf591",
+        "https://github.com/redis/redis/security/advisories/GHSA-p486-xggp-782c",
+        "https://lists.apache.org/thread.html/r75490c61c2cb7b6ae2c81238fd52ae13636c60435abcd732d41531a0%40%3Ccommits.druid.apache.org%3E",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/HTYQ5ZF37HNGTZWVNJD3VXP7I6MEEF42/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/VL5KXFN3ATM7IIM7Q4O4PWTSRGZ5744Z/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/WR5WKJWXD4D6S3DJCZ56V74ESLTDQRAB/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-32626"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-32627",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "5.0.0",
+          "fixed": "5.0.14"
+        },
+        {
+          "introduced": "6.0.0",
+          "fixed": "6.0.16"
+        },
+        {
+          "introduced": "6.2.0",
+          "fixed": "6.2.6"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/commit/f6a40570fa63d5afdd596c78083d754081d80ae3",
+        "https://github.com/redis/redis/security/advisories/GHSA-f434-69fm-g45v",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/HTYQ5ZF37HNGTZWVNJD3VXP7I6MEEF42/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/VL5KXFN3ATM7IIM7Q4O4PWTSRGZ5744Z/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/WR5WKJWXD4D6S3DJCZ56V74ESLTDQRAB/",
+        "https://security.gentoo.org/glsa/202209-17",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-32627"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-32628",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "5.0.0",
+          "fixed": "5.0.14"
+        },
+        {
+          "introduced": "6.0.0",
+          "fixed": "6.0.16"
+        },
+        {
+          "introduced": "6.2.0",
+          "fixed": "6.2.6"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/commit/f6a40570fa63d5afdd596c78083d754081d80ae3",
+        "https://github.com/redis/redis/security/advisories/GHSA-vw22-qm3h-49pr",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/HTYQ5ZF37HNGTZWVNJD3VXP7I6MEEF42/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/VL5KXFN3ATM7IIM7Q4O4PWTSRGZ5744Z/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/WR5WKJWXD4D6S3DJCZ56V74ESLTDQRAB/",
+        "https://security.gentoo.org/glsa/202209-17",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-32628"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-32687",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "5.0.0",
+          "fixed": "5.0.14"
+        },
+        {
+          "introduced": "6.0.0",
+          "fixed": "6.0.16"
+        },
+        {
+          "introduced": "6.2.0",
+          "fixed": "6.2.6"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/commit/a30d367a71b7017581cf1ca104242a3c644dec0f",
+        "https://github.com/redis/redis/security/advisories/GHSA-m3mf-8x9w-r27q",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/HTYQ5ZF37HNGTZWVNJD3VXP7I6MEEF42/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/VL5KXFN3ATM7IIM7Q4O4PWTSRGZ5744Z/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/WR5WKJWXD4D6S3DJCZ56V74ESLTDQRAB/",
+        "https://security.gentoo.org/glsa/202209-17",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-32687"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-32761",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "2.2.0",
+          "fixed": "5.0.13"
+        },
+        {
+          "introduced": "6.0",
+          "fixed": "6.0.15"
+        },
+        {
+          "introduced": "6.2.0",
+          "fixed": "6.2.5"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/security/advisories/GHSA-8wxq-j7rp-g8wj",
+        "https://lists.debian.org/debian-lts-announce/2021/07/msg00017.html",
+        "https://lists.debian.org/debian-lts-announce/2021/08/msg00026.html",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/6O7AUOROBYGP5IMGJPC5HZ3R2RB6GZ5X/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/VGX7RRAWGXWXEAKJTQYSDSBO2BC3SAHD/",
+        "https://security.gentoo.org/glsa/202209-17",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-32761"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2021-41099",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "5.0.0",
+          "fixed": "5.0.14"
+        },
+        {
+          "introduced": "6.0.0",
+          "fixed": "6.0.16"
+        },
+        {
+          "introduced": "6.2.0",
+          "fixed": "6.2.6"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/commit/c6ad876774f3cc11e32681ea02a2eead00f2c521",
+        "https://github.com/redis/redis/security/advisories/GHSA-j3cr-9h5g-6cph",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/HTYQ5ZF37HNGTZWVNJD3VXP7I6MEEF42/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/VL5KXFN3ATM7IIM7Q4O4PWTSRGZ5744Z/",
+        "https://lists.fedoraproject.org/archives/list/package-announce%40lists.fedoraproject.org/message/WR5WKJWXD4D6S3DJCZ56V74ESLTDQRAB/",
+        "https://security.gentoo.org/glsa/202209-17",
+        "https://nvd.nist.gov/vuln/detail/CVE-2021-41099"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-24834",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "2.6.0",
+          "fixed": "6.0.20"
+        },
+        {
+          "introduced": "6.2.0",
+          "fixed": "6.2.13"
+        },
+        {
+          "introduced": "7.0.0",
+          "fixed": "7.0.12"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/security/advisories/GHSA-p8x2-9v9q-c838",
+        "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/MIF5MAGYARYUMRFK7PQI7HYXMK2HZE5T/",
+        "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/TDNNH2ONMVNBQ6LUIAOAGDNFPKXNST5K/",
+        "https://security.netapp.com/advisory/ntap-20230814-0006/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-24834"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-31144",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "7.0",
+          "fixed": "7.0.4"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/releases/tag/7.0.4",
+        "https://github.com/redis/redis/security/advisories/GHSA-96f7-42fg-2jrh",
+        "https://security.gentoo.org/glsa/202209-17",
+        "https://security.netapp.com/advisory/ntap-20220909-0002/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-31144"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2022-35951",
+      "product": "redis",
+      "title": "Redis unauthenticated remote code execution",
+      "severity": "CRITICAL",
+      "score": 9.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "7.0.0",
+          "fixed": "7.0.5"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/security/advisories/GHSA-5gc4-76rx-22c9",
+        "https://nvd.nist.gov/vuln/detail/CVE-2022-35951"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-36824",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "7.0.0",
+          "fixed": "7.0.12"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/releases/tag/7.0.12",
+        "https://github.com/redis/redis/security/advisories/GHSA-4cfx-h9gq-xpx3",
+        "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/MIF5MAGYARYUMRFK7PQI7HYXMK2HZE5T/",
+        "https://lists.fedoraproject.org/archives/list/package-announce@lists.fedoraproject.org/message/TDNNH2ONMVNBQ6LUIAOAGDNFPKXNST5K/",
+        "https://security.netapp.com/advisory/ntap-20230814-0009/",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-36824"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2023-41056",
+      "product": "redis",
+      "title": "Redis unauthenticated remote code execution",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "7.0.9",
+          "fixed": "7.0.15"
+        },
+        {
+          "introduced": "7.2.0",
+          "fixed": "7.2.4"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/releases/tag/7.0.15",
+        "https://github.com/redis/redis/releases/tag/7.2.4",
+        "https://github.com/redis/redis/security/advisories/GHSA-xr47-pcmx-fq2m",
+        "https://nvd.nist.gov/vuln/detail/CVE-2023-41056"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2024-31449",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "2.8.18",
+          "fixed": "6.2.16"
+        },
+        {
+          "introduced": "7.2.0",
+          "fixed": "7.2.6"
+        },
+        {
+          "introduced": "7.4.0",
+          "last_affected": "7.4.0"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/commit/1f7c148be2cbacf7d50aa461c58b871e87cc5ed9",
+        "https://github.com/redis/redis/security/advisories/GHSA-whxg-wx83-85p5",
+        "https://nvd.nist.gov/vuln/detail/CVE-2024-31449"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2025-46817",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "6.2.20"
+        },
+        {
+          "introduced": "7.0",
+          "fixed": "7.2.11"
+        },
+        {
+          "introduced": "7.4.0",
+          "fixed": "7.4.6"
+        },
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.4"
+        },
+        {
+          "introduced": "8.2.0",
+          "fixed": "8.2.2"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/commit/fc9abc775e308374f667fdf3e723ef4b7eb0e3ca",
+        "https://github.com/redis/redis/releases/tag/8.2.2",
+        "https://github.com/redis/redis/security/advisories/GHSA-m8fj-85cg-7vhp",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-46817"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2025-49844",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "CRITICAL",
+      "score": 9.9,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "6.2.20"
+        },
+        {
+          "introduced": "7.0",
+          "fixed": "7.2.11"
+        },
+        {
+          "introduced": "7.4.0",
+          "fixed": "7.4.6"
+        },
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.4"
+        },
+        {
+          "introduced": "8.2.0",
+          "fixed": "8.2.2"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/commit/d5728cb5795c966c5b5b1e0f0ac576a7e69af539",
+        "https://github.com/redis/redis/releases/tag/8.2.2",
+        "https://github.com/redis/redis/security/advisories/GHSA-4789-qfc9-5f9q",
+        "https://github.com/lastvocher/redis-CVE-2025-49844",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-49844"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2025-62507",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.7,
+      "vector": "CVSS:4.0/AV:N/AC:L/AT:P/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "8.2.0",
+          "fixed": "8.2.3"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/commit/5f83972188f6e5b1d6f1940218c650a9cbdf7741",
+        "https://github.com/redis/redis/releases/tag/8.2.3",
+        "https://github.com/redis/redis/security/advisories/GHSA-jhjx-x4cf-4vm8",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-62507"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-23479",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.7,
+      "vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "impact": "rce",
+      "affected": [
+        {
+          "introduced": "7.2.0",
+          "fixed": "8.6.3"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/releases/tag/8.6.3",
+        "https://github.com/redis/redis/security/advisories/GHSA-93m2-935m-8rj3",
+        "https://access.redhat.com/errata/RHSA-2026:14316",
+        "https://access.redhat.com/errata/RHSA-2026:25216",
+        "https://access.redhat.com/errata/RHSA-2026:25219",
+        "https://access.redhat.com/errata/RHSA-2026:25925",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-23479"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-23631",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.1,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "8.6.3"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/releases/tag/8.6.3",
+        "https://github.com/redis/redis/security/advisories/GHSA-8ghh-qpmp-7826",
+        "https://access.redhat.com/errata/RHSA-2026:14316",
+        "https://access.redhat.com/errata/RHSA-2026:25216",
+        "https://access.redhat.com/errata/RHSA-2026:25219",
+        "https://access.redhat.com/errata/RHSA-2026:25925",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-23631"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-25243",
+      "product": "redis",
+      "title": "Redis remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.7,
+      "vector": "CVSS:4.0/AV:N/AC:H/AT:N/PR:L/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N/E:X/CR:X/IR:X/AR:X/MAV:X/MAC:X/MAT:X/MPR:X/MUI:X/MVC:X/MVI:X/MVA:X/MSC:X/MSI:X/MSA:X/S:X/AU:X/R:X/V:X/RE:X/U:X",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "8.6.3"
+        }
+      ],
+      "references": [
+        "https://github.com/redis/redis/releases/tag/8.6.3",
+        "https://github.com/redis/redis/security/advisories/GHSA-c8h9-259x-jff4",
+        "https://access.redhat.com/errata/RHSA-2026:14316",
+        "https://access.redhat.com/errata/RHSA-2026:23229",
+        "https://access.redhat.com/errata/RHSA-2026:25216",
+        "https://access.redhat.com/errata/RHSA-2026:25219",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-25243"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2025-49844",
+      "product": "valkey",
+      "title": "Valkey remote code execution requiring low privileges",
+      "severity": "CRITICAL",
+      "score": 9.9,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "7.2.11"
+        },
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.6"
+        },
+        {
+          "introduced": "8.1.0",
+          "fixed": "8.1.4"
+        }
+      ],
+      "references": [
+        "https://github.com/valkey-io/valkey/security/advisories/GHSA-9rfg-jx7v-52p6",
+        "https://nvd.nist.gov/vuln/detail/CVE-2025-49844"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-56684",
+      "product": "valkey",
+      "title": "Valkey remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 7.5,
+      "vector": "CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "7.2.14"
+        },
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.10"
+        },
+        {
+          "introduced": "8.1.0",
+          "fixed": "8.1.9"
+        },
+        {
+          "introduced": "9.0.0",
+          "fixed": "9.0.5"
+        },
+        {
+          "introduced": "9.1.0",
+          "fixed": "9.1.1"
+        }
+      ],
+      "references": [
+        "https://github.com/valkey-io/valkey/security/advisories/GHSA-53mc-f3m3-99vh",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-56684"
+      ],
+      "verified_at": "2026-09-20"
+    },
+    {
+      "id": "CVE-2026-63639",
+      "product": "valkey",
+      "title": "Valkey remote code execution requiring low privileges",
+      "severity": "HIGH",
+      "score": 8.8,
+      "vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H",
+      "impact": "rce",
+      "affected": [
+        {
+          "fixed": "7.2.14"
+        },
+        {
+          "introduced": "8.0.0",
+          "fixed": "8.0.10"
+        },
+        {
+          "introduced": "8.1.0",
+          "fixed": "8.1.9"
+        },
+        {
+          "introduced": "9.0.0",
+          "fixed": "9.0.5"
+        },
+        {
+          "introduced": "9.1.0",
+          "fixed": "9.1.1"
+        }
+      ],
+      "references": [
+        "https://github.com/valkey-io/valkey/security/advisories/GHSA-mvcj-73cw-22m4",
+        "https://nvd.nist.gov/vuln/detail/CVE-2026-63639"
+      ],
+      "verified_at": "2026-09-20"
+    }
+  ]
+}

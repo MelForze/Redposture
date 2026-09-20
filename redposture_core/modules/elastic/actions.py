@@ -51,6 +51,10 @@ _THREAD_LOCAL_DEBUG_EMIT = threading.local()
 _THREAD_LOCAL_ELASTIC_SESSION = threading.local()
 _VERSION_NUMBER_RE = re.compile(r'"number"\s*:\s*"([0-9]+(?:\.[0-9]+){1,3}(?:[-+][^"]+)?)"')
 _VERSION_STRING_RE = re.compile(r'"version"\s*:\s*"([0-9]+(?:\.[0-9]+){1,3}(?:[-+][^"]+)?)"')
+_PRODUCT_SERVER_VERSION_RE = re.compile(
+    r"(?:elasticsearch|opensearch)[/\s-]+([0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9._-]+)?)",
+    re.IGNORECASE,
+)
 
 _DISCOVER_KEYWORDS = (
     "password",
@@ -726,6 +730,19 @@ def _extract_version_hint(payload: bytes, headers: dict[str, str] | None = None)
         node_version = _extract_version_from_nodes_body(body)
         if isinstance(node_version, str) and node_version.strip():
             return node_version.strip()
+
+    response_headers = headers or {}
+    for header_name in ("X-OpenSearch-Version", "X-Elasticsearch-Version"):
+        header_version = _header_lookup(response_headers, header_name)
+        if isinstance(header_version, str) and re.fullmatch(
+            r"[0-9]+(?:\.[0-9]+){1,3}(?:[-+][A-Za-z0-9._-]+)?", header_version.strip()
+        ):
+            return header_version.strip()
+    server_header = _header_lookup(response_headers, "Server")
+    if isinstance(server_header, str):
+        server_match = _PRODUCT_SERVER_VERSION_RE.search(server_header)
+        if server_match:
+            return server_match.group(1)
 
     text = payload.decode("utf-8", errors="replace")
     match = _VERSION_NUMBER_RE.search(text)
@@ -4370,7 +4387,9 @@ def _format_record(record: dict[str, Any], output_format: str) -> str:
             return ""
         if bool(record.get("provided_credentials") or record.get("provided_token")):
             return f"{prefix} [-] authentication required (credentials invalid){counts}{caps}"
-        return f"{prefix} [-] authentication required{counts}"
+        # The primary detection line already carries auth required:True.  With
+        # no credential attempt there is no additional result to report.
+        return ""
 
     if status == "unknown_auth":
         if has_attempt_history:

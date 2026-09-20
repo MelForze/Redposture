@@ -32,6 +32,7 @@ def build_registry_plan(args: Any) -> AuditCommandPlan:
 
 
 def build_registry_spec(args: Any) -> ModuleAuditSpec:
+    enum_cve = bool(getattr(args, "enum_cve", False))
     options = {
         "docker": bool(getattr(args, "docker", False)),
         "show_images": bool(getattr(args, "images", False)),
@@ -39,9 +40,9 @@ def build_registry_spec(args: Any) -> ModuleAuditSpec:
         "repository": str(getattr(args, "repository", "") or "").strip() or None,
         "tag": str(getattr(args, "tag", "") or "").strip() or None,
         "metadata": bool(getattr(args, "metadata", False)),
-        "harbor": bool(getattr(args, "harbor", False)),
-        "gitlab": bool(getattr(args, "gitlab", False)),
-        "nexus": bool(getattr(args, "nexus", False)),
+        "harbor": bool(getattr(args, "harbor", False)) or enum_cve,
+        "gitlab": bool(getattr(args, "gitlab", False)) or enum_cve,
+        "nexus": bool(getattr(args, "nexus", False)) or enum_cve,
         "assets": bool(getattr(args, "assets", False)),
         "inspect": bool(getattr(args, "inspect", False)),
         "image": str(getattr(args, "image", "") or "").strip() or None,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
@@ -89,6 +90,29 @@ def _server_is_minio(resp: MinioResponse) -> bool:
 
 
 _MINIO_CONSOLE_TITLE_RE = re.compile(rb"<title\b[^>]*>\s*MinIO\s+Console\b", re.I)
+_CONSOLE_API_CANDIDATE_PORTS = (9000,)
+
+
+def _http_origin(url: str | None) -> tuple[str, str, int] | None:
+    if not url:
+        return None
+    try:
+        parsed = urlsplit(url)
+        scheme = parsed.scheme.lower()
+        if scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        return scheme, parsed.hostname, parsed.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        return None
+
+
+def _origin_url(url: str | None) -> str | None:
+    origin = _http_origin(url)
+    if origin is None:
+        return None
+    scheme, host, port = origin
+    authority = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{authority}:{port}"
 
 
 def _is_minio_console(resp: MinioResponse) -> bool:
@@ -99,6 +123,15 @@ def _is_minio_console(resp: MinioResponse) -> bool:
     if resp.transport_error or resp.http_status != 200:
         return False
     return bool(_MINIO_CONSOLE_TITLE_RE.search(resp.body or b""))
+
+
+def _is_s3_request_on_console_port(resp: MinioResponse) -> bool:
+    """MinIO Console's canonical response to a signed S3 request."""
+    if resp.transport_error or resp.error is None:
+        return False
+    code = str(resp.error.code or "").strip().lower()
+    message = re.sub(r"\s+", " ", str(resp.error.message or "")).strip().lower().rstrip(".")
+    return code == "invalidargument" and message == "s3 api requests must be made to api port"
 
 
 def _health_live(resp: MinioResponse) -> bool:
@@ -126,13 +159,19 @@ def detect_minio(client: MinioClient) -> MinioDetection:
     health = client.health("live")
     admin = client.admin_info(signed=False)
 
-    s3_shape = _has_s3_shape(root)
+    root_console = _is_minio_console(root)
+    # An unsigned GET / on the S3 listener may redirect to the Console. The
+    # Admin API's S3-shaped denial plus the MinIO health endpoint still verify
+    # that the *source* listener serves the API.
+    admin_s3_shape = _has_s3_shape(admin)
+    s3_shape = _has_s3_shape(root) or (root_console and admin_s3_shape and _health_live(health))
     server_minio = _server_is_minio(root)
     health_ok = _health_live(health)
     admin_ok = _admin_plane(admin)
 
     evidence = {
         "s3_shape": s3_shape,
+        "admin_s3_shape": admin_s3_shape,
         "server_minio": server_minio,
         "health_live": health_ok,
         "admin_plane": admin_ok,
@@ -144,12 +183,19 @@ def detect_minio(client: MinioClient) -> MinioDetection:
 
     strong_signals = sum(1 for flag in (health_ok, admin_ok, server_minio) if flag)
     if s3_shape and strong_signals >= 1 and (health_ok or admin_ok or (server_minio and strong_signals >= 2)):
-        return MinioDetection(status="confirmed", api_endpoint=client.base_url, evidence=evidence)
-    if _is_minio_console(root):
+        return MinioDetection(
+            status="confirmed",
+            api_endpoint=client.base_url,
+            console_endpoint=_origin_url(root.final_url) if root_console else None,
+            evidence=evidence,
+        )
+    if root_console:
         # Console-only exposure: MinIO is present, but the S3 API is not reachable
         # here. Report the console endpoint and leave the S3 API unverified.
         evidence["console"] = True
-        return MinioDetection(status="console", console_endpoint=client.base_url, evidence=evidence)
+        return MinioDetection(
+            status="console", console_endpoint=_origin_url(root.final_url) or client.base_url, evidence=evidence
+        )
     status = "probable" if s3_shape else "not_minio"
     return MinioDetection(status=status, api_endpoint=client.base_url, evidence=evidence)
 
@@ -216,11 +262,27 @@ def _is_service_bucket_listing(body: bytes) -> bool:
     return False
 
 
+def _is_admin_info_response(body: bytes) -> bool:
+    try:
+        data = json.loads(body)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and any(key in data for key in ("servers", "mode", "version"))
+
+
 def verify_credential(client: MinioClient) -> CredentialResult:
     resp = client.get_service_root(signed=True)
     access_key = getattr(client, "access_key", None)
     if resp.transport_error:
         return CredentialResult(state="transient_failure", access_key=access_key)
+    if _is_minio_console(resp) or _is_s3_request_on_console_port(resp):
+        # Some proxies redirect even a signed GET / to the browser UI. Verify
+        # against the confirmed API listener's Admin endpoint instead.
+        resp = client.admin_info(signed=True)
+        if resp.transport_error:
+            return CredentialResult(state="transient_failure", access_key=access_key)
+        if resp.http_status == 200 and _is_admin_info_response(resp.body):
+            return CredentialResult(state="valid", access_key=access_key)
     if 200 <= resp.http_status < 300:
         state = (
             "valid" if resp.http_status == 200 and _is_service_bucket_listing(resp.body) else "verification_unavailable"
@@ -419,21 +481,17 @@ class MinioLifecycleState:
         )
         return client.get_service_root(signed=False)
 
-    def _remember_final_origin(self, resp: MinioResponse) -> str | None:
-        if not resp.final_url:
+    def _remember_origin(self, url: str | None) -> str | None:
+        origin = _http_origin(url)
+        if origin is None:
             return None
-        try:
-            parsed = urlsplit(resp.final_url)
-            scheme = str(parsed.scheme or "").lower()
-            host = parsed.hostname
-            if scheme not in {"http", "https"} or not host:
-                return None
-            port = parsed.port or (443 if scheme == "https" else 80)
-        except ValueError:
-            return None
+        scheme, host, port = origin
         self.resolved_host = host
         self.resolved_port = port
         return scheme
+
+    def _remember_final_origin(self, resp: MinioResponse) -> str | None:
+        return self._remember_origin(resp.final_url)
 
     def resolve_scheme(self) -> str:
         """Return the transport scheme for this target, probing once and caching.
@@ -448,6 +506,20 @@ class MinioLifecycleState:
             return self.resolved_scheme
         guess = self.explicit_scheme or ("https" if self.port in _TLS_PORTS else "http")
         resp = self._probe(guess)
+        if _is_minio_console(resp) and resp.redirect_history:
+            # The final URL is a web UI, not an S3 origin. Retain the listener
+            # that issued the final redirect. A same-host, same-port HTTPS
+            # upgrade is still a transport change worth probing before making
+            # that distinction.
+            source = _http_origin(resp.redirect_history[-1])
+            final = _http_origin(resp.final_url)
+            selected = (
+                resp.final_url
+                if source and final and source[1:] == final[1:] and source[0] != final[0]
+                else resp.redirect_history[-1]
+            )
+            self.resolved_scheme = self._remember_origin(selected) or guess
+            return self.resolved_scheme
         final_scheme = self._remember_final_origin(resp)
         mismatch = bool(resp.transport_error and _transport_mismatch(guess, resp.transport_error))
         tls_required = guess == "http" and http_response_requires_https(resp.http_status, resp.body)
@@ -459,6 +531,23 @@ class MinioLifecycleState:
             return "https"
         self.resolved_scheme = guess
         return guess
+
+    def find_api_for_console(self, console_endpoint: str | None) -> MinioDetection | None:
+        """Try the conventional S3 port on the same host using unsigned requests."""
+        for port in _CONSOLE_API_CANDIDATE_PORTS:
+            if port == self.resolved_port and self.host == self.resolved_host:
+                continue
+            first_scheme = self.resolved_scheme or self.explicit_scheme or "http"
+            for scheme in (first_scheme, "https" if first_scheme == "http" else "http"):
+                client = MinioClient(self.pool, scheme=scheme, host=self.host, port=port)
+                detection = detect_minio(client)
+                if detection.status != "confirmed":
+                    continue
+                self.resolved_scheme = scheme
+                self.resolved_host = self.host
+                self.resolved_port = port
+                return replace(detection, console_endpoint=console_endpoint)
+        return None
 
     def try_https_upgrade(self) -> bool:
         """Switch an HTTP lifecycle to HTTPS when HTTPS exposes an S3 endpoint.
@@ -513,6 +602,19 @@ def _client_for(ctx: Any, credential: Any) -> MinioClient:
 def detect_record(ctx: Any) -> dict[str, Any]:
     client = _client_for(ctx, ctx.credential)
     detection = detect_minio(client)
+    state = getattr(ctx, "lifecycle_state", None)
+    args = getattr(ctx, "args", None)
+    credential = getattr(ctx, "credential", None)
+    wants_credentials = bool(
+        getattr(args, "defcreds", False)
+        or getattr(args, "username", None)
+        or (getattr(credential, "username", None) and getattr(credential, "password", None))
+    )
+    if detection.status == "console" and wants_credentials and isinstance(state, MinioLifecycleState):
+        recovered = state.find_api_for_console(detection.console_endpoint)
+        if recovered is not None:
+            detection = recovered
+            client = _client_for(ctx, ctx.credential)
     anon = classify_anonymous(client) if detection.status == "confirmed" else None
     verification_status = "available" if detection.status == "confirmed" else "unavailable"
     status_word = {
@@ -545,7 +647,13 @@ def detect_record(ctx: Any) -> dict[str, Any]:
         record["version"] = header_version
     if anon is not None:
         record["anonymous"] = anon.classification
-        record["auth_required"] = anon.classification == "authentication_required"
+        record["auth_required"] = (
+            True
+            if anon.classification == "authentication_required"
+            else False
+            if anon.classification == "anonymous_list_ok"
+            else None
+        )
         # Distinct key from the structured `buckets` list emitted by --show-buckets
         # (data_record) so the JSON `buckets` field is not polymorphic.
         record["anonymous_buckets"] = list(anon.buckets)

@@ -10,6 +10,7 @@ clients.s3_sigv4 when credentials are present.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import quote, urlencode, urlsplit
@@ -45,6 +46,17 @@ class MinioResponse:
 def _parse_s3_error(status: int, body: bytes) -> S3Error | None:
     if status < 400 or not body:
         return None
+    # MinIO's S3 endpoints return XML errors, while its Admin API returns the
+    # same Code/Message envelope as JSON.  Normalise both so credential
+    # verification does not lose InvalidAccessKeyId after an Admin fallback.
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        code = str(parsed.get("Code") or parsed.get("code") or "").strip()
+        message = str(parsed.get("Message") or parsed.get("message") or "").strip()
+        return S3Error(http_status=status, code=code, message=message)
     try:
         root = ElementTree.fromstring(body)
     except ElementTree.ParseError:

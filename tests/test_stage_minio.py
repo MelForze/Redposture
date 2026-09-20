@@ -124,7 +124,7 @@ def test_resolve_scheme_upgrades_on_https_required_http_response(monkeypatch: py
     state.close()
 
 
-def test_explicit_http_target_caches_https_redirect(monkeypatch: pytest.MonkeyPatch):
+def test_console_redirect_preserves_original_s3_origin(monkeypatch: pytest.MonkeyPatch):
     state = actions.MinioLifecycleState(_fake_args(), "10.0.0.9", 9000, scheme="http")
     calls: list[str] = []
 
@@ -140,10 +140,10 @@ def test_explicit_http_target_caches_https_redirect(monkeypatch: pytest.MonkeyPa
         )
 
     monkeypatch.setattr(state, "_probe", fake_probe)
-    assert state.resolve_scheme() == "https"
-    assert state.resolve_scheme() == "https"
-    assert state.resolved_host == "storage.internal"
-    assert state.resolved_port == 9443
+    assert state.resolve_scheme() == "http"
+    assert state.resolve_scheme() == "http"
+    assert state.resolved_host == "10.0.0.9"
+    assert state.resolved_port == 9000
     client = actions._client_for(
         SimpleNamespace(
             args=_fake_args(),
@@ -153,7 +153,7 @@ def test_explicit_http_target_caches_https_redirect(monkeypatch: pytest.MonkeyPa
         ),
         SimpleNamespace(username="AK", password="SK"),
     )
-    assert client.base_url == "https://storage.internal:9443"
+    assert client.base_url == "http://10.0.0.9:9000"
     assert calls == ["http"]
     state.close()
 
@@ -179,6 +179,27 @@ def test_console_on_http_upgrades_when_https_is_s3(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(state, "_probe", fake_probe)
     assert state.resolve_scheme() == "https"
     assert calls == ["http", "https"]
+    state.close()
+
+
+def test_console_api_fallback_accepts_verified_https_origin(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = actions.MinioLifecycleState(_fake_args(), "10.0.0.9", 8083, scheme="http")
+    state.resolved_scheme = "http"
+    tried: list[tuple[str, int]] = []
+
+    def fake_detect(client: actions.MinioClient) -> MinioDetection:
+        tried.append((client.scheme, client.port))
+        return MinioDetection(
+            status="confirmed" if client.scheme == "https" and client.port == 9000 else "not_minio",
+            api_endpoint=client.base_url,
+        )
+
+    monkeypatch.setattr(actions, "detect_minio", fake_detect)
+    result = state.find_api_for_console("http://10.0.0.9:8083")
+    assert result is not None and result.status == "confirmed"
+    assert result.console_endpoint == "http://10.0.0.9:8083"
+    assert tried == [("http", 9000), ("https", 9000)]
+    assert (state.resolved_scheme, state.resolved_host, state.resolved_port) == ("https", "10.0.0.9", 9000)
     state.close()
 
 

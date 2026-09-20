@@ -48,6 +48,25 @@ def test_confirmed_when_health_live_and_s3_shape():
     assert det.evidence["s3_shape"] is True
 
 
+def test_console_redirect_does_not_hide_s3_api_signals() -> None:
+    client = _StubClient(
+        root=MinioResponse(
+            http_status=200,
+            headers={"Content-Type": "text/html"},
+            body=b"<html><title>MinIO Console</title></html>",
+            request_url="http://10.0.0.5:9000/",
+            final_url="http://10.0.0.5:8083/",
+            redirect_history=("http://10.0.0.5:9000/",),
+        ),
+        health=_resp(200, headers={"Server": "MinIO"}),
+        admin=_resp(403, b"<Error><Code>AccessDenied</Code></Error>", error=S3Error(403, "AccessDenied", "")),
+    )
+    detection = actions.detect_minio(client)
+    assert detection.status == "confirmed"
+    assert detection.api_endpoint == "http://10.0.0.5:9000"
+    assert detection.console_endpoint == "http://10.0.0.5:8083"
+
+
 def test_probable_when_only_s3_shape_no_minio_specific_signals():
     # Generic S3-совместимый (не MinIO): S3 XML есть, но health/admin/Server отсутствуют.
     client = _StubClient(

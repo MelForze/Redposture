@@ -185,6 +185,24 @@ def test_detect_line_for_fail_not_consul_and_detected() -> None:
     )
     assert "[*] Consul Agent" in detected
     assert "(auth required:False)" in detected
+    assert "(kv:1) (services:2) (agent:3)" in detected
+
+    protected = consul._detect_line(
+        {
+            "host": "127.0.0.1",
+            "port": 8500,
+            "is_consul": True,
+            "version": "1.20.0",
+            "anonymous_scopes": _scope_fixture(False, False, False),
+            "anonymous_self_ok": False,
+            "anonymous_self_error": "permission denied",
+        },
+        "txt",
+    )
+    assert "(auth required:True)" in protected
+    assert "(kv:" not in protected
+    assert "(services:" not in protected
+    assert "(agent:" not in protected
 
 
 def test_summary_line_suppresses_full_anonymous_access_but_keeps_partial() -> None:

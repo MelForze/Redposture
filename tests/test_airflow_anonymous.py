@@ -15,6 +15,43 @@ class _FakeClient:
         return AirflowResponse(http_status=status, headers={}, body=b"[]")
 
 
+def test_keycloak_redirect_page_is_sso_not_unknown():
+    class _SsoClient:
+        def get(self, _path, *, authed=True):
+            return AirflowResponse(
+                http_status=200,
+                headers={"Content-Type": "text/html"},
+                body=b'<html><form id="kc-form-login"></form></html>',
+                final_url="https://sso.example/realms/company/protocol/openid-connect/auth?client_id=airflow",
+                redirect_history=("http://airflow.example/api/v1/dags",),
+            )
+
+    result = actions.classify_anonymous(_SsoClient(), "v1")
+    assert result.auth_required is True
+    assert result.auth_method == "sso"
+    assert result.sso_provider == "keycloak"
+    assert result.role == "none"
+
+
+def test_slow_identity_provider_is_sso_from_redirect_even_when_page_times_out():
+    class _SlowSsoClient:
+        def get(self, _path, *, authed=True):
+            return AirflowResponse(
+                http_status=0,
+                headers={},
+                body=b"",
+                transport_error="timed out while loading identity provider",
+                final_url="https://sso.example/realms/company/protocol/openid-connect/auth?client_id=airflow",
+                redirect_history=("http://airflow.example/api/v1/dags",),
+            )
+
+    result = actions.classify_anonymous(_SlowSsoClient(), "v1")
+    assert result.reachable is True
+    assert result.auth_required is True
+    assert result.auth_method == "sso"
+    assert result.sso_provider == "keycloak"
+
+
 def test_anonymous_admin_is_flagged():
     c = _FakeClient({"/api/v1/dags": 200, "/api/v1/pools": 200, "/api/v1/eventLogs": 200})
     r = actions.classify_anonymous(c, "v1")

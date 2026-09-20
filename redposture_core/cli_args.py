@@ -347,6 +347,16 @@ def _add_scan_host_flags(parser: argparse.ArgumentParser, *, include_profiles: b
         metavar="count",
         help="Retry attempts for network requests (with exponential backoff).",
     )
+    # Audit modules pass include_profiles=False; exporter workflows keep their
+    # separate scan/collect/trigger contracts and must not expose CVE matching.
+    if not include_profiles:
+        parser.add_argument(
+            "--enum-cve",
+            dest="enum_cve",
+            action="store_true",
+            default=False,
+            help="Match the detected product version against the bundled offline CVE catalog.",
+        )
     parser.add_argument(
         "--proxy",
         dest="proxy",

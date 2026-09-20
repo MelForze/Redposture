@@ -51,6 +51,16 @@ def test_get_service_root_parses_s3_error_code():
     assert pool.calls[0]["url"] == "http://10.0.0.5:9000/"
 
 
+def test_admin_api_parses_json_error_code():
+    body = b'{"Code":"InvalidAccessKeyId","Message":"The access key does not exist."}'
+    pool = _FakePool(403, body, {"Content-Type": "application/json"})
+    client = minio_api.MinioClient(pool, scheme="http", host="10.0.0.5", port=9000)
+    resp = client.admin_info(signed=False)
+    assert resp.error is not None
+    assert resp.error.code == "InvalidAccessKeyId"
+    assert resp.error.message == "The access key does not exist."
+
+
 def test_response_preserves_redirect_destination():
     class _RedirectPool:
         def request(self, *args, **kwargs):

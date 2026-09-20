@@ -215,6 +215,16 @@ def test_render_colored_consul_colors_pwned_and_counts() -> None:
     assert _contains_paint(console.paint_calls, "(auth required:unknown)", "yellow")
 
 
+def test_render_colored_consul_colors_detect_agent_count() -> None:
+    console = _RecordingConsole()
+    line = (
+        "CONSUL\t127.0.0.1\t8500\t [*] Consul Agent (auth required:False) "
+        "(kv:2) (services:1) (agent:1) (version:1.22.0)"
+    )
+    assert _render_colored_consul_line(console, line) is True
+    assert _contains_paint(console.paint_calls, "(agent:1)", "orange")
+
+
 def test_render_colored_elastic_colors_access_and_capabilities() -> None:
     console = _RecordingConsole()
     line = (

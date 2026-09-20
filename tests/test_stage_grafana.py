@@ -207,6 +207,67 @@ def test_grafana_login_with_nonstandard_health_and_protected_api_requires_auth(
     assert paths == ["/api/health", "/login", "/api/datasources"]
 
 
+def test_grafana_keycloak_login_is_reported_as_sso(monkeypatch: pytest.MonkeyPatch) -> None:
+    paths: list[str] = []
+
+    def fake_http_request(_host: str, _port: int, path: str, _timeout: float, **_kwargs):
+        paths.append(path)
+        if path == "/api/health":
+            return 200, '{"database":"ok","commit":"abc","version":"11.2.0"}', {}
+        if path == "/login":
+            return 200, '<html><form id="kc-form-login"></form></html>', {}
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http_request)
+    context = SimpleNamespace(
+        host="127.0.0.1",
+        port=3000,
+        args=SimpleNamespace(timeout=1.0, retries=0, defcreds=True, apitoken=None, username=None, password=None),
+        lifecycle_state=None,
+    )
+    detected = grafana_stage.detect_grafana(context, {"show_datasources": False, "check_urls": []})
+    assert detected["auth_required"] is True
+    assert detected["auth_method"] == "sso"
+    assert detected["sso_provider"] == "keycloak"
+    assert detected["credential_verification_status"] == "unavailable"
+    assert paths == ["/api/health", "/login"]
+
+    line = grafana_stage._format_detect_record(detected, "txt")
+    assert "Grafana Service (auth required:sso) (provider:keycloak)" in line
+    payload = json.loads(grafana_stage._format_detect_record(detected, "json"))
+    assert payload["auth_required"] is True
+    assert payload["auth_method"] == "sso"
+    assert payload["sso_provider"] == "keycloak"
+
+    paths.clear()
+    audited = _audit_grafana_host("127.0.0.1", 3000, 1.0, 0, None, None, False, None)
+    assert audited["status"] == "auth_required"
+    assert audited["auth_required"] is True
+    assert audited["auth_method"] == "sso"
+    assert paths == ["/api/health", "/login"]
+
+
+def test_slow_grafana_login_does_not_erase_health_detection(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_http_request(_host: str, _port: int, path: str, _timeout: float, **_kwargs):
+        if path == "/api/health":
+            return 200, '{"database":"ok","commit":"abc","version":"11.2.0"}', {}
+        if path == "/login":
+            raise TimeoutError("identity provider still loading")
+        raise AssertionError(path)
+
+    monkeypatch.setattr("redposture_core.stage_grafana._http_request", fake_http_request)
+    context = SimpleNamespace(
+        host="127.0.0.1",
+        port=3000,
+        args=SimpleNamespace(timeout=1.0, retries=0, defcreds=False, apitoken=None, username=None, password=None),
+        lifecycle_state=None,
+    )
+    detected = grafana_stage.detect_grafana(context, {"show_datasources": False, "check_urls": []})
+    assert detected["is_grafana"] is True
+    assert detected["status"] == "open_no_auth"
+    assert detected["server_version"] == "11.2.0"
+
+
 def test_verify_datasource_and_temp_datasource_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "redposture_core.stage_grafana._http_request",
