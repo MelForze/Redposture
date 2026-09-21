@@ -408,6 +408,48 @@ def test_kafka_detect_caches_anonymous_protocol_facts(
     assert state.anonymous_metadata == {"topic_map": {"orders": 2}}
 
 
+def test_kafka_lifecycle_detects_sasl_listener_that_closes_apiversions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sessions: list[Any] = []
+
+    class _Session:
+        transport_mode = "plaintext"
+        correlation_id = 1
+        sock = object()
+
+        def __init__(self) -> None:
+            self.closed = False
+
+        def detect(self) -> Any:
+            return SimpleNamespace(ok=False, error="unexpected EOF", error_code=None)
+
+        def close(self) -> None:
+            self.closed = True
+
+    def fake_open(*_args: Any, **_kwargs: Any) -> _Session:
+        session = _Session()
+        sessions.append(session)
+        return session
+
+    monkeypatch.setattr(kafka.KafkaSession, "open", fake_open)
+    monkeypatch.setattr(kafka, "_sasl_handshake_plain", lambda _sock, correlation: (True, correlation + 1, None))
+    state = kafka.KafkaLifecycleState(requested_use_tls=False)
+
+    record = kafka._kafka_lifecycle_detection_record(_ctx(state), state)
+
+    assert record["is_kafka"] is True
+    assert record["status"] == "auth_required"
+    assert record["auth_required"] is True
+    assert state.sasl_first is True
+    assert state.is_kafka is True
+    assert state.auth_required is True
+    assert state.connections_opened == 2
+    assert state.protocol_requests == 2
+    assert len(sessions) == 2
+    assert all(session.closed for session in sessions)
+
+
 @pytest.mark.parametrize(
     ("auth_required", "ok", "source", "expected_status", "expected_ok"),
     [

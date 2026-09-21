@@ -1,0 +1,28 @@
+services:
+  redis-vulnerable:
+    image: redis:7.0.3-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:16370:6379"
+
+  redis-fixed:
+    image: redis:7.0.4-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:16371:6379"
+
+  grafana-vulnerable:
+    image: grafana/grafana:11.0.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "127.0.0.1:13000:3000"
+
+  grafana-fixed:
+    image: grafana/grafana:11.0.5
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    ports:
+      - "127.0.0.1:13005:3000"

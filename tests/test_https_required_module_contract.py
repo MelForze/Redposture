@@ -4,15 +4,18 @@ from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 from redposture_core.clients.http_api import HttpResponse
+from redposture_core.clients.http_session import HttpSessionPool
+from redposture_core.modules.airflow import actions as airflow
 from redposture_core.modules.etcd import actions as etcd
 from redposture_core.modules.gitlab import actions as gitlab
 from redposture_core.modules.grafana import actions as grafana
 from redposture_core.modules.proxmox import actions as proxmox
 from redposture_core.modules.qdrant import actions as qdrant
+from redposture_core.modules.rabbitmq import actions as rabbitmq
 from redposture_core.modules.registry import actions as registry
 
 
-class HttpsRequiredPool:
+class HttpsRequiredPool(HttpSessionPool):
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
 
@@ -25,6 +28,36 @@ class HttpsRequiredPool:
 
     def close(self) -> None:
         return None
+
+
+def test_airflow_discovery_upgrades_exact_https_required_response() -> None:
+    pool = HttpsRequiredPool()
+    state = airflow.AirflowLifecycleState(SimpleNamespace(timeout=1.0, retries=0), "service.local", 8080)
+    state.pool.close()
+    state.pool = pool
+
+    assert state.resolve_scheme() == "https"
+    assert state.resolved_scheme == "https"
+    assert pool.calls == [("GET", "http"), ("GET", "https")]
+
+
+def test_rabbitmq_discovery_upgrades_exact_https_required_response() -> None:
+    pool = HttpsRequiredPool()
+    ctx = SimpleNamespace(
+        host="service.local",
+        port=15672,
+        target=None,
+        args=SimpleNamespace(timeout=1.0, retries=0, _proxy_config=None),
+    )
+    state = rabbitmq.RabbitMQLifecycleState(ctx)
+    state.pool.close()
+    state.pool = pool
+
+    response = state.resolve()
+
+    assert response.status == 200
+    assert state.scheme == "https"
+    assert pool.calls == [("GET", "http"), ("GET", "https")]
 
 
 def test_grafana_discovery_upgrades_exact_https_required_response() -> None:
@@ -93,11 +126,7 @@ def test_gitlab_discovery_upgrades_exact_https_required_response() -> None:
 
 
 def test_proxmox_discovery_upgrades_exact_https_required_response() -> None:
-    class ProxmoxPool(HttpsRequiredPool, proxmox.HttpSessionPool):
-        def __init__(self) -> None:
-            HttpsRequiredPool.__init__(self)
-
-    pool = ProxmoxPool()
+    pool = HttpsRequiredPool()
     origin = SimpleNamespace(scheme="http", host="service.local", port=8006, origin_resolved=False)
     proxmox.activate_proxmox_transport(pool, origin)
     try:

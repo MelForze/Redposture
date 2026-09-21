@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "redposture"
-version = "5.20.5"
+version = "5.20.6"
 description = "Security toolkit for listener emulation, endpoint discovery/trigger/collect, and Redis/Postgres/MongoDB/Docker/Oracle/ClickHouse/etcd/Registry/Grafana/GitLab/Kafka/ZooKeeper/Keeper/Elasticsearch/gRPC/MinIO auditing"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -79,6 +79,7 @@ addopts = "-q --disable-socket --allow-hosts=127.0.0.1,::1,localhost --allow-uni
 testpaths = ["tests"]
 markers = [
   "cli_param_fuzz: opt-in deterministic fuzz coverage for CLI parameter handling",
+  "protocol_fuzz: deterministic malformed-input coverage for network protocol parsers",
 ]
 
 [tool.mypy]

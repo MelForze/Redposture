@@ -3,7 +3,9 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import shutil
 import socket
+import subprocess
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
@@ -14,6 +16,109 @@ from redposture_core.clients.tls_cache import clear_tls_context_cache
 
 class ExternalDnsBlockedError(RuntimeError):
     """Raised when a unit test attempts real non-loopback DNS resolution."""
+
+
+@pytest.fixture(scope="session")
+def mtls_material(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """Generate a short-lived CA, server identity, client identity and wrong CA."""
+
+    openssl = shutil.which("openssl")
+    if openssl is None:
+        pytest.skip("openssl is required for real TLS integration tests")
+    root = tmp_path_factory.mktemp("mtls-material")
+
+    def run(*args: str) -> None:
+        subprocess.run([openssl, *args], check=True, capture_output=True, timeout=20)
+
+    ca_cert, ca_key = root / "ca.pem", root / "ca.key"
+    wrong_ca_cert, wrong_ca_key = root / "wrong-ca.pem", root / "wrong-ca.key"
+    for cert, key, common_name in (
+        (ca_cert, ca_key, "RedPosture QA CA"),
+        (wrong_ca_cert, wrong_ca_key, "RedPosture Wrong QA CA"),
+    ):
+        run(
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            f"/CN={common_name}",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+            "-addext",
+            "keyUsage=critical,keyCertSign,cRLSign",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+        )
+
+    def signed_identity(name: str, common_name: str, extensions: str) -> tuple[Path, Path]:
+        cert, key, csr, ext = (
+            root / f"{name}.pem",
+            root / f"{name}.key",
+            root / f"{name}.csr",
+            root / f"{name}.ext",
+        )
+        ext.write_text(extensions, encoding="utf-8")
+        run(
+            "req",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            f"/CN={common_name}",
+            "-keyout",
+            str(key),
+            "-out",
+            str(csr),
+        )
+        run(
+            "x509",
+            "-req",
+            "-in",
+            str(csr),
+            "-CA",
+            str(ca_cert),
+            "-CAkey",
+            str(ca_key),
+            "-CAcreateserial",
+            "-days",
+            "1",
+            "-sha256",
+            "-extfile",
+            str(ext),
+            "-out",
+            str(cert),
+        )
+        return cert, key
+
+    server_cert, server_key = signed_identity(
+        "server",
+        "localhost",
+        "subjectAltName=DNS:localhost,DNS:service.test,DNS:secure.service.test\n"
+        "basicConstraints=critical,CA:FALSE\n"
+        "keyUsage=critical,digitalSignature,keyEncipherment\n"
+        "extendedKeyUsage=serverAuth\n",
+    )
+    client_cert, client_key = signed_identity(
+        "client",
+        "redposture-client",
+        "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=clientAuth\n",
+    )
+    return {
+        "ca_cert": ca_cert,
+        "ca_key": ca_key,
+        "wrong_ca_cert": wrong_ca_cert,
+        "wrong_ca_key": wrong_ca_key,
+        "server_cert": server_cert,
+        "server_key": server_key,
+        "client_cert": client_cert,
+        "client_key": client_key,
+    }
 
 
 @pytest.fixture(autouse=True)

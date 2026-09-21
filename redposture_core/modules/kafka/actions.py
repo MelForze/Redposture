@@ -1164,6 +1164,35 @@ def _kafka_lifecycle_detection_record(
             "transport_mode": state.transport_mode,
         }
 
+    def _sasl_required_record(*, use_tls: bool | None) -> dict[str, Any] | None:
+        """Confirm a listener that closes ApiVersions until SASL handshake."""
+
+        candidate: KafkaSession | None = None
+        try:
+            candidate = KafkaSession.open(
+                host,
+                port,
+                timeout,
+                use_tls=use_tls,
+                tls_config=state.tls_config,
+            )
+            state.connections_opened += 1
+            state.transport_mode = candidate.transport_mode
+            state.protocol_requests += 1
+            ok, correlation, _error = _sasl_handshake_plain(candidate.sock, candidate.correlation_id)
+            candidate.correlation_id = correlation
+            if not ok:
+                return None
+            state.is_kafka = True
+            state.auth_required = True
+            state.sasl_first = True
+            return _record(detected=True, status="auth_required", auth_required=True, error=None)
+        except (TimeoutError, ConnectionError, OSError, ValueError):
+            return None
+        finally:
+            if candidate is not None:
+                candidate.close()
+
     for attempt in range(attempts):
         transport_use_tls = state.requested_use_tls
         for _transport_attempt in range(2):
@@ -1182,8 +1211,13 @@ def _kafka_lifecycle_detection_record(
                 api_probe = session.detect()
                 if not api_probe.ok:
                     session.close()
+                    api_error = api_probe.error or ""
+                    if _is_sasl_probe_candidate(api_error):
+                        sasl_record = _sasl_required_record(use_tls=(state.transport_mode == "tls") or None)
+                        if sasl_record is not None:
+                            return sasl_record
                     state.is_kafka = False
-                    error = api_probe.error or (
+                    error = api_error or (
                         f"ApiVersions failed ({_kafka_error_name(int(api_probe.error_code))})"
                         if api_probe.error_code is not None
                         else "service is not kafka"
@@ -1223,6 +1257,10 @@ def _kafka_lifecycle_detection_record(
                 if state.requested_use_tls is None and transport_use_tls is not True and _should_retry_kafka_tls(exc):
                     transport_use_tls = True
                     continue
+                if _is_sasl_probe_candidate(last_error):
+                    sasl_record = _sasl_required_record(use_tls=(transport_use_tls is True) or None)
+                    if sasl_record is not None:
+                        return sasl_record
                 break
         if attempt < attempts - 1:
             state.transport_retries += 1

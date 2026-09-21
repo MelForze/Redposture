@@ -487,5 +487,30 @@ class SharedNestedScheduler:
             self._threads.clear()
             self._limiters.clear()
 
+    def cancel(self) -> None:
+        """Stop accepting work and detach from active daemon workers immediately."""
+
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            threads = list(self._threads)
+        while True:
+            try:
+                queued = self._tasks.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                if isinstance(queued, _SharedTask):
+                    queued.cancelled.set()
+                self._tasks.task_done()
+        for _thread in threads:
+            try:
+                self._tasks.put_nowait(_STOP)
+            except queue.Full:  # pragma: no cover - the queue was drained above
+                break
+        with self._lock:
+            self._limiters.clear()
+
 
 __all__ = ["BoundedScheduler", "SharedNestedScheduler"]

@@ -7,6 +7,8 @@ import tomlkit
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
+from redposture_core.module_registry import AUDIT_MODULE_NAMES
+
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_FILES = (
     "requirements/ci-py310.txt",
@@ -54,6 +56,7 @@ def test_local_tox_and_github_ci_delegate_to_shared_runner() -> None:
     assert "bash scripts/run_ci_job.sh test" in tox
     assert "bash scripts/run_ci_job.sh lint" in workflow
     assert "bash scripts/run_ci_job.sh test" in workflow
+    assert "python scripts/run_mutation_smoke.py" in workflow
 
 
 def test_github_actions_and_runner_are_pinned() -> None:
@@ -70,7 +73,19 @@ def test_github_actions_and_runner_are_pinned() -> None:
 
     release_workflow = (ROOT / ".github/workflows/release-smoke.yml").read_text(encoding="utf-8")
     assert "python -m build --no-isolation" in release_workflow
+    assert "python scripts/verify_release_artifact.py dist/*.whl" in release_workflow
     assert "PIP_CONSTRAINT:" in release_workflow
+    assert 'test "$(redposture --version)" = "redposture ${expected_version}"' in release_workflow
+
+
+def test_release_smoke_checks_every_installed_cli_surface() -> None:
+    workflow = (ROOT / ".github/workflows/release-smoke.yml").read_text(encoding="utf-8")
+    command_loop = next(line.strip() for line in workflow.splitlines() if line.strip().startswith("for command in "))
+    listed = set(command_loop.partition("for command in ")[2].partition("; do")[0].split())
+
+    assert listed == set(AUDIT_MODULE_NAMES)
+    for action in ("scan", "collect", "trigger"):
+        assert f"redposture exporters {action} -h" in workflow
 
 
 def test_pytest_network_isolation_is_global() -> None:

@@ -1,0 +1,30 @@
+services:
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - "${MINIO_CERTS_DIR}:/root/.minio/certs:ro"
+    ports:
+      - "127.0.0.1:19000:9000"
+      - "127.0.0.1:19001:9001"
+
+  kubeapi:
+    image: rancher/k3s:v1.27.5-k3s1
+    command:
+      - server
+      - --disable=traefik
+      - --disable=servicelb
+      - --disable=metrics-server
+      - --disable=local-storage
+      - --write-kubeconfig-mode=644
+      - --tls-san=127.0.0.1
+      - --kube-apiserver-arg=anonymous-auth=true
+    privileged: true
+    tmpfs:
+      - /run
+      - /var/run
+    ports:
+      - "127.0.0.1:16443:6443"

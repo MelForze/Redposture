@@ -35,6 +35,9 @@ jobs:
       - name: Build distributions
         run: python -m build --no-isolation
 
+      - name: Verify wheel contents
+        run: python scripts/verify_release_artifact.py dist/*.whl
+
       - name: pipx install wheel
         env:
           PIP_CONSTRAINT: ${{ github.workspace }}/requirements/release-py312.txt
@@ -42,6 +45,12 @@ jobs:
 
       - name: CLI smoke
         run: |
-          redposture --version
+          expected_version="$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')"
+          test "$(redposture --version)" = "redposture ${expected_version}"
           redposture --help > /dev/null
-          redposture registry -h > /dev/null
+          for command in airflow clickhouse consul docker elastic etcd gitlab grafana grpc kafka keeper kubeapi minio mongodb oracle postgres proxmox qdrant rabbitmq redis registry zookeeper; do
+            redposture "$command" -h > /dev/null
+          done
+          redposture exporters scan -h > /dev/null
+          redposture exporters collect -h > /dev/null
+          redposture exporters trigger -h > /dev/null

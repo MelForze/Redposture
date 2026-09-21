@@ -1938,12 +1938,18 @@ class AuditCommandRunner:
         # Data hooks may stream lines live (real-time output) via this sink, but only
         # for TXT; JSON stays a single serialized record per target.
         self._live_emit = sink.emit_many if plan.output_format == "txt" else None
+        completed = False
         try:
-            return self._run_prepared_plan(plan, sink)
+            result = self._run_prepared_plan(plan, sink)
+            completed = True
+            return result
         finally:
             self._close_all_lifecycle_states()
             if self._nested_scheduler is not None:
-                self._nested_scheduler.close()
+                if completed:
+                    self._nested_scheduler.close()
+                else:
+                    self._nested_scheduler.cancel()
             sink.close()
             if self.console is not None and bool(getattr(self.args, "debug", False)):
                 tls_stats = tls_context_cache_stats()

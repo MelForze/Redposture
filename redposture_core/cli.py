@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import datetime as _dt
 import os
+import signal
 import sys
 import threading
 from collections.abc import Iterator
@@ -24,6 +25,29 @@ from .module_registry import (
 )
 from .network_proxy import RuntimeNetworkConfig, parse_proxy_config, proxy_socket_context
 from .progress import CommandProgressOwner
+
+
+class _TerminationRequested(BaseException):
+    """Internal control flow used to unwind cleanly after SIGTERM."""
+
+
+@contextlib.contextmanager
+def _termination_signal_context() -> Iterator[None]:
+    """Translate SIGTERM into a normal CLI unwind when running on the main thread."""
+
+    if not hasattr(signal, "SIGTERM") or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def request_termination(_signum: int, _frame: Any) -> None:
+        raise _TerminationRequested
+
+    signal.signal(signal.SIGTERM, request_termination)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 class _TeeStream:
@@ -175,13 +199,18 @@ def main(argv: list[str] | None = None) -> int:
         args._proxy_config = proxy_cfg
         args._runtime_network = RuntimeNetworkConfig.from_args(args, proxy=proxy_cfg)
         try:
-            with proxy_socket_context(proxy_cfg):
-                return _run_command(args, logger)
-        except KeyboardInterrupt:
-            # F1 fix: without this the interpreter dumps a full traceback on
-            # Ctrl+C. 130 is the shell-conventional SIGINT exit code.
-            print("[!] interrupted by user (Ctrl+C)", file=sys.stderr)
-            return 130
+            with _termination_signal_context():
+                try:
+                    with proxy_socket_context(proxy_cfg):
+                        return _run_command(args, logger)
+                except KeyboardInterrupt:
+                    # F1 fix: without this the interpreter dumps a full traceback on
+                    # Ctrl+C. 130 is the shell-conventional SIGINT exit code.
+                    print("[!] interrupted by user (Ctrl+C)", file=sys.stderr)
+                    return 130
+        except _TerminationRequested:
+            print("[!] terminated by signal (SIGTERM)", file=sys.stderr)
+            return 143
     finally:
         progress_owner.close()
         set_console_no_color(False)

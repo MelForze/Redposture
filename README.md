@@ -482,6 +482,47 @@ CVSS vector, detected version, affected range, fixed version, impact, and source
 references. Without `--enum-cve`, TXT and JSON records keep their existing
 shape.
 
+The opt-in vendor-image QA matrix checks both sides of real fixed-version
+boundaries for Redis and Grafana:
+
+```bash
+./scripts/run_real_cve_matrix.sh
+```
+
+## Extended QA profiles
+
+The default `pytest` suite includes deterministic concurrency, transport fault
+injection, real local mTLS, output/checkpoint I/O failures, signal handling,
+proxy protocol tests, and a bounded 10,000-target soak test. The following
+opt-in profiles use local vendor containers or system `proxychains4`:
+
+```bash
+# Real MinIO and K3s: HTTP-to-HTTPS, self-signed TLS, credentials and RBAC.
+./scripts/run_minio_kubeapi_lab.sh
+
+# Real PostgreSQL, MongoDB, Elasticsearch, RabbitMQ and Kafka authentication.
+./scripts/run_auth_service_matrix.sh
+
+# Actual proxychains4 subprocess with proxy DNS and HTTP-to-HTTPS redirect.
+pytest -q tests/test_proxy_end_to_end.py
+```
+
+For a longer resource-leak run, choose the target count, duration and rounds.
+The runner fails on leaked worker threads, file descriptors, or excessive
+retained Python memory:
+
+```bash
+python scripts/run_soak_qa.py --targets 100000 --workers 128 --duration 7200 --rounds 2
+```
+
+Mutation smoke tests exercise selected transport, scheduler, CVE and output
+branches locally. Set `REDPOSTURE_MUTATION_STRICT=1` to fail when the optional
+`mutmut` dependency is unavailable:
+
+```bash
+python scripts/run_mutation_smoke.py
+```
+
 ## License
 
 MIT License. See `LICENSE`.
